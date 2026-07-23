@@ -1,0 +1,40 @@
+{
+  "avatars": [
+    {
+      "id": "cat_pose_01",
+      "name": "Front sitting cat",
+      "species": "cat",
+      "pose": "front_sitting",
+      "canvas": {
+        "width": 548,
+        "height": 854
+      },
+      "image": "assets/pets/cat_pose_01.png",
+      "overlays": {
+        "head": "assets/overlays/cat_pose_01_head_overlay.png",
+        "frontPaws": "assets/overlays/cat_pose_01_front_paws_overlay.png"
+      },
+      "anchors": {
+        "headTop": [274, 32],
+        "hatBase": [274, 160],
+        "headCenter": [274, 220],
+        "eyesCenter": [274, 244],
+        "leftEye": [207, 244],
+        "rightEye": [341, 244],
+        "leftEar": [108, 72],
+        "rightEar": [440, 72],
+        "neck": [274, 392],
+        "chest": [274, 548],
+        "leftShoulder": [112, 412],
+        "rightShoulder": [436, 412],
+        "leftPaw": [196, 770],
+        "rightPaw": [352, 770]
+      },
+      "measurements": {
+        "shoulders": ["leftShoulder", "rightShoulder"],
+        "eyes": ["leftEye", "rightEye"],
+        "ears": ["leftEar", "rightEar"]
+      }
+    }
+  ]
+}

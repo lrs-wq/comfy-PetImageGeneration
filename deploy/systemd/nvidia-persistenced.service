@@ -1,0 +1,15 @@
+[Unit]
+Description=NVIDIA Persistence Daemon
+After=systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=forking
+PIDFile=/run/nvidia-persistenced/nvidia-persistenced.pid
+ExecStart=/usr/bin/nvidia-persistenced --user root --persistence-mode --verbose
+ExecStopPost=/usr/bin/rm -rf /run/nvidia-persistenced
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+

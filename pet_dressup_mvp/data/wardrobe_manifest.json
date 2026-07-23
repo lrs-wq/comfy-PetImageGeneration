@@ -1,0 +1,158 @@
+{
+  "slots": [
+    {
+      "id": "back",
+      "label": "背饰"
+    },
+    {
+      "id": "top",
+      "label": "上衣"
+    },
+    {
+      "id": "collar",
+      "label": "颈饰"
+    },
+    {
+      "id": "eyes",
+      "label": "眼镜"
+    },
+    {
+      "id": "hat",
+      "label": "帽子"
+    }
+  ],
+  "items": [
+    {
+      "id": "royal_cape",
+      "slot": "back",
+      "name": "Royal Cape",
+      "asset": "assets/items/back_royal_cape.png",
+      "targetAnchor": "neck",
+      "assetAnchor": [270, 92],
+      "scaleBy": "shoulders",
+      "referenceDistance": 324,
+      "scale": 1.12,
+      "offset": [0, 16]
+    },
+    {
+      "id": "red_hoodie",
+      "slot": "top",
+      "name": "Red Hoodie",
+      "asset": "assets/items/top_red_hoodie.png",
+      "targetAnchor": "neck",
+      "assetAnchor": [215, 78],
+      "scaleBy": "shoulders",
+      "referenceDistance": 324,
+      "scale": 1.05,
+      "offset": [0, 8]
+    },
+    {
+      "id": "sailor_top",
+      "slot": "top",
+      "name": "Sailor Top",
+      "asset": "assets/items/top_sailor.png",
+      "targetAnchor": "neck",
+      "assetAnchor": [215, 68],
+      "scaleBy": "shoulders",
+      "referenceDistance": 324,
+      "scale": 1.04,
+      "offset": [0, 14]
+    },
+    {
+      "id": "utility_vest",
+      "slot": "top",
+      "name": "Utility Vest",
+      "asset": "assets/items/top_utility_vest.png",
+      "targetAnchor": "neck",
+      "assetAnchor": [195, 60],
+      "scaleBy": "shoulders",
+      "referenceDistance": 324,
+      "scale": 1.08,
+      "offset": [0, 18]
+    },
+    {
+      "id": "bell_collar",
+      "slot": "collar",
+      "name": "Bell Collar",
+      "asset": "assets/items/collar_bell.png",
+      "targetAnchor": "neck",
+      "assetAnchor": [185, 56],
+      "scaleBy": "shoulders",
+      "referenceDistance": 324,
+      "scale": 0.9,
+      "offset": [0, 0]
+    },
+    {
+      "id": "bow_collar",
+      "slot": "collar",
+      "name": "Pink Bow",
+      "asset": "assets/items/collar_bow.png",
+      "targetAnchor": "neck",
+      "assetAnchor": [180, 78],
+      "scaleBy": "shoulders",
+      "referenceDistance": 324,
+      "scale": 0.78,
+      "offset": [0, 16]
+    },
+    {
+      "id": "round_glasses",
+      "slot": "eyes",
+      "name": "Round Glasses",
+      "asset": "assets/items/eyes_round_glasses.png",
+      "targetAnchor": "eyesCenter",
+      "assetAnchor": [140, 62],
+      "scaleBy": "eyes",
+      "referenceDistance": 134,
+      "scale": 1.08,
+      "offset": [0, -4]
+    },
+    {
+      "id": "sunglasses",
+      "slot": "eyes",
+      "name": "Sunglasses",
+      "asset": "assets/items/eyes_sunglasses.png",
+      "targetAnchor": "eyesCenter",
+      "assetAnchor": [150, 64],
+      "scaleBy": "eyes",
+      "referenceDistance": 134,
+      "scale": 1.06,
+      "offset": [0, 0]
+    },
+    {
+      "id": "crown",
+      "slot": "hat",
+      "name": "Crown",
+      "asset": "assets/items/hat_crown.png",
+      "targetAnchor": "hatBase",
+      "assetAnchor": [160, 170],
+      "scaleBy": "ears",
+      "referenceDistance": 332,
+      "scale": 0.9,
+      "offset": [0, 6]
+    },
+    {
+      "id": "beanie",
+      "slot": "hat",
+      "name": "Beanie",
+      "asset": "assets/items/hat_beanie.png",
+      "targetAnchor": "hatBase",
+      "assetAnchor": [180, 142],
+      "scaleBy": "ears",
+      "referenceDistance": 332,
+      "scale": 1.05,
+      "offset": [0, 12]
+    },
+    {
+      "id": "party_hat",
+      "slot": "hat",
+      "name": "Party Hat",
+      "asset": "assets/items/hat_party.png",
+      "targetAnchor": "hatBase",
+      "assetAnchor": [115, 268],
+      "scaleBy": "ears",
+      "referenceDistance": 332,
+      "scale": 0.72,
+      "offset": [0, 4]
+    }
+  ]
+}

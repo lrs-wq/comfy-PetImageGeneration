@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pet Dressup MVP</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="side-panel left-panel">
+        <div class="app-title">
+          <span class="mark">PD</span>
+          <div>
+            <h1>Pet Dressup</h1>
+            <p>QQ秀宠物换装 MVP</p>
+          </div>
+        </div>
+
+        <div class="tool-group">
+          <label class="file-button">
+            <input id="petUpload" type="file" accept="image/png,image/jpeg,image/webp" />
+            <span>上传宠物图</span>
+          </label>
+          <button id="samplePetButton" type="button">恢复示例</button>
+        </div>
+
+        <section class="control-section">
+          <h2>背景</h2>
+          <div id="backgroundSwatches" class="swatches"></div>
+        </section>
+
+        <section class="control-section">
+          <h2>微调</h2>
+          <div class="range-row">
+            <label for="adjustScale">缩放</label>
+            <input id="adjustScale" type="range" min="70" max="135" value="100" />
+            <output id="adjustScaleValue">100%</output>
+          </div>
+          <div class="range-row">
+            <label for="adjustX">左右</label>
+            <input id="adjustX" type="range" min="-80" max="80" value="0" />
+            <output id="adjustXValue">0</output>
+          </div>
+          <div class="range-row">
+            <label for="adjustY">上下</label>
+            <input id="adjustY" type="range" min="-80" max="80" value="0" />
+            <output id="adjustYValue">0</output>
+          </div>
+          <div class="range-row">
+            <label for="adjustRotate">旋转</label>
+            <input id="adjustRotate" type="range" min="-18" max="18" value="0" />
+            <output id="adjustRotateValue">0°</output>
+          </div>
+        </section>
+
+        <div class="tool-group final-actions">
+          <button id="randomButton" type="button">随机搭配</button>
+          <button id="clearButton" type="button">清空</button>
+          <button id="refineButton" type="button">AI融合成图</button>
+          <button id="exportButton" type="button" class="primary-button">导出 PNG</button>
+        </div>
+
+        <section class="control-section result-section">
+          <h2>融合结果</h2>
+          <p id="refineStatus" class="status-text">等待生成</p>
+          <a id="openRefinedLink" class="result-link" href="#" target="_blank" rel="noreferrer">打开结果图</a>
+        </section>
+      </aside>
+
+      <section class="stage-area">
+        <div id="canvasFrame" class="canvas-frame checkerboard">
+          <canvas id="avatarCanvas" width="548" height="854"></canvas>
+        </div>
+        <figure id="refinedResult" class="refined-result" hidden>
+          <img id="refinedImage" alt="AI融合后的宠物换装图" />
+        </figure>
+        <div id="outfitStack" class="outfit-stack"></div>
+      </section>
+
+      <aside class="side-panel wardrobe-panel">
+        <nav id="slotTabs" class="slot-tabs" aria-label="装扮分类"></nav>
+        <div id="wardrobeGrid" class="wardrobe-grid"></div>
+      </aside>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

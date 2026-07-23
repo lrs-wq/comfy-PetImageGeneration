@@ -1,0 +1,10 @@
+name: comfy-pet-video
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.10
+  - pip>=24
+  - ffmpeg
+  - pip:
+      - -r requirements.txt
