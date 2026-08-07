@@ -6896,6 +6896,32 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 ],
             }
         )
+        hard_object = pipeline.advisory_grooming_minimum_pose_quality(
+            {
+                "available": True,
+                "issues": ["guide_chamfer_coverage_too_low"],
+                "metrics": {
+                    "appearance_consistency": {
+                        "available": True,
+                        "texture_gradient_p90_ratio": 3.645234,
+                        "raised": {"gradient_p90": 249.285098},
+                    }
+                },
+            }
+        )
+        soft_high_contrast_fur = pipeline.advisory_grooming_minimum_pose_quality(
+            {
+                "available": True,
+                "issues": [],
+                "metrics": {
+                    "appearance_consistency": {
+                        "available": True,
+                        "texture_gradient_p90_ratio": 3.2,
+                        "raised": {"gradient_p90": 160.0},
+                    }
+                },
+            }
+        )
 
         self.assertTrue(appearance_only["acceptable"])
         self.assertEqual(appearance_only["issues"], [])
@@ -6907,6 +6933,18 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertEqual(
             missing_contact["issues"],
             ["raised_paw_too_far_from_muzzle"],
+        )
+        self.assertFalse(hard_object["acceptable"])
+        self.assertEqual(
+            hard_object["issues"],
+            ["raised_paw_hard_object_texture_signature"],
+        )
+        self.assertTrue(
+            hard_object["hard_object_texture_evidence"]["blocking"]
+        )
+        self.assertTrue(soft_high_contrast_fur["acceptable"])
+        self.assertFalse(
+            soft_high_contrast_fur["hard_object_texture_evidence"]["blocking"]
         )
 
     def test_production_eating_attempt5_refines_pose_safe_palette_drift(

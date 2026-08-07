@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.22.8"
+API_VERSION = "2.22.9"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -240,7 +240,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.37.3"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.37.4"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "main_case_grooming_canonical_open_channel_then_identity_refine_v26"
 )
@@ -351,20 +351,23 @@ GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = 1.0
 GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = 3
 GROOMING_ADVISORY_MINIMUM_GATE_POLICY = (
-    "grooming_action_identity_minimum_contract_v2"
+    "grooming_action_identity_minimum_contract_v3"
 )
-GROOMING_ADVISORY_MINIMUM_GATE_VERSION = "2.0"
+GROOMING_ADVISORY_MINIMUM_GATE_VERSION = "3.0"
 GROOMING_ADVISORY_IDENTITY_PALETTE_L1_MAX = 0.48
 GROOMING_ADVISORY_IDENTITY_BLACK_FRACTION_DELTA_MAX = 0.20
 GROOMING_ADVISORY_IDENTITY_CHROMATIC_FRACTION_DELTA_MAX = 0.14
 GROOMING_ADVISORY_IDENTITY_ACHROMATIC_BALANCE_L1_MAX = 0.38
 GROOMING_ADVISORY_IDENTITY_NEW_DARK_DOMINANT_DELTA_MIN = 0.10
+GROOMING_ADVISORY_HARD_OBJECT_TEXTURE_RATIO_MAX = 3.0
+GROOMING_ADVISORY_HARD_OBJECT_RAISED_GRADIENT_P90_MIN = 200.0
 GROOMING_ADVISORY_BLOCKING_POSE_ISSUES = frozenset(
     {
         "continuous_raised_foreleg_edge_unavailable",
         "continuous_raised_foreleg_edge_too_short",
         "paw_muzzle_gap_unavailable",
         "raised_paw_too_far_from_muzzle",
+        "raised_paw_hard_object_texture_signature",
     }
 )
 GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY = (
@@ -7974,7 +7977,7 @@ def advisory_grooming_minimum_palette_quality(
 def advisory_grooming_minimum_pose_quality(
     pose_quality: dict[str, Any],
 ) -> dict[str, Any]:
-    """Keep only raised-paw continuity/contact as blocking pose evidence."""
+    """Keep only action topology and obvious hard-object paw evidence blocking."""
 
     if pose_quality.get("available") is not True:
         return {
@@ -7986,6 +7989,32 @@ def advisory_grooming_minimum_pose_quality(
             "full_pose_quality": pose_quality,
         }
     measured_issues = [str(issue) for issue in pose_quality.get("issues", [])]
+    metrics = pose_quality.get("metrics")
+    appearance_consistency = (
+        metrics.get("appearance_consistency")
+        if isinstance(metrics, dict)
+        and isinstance(metrics.get("appearance_consistency"), dict)
+        else {}
+    )
+    raised_appearance = (
+        appearance_consistency.get("raised")
+        if isinstance(appearance_consistency.get("raised"), dict)
+        else {}
+    )
+    texture_ratio = float(
+        appearance_consistency.get("texture_gradient_p90_ratio") or 0.0
+    )
+    raised_gradient_p90 = float(
+        raised_appearance.get("gradient_p90") or 0.0
+    )
+    hard_object_texture_signature = bool(
+        appearance_consistency.get("available") is True
+        and texture_ratio > GROOMING_ADVISORY_HARD_OBJECT_TEXTURE_RATIO_MAX
+        and raised_gradient_p90
+        >= GROOMING_ADVISORY_HARD_OBJECT_RAISED_GRADIENT_P90_MIN
+    )
+    if hard_object_texture_signature:
+        measured_issues.append("raised_paw_hard_object_texture_signature")
     blocking_issues = [
         issue
         for issue in measured_issues
@@ -7999,6 +8028,18 @@ def advisory_grooming_minimum_pose_quality(
         "warnings": warnings,
         "penalty": round(100.0 * len(blocking_issues), 6),
         "blocking_issue_policy": sorted(GROOMING_ADVISORY_BLOCKING_POSE_ISSUES),
+        "hard_object_texture_evidence": {
+            "available": bool(appearance_consistency.get("available") is True),
+            "texture_gradient_p90_ratio": round(texture_ratio, 6),
+            "texture_gradient_p90_ratio_max": (
+                GROOMING_ADVISORY_HARD_OBJECT_TEXTURE_RATIO_MAX
+            ),
+            "raised_gradient_p90": round(raised_gradient_p90, 6),
+            "raised_gradient_p90_min": (
+                GROOMING_ADVISORY_HARD_OBJECT_RAISED_GRADIENT_P90_MIN
+            ),
+            "blocking": hard_object_texture_signature,
+        },
         "full_pose_quality": pose_quality,
     }
 
@@ -24599,6 +24640,7 @@ def health() -> dict[str, Any]:
                             "new_dominant_dark_markings",
                             "missing_or_disconnected_raised_foreleg",
                             "missing_paw_to_mouth_contact",
+                            "obvious_hard_object_instead_of_raised_paw",
                         ],
                         "thresholds": {
                             "palette_l1_max": (
@@ -24612,6 +24654,12 @@ def health() -> dict[str, Any]:
                             ),
                             "achromatic_balance_l1_max": (
                                 GROOMING_ADVISORY_IDENTITY_ACHROMATIC_BALANCE_L1_MAX
+                            ),
+                            "hard_object_texture_ratio_max": (
+                                GROOMING_ADVISORY_HARD_OBJECT_TEXTURE_RATIO_MAX
+                            ),
+                            "hard_object_raised_gradient_p90_min": (
+                                GROOMING_ADVISORY_HARD_OBJECT_RAISED_GRADIENT_P90_MIN
                             ),
                         },
                         "fur_surface_audit_enabled": False,
@@ -24656,7 +24704,7 @@ def health() -> dict[str, Any]:
                     if GENERATION_VISUAL_AUDITS_BLOCKING
                     else (
                         "canonical_identity_soft_foreleg_depth_action_transfer_"
-                        "minimum_contract_v5"
+                        "minimum_contract_v6"
                     )
                 ),
                 "generated_canonical_bypassed": False,
