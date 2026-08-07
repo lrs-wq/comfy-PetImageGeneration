@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import copy
@@ -14,6 +15,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
+from urllib.parse import quote
 from uuid import uuid4
 
 import requests
@@ -31,7 +33,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-VERSION = "1.9.0"
+VERSION = "1.12.0"
 HOST_PAGE = Path(__file__).with_name("pet_generation_platform.html")
 HISTORY_PAGE = Path(__file__).with_name("pet_generation_history.html")
 OUTPUT_ROOT = Path(
@@ -60,6 +62,14 @@ HISTORY_IMAGE_OUTPUT_TYPES = frozenset(
     }
 )
 HISTORY_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".apng"})
+HISTORY_VIDEO_OUTPUT_TYPES = frozenset(
+    {
+        "video",
+        "video_preview",
+        "subject_replacement_video",
+    }
+)
+HISTORY_VIDEO_SUFFIXES = frozenset({".mp4", ".webm", ".mov", ".mkv"})
 
 IMAGE_JOBS: dict[str, dict[str, Any]] = {}
 IMAGE_JOBS_LOCK = threading.RLock()
@@ -162,9 +172,9 @@ def image_positive_prompt(user_prompt: str, transparent: bool) -> str:
 
 User request: {user_prompt}
 
-Create one polished premium stylized 3D cartoon image of this exact same cat. Follow the user's requested pose, action and mood while strictly preserving the original cat's fur base colors, marking placement, face shape, cheek width, eye color, ears, nose, muzzle, fur length, breed traits, body proportions and tail. Preserve natural asymmetry and do not invent stripes or spots.
+Create one polished premium stylized 3D cartoon image of this exact same cat. Follow the user's requested pose, action and mood while strictly preserving the original cat's fur base colors, marking placement, face shape, cheek width, eye color, ears, nose, muzzle, natural coat-length category, breed traits, body proportions and tail. Preserve natural asymmetry and do not invent stripes or spots.
 
-Visual style: high-end animated-film character render, softly rounded face, large clean glossy eyes with natural catchlights, tiny natural nose, compact mouth, soft finely groomed fur, warm high-key character lighting, appealing but recognizable. The cat remains completely unclothed and wears no glasses, collar, bow tie, shirt, harness, hat, shoes, jewelry or other accessory unless the user explicitly requests a prop. Show exactly one complete subject with anatomically correct limbs and full tail, generous padding, no crop, no duplicate animal, no text, logo or watermark.
+Visual style: high-end animated-film character render, softly rounded face, large clean glossy eyes with natural catchlights, tiny natural nose, compact mouth, soft finely groomed fur, warm high-key character lighting, appealing but recognizable. {pipeline.SLEEK_GROOMING_PROMPT} The grooming rule overrides any request or reference feature that would amplify fluffy volume, standing guard hairs, long isolated tufts or a jagged fur silhouette; it does not override identity colors or markings. The cat remains completely unclothed and wears no glasses, collar, bow tie, shirt, harness, hat, shoes, jewelry or other accessory unless the user explicitly requests a prop. Show exactly one complete subject with anatomically correct limbs and full tail, generous padding, no crop, no duplicate animal, no text, logo or watermark.
 
 {background}"""
 
@@ -540,6 +550,7 @@ def history_images(
         route_kind = "image" if source == "legacy" else "video"
         item = {
             "type": output_type,
+            "media_kind": "image",
             "filename": filename,
             "download_url": (
                 f"{PUBLIC_BASE_PATH}/api/jobs/{route_kind}/{job['job_id']}/files/{filename}"
@@ -547,12 +558,64 @@ def history_images(
             "available": (job_dir / filename).is_file(),
             "pose_index": output.get("pose_index"),
             "pose": output.get("pose"),
+            "action": output.get("action"),
             "width": output.get("width"),
             "height": output.get("height"),
+            "frames": output.get("frames"),
+            "fps": output.get("fps"),
+            "duration_seconds": output.get("duration_seconds"),
             "transparent": output.get("transparent"),
             "primary": output.get("primary"),
+            "generation_engine": output.get("generation_engine"),
         }
         result.append(item)
+    return result
+
+
+def history_videos(
+    job: dict[str, Any],
+    job_dir: Path,
+    source: str,
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for output in job.get("outputs", []):
+        if not isinstance(output, dict):
+            continue
+        filename = history_filename(output.get("filename"))
+        if not filename or filename in seen:
+            continue
+        output_type = str(output.get("type") or "video")
+        suffix = Path(filename).suffix.lower()
+        if (
+            output_type not in HISTORY_VIDEO_OUTPUT_TYPES
+            and suffix not in HISTORY_VIDEO_SUFFIXES
+        ):
+            continue
+        seen.add(filename)
+        route_kind = "image" if source == "legacy" else "video"
+        result.append(
+            {
+                "type": output_type,
+                "media_kind": "video",
+                "filename": filename,
+                "download_url": (
+                    f"{PUBLIC_BASE_PATH}/api/jobs/{route_kind}/{job['job_id']}/files/{filename}"
+                ),
+                "available": (job_dir / filename).is_file(),
+                "pose_index": output.get("pose_index"),
+                "pose": output.get("pose"),
+                "action": output.get("action"),
+                "width": output.get("width"),
+                "height": output.get("height"),
+                "frames": output.get("frames"),
+                "fps": output.get("fps"),
+                "duration_seconds": output.get("duration_seconds"),
+                "primary": output.get("primary"),
+                "video_engine": output.get("video_engine"),
+                "generation_engine": output.get("generation_engine"),
+            }
+        )
     return result
 
 
@@ -588,6 +651,15 @@ def history_parameters(
         "output_format": job.get("output_format"),
         "skip_video": job.get("skip_video"),
         "generation_mode": job.get("generation_mode"),
+        "actions": job.get("actions"),
+        "subject_profile": job.get("subject_profile"),
+        "requested_subject_source": job.get("requested_subject_source"),
+        "effective_subject_source": job.get("effective_subject_source"),
+        "driving_templates": job.get("driving_templates"),
+        "generation_engine": job.get("generation_engine"),
+        "scail_steps": job.get("scail_steps"),
+        "pose_strength": job.get("pose_strength"),
+        "subject_source": job.get("subject_source"),
         "qwen_steps": job.get("qwen_steps"),
         "qwen_cfg": job.get("qwen_cfg"),
         "qwen_denoise": job.get("qwen_denoise"),
@@ -626,8 +698,7 @@ def history_item(
         "loras": [],
     }
     images = history_images(job, job_dir, source)
-    if not images:
-        return None
+    videos = history_videos(job, job_dir, source)
     user_loras = history_user_loras(job)
     builtin_lora = history_builtin_lora(job)
     effective_lora = history_effective_lora(job)
@@ -672,6 +743,11 @@ def history_item(
         prompt_en,
         pose_search,
         pose_search_en,
+        " ".join(str(action) for action in job.get("actions", []))
+        if isinstance(job.get("actions"), list)
+        else str(job.get("actions") or ""),
+        str(job.get("subject_profile") or ""),
+        str(job.get("generation_engine") or ""),
         " ".join(item["name"] for item in user_loras),
         " ".join(item["name"] for item in workflow_loras),
         builtin_lora["name"] if builtin_lora else "",
@@ -723,9 +799,17 @@ def history_item(
         "has_active_user_lora": any(item["active"] for item in user_loras),
         "parameters": parameters,
         "images": images,
-        "thumbnail": next((item for item in images if item["available"]), images[0]),
+        "videos": videos,
+        "media": [*images, *videos],
+        "thumbnail": (
+            next((item for item in images if item["available"]), images[0])
+            if images
+            else None
+        ),
         "image_count": len(images),
         "available_image_count": sum(bool(item["available"]) for item in images),
+        "video_count": len(videos),
+        "available_video_count": sum(bool(item["available"]) for item in videos),
         "automatic_recovery_used": bool(job.get("automatic_recovery_used")),
         "background_removal_failed": bool(job.get("background_removal_failed")),
         "error": job.get("error"),
@@ -840,6 +924,70 @@ def health(_: None = Depends(require_auth)) -> dict[str, Any]:
     }
 
 
+@app.get("/api/subjects")
+def subjects(_: None = Depends(require_auth)) -> Any:
+    try:
+        response = requests.get(
+            f"{LOCAL_API_URL}/api/local-video/subjects",
+            headers=video_headers(),
+            timeout=30,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Generation API unavailable: {exc}",
+        ) from exc
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=response.text[:1000])
+    try:
+        return response.json()
+    except requests.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Generation API returned an invalid subject profile response.",
+        ) from exc
+
+
+@app.get("/api/subjects/{profile_id}/preview")
+def subject_preview(
+    profile_id: str,
+    _: None = Depends(require_auth),
+) -> StreamingResponse:
+    if (
+        not profile_id
+        or profile_id in {".", ".."}
+        or Path(profile_id).name != profile_id
+    ):
+        raise HTTPException(status_code=400, detail="Invalid subject profile id.")
+    encoded_profile_id = quote(profile_id, safe="")
+    try:
+        response = requests.get(
+            f"{LOCAL_API_URL}/api/local-video/subjects/{encoded_profile_id}/preview",
+            headers=video_headers(),
+            stream=True,
+            timeout=120,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Generation API unavailable: {exc}",
+        ) from exc
+    if response.status_code != 200:
+        detail = response.text[:1000]
+        response.close()
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    media_type = response.headers.get("Content-Type", "image/png").split(";", 1)[0]
+    return StreamingResponse(
+        iter_remote(response),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": "inline",
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        },
+        background=BackgroundTask(response.close),
+    )
+
+
 @app.get("/api/history")
 def history(
     limit: int = Query(default=12, ge=1, le=48),
@@ -905,10 +1053,15 @@ def history(
 
 @app.post("/api/jobs", status_code=status.HTTP_202_ACCEPTED)
 async def create_job(
-    image: UploadFile = File(...),
+    image: UploadFile | None = File(default=None),
+    image_left: UploadFile | None = File(default=None),
+    image_right: UploadFile | None = File(default=None),
     lora: list[UploadFile] | None = File(default=None),
-    prompt: str = Form(...),
-    mode: str = Form(default="image"),
+    prompt: str = Form(default=""),
+    mode: str = Form(default="video"),
+    generation_mode: str = Form(default="subject_replacement"),
+    actions: str = Form(default='["eating"]'),
+    subject_profile: str | None = Form(default=None),
     image_profile: str | None = Form(default=None),
     transparent: str = Form(default="true"),
     poses: str | None = Form(default=None),
@@ -927,17 +1080,146 @@ async def create_job(
     wan_steps: int = Form(default=pipeline.WAN_STEPS, ge=4, le=40),
     wan_cfg: float = Form(default=pipeline.WAN_CFG, ge=1.0, le=8.0),
     wan_shift: float = Form(default=pipeline.WAN_SHIFT, ge=1.0, le=12.0),
-    seed: int = Form(default=20260715),
+    scail_steps: int = Form(default=6, ge=4, le=12),
+    pose_strength: float | None = Form(default=None, ge=0.0, le=2.0),
+    seed: int = Form(default=20260726),
     _: None = Depends(require_auth),
 ) -> dict[str, Any]:
-    mode = mode.strip().lower()
+    generation_mode = generation_mode.strip().lower()
+    if generation_mode not in {"subject_replacement", "keyframe_video"}:
+        for upload in [image, image_left, image_right, *(lora or [])]:
+            if upload is not None:
+                await upload.close()
+        raise HTTPException(
+            status_code=422,
+            detail="generation_mode must be subject_replacement or keyframe_video.",
+        )
     prompt = prompt.strip()
+    if not 0 <= seed <= 2**63 - 1:
+        raise HTTPException(status_code=422, detail="Seed is out of range.")
+
+    if generation_mode == "subject_replacement":
+        for upload in lora or []:
+            await upload.close()
+        subject_files: dict[str, tuple[str, bytes, str]] | None = None
+        identity_uploads = {
+            "image": image,
+            "image_left": image_left,
+            "image_right": image_right,
+        }
+        present_parts = tuple(
+            name
+            for name, upload in identity_uploads.items()
+            if upload is not None and bool(upload.filename)
+        )
+        try:
+            if present_parts not in {
+                (),
+                ("image",),
+                ("image", "image_left", "image_right"),
+            }:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Identity upload must contain either image only, or "
+                        "the complete image + image_left + image_right set."
+                    ),
+                )
+            if present_parts:
+                subject_files = {}
+                for part_name in present_parts:
+                    upload = identity_uploads[part_name]
+                    if upload is None:
+                        raise RuntimeError("Resolved upload unexpectedly disappeared.")
+                    raw = await upload.read(pipeline.MAX_UPLOAD_BYTES + 1)
+                    if not raw:
+                        raise HTTPException(
+                            status_code=422,
+                            detail=f"Uploaded {part_name} is empty.",
+                        )
+                    if len(raw) > pipeline.MAX_UPLOAD_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Uploaded {part_name} is too large.",
+                        )
+                    subject_files[part_name] = (
+                        upload.filename or part_name,
+                        raw,
+                        upload.content_type or "application/octet-stream",
+                    )
+        finally:
+            for upload in identity_uploads.values():
+                if upload is not None:
+                    await upload.close()
+
+        data = {
+            "generation_mode": "subject_replacement",
+            "request_kind": "video",
+            "prompt": prompt,
+            "actions": actions.strip(),
+            "resolution": "512x512",
+            "output_format": output_format,
+            "scail_steps": str(scail_steps),
+            "seed": str(seed),
+        }
+        normalized_subject_profile = (subject_profile or "").strip()
+        if normalized_subject_profile:
+            data["subject_profile"] = normalized_subject_profile
+        if pose_strength is not None:
+            data["pose_strength"] = str(pose_strength)
+        try:
+            response = await asyncio.to_thread(
+                requests.post,
+                f"{LOCAL_API_URL}/api/local-video/jobs",
+                headers=video_headers(),
+                files=subject_files,
+                data=data,
+                timeout=120,
+            )
+        except requests.RequestException as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Generation API unavailable: {exc}",
+            ) from exc
+        if response.status_code != 202:
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Generation API rejected the job: {response.text[:1000]}",
+            )
+        return rewrite_video_job(response.json())
+
+    if any(
+        upload is not None and bool(upload.filename)
+        for upload in (image_left, image_right)
+    ):
+        for upload in [image, image_left, image_right, *(lora or [])]:
+            if upload is not None:
+                await upload.close()
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "image_left and image_right are supported only for "
+                "generation_mode=subject_replacement."
+            ),
+        )
+    for upload in (image_left, image_right):
+        if upload is not None:
+            await upload.close()
+
+    mode = mode.strip().lower()
     if mode not in {"image", "video"}:
         raise HTTPException(status_code=422, detail="mode must be image or video.")
     if not prompt:
         raise HTTPException(status_code=422, detail="Prompt cannot be blank.")
-    if not 0 <= seed <= 2**63 - 1:
-        raise HTTPException(status_code=422, detail="Seed is out of range.")
+    if image is None or not image.filename:
+        if image is not None:
+            await image.close()
+        for upload in lora or []:
+            await upload.close()
+        raise HTTPException(
+            status_code=422,
+            detail="An uploaded image is required for keyframe_video generation.",
+        )
     lora_mode = lora_mode.strip().lower()
     if lora_mode not in {"replace", "stack"}:
         raise HTTPException(status_code=422, detail="lora_mode must be replace or stack.")
@@ -1065,6 +1347,7 @@ async def create_job(
             detail="The same LoRA file cannot be fused more than once.",
         )
     data: dict[str, str] = {
+        "generation_mode": "keyframe_video",
         "prompt": prompt,
         "request_kind": mode,
         "pose_count": str(max(1, min(pose_count, pipeline.MAX_POSES))),
@@ -1095,7 +1378,8 @@ async def create_job(
             }
         )
     try:
-        response = requests.post(
+        response = await asyncio.to_thread(
+            requests.post,
             f"{LOCAL_API_URL}/api/local-video/jobs",
             headers=video_headers(),
             files={"image": (filename, raw, content_type)},

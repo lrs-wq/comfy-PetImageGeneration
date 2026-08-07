@@ -99,6 +99,12 @@ pet_dressup_mvp/outputs/
 
 # Backups and editor artifacts
 /backups/
+/.codex-backups/
+/.codex-staging/
+/.codex-validation/
+/diagnostics/
+/deploy/backups/
+/deploy/staging/
 *.bak
 *.bak.*
 *.bak-*

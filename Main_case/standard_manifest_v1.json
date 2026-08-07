@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "profile_id": "sleek_tabby_cat_v1",
+  "revision": "main-case-20260801-v2",
+  "role": "authoritative_black_white_main_case_subject_identity_and_action_standard",
+  "standard_direct": {
+    "enabled": true,
+    "policy": "main_case_profile_standard_direct_v2",
+    "gpu_required": false,
+    "upload_identity_excluded": true
+  },
+  "server_root": "/data/comfy-pet-pipeline/profile_assets/sleek_tabby_cat_v1/driving/20260731-main-case-v1",
+  "normalization": {
+    "source_segment_start_seconds": 5.0175,
+    "source_segment_duration_seconds": 5.0625,
+    "crop": "center_720x720_from_960x720",
+    "size": [512, 512],
+    "frames": 81,
+    "fps": 16,
+    "audio_removed": true,
+    "video_codec": "h264_high_yuv420p",
+    "watermark_policy": "disconnected_corner_marks_excluded_by_largest_connected_subject_mask"
+  },
+  "actions": {
+    "eating": {
+      "source_filename": "eat.mp4",
+      "source_sha256": "ea893acad01481dcd2c96e7b115478d1e82ad3785ad8d641296aecb7a25986b7",
+      "runtime_filename": "eating_driver_512x512_81f_16fps.mp4",
+      "runtime_sha256": "07cf90c34ecca9742cf10c7a0290274ec1b9e5c1a008d73335836aec53d49b46",
+      "acceptance": "head_up_then_muzzle_in_food_then_head_up",
+      "validated_run_id": "codex-main-case-profile-assets-20260801-eating-v2",
+      "profile_relative_fur_gate": "passed"
+    },
+    "grooming": {
+      "source_filename": "TM.mp4",
+      "source_sha256": "b03d7e5ebb5aa878d1f57fff389dfa241d7ff8d7d273df1fd264bb479311aedd",
+      "runtime_filename": "grooming_driver_512x512_81f_16fps.mp4",
+      "runtime_sha256": "2fc8ed9a398706fb2bf88b43f340be1a555d7dc638073a43e8f89f5c15ec0993",
+      "acceptance": "continuous_raised_forepaw_licking",
+      "validated_run_id": "codex-main-case-profile-assets-20260801-grooming-v2",
+      "visual_fur_review": "passed_smooth_back"
+    }
+  }
+}

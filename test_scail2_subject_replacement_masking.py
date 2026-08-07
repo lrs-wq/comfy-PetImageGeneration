@@ -1,0 +1,927 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw
+
+import scail2_subject_replacement_test as scail
+
+
+class EatingScenePropMaskTests(unittest.TestCase):
+    @staticmethod
+    def _normalized_frames() -> list[Image.Image]:
+        frames: list[Image.Image] = []
+        for index in range(9):
+            frame = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(frame)
+            draw.ellipse((55, 140, 315, 380), fill=(90, 100, 110, 255))
+            draw.rectangle((320, 336, 442, 378), fill=(220, 185, 135, 255))
+            if index in {0, 1}:
+                draw.ellipse((365, 326, 385, 344), fill=(20, 30, 210, 255))
+            frames.append(frame)
+        return frames
+
+    @staticmethod
+    def _source_frames() -> list[Image.Image]:
+        frames: list[Image.Image] = []
+        for index in range(9):
+            frame = Image.new("RGBA", (640, 360), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(frame)
+            draw.ellipse((80, 80, 390, 320), fill=(90, 100, 110, 255))
+            draw.rectangle((395, 270, 540, 325), fill=(220, 185, 135, 255))
+            if index in {0, 1}:
+                draw.ellipse((445, 258, 465, 278), fill=(20, 30, 210, 255))
+            frames.append(frame)
+        return frames
+
+    @staticmethod
+    def _white_bowl_frames(*, with_bowl: bool = True) -> list[Image.Image]:
+        frames: list[Image.Image] = []
+        for index in range(13):
+            frame = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(frame)
+            draw.ellipse((55, 80, 382, 438), fill=(38, 42, 48, 255))
+            draw.ellipse((76, 310, 150, 440), fill=(218, 218, 214, 255))
+            draw.ellipse((300, 310, 370, 440), fill=(215, 215, 212, 255))
+            # A large, static right-side tail reproduces the old false match.
+            draw.ellipse((350, 324, 456, 455), fill=(76, 78, 82, 255))
+            if with_bowl:
+                draw.rounded_rectangle(
+                    (150, 388, 320, 455),
+                    radius=20,
+                    fill=(210, 208, 202, 255),
+                )
+                draw.ellipse((165, 370, 305, 398), fill=(151, 91, 38, 255))
+                if index in {0, 1}:
+                    # The dipping muzzle temporarily hides the food and rim.
+                    draw.ellipse((220, 342, 270, 397), fill=(42, 45, 50, 255))
+            else:
+                # A tiny warm nose is not wide enough to qualify as food.
+                draw.ellipse((230, 338, 246, 350), fill=(165, 92, 52, 255))
+            frames.append(frame)
+        return frames
+
+    @staticmethod
+    def _geometry_frames(
+        *,
+        low_muzzle: bool = True,
+        static_contact_paw: bool = False,
+        full_body_motion: bool = False,
+    ) -> list[Image.Image]:
+        frames: list[Image.Image] = []
+        for index in range(13):
+            frame = Image.new("RGBA", (640, 360), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(frame)
+            low_phase = index in {2, 9}
+            if full_body_motion and low_phase:
+                body_box = (48, 92, 405, 334)
+                left_paw_box = (72, 272, 184, 342)
+                right_paw_box = (286, 280, 378, 342)
+            else:
+                body_box = (65, 75, 390, 318)
+                left_paw_box = (90, 265, 170, 325)
+                right_paw_box = (300, 270, 365, 325)
+            draw.ellipse(body_box, fill=(115, 82, 52, 255))
+            draw.ellipse(left_paw_box, fill=(145, 105, 70, 255))
+            draw.ellipse(right_paw_box, fill=(145, 105, 70, 255))
+            head_box = (
+                (335, 188, 475, 288)
+                if low_muzzle and low_phase
+                else (335, 112, 475, 230)
+            )
+            draw.ellipse(head_box, fill=(125, 90, 58, 255))
+            # Source-only identity signals that must not survive in Image 2.
+            draw.line((342, 225, 456, 225), fill=(225, 25, 25, 255), width=7)
+            draw.polygon(
+                ((395, 226), (405, 249), (415, 226)),
+                fill=(235, 45, 25, 255),
+            )
+            if static_contact_paw:
+                # This planted paw reaches the bowl rim in every frame. The old
+                # lowest-pixel gap signal was therefore always zero and missed
+                # the otherwise obvious vertical head motion.
+                draw.ellipse((420, 238, 462, 286), fill=(145, 105, 70, 255))
+            for offset in (0, 18, 36):
+                draw.line(
+                    (110 + offset, 105, 145 + offset, 300),
+                    fill=(45, 30, 20, 255),
+                    width=5,
+                )
+            draw.rectangle((400, 270, 540, 325), fill=(215, 185, 140, 255))
+            frames.append(frame)
+        return frames
+
+    @staticmethod
+    def _grooming_geometry_frames(
+        *,
+        motion: bool = True,
+        contact_structure: bool = True,
+    ) -> list[Image.Image]:
+        frames: list[Image.Image] = []
+        for index in range(13):
+            frame = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(frame)
+            action_phase = motion and index in {4, 10}
+            if contact_structure:
+                body_color = (30, 90, 220, 255)
+                head_color = (210, 35, 70, 255)
+                tail_color = (105, 40, 180, 255)
+                contact_color = (245, 245, 225, 255)
+                planted_color = (230, 170, 45, 255)
+            else:
+                body_color = (110, 110, 110, 255)
+                head_color = body_color
+                tail_color = body_color
+                contact_color = body_color
+                planted_color = body_color
+
+            draw.ellipse((145, 135, 425, 460), fill=body_color)
+            draw.ellipse((360, 335, 475, 455), fill=tail_color)
+            draw.ellipse((205, 395, 295, 470), fill=planted_color)
+            if action_phase:
+                head_box = (80, 90, 310, 310)
+                muzzle_box = (112, 185, 240, 245)
+                paw_box = (140, 212, 218, 370)
+            else:
+                head_box = (105, 60, 335, 280)
+                muzzle_box = (137, 165, 265, 225)
+                paw_box = (158, 220, 236, 378)
+            draw.ellipse(head_box, fill=head_color)
+            draw.polygon(
+                (
+                    (head_box[0] + 28, head_box[1] + 35),
+                    (head_box[0] + 58, head_box[1] - 18),
+                    (head_box[0] + 92, head_box[1] + 42),
+                ),
+                fill=head_color,
+            )
+            draw.ellipse(muzzle_box, fill=contact_color)
+            draw.ellipse(paw_box, fill=contact_color)
+
+            if contact_structure:
+                # High-frequency source-only coat marks must not be copied to
+                # the guide. They are deliberately saturated and narrow.
+                for offset in range(0, 90, 12):
+                    draw.line(
+                        (285 + offset // 3, 190, 315 + offset // 3, 365),
+                        fill=(20, 235, 80, 255),
+                        width=4,
+                    )
+                draw.line(
+                    (112, 140, 286, 245),
+                    fill=(255, 35, 220, 255),
+                    width=5,
+                )
+            frames.append(frame)
+        return frames
+
+    @staticmethod
+    def _aligned_reference(
+        *,
+        muzzle_gap_px: int = 6,
+    ) -> tuple[Image.Image, Image.Image]:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(reference)
+        draw.ellipse((55, 130, 455, 405), fill=(92, 102, 112, 255))
+        draw.ellipse((175, 175, 350, 338), fill=(112, 122, 132, 255))
+        draw.ellipse((85, 335, 175, 405), fill=(122, 132, 142, 255))
+        draw.ellipse((340, 335, 430, 405), fill=(122, 132, 142, 255))
+        # Neutral chest fur and a planted paw deliberately intrude into the
+        # bowl-centre strip and reach its rim.  A lowest-blue-pixel heuristic
+        # would select these instead of the mouth.
+        draw.ellipse((260, 292, 315, 342), fill=(105, 112, 120, 255))
+        draw.ellipse((272, 311, 318, 350), fill=(118, 124, 132, 255))
+        # The real profile has a small natural warm nose/muzzle.  The fixture
+        # can either leave a small gap or exactly touch the food boundary.
+        muzzle_bottom = 329 - muzzle_gap_px
+        draw.ellipse(
+            (230, muzzle_bottom - 24, 270, muzzle_bottom),
+            fill=(220, 120, 125, 255),
+        )
+        draw.rounded_rectangle(
+            (218, 330, 350, 405),
+            radius=22,
+            fill=(215, 190, 155, 255),
+        )
+
+        colored = Image.new("RGB", (512, 512), (0, 0, 0))
+        mask_draw = ImageDraw.Draw(colored)
+        mask_draw.ellipse((55, 130, 455, 405), fill=(0, 0, 255))
+        mask_draw.ellipse((175, 175, 350, 338), fill=(0, 0, 255))
+        mask_draw.ellipse((85, 335, 175, 405), fill=(0, 0, 255))
+        mask_draw.ellipse((340, 335, 430, 405), fill=(0, 0, 255))
+        mask_draw.rounded_rectangle(
+            (218, 330, 350, 405),
+            radius=22,
+            fill=(255, 0, 0),
+        )
+        return reference, colored
+
+    def test_temporal_prop_mask_keeps_cat_occlusion_out_of_bowl_layer(self) -> None:
+        frames = self._normalized_frames()
+        exclusions, metadata = scail.make_eating_prop_exclusion_masks(frames)
+        occluded = np.asarray(exclusions[0], dtype=np.uint8)
+        clear = np.asarray(exclusions[4], dtype=np.uint8)
+
+        self.assertEqual(
+            metadata["policy"],
+            "map_driving_bowl_as_red_scail_object",
+        )
+        self.assertEqual(
+            metadata["method"],
+            "eating_temporal_food_anchor_bowl_v2",
+        )
+        self.assertEqual(int(occluded[335, 375]), 0)
+        self.assertEqual(int(clear[360, 400]), 255)
+        self.assertLess(metadata["prop_area_cv"], 0.05)
+        self.assertLessEqual(metadata["prop_center_step_max"], 1.5)
+
+    def test_white_bowl_uses_brown_food_anchor_instead_of_right_tail(
+        self,
+    ) -> None:
+        exclusions, metadata = scail.make_eating_prop_exclusion_masks(
+            self._white_bowl_frames()
+        )
+        occluded = np.asarray(exclusions[0], dtype=np.uint8)
+        clear = np.asarray(exclusions[4], dtype=np.uint8)
+        left, top, right, bottom = metadata["prop_exclusion_bbox_union"]
+
+        self.assertLess(left, 165)
+        self.assertGreater(right, 305)
+        self.assertGreaterEqual(top, 360)
+        self.assertGreater(bottom, 445)
+        self.assertEqual(int(clear[430, 235]), 255)
+        self.assertEqual(int(clear[400, 410]), 0)
+        self.assertEqual(int(occluded[382, 245]), 0)
+        self.assertGreaterEqual(metadata["prop_fraction_min"], 0.04)
+        self.assertLessEqual(metadata["prop_fraction_max"], 0.20)
+
+    def test_temporal_prop_mask_fails_closed_without_food_or_bowl(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "eating_prop_split_unreliable",
+        ):
+            scail.make_eating_prop_exclusion_masks(
+                self._white_bowl_frames(with_bowl=False)
+            )
+
+    def test_pose_identity_excludes_bowl_but_keeps_total_pose_pixels(self) -> None:
+        source_frames = self._source_frames()
+
+        pose_frames, masks, metadata = scail.make_pose_and_mask_frames(
+            source_frames,
+            (512, 512),
+            separate_eating_prop=True,
+        )
+        mask = np.asarray(masks[4].convert("RGB"), dtype=np.uint8)
+        blue = (mask[..., 0] == 0) & (mask[..., 1] == 0) & (mask[..., 2] == 255)
+        red = (mask[..., 0] == 255) & (mask[..., 1] == 0) & (mask[..., 2] == 0)
+        white = np.all(mask == 255, axis=2)
+
+        self.assertEqual(pose_frames[0].size, (512, 512))
+        self.assertTrue(metadata["scene_prop_separated"])
+        self.assertGreater(metadata["scene_prop_fraction_min"], 0.0)
+        self.assertLess(
+            metadata["identity_fraction_mean"],
+            metadata["subject_fraction_mean"],
+        )
+        self.assertTrue(np.any(blue))
+        self.assertTrue(np.any(red))
+        self.assertTrue(np.any(white))
+
+    def test_full_eating_pose_preserves_driver_silhouette_and_separates_bowl(
+        self,
+    ) -> None:
+        poses, masks, metadata = scail.make_full_eating_pose_and_mask_frames(
+            self._geometry_frames(full_body_motion=True),
+            (512, 512),
+        )
+
+        self.assertEqual(
+            metadata["policy"],
+            "full_driver_pose_with_separate_bowl_v1",
+        )
+        self.assertFalse(metadata["driver_signal_only"])
+        self.assertTrue(metadata["driver_rgb_preserved"])
+        self.assertTrue(metadata["driver_silhouette_preserved"])
+        self.assertEqual(
+            metadata["pose_geometry_scope"],
+            "full_subject_silhouette_per_frame",
+        )
+        self.assertTrue(metadata["scene_prop_separated"])
+        self.assertEqual(len(metadata["identity_bbox_by_frame"]), len(poses))
+        self.assertFalse(
+            np.array_equal(
+                np.asarray(poses[0].convert("RGB")),
+                np.asarray(poses[2].convert("RGB")),
+            )
+        )
+
+        upright_mask = np.asarray(masks[0].convert("RGB"), dtype=np.uint8)
+        low_mask = np.asarray(masks[2].convert("RGB"), dtype=np.uint8)
+        upright_blue = np.all(upright_mask == (0, 0, 255), axis=2)
+        blue = np.all(low_mask == (0, 0, 255), axis=2)
+        red = np.all(low_mask == (255, 0, 0), axis=2)
+        white = np.all(low_mask == (255, 255, 255), axis=2)
+        self.assertFalse(np.array_equal(upright_blue, blue))
+        self.assertTrue(np.any(blue))
+        self.assertTrue(np.any(red))
+        self.assertTrue(np.all(blue | red | white))
+        self.assertFalse(np.any(blue & red))
+        motion_audit = metadata["identity_motion_audit"]
+        self.assertEqual(
+            motion_audit["policy"],
+            "first_frame_blue_identity_mask_xor_v1",
+        )
+        self.assertTrue(motion_audit["passed"])
+        self.assertGreaterEqual(
+            motion_audit["overall_change_ratio_max"],
+            motion_audit["thresholds"]["overall_change_ratio_min"],
+        )
+        self.assertGreaterEqual(
+            motion_audit["lower_half_change_ratio_max"],
+            motion_audit["thresholds"]["lower_half_change_ratio_min"],
+        )
+        self.assertGreaterEqual(
+            motion_audit["lower_quarter_change_ratio_max"],
+            motion_audit["thresholds"]["lower_quarter_change_ratio_min"],
+        )
+        self.assertEqual(
+            len(motion_audit["overall_change_ratio_by_frame"]),
+            len(poses),
+        )
+
+    def test_full_eating_pose_rejects_head_only_motion(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "eating_full_pose_motion_unreliable.*lower_quarter",
+        ):
+            scail.make_full_eating_pose_and_mask_frames(
+                self._geometry_frames(),
+                (512, 512),
+            )
+
+    def test_full_eating_pose_rejects_almost_static_motion(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "eating_full_pose_motion_unreliable.*overall",
+        ):
+            scail.make_full_eating_pose_and_mask_frames(
+                self._geometry_frames(low_muzzle=False),
+                (512, 512),
+            )
+
+    def test_non_eating_pose_mask_keeps_original_single_identity_policy(self) -> None:
+        source_frames = self._source_frames()
+
+        _, masks, metadata = scail.make_pose_and_mask_frames(
+            source_frames,
+            (512, 512),
+            separate_eating_prop=False,
+        )
+        mask = np.asarray(masks[0].convert("RGB"), dtype=np.uint8)
+        unknown = ~(
+            np.all(mask == (255, 255, 255), axis=2)
+            | np.all(mask == (0, 0, 255), axis=2)
+        )
+
+        self.assertFalse(metadata["scene_prop_separated"])
+        self.assertFalse(np.any(unknown))
+
+    def test_eating_geometry_guide_selects_low_muzzle_and_removes_identity(self) -> None:
+        guide, metadata = scail.make_eating_geometry_guide(
+            self._geometry_frames(),
+            (512, 512),
+        )
+        pixels = np.asarray(guide.convert("RGB"), dtype=np.uint8)
+        green = np.all(pixels == (0, 255, 0), axis=2)
+        foreground = pixels[~green]
+
+        self.assertEqual(metadata["selected_frame_index"], 2)
+        self.assertLessEqual(metadata["muzzle_bowl_gap_px"], 4)
+        self.assertGreaterEqual(metadata["contact_pixels"], 4)
+        self.assertTrue(metadata["head_lowering_selection"]["passed"])
+        self.assertGreaterEqual(
+            metadata["head_lowering_selection"]["head_y_p10_span"],
+            metadata["head_lowering_selection"]["head_y_p10_span_min"],
+        )
+        self.assertEqual(
+            metadata["policy"],
+            "driving_eating_geometry_image2_v4",
+        )
+        self.assertFalse(metadata["palette"]["source_rgb_preserved"])
+        self.assertFalse(
+            metadata["palette"]["high_frequency_texture_preserved"]
+        )
+        self.assertFalse(
+            metadata["semantic_structure"]["source_luma_values_preserved"]
+        )
+        self.assertGreaterEqual(
+            metadata["semantic_structure"]["subject_luma_contrast"],
+            8.0,
+        )
+        self.assertLessEqual(
+            metadata["outline_smoothing"]["perimeter_ratio"],
+            1.01,
+        )
+        self.assertFalse(
+            metadata["outline_smoothing"]["high_frequency_outline_preserved"]
+        )
+        semantic_colors = np.asarray(
+            [
+                metadata["semantic_food"]["bowl_rgb"],
+                metadata["semantic_food"]["bowl_rim_rgb"],
+                metadata["semantic_food"]["food_rgb"],
+            ],
+            dtype=np.uint8,
+        )
+        semantic_prop = np.any(
+            np.all(foreground[:, None, :] == semantic_colors[None, :, :], axis=2),
+            axis=1,
+        )
+        subject_foreground = foreground[~semantic_prop]
+        self.assertTrue(np.all(subject_foreground[:, 0] == subject_foreground[:, 1]))
+        self.assertTrue(np.all(subject_foreground[:, 1] == subject_foreground[:, 2]))
+        self.assertTrue(metadata["semantic_food"]["semantic_chroma_only"])
+        self.assertTrue(
+            all(
+                np.any(np.all(pixels == color, axis=2))
+                for color in semantic_colors
+            )
+        )
+        self.assertFalse(np.any(np.all(pixels == (225, 25, 25), axis=2)))
+        self.assertFalse(np.any(np.all(pixels == (115, 82, 52), axis=2)))
+        self.assertGreater(metadata["subject_pixels"], 500)
+        self.assertGreater(metadata["bowl_pixels"], 100)
+
+    def test_eating_geometry_guide_fails_closed_without_muzzle_contact(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "eating_geometry_guide_unreliable",
+        ):
+            scail.make_eating_geometry_guide(
+                self._geometry_frames(low_muzzle=False),
+                (512, 512),
+            )
+
+    def test_eating_geometry_guide_ignores_static_paw_bowl_contact(self) -> None:
+        _guide, metadata = scail.make_eating_geometry_guide(
+            self._geometry_frames(static_contact_paw=True),
+            (512, 512),
+        )
+
+        self.assertEqual(metadata["selected_frame_index"], 2)
+        self.assertGreater(
+            metadata["head_lowering_selection"]["head_y_p10_span"],
+            metadata["head_lowering_selection"]["head_y_p10_span_min"],
+        )
+
+    def test_eating_geometry_guide_requires_temporal_prop_evidence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "fewer_than_9_frames"):
+            scail.make_eating_geometry_guide(
+                self._geometry_frames()[:8],
+                (512, 512),
+            )
+
+    def test_grooming_geometry_guide_keeps_contact_but_removes_identity(
+        self,
+    ) -> None:
+        guide, metadata = scail.make_grooming_geometry_guide(
+            self._grooming_geometry_frames(),
+            (512, 512),
+        )
+        pixels = np.asarray(guide.convert("RGB"), dtype=np.uint8)
+        green = np.all(pixels == (0, 255, 0), axis=2)
+        foreground = pixels[~green]
+        gray = pixels[:, :, 0]
+
+        self.assertEqual(metadata["selected_frame_index"], 4)
+        self.assertEqual(
+            metadata["policy"],
+            "driving_grooming_geometry_image1_v3",
+        )
+        self.assertTrue(metadata["action_motion_audit"]["passed"])
+        self.assertGreaterEqual(
+            metadata["action_motion_audit"]["upper_body_xor_ratio"],
+            metadata["action_motion_audit"]["thresholds"][
+                "upper_body_xor_ratio_min"
+            ],
+        )
+        relation = metadata["raised_paw_muzzle_relation"]
+        self.assertTrue(relation["passed"])
+        self.assertEqual(
+            relation["policy"],
+            "source_derived_muzzle_foreleg_geometry_audit_v3",
+        )
+        self.assertGreaterEqual(
+            relation["upper_muzzle_support_pixels"],
+            relation["minimum_support_pixels"],
+        )
+        self.assertGreaterEqual(
+            relation["lower_raised_paw_support_pixels"],
+            relation["minimum_support_pixels"],
+        )
+        self.assertTrue(relation["regions_disjoint"])
+        self.assertFalse(relation["c_hook_component_preserved"])
+        self.assertFalse(relation["black_or_tool_semantics_preserved"])
+        self.assertGreaterEqual(
+            relation["semantic_contact_pixels"],
+            relation["minimum_semantic_contact_pixels"],
+        )
+        encoding = relation["output_encoding"]
+        self.assertEqual(
+            encoding["method"],
+            "compressed_blurred_quantized_neutral_anatomy",
+        )
+        foreground_values = np.unique(gray[~green])
+        self.assertGreaterEqual(len(foreground_values), 4)
+        self.assertGreaterEqual(int(foreground_values.min()), 120)
+        self.assertLessEqual(int(foreground_values.max()), 168)
+        self.assertTrue(np.all(foreground_values % 8 == 0))
+        self.assertFalse(metadata["palette"]["source_rgb_preserved"])
+        self.assertFalse(
+            metadata["palette"]["high_frequency_texture_preserved"]
+        )
+        self.assertFalse(metadata["palette"]["distance_field_preserved"])
+        self.assertTrue(metadata["palette"]["low_frequency_anatomy_preserved"])
+        self.assertFalse(
+            metadata["palette"]["source_marking_contrast_preserved"]
+        )
+        self.assertFalse(
+            metadata["palette"]["artificial_part_markers_preserved"]
+        )
+        self.assertFalse(metadata["palette"]["black_foreground_preserved"])
+        self.assertGreaterEqual(int(foreground.min()), 120)
+        self.assertTrue(np.all(foreground[:, 0] == foreground[:, 1]))
+        self.assertTrue(np.all(foreground[:, 1] == foreground[:, 2]))
+        self.assertFalse(np.any(np.all(pixels == (30, 90, 220), axis=2)))
+        self.assertFalse(np.any(np.all(pixels == (210, 35, 70), axis=2)))
+        self.assertFalse(np.any(np.all(pixels == (20, 235, 80), axis=2)))
+        self.assertGreater(metadata["subject_pixels"], 500)
+        self.assertLessEqual(
+            metadata["outline_smoothing"]["perimeter_ratio"],
+            1.01,
+        )
+
+    def test_grooming_geometry_guide_fails_closed_without_action_motion(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "grooming_geometry_guide_unreliable:"
+            " insufficient_raised_paw_head_motion",
+        ):
+            scail.make_grooming_geometry_guide(
+                self._grooming_geometry_frames(motion=False),
+                (512, 512),
+            )
+
+    def test_grooming_geometry_guide_fails_without_paw_muzzle_structure(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "grooming_geometry_guide_unreliable:"
+            " low_frequency_contact_contrast",
+        ):
+            scail.make_grooming_geometry_guide(
+                self._grooming_geometry_frames(contact_structure=False),
+                (512, 512),
+            )
+
+    def test_grooming_geometry_guide_requires_temporal_evidence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "fewer_than_9_frames"):
+            scail.make_grooming_geometry_guide(
+                self._grooming_geometry_frames()[:8],
+                (512, 512),
+            )
+
+    def test_reference_aligned_eating_motion_uses_only_driver_timing(self) -> None:
+        reference, reference_mask = self._aligned_reference()
+        poses, masks, metadata = scail.make_eating_reference_aligned_pose_frames(
+            self._geometry_frames(static_contact_paw=True),
+            reference,
+            reference_mask,
+            (512, 512),
+        )
+
+        self.assertEqual(
+            metadata["policy"],
+            "reference_space_head_nod_food_overlap_v2",
+        )
+        self.assertTrue(metadata["driver_signal_only"])
+        self.assertFalse(metadata["driver_rgb_preserved"])
+        self.assertFalse(metadata["driver_silhouette_preserved"])
+        self.assertEqual(
+            metadata["driver_signal_method"],
+            "bowl_relative_upper_head_row_p10_v1",
+        )
+        self.assertGreaterEqual(metadata["driver_head_y_span"], 4.0)
+        self.assertLessEqual(metadata["reference_muzzle_bowl_gap_px"], 8)
+        self.assertEqual(
+            metadata["reference_muzzle_method"],
+            "warm_face_component_above_bowl_v1",
+        )
+        self.assertEqual(metadata["reference_muzzle_bowl_gap_px"], 6)
+        self.assertEqual(metadata["target_muzzle_food_overlap_px"], 8.0)
+        self.assertEqual(metadata["reference_contact_drop_px"], 14.0)
+        self.assertGreater(metadata["reference_contact_drop_control_px"], 6.0)
+        self.assertEqual(metadata["low_phase_face_bowl_gap_px"], 0)
+        self.assertLessEqual(
+            metadata["low_phase_face_bowl_signed_gap_px"],
+            -6,
+        )
+        self.assertGreaterEqual(
+            metadata["low_phase_face_bowl_signed_gap_px"],
+            -10,
+        )
+        self.assertGreaterEqual(
+            metadata["low_phase_muzzle_food_overlap_depth_px"],
+            6,
+        )
+        self.assertLessEqual(
+            metadata["low_phase_muzzle_food_overlap_depth_px"],
+            10,
+        )
+        self.assertGreater(
+            metadata["low_phase_muzzle_food_overlap_pixels"],
+            0,
+        )
+        self.assertLessEqual(metadata["vertical_control_abs_max_px"], 18.0)
+        self.assertEqual(metadata["reference_face_seed_bbox"], [230, 299, 271, 324])
+        self.assertGreaterEqual(metadata["head_lift_px_max"], 12.0)
+        self.assertEqual(len(poses), 13)
+        self.assertEqual(len(masks), 13)
+
+        lift_values = metadata["head_lift_px_by_frame"]
+        low_index = int(np.argmin(lift_values))
+        high_index = int(np.argmax(lift_values))
+        low_mask = np.asarray(masks[low_index].convert("RGB"), dtype=np.uint8)
+        high_mask = np.asarray(masks[high_index].convert("RGB"), dtype=np.uint8)
+        low_blue = np.all(low_mask == (0, 0, 255), axis=2)
+        high_blue = np.all(high_mask == (0, 0, 255), axis=2)
+        low_red = np.all(low_mask == (255, 0, 0), axis=2)
+        high_red = np.all(high_mask == (255, 0, 0), axis=2)
+
+        self.assertTrue(np.array_equal(low_red, high_red))
+        reference_red = low_red.copy()
+        first_pose = np.asarray(poses[0].convert("RGB"), dtype=np.uint8)
+        first_bowl_rgb = first_pose[reference_red]
+        for pose, mask in zip(poses, masks, strict=True):
+            mask_pixels = np.asarray(mask.convert("RGB"), dtype=np.uint8)
+            red = np.all(mask_pixels == (255, 0, 0), axis=2)
+            blue = np.all(mask_pixels == (0, 0, 255), axis=2)
+            white = np.all(mask_pixels == (255, 255, 255), axis=2)
+            self.assertTrue(np.array_equal(red, reference_red))
+            self.assertFalse(np.any(red & blue))
+            self.assertTrue(np.all(red | blue | white))
+            pose_pixels = np.asarray(pose.convert("RGB"), dtype=np.uint8)
+            self.assertTrue(
+                np.array_equal(pose_pixels[reference_red], first_bowl_rgb)
+            )
+        self.assertTrue(metadata["static_bowl_mask"])
+        self.assertTrue(metadata["static_bowl_rgb"])
+        self.assertLess(np.where(high_blue)[0].min(), np.where(low_blue)[0].min())
+        allowed = (
+            np.all(high_mask == (255, 255, 255), axis=2)
+            | high_blue
+            | high_red
+        )
+        self.assertTrue(np.all(allowed))
+        high_pose = np.asarray(poses[high_index].convert("RGB"), dtype=np.uint8)
+        self.assertFalse(np.any(np.all(high_pose == (225, 25, 25), axis=2)))
+
+    def test_reference_aligned_eating_motion_pushes_touching_muzzle_into_food(
+        self,
+    ) -> None:
+        reference, reference_mask = self._aligned_reference(muzzle_gap_px=0)
+        poses, masks, metadata = scail.make_eating_reference_aligned_pose_frames(
+            self._geometry_frames(static_contact_paw=True),
+            reference,
+            reference_mask,
+            (512, 512),
+        )
+
+        self.assertEqual(metadata["reference_muzzle_bowl_gap_px"], 0)
+        self.assertEqual(metadata["reference_contact_drop_px"], 8.0)
+        self.assertGreaterEqual(
+            metadata["low_phase_muzzle_food_overlap_depth_px"],
+            6,
+        )
+        self.assertLessEqual(
+            metadata["low_phase_muzzle_food_overlap_depth_px"],
+            10,
+        )
+        self.assertGreater(
+            metadata["low_phase_muzzle_food_overlap_pixels"],
+            0,
+        )
+        self.assertLessEqual(metadata["vertical_control_abs_max_px"], 18.0)
+
+        first_pose = np.asarray(poses[0].convert("RGB"), dtype=np.uint8)
+        first_mask = np.asarray(masks[0].convert("RGB"), dtype=np.uint8)
+        for left, top, right, bottom in metadata[
+            "lower_lateral_freeze_bboxes"
+        ]:
+            expected_pose = first_pose[top:bottom, left:right]
+            expected_mask = first_mask[top:bottom, left:right]
+            for pose, mask in zip(poses[1:], masks[1:], strict=True):
+                pose_pixels = np.asarray(pose.convert("RGB"), dtype=np.uint8)
+                mask_pixels = np.asarray(mask.convert("RGB"), dtype=np.uint8)
+                self.assertTrue(
+                    np.array_equal(
+                        pose_pixels[top:bottom, left:right],
+                        expected_pose,
+                    )
+                )
+                self.assertTrue(
+                    np.array_equal(
+                        mask_pixels[top:bottom, left:right],
+                        expected_mask,
+                    )
+                )
+
+    def test_eating_reference_mask_excludes_bowl_and_preserves_paws(self) -> None:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(reference)
+        draw.ellipse((57, 121, 455, 391), fill=(95, 105, 115, 255))
+        # A disconnected warm muzzle lies inside the lower prop-search zone.
+        # It must remain identity-blue instead of joining the static red bowl.
+        draw.ellipse((235, 300, 252, 312), fill=(220, 145, 100, 255))
+        draw.rectangle((179, 348, 314, 389), fill=(205, 125, 55, 255))
+        draw.ellipse((188, 315, 305, 360), fill=(175, 90, 35, 255))
+
+        colored, exclusion, metadata = scail.make_eating_reference_identity_mask(
+            reference
+        )
+        mask = np.asarray(colored, dtype=np.uint8)
+        excluded = np.asarray(exclusion, dtype=np.uint8)
+
+        self.assertEqual(
+            metadata["policy"],
+            "eating_reference_cat_blue_bowl_red_v1",
+        )
+        self.assertEqual(
+            metadata["bowl_body_method"],
+            "warm_bowl_eroded_core_v1",
+        )
+        self.assertEqual(tuple(mask[370, 245]), (255, 0, 0))
+        self.assertEqual(int(excluded[370, 245]), 255)
+        self.assertEqual(tuple(mask[360, 150]), (0, 0, 255))
+        self.assertEqual(tuple(mask[360, 380]), (0, 0, 255))
+        self.assertEqual(tuple(mask[306, 243]), (0, 0, 255))
+        self.assertGreater(metadata["left_paw_identity_support"], 100)
+        self.assertGreater(metadata["right_paw_identity_support"], 100)
+
+    def test_eating_reference_mask_accepts_food_above_a_pale_bowl(self) -> None:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(reference)
+        draw.ellipse((57, 112, 455, 399), fill=(95, 105, 115, 255))
+        draw.ellipse((218, 344, 280, 398), fill=(225, 225, 220, 255))
+        draw.ellipse((390, 344, 450, 398), fill=(225, 225, 220, 255))
+        draw.rounded_rectangle(
+            (268, 338, 397, 398),
+            radius=26,
+            fill=(211, 194, 168, 255),
+        )
+        draw.ellipse((277, 326, 382, 345), fill=(160, 100, 45, 255))
+
+        colored, exclusion, metadata = scail.make_eating_reference_identity_mask(
+            reference
+        )
+        mask = np.asarray(colored, dtype=np.uint8)
+        excluded = np.asarray(exclusion, dtype=np.uint8)
+
+        self.assertEqual(
+            metadata["bowl_body_method"],
+            "warm_food_core_plus_beige_bowl_v1",
+        )
+        self.assertLess(
+            metadata["food_core_bbox"][3],
+            112 + round((399 - 112) * 0.82),
+        )
+        self.assertEqual(tuple(mask[382, 330]), (255, 0, 0))
+        self.assertEqual(int(excluded[382, 330]), 255)
+        self.assertEqual(tuple(mask[375, 235]), (0, 0, 255))
+        self.assertEqual(tuple(mask[375, 430]), (0, 0, 255))
+        self.assertEqual(tuple(mask[375, 260]), (0, 0, 255))
+        self.assertEqual(tuple(mask[375, 405]), (0, 0, 255))
+        self.assertEqual(int(excluded[375, 260]), 0)
+        self.assertEqual(int(excluded[375, 405]), 0)
+        self.assertGreater(metadata["left_paw_identity_support"], 500)
+        self.assertGreater(metadata["right_paw_identity_support"], 500)
+
+    def test_narrow_kibble_row_keeps_wide_pale_bowl_search_corridor(self) -> None:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(reference)
+        draw.ellipse((57, 108, 455, 405), fill=(96, 106, 116, 255))
+        draw.ellipse((145, 348, 207, 405), fill=(224, 224, 218, 255))
+        draw.ellipse((365, 348, 430, 405), fill=(224, 224, 218, 255))
+        draw.rounded_rectangle(
+            (205, 342, 365, 405),
+            radius=22,
+            fill=(218, 210, 198, 255),
+        )
+        # The visible food occupies only the centre 42 px of a 160 px bowl.
+        for x in (264, 276, 288, 300):
+            draw.ellipse((x, 331, x + 10, 343), fill=(162, 94, 38, 255))
+
+        colored, exclusion, metadata = scail.make_eating_reference_identity_mask(
+            reference
+        )
+        mask = np.asarray(colored, dtype=np.uint8)
+        excluded = np.asarray(exclusion, dtype=np.uint8)
+
+        self.assertEqual(
+            metadata["bowl_body_method"],
+            "warm_food_core_plus_beige_bowl_v1",
+        )
+        self.assertEqual(
+            metadata["food_anchored_search_width_min_fraction"],
+            0.32,
+        )
+        self.assertGreaterEqual(metadata["safe_width_fraction"], 0.25)
+        self.assertLessEqual(metadata["safe_width_fraction"], 0.55)
+        self.assertEqual(tuple(mask[385, 225]), (255, 0, 0))
+        self.assertEqual(tuple(mask[385, 345]), (255, 0, 0))
+        self.assertEqual(int(excluded[385, 225]), 255)
+        self.assertEqual(int(excluded[385, 345]), 255)
+        self.assertEqual(tuple(mask[380, 175]), (0, 0, 255))
+        self.assertEqual(tuple(mask[380, 400]), (0, 0, 255))
+
+    def test_eating_model_reference_maps_bowl_as_second_object(self) -> None:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(reference)
+        draw.ellipse((57, 121, 455, 391), fill=(95, 105, 115, 255))
+        draw.rectangle((179, 348, 314, 389), fill=(205, 125, 55, 255))
+        draw.ellipse((188, 315, 305, 360), fill=(175, 90, 35, 255))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "eating-reference.png"
+            reference.save(path)
+            model_reference, _mask, metadata = scail.make_reference_assets(
+                path,
+                (512, 512),
+                separate_eating_prop=True,
+            )
+
+        model_rgba = np.asarray(model_reference.convert("RGBA"), dtype=np.uint8)
+        self.assertTrue(metadata["scene_prop_separated"])
+        self.assertGreater(
+            metadata["reference_prop_fraction"],
+            0,
+        )
+        self.assertTrue(np.any(model_rgba[..., 3] > 0))
+
+
+class DrivingAnimationDecodeTests(unittest.TestCase):
+    def test_video_driver_decodes_all_frames_with_constant_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "driver.avi"
+            writer = cv2.VideoWriter(
+                str(path),
+                cv2.VideoWriter_fourcc(*"MJPG"),
+                10.0,
+                (32, 24),
+            )
+            self.assertTrue(writer.isOpened())
+            try:
+                for value in (30, 90, 150):
+                    bgr = np.zeros((24, 32, 3), dtype=np.uint8)
+                    bgr[..., 1] = 230
+                    bgr[6:20, 9:24] = value
+                    bgr[0:3, 0:3] = 240
+                    writer.write(bgr)
+            finally:
+                writer.release()
+
+            frames, durations = scail.read_animation_frames(path)
+
+        self.assertEqual(len(frames), 3)
+        self.assertEqual(durations, [100, 100, 100])
+        self.assertTrue(all(frame.mode == "RGBA" for frame in frames))
+        self.assertTrue(all(frame.size == (32, 24) for frame in frames))
+        first_rgba = np.asarray(frames[0], dtype=np.uint8)
+        self.assertEqual(int(first_rgba[1, 1, 3]), 0)
+        self.assertGreater(int(first_rgba[12, 16, 3]), 250)
+        decoded_means = [
+            float(np.asarray(frame.convert("RGB"), dtype=np.uint8).mean())
+            for frame in frames
+        ]
+        self.assertLess(decoded_means[0], decoded_means[1])
+        self.assertLess(decoded_means[1], decoded_means[2])
+
+    def test_unknown_driver_format_is_rejected_before_decode(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "Unsupported driving animation format",
+        ):
+            scail.read_animation_frames(Path("driver.txt"))
+
+
+if __name__ == "__main__":
+    unittest.main()

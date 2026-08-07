@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 import traceback
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,62 @@ from fastapi import (
 from fastapi.responses import FileResponse
 from PIL import Image, ImageChops, UnidentifiedImageError
 
-from transparent_animation import build_transparent_animations, build_transparent_cutout
+from fur_contour_gate import (
+    compare_fur_contours,
+    evaluate_animation_fur_quality,
+)
+from fur_surface_gate import (
+    GATE_VERSION as FUR_SURFACE_GATE_VERSION,
+    POLICY as FUR_SURFACE_GATE_POLICY,
+    THRESHOLD_VERSION as FUR_SURFACE_THRESHOLD_VERSION,
+    FurSurfaceThresholds,
+    evaluate_fur_surface,
+)
+from final_video_fur_audit import (
+    DEFAULT_SAMPLE_COUNT as FINAL_VIDEO_FUR_SAMPLE_COUNT,
+    FINAL_VIDEO_COHERENT_BRUSH_TEMPORAL_MIN_SAMPLES,
+    FINAL_VIDEO_DIRECT_QWEN_SPARSE_COARSE_MAX_BLOCKING_FRACTION,
+    FINAL_VIDEO_DIRECT_QWEN_SPARSE_COARSE_MIN_BLOCKING_SAMPLES,
+    FINAL_VIDEO_DIRECT_QWEN_SPARSE_COARSE_MIN_SAMPLES,
+    FINAL_VIDEO_DIRECT_QWEN_SPARSE_COARSE_TEMPORAL_SPREAD_MAX,
+    FINAL_VIDEO_EATING_BOUNDARY_ANCHOR_MIN_BLOCKING_SAMPLES,
+    FINAL_VIDEO_EATING_BOUNDARY_ANCHOR_MIN_SAMPLES,
+    FINAL_VIDEO_EATING_BOUNDARY_ANCHOR_SPREAD_MAX,
+    FINAL_VIDEO_EATING_ISOLATED_LONG_FUR_MIN_SAMPLES,
+    FINAL_VIDEO_EATING_PROP_ALIGNMENT_MIN,
+    FINAL_VIDEO_EATING_RADIAL_BOUNDED_REFERENCE_LOAD_DELTA_MULTIPLIER,
+    FINAL_VIDEO_EATING_RADIAL_BOUNDED_REFERENCE_RATIO_MARGIN,
+    FINAL_VIDEO_EATING_RADIAL_BOUNDARY_COMPONENT_SPREAD_MAX,
+    FINAL_VIDEO_EATING_RADIAL_BOUNDARY_LOAD_ENERGY_SPREAD_MAX,
+    FINAL_VIDEO_EATING_RADIAL_BOUNDARY_MIN_SAMPLES,
+    FINAL_VIDEO_LOW_SIGNAL_REFERENCE_MIN_SAMPLES,
+    FINAL_VIDEO_LOW_SIGNAL_REFERENCE_MIN_LONG_BLOCKING_FRACTION,
+    FINAL_VIDEO_LOW_SIGNAL_REFERENCE_TEMPORAL_SPREAD_MAX,
+    FINAL_VIDEO_SPARSE_COARSE_LOW_SIGNAL_MAX_BLOCKING_FRACTION,
+    FINAL_VIDEO_SPARSE_COARSE_LOW_SIGNAL_MIN_BLOCKING_SAMPLES,
+    FINAL_VIDEO_SPARSE_COARSE_LOW_SIGNAL_MIN_SAMPLES,
+    POLICY as FINAL_VIDEO_FUR_AUDIT_POLICY,
+    PROFILE_FULL_SCOPE as FINAL_VIDEO_PROFILE_FULL_SCOPE,
+    VALIDATED_ACTION_SURFACE_SCOPE as FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE,
+    VERSION as FINAL_VIDEO_FUR_AUDIT_VERSION,
+    audit_final_video,
+)
+from grooming_pose_gate import (
+    GATE_VERSION as GROOMING_POSE_GATE_VERSION,
+    POLICY as GROOMING_POSE_GATE_POLICY,
+    GroomingPoseThresholds,
+    evaluate_grooming_pose,
+)
+from transparent_animation import (
+    build_standard_direct_outputs,
+    build_transparent_animations,
+    build_transparent_cutout,
+)
+from uploaded_identity_scail_reference import (
+    POLICY as UPLOADED_IDENTITY_SCAIL_REFERENCE_POLICY,
+    VERSION as UPLOADED_IDENTITY_SCAIL_REFERENCE_VERSION,
+    build_uploaded_identity_scail_references,
+)
 
 
 LOGGER = logging.getLogger("local_video_api")
@@ -45,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.18.4"
+API_VERSION = "2.21.43"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -88,13 +144,16 @@ MAX_UPLOAD_BYTES = int(
 QWEN_POSE_MAX_ATTEMPTS = max(
     1, min(3, int(os.environ.get("QWEN_POSE_MAX_ATTEMPTS", "3")))
 )
+FUR_SURFACE_GATE_MAX_REJECTIONS = 3
+FUR_SURFACE_GATE_RETRY_POLICY = "preserve_configured_eating_bowl_surface_recovery_v1"
+QWEN_BOWL_POSE_RETRY_NAME = "bowl_palette_canvas_seed_retry"
 QWEN_RUNNING_POSE_EXTRA_ATTEMPTS = max(
     0,
     min(2, int(os.environ.get("QWEN_RUNNING_POSE_EXTRA_ATTEMPTS", "1"))),
 )
 QWEN_BOWL_POSE_EXTRA_ATTEMPTS = max(
     0,
-    min(2, int(os.environ.get("QWEN_BOWL_POSE_EXTRA_ATTEMPTS", "1"))),
+    min(2, int(os.environ.get("QWEN_BOWL_POSE_EXTRA_ATTEMPTS", "2"))),
 )
 QWEN_CHROMA_MAX_ATTEMPTS = max(
     1,
@@ -120,6 +179,268 @@ QWEN_POSE_USER_LORA_FINAL_TOTAL_CAP = float(
 )
 QWEN_POSE_USER_LORA_PER_LORA_CAP = float(
     os.environ.get("QWEN_POSE_USER_LORA_PER_LORA_CAP", "0.35")
+)
+QWEN_SUBJECT_REPLACEMENT_CANONICAL_LORA_TOTAL_CAP = float(
+    os.environ.get(
+        "QWEN_SUBJECT_REPLACEMENT_CANONICAL_LORA_TOTAL_CAP",
+        "0.15",
+    )
+)
+QWEN_SUBJECT_REPLACEMENT_POSE_LORA_TOTAL_CAP = float(
+    os.environ.get(
+        "QWEN_SUBJECT_REPLACEMENT_POSE_LORA_TOTAL_CAP",
+        "0.25",
+    )
+)
+POSE_IDENTITY_INPUT_POLICY_CANONICAL = "canonical_character_image1"
+POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD = "uploaded_photo_direct_profile_action_image2"
+POSE_IDENTITY_INPUT_POLICY_MAIN_CASE_GEOMETRY_FIRST = (
+    "main_case_driver_geometry_image1_uploaded_identity_image2_v2"
+)
+# Backward-compatible import name for the retired geometry-first diagnostic
+# branch. The production upload path always generates a Qwen canonical first
+# and uses that canonical as Image 1 for both supported actions. The dedicated
+# grooming geometry-first policy below remains readable only for old jobs and
+# regression diagnostics.
+POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST = (
+    POSE_IDENTITY_INPUT_POLICY_MAIN_CASE_GEOMETRY_FIRST
+)
+POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL = (
+    "main_case_grooming_geometry_image1_canonical_identity_image2_v1"
+)
+SCAIL_FROZEN_SLEEK_EATING_POLICY = (
+    "frozen_profile_action_identity_with_bowl_mapped_red_v1"
+)
+SCAIL_FROZEN_EATING_PIPELINE = "frozen_profile_eating_then_scail_v1"
+SCAIL_MIXED_REFERENCE_PIPELINE = (
+    "frozen_profile_eating_plus_qwen_grooming_then_scail_v1"
+)
+PROFILE_STANDARD_DIRECT_POLICY = "main_case_profile_standard_direct_v2"
+PROFILE_STANDARD_DIRECT_ROLE = (
+    "authoritative_black_white_main_case_subject_identity_and_action_standard"
+)
+PROFILE_STANDARD_DIRECT_GPU_REASON = (
+    "The frozen Main_case runtime is already the requested profile identity and "
+    "action standard; generative redraw would change the approved subject."
+)
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
+    "qwen_full_body_then_action_keyframes_then_scail_v1"
+)
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.31.11"
+GROOMING_QWEN_POSE_REFERENCE_POLICY = (
+    "main_case_grooming_canonical_open_channel_then_identity_refine_v26"
+)
+GROOMING_QWEN_GEOMETRY_GUIDE_POLICY = "driving_grooming_geometry_image2_v8"
+GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY = "driving_grooming_geometry_image1_v3"
+GROOMING_QWEN_GEOMETRY_GUIDE_METHOD = (
+    "single_tone_organic_open_channel_main_case_silhouette_v5"
+)
+GROOMING_QWEN_GUIDE_FOREGROUND_RGB = (144, 144, 144)
+GROOMING_QWEN_GUIDE_FORELEG_RGB = (176, 176, 176)
+GROOMING_QWEN_GUIDE_STYLE = (
+    "single_tone_achromatic_open_foreleg_channel_plus_private_cv_v5"
+)
+CANONICAL_ACTION_IDENTITY_PALETTE_POLICY = (
+    "canonical_action_identity_palette_continuity_v1"
+)
+# Historical accepted canonical-first action candidates top out at 0.358322,
+# while every observed grooming guide-copy failure starts at 0.489248. Keep a
+# fixed fail-closed gap between those populations instead of allowing a gray
+# guide to replace a light canonical subject.
+CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX = 0.40
+GROOMING_QWEN_NEGATIVE_SPACE_METHOD = (
+    "verified_foreleg_anchor_organic_open_curve_negative_space_v3"
+)
+GROOMING_QWEN_FORELEG_SEMANTIC_METHOD = "verified_shoulder_to_paw_achromatic_capsule_v1"
+QWEN_GROOMING_CANONICAL_GEOMETRY_DENOISE_BY_ATTEMPT = (0.84, 0.82, 0.86)
+GROOMING_QWEN_FORELEG_REPAIR_POLICY = (
+    "canonical_foreleg_seed_expanded_context_local_pet3d_composite_gate_v9"
+)
+GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY = (
+    "canonical_identity_base_masked_private_anatomy_foreleg_completion_v2"
+)
+GROOMING_PRIVATE_COMPLETION_MASK_POLICY = (
+    "verified_foreleg_completion_mask_not_qwen_input_v1"
+)
+GROOMING_CANONICAL_COMPLETION_EDGE_EVIDENCE_POLICY = (
+    "canonical_masked_completion_antialias_edge_evidence_v1"
+)
+# The v29 production candidate missed the unchanged 0.11 global threshold by
+# 23 Canny pixels out of a 16,820-pixel ROI while every independent geometry,
+# contact, color, histogram, and texture check passed. Accept only this narrow
+# quantization band on the digest-bound canonical masked-completion attempt.
+GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN = 0.985
+GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_EVIDENCE_POLICY = (
+    "canonical_direct_organic_foreleg_structural_edge_evidence_v3"
+)
+# Direct canonical attempts 1-2 can land just below the unchanged 0.11 raw
+# Canny threshold when an antialiased light paw is otherwise correctly formed.
+# Recover only the narrow population that also has strong low-pass organic
+# structure and substantially exceeds the ordinary guide-alignment contract.
+# The strict chamfer bounds keep historical straight prop/cylinder false
+# positives (coverage <= 0.632565, mean distance >= 6.789175) rejected.
+GROOMING_CANONICAL_DIRECT_EDGE_DENSITY_RATIO_MIN = 0.925
+GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_DENSITY_MIN = 0.03
+GROOMING_CANONICAL_DIRECT_CHAMFER_COVERAGE_MIN = 0.70
+GROOMING_CANONICAL_DIRECT_CHAMFER_MEAN_DISTANCE_MAX = 5.0
+GROOMING_CANONICAL_DIRECT_CHAMFER_P90_DISTANCE_MAX = 12.0
+GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT = 2
+GROOMING_CANONICAL_DIRECT_OFFGUIDE_STRUCTURAL_EDGE_DENSITY_MIN = 0.025
+GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_COVERAGE_MIN = 0.56
+GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_MEAN_DISTANCE_MAX = 11.0
+GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_P90_DISTANCE_MAX = 35.0
+GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_LAB_DELTA_MAX = 8.0
+GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_HISTOGRAM_MAX = 0.15
+GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_TEXTURE_RATIO_MIN = 0.75
+GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_TEXTURE_RATIO_MAX = 2.0
+GROOMING_CANONICAL_DIRECT_ALIGNED_STRUCTURAL_EDGE_DENSITY_MIN = 0.03
+GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_LAB_DELTA_MAX = 16.0
+GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_HISTOGRAM_MAX = 0.10
+GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MIN = 0.75
+GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MAX = 1.5
+GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_PALETTE_POLICY = (
+    "canonical_direct_organic_paw_achromatic_histogram_match_v1"
+)
+GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_ACHROMATIC_MIN = 0.95
+GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_BALANCE_L1_MAX = 0.90
+GROOMING_CANONICAL_DIRECT_SURFACE_NONEXPANSION_POLICY = (
+    "canonical_direct_identity_surface_debt_nonexpansion_v1"
+)
+# A canonical generated from the uploaded identity can carry a borderline
+# directional-fur signal of its own. A direct action candidate may inherit that
+# single issue only when every measured brush/line energy stays bounded and is
+# non-expanding against the digest-bound transparent canonical.
+GROOMING_CANONICAL_DIRECT_SURFACE_COHERENT_FRACTION_MAX = 0.57
+GROOMING_CANONICAL_DIRECT_SURFACE_COHERENT_FRACTION_DELTA_MAX = 0.01
+GROOMING_CANONICAL_DIRECT_SURFACE_COHERENCE_MEAN_MAX = 0.73
+GROOMING_CANONICAL_DIRECT_SURFACE_COHERENCE_MEAN_DELTA_MAX = 0.02
+GROOMING_CANONICAL_DIRECT_SURFACE_ORIENTATION_MAX = 0.72
+GROOMING_CANONICAL_DIRECT_SURFACE_ORIENTATION_DELTA_MAX = 0.12
+GROOMING_CANONICAL_DIRECT_SURFACE_HOUGH_RADIAL_DELTA_MAX = 0.03
+GROOMING_CANONICAL_DIRECT_SURFACE_CANONICAL_LONG_ENERGY_MAX = 0.25
+GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT = 3
+GROOMING_QWEN_FORELEG_REPAIR_DENOISE = 1.0
+GROOMING_QWEN_FORELEG_REPAIR_STEPS = 12
+GROOMING_CANONICAL_FULL_POSE_RESCUE_POLICY = (
+    "canonical_single_tone_open_channel_full_pose_rescue_v4"
+)
+GROOMING_CANONICAL_FULL_POSE_REFINE_POLICY = (
+    "canonical_seed_bound_pose_safe_identity_refine_v6"
+)
+GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
+    "canonical_palette_conditioned_action_pose_transfer_seed_v1"
+)
+GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY = (
+    "canonical_pose_transfer_seed_bound_matte_union_v1"
+)
+GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE = (
+    "rembg_u2net_plus_digest_bound_pose_seed"
+)
+GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY = (
+    "canonical_seed_bound_pose_safe_identity_refine_source_v1"
+)
+GROOMING_CANONICAL_SEED_BOUND_INTERSECTION_OVER_SEED_MIN = 0.50
+GROOMING_CANONICAL_SEED_BOUND_INTERSECTION_OVER_SEMANTIC_MIN = 0.85
+GROOMING_CANONICAL_SEED_BOUND_SEMANTIC_TO_SEED_MIN = 0.45
+GROOMING_CANONICAL_SEED_BOUND_SEMANTIC_TO_SEED_MAX = 1.15
+GROOMING_CANONICAL_SEED_BOUND_ADDED_OVER_SEED_MAX = 0.45
+GROOMING_CANONICAL_POSE_SAFE_STRUCTURAL_EDGE_DENSITY_MIN = 0.02
+GROOMING_CANONICAL_POSE_SAFE_IDENTITY_ONLY_ISSUES = frozenset(
+    {
+        "new_dominant_warm_brown_or_orange",
+        "achromatic_source_recolored_with_warm_fur",
+        "achromatic_coat_value_balance_lost",
+        "canonical_action_achromatic_value_balance_drift",
+    }
+)
+GROOMING_CANONICAL_FULL_POSE_GUIDE_POLICY = (
+    "single_tone_open_channel_organic_grooming_geometry_v3"
+)
+GROOMING_CANONICAL_FULL_POSE_GUIDE_LUMA_HALF_SPAN = 12
+GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT = 4
+GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT = 5
+GROOMING_CANONICAL_FULL_POSE_RESCUE_STEPS = 12
+GROOMING_CANONICAL_FULL_POSE_RESCUE_DENOISE = 1.0
+GROOMING_CANONICAL_FULL_POSE_REFINE_DENOISE = 1.0
+GROOMING_CANONICAL_POSE_TRANSFER_LOWPASS_SIGMA_PX = 4.0
+GROOMING_CANONICAL_POSE_TRANSFER_LUMA_LOW_QUANTILE = 0.30
+GROOMING_CANONICAL_POSE_TRANSFER_LUMA_HIGH_QUANTILE = 0.92
+GROOMING_CANONICAL_POSE_TRANSFER_LUMA_LOW_OFFSET = 32.0
+GROOMING_CANONICAL_POSE_TRANSFER_LUMA_HIGH_OFFSET = 18.0
+EATING_CANONICAL_IDENTITY_REFINE_POLICY = (
+    "canonical_eating_pose_uploaded_front_identity_refine_v2"
+)
+EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT = 5
+EATING_CANONICAL_IDENTITY_REFINE_STEPS = 12
+EATING_CANONICAL_IDENTITY_REFINE_DENOISE = 1.0
+GROOMING_QWEN_FORELEG_REPAIR_MASK_DILATION_PX = 18
+GROOMING_QWEN_FORELEG_REPAIR_SEED_LOWPASS_SIGMA_PX = 2.5
+GROOMING_QWEN_FORELEG_REPAIR_SEED_IDENTITY_MEDIAN_BLEND = 0.12
+GROOMING_QWEN_FORELEG_REPAIR_NOISE_MASK_EXPANSION_PX = 32
+GROOMING_QWEN_FORELEG_REPAIR_NOISE_MASK_FEATHER_SIGMA_PX = 8.0
+GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH = float(
+    os.environ.get("GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH", "0.22")
+)
+GROOMING_QWEN_FORELEG_REPAIR_STYLE_POLICY = (
+    "expanded_noise_mask_local_pet3d_surface_prior_v1"
+)
+GROOMING_QWEN_FORELEG_REPAIR_COMPOSITE_GATE_POLICY = (
+    "masked_pet3d_surface_verified_pose_edge_and_low_texture_paw_rescue_v3"
+)
+GROOMING_QWEN_FORELEG_REPAIR_EDGE_DENSITY_RATIO_MIN = 0.70
+GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN = 0.11
+GROOMING_POSE_DEFAULT_THRESHOLDS = GroomingPoseThresholds()
+GROOMING_POSE_STRUCTURAL_BLUR_SIGMA = (
+    GROOMING_POSE_DEFAULT_THRESHOLDS.structural_blur_sigma
+)
+GROOMING_POSE_STRUCTURAL_EDGE_DENSITY_MIN = (
+    GROOMING_POSE_DEFAULT_THRESHOLDS.structural_edge_density_min
+)
+GROOMING_QWEN_FORELEG_REPAIR_PLANTED_PAW_GRADIENT_P90_MAX = 8.0
+GROOMING_QWEN_FORELEG_REPAIR_RAISED_PAW_GRADIENT_P90_MAX = 128.0
+GROOMING_QWEN_FORELEG_REPAIR_ANATOMY_POLICY = (
+    "frozen_single_tone_open_channel_grooming_anatomy_image3_v2"
+)
+UPLOADED_IDENTITY_VIEW_POLICY = "front_left_right_qwen_canonical_identity_v1"
+CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY = (
+    "front_view_for_front_three_quarter_canonical_v1"
+)
+UPLOADED_IDENTITY_VIEW_ROLES = ("front", "left", "right")
+UPLOADED_IDENTITY_VIEW_FILES = {
+    "front": ("input.png", "input_identity_source.png"),
+    "left": ("input_left.png", "input_left_identity_source.png"),
+    "right": ("input_right.png", "input_right_identity_source.png"),
+}
+QWEN_MULTI_VIEW_CANONICAL_PROMPT = (
+    "MULTI-VIEW IDENTITY CONTRACT: Images 1, 2, and 3 are front, left-side, "
+    "and right-side photographs of the same single pet. Generate exactly one "
+    "pet. Use Image 1 as the primary face and frontal-identity authority; use "
+    "Images 2 and 3 to preserve side-specific coat markings, body proportions, "
+    "tail, legs, and asymmetry. Reconcile the three observations into one "
+    "coherent full-body identity. Do not average markings, mirror one side onto "
+    "the other, combine multiple animals, or place reference panels in output."
+)
+FINAL_VIDEO_VALIDATED_ACTION_REFERENCE_POLICIES = {
+    "eating": "qwen_action_identity_with_bowl_mapped_red",
+    "grooming": "qwen_action_specific_identity",
+}
+EATING_MOUTH_BOWL_CONTACT_POLICY = "warm_face_component_above_detected_bowl_v3"
+EATING_BOWL_SPLIT_FALLBACK_POLICY = (
+    "food_anchored_beige_bowl_after_eroded_warm_core_miss_v2"
+)
+EATING_MUZZLE_BOWL_GAP_MAX_PX = 8
+EATING_MUZZLE_COMPONENT_WIDTH_BOWL_RATIO_MAX = 0.70
+EATING_MUZZLE_COMPONENT_HEIGHT_BOWL_RATIO_MAX = 0.35
+EATING_MUZZLE_COMPONENT_CENTER_MARGIN_BOWL_RATIO = 0.10
+FULL_DRIVER_EATING_POSE_POLICY = "full_driver_pose_with_separate_bowl_v1"
+UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY = (
+    "uploaded_subject_absolute_animation_roughness_v1"
+)
+UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE = (
+    "uploaded_identity_absolute_surface_contract_v1"
+)
+UPLOADED_IDENTITY_CHROMA_SPILL_POLICY = (
+    "source_palette_guarded_green_spill_neutralization_v1"
 )
 BOWL_IDENTITY_PALETTE_BOTTOM_EXCLUSION = max(
     0.0,
@@ -152,6 +473,70 @@ QWEN_POSE_RELATED_IOU_THRESHOLD = float(
 QWEN_POSE_RELATED_DHASH_THRESHOLD = int(
     os.environ.get("QWEN_POSE_RELATED_DHASH_THRESHOLD", "3")
 )
+QWEN_ACTION_CANONICAL_IOU_THRESHOLD = float(
+    os.environ.get("QWEN_ACTION_CANONICAL_IOU_THRESHOLD", "0.90")
+)
+QWEN_ACTION_CANONICAL_DHASH_THRESHOLD = int(
+    os.environ.get("QWEN_ACTION_CANONICAL_DHASH_THRESHOLD", "10")
+)
+QWEN_BOWL_ACTION_MIN_ASPECT_RATIO = float(
+    os.environ.get("QWEN_BOWL_ACTION_MIN_ASPECT_RATIO", "1.05")
+)
+QWEN_SUBJECT_REPLACEMENT_POSE_DENOISE = max(
+    0.1,
+    min(
+        1.0,
+        float(os.environ.get("QWEN_SUBJECT_REPLACEMENT_POSE_DENOISE", "1.0")),
+    ),
+)
+QWEN_SUBJECT_REPLACEMENT_POSE_DENOISE_STEP = max(
+    0.0,
+    min(
+        0.25,
+        float(
+            os.environ.get(
+                "QWEN_SUBJECT_REPLACEMENT_POSE_DENOISE_STEP",
+                "0.0",
+            )
+        ),
+    ),
+)
+QWEN_EATING_GEOMETRY_FIRST_DENOISE_HIGH = max(
+    0.1,
+    min(
+        1.0,
+        float(
+            os.environ.get(
+                "QWEN_EATING_GEOMETRY_FIRST_DENOISE_HIGH",
+                "1.0",
+            )
+        ),
+    ),
+)
+QWEN_EATING_GEOMETRY_FIRST_DENOISE_LOW = max(
+    0.1,
+    min(
+        1.0,
+        float(
+            os.environ.get(
+                "QWEN_EATING_GEOMETRY_FIRST_DENOISE_LOW",
+                "0.90",
+            )
+        ),
+    ),
+)
+QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH = max(
+    0.0,
+    min(
+        0.25,
+        float(
+            os.environ.get(
+                "QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH",
+                "0.15",
+            )
+        ),
+    ),
+)
 QWEN_POSE_HARD_DUPLICATE_IOU = float(
     os.environ.get("QWEN_POSE_HARD_DUPLICATE_IOU", "0.985")
 )
@@ -174,8 +559,79 @@ TRANSPARENT_GIF_SIZE = 512
 TRANSPARENT_GIF_FPS = 20
 TRANSPARENT_GIF_FRAMES = 100
 TRANSPARENT_GIF_DURATION_SECONDS = 5.0
+QWEN_ACTION_CANDIDATE_MATTE_POLICY = (
+    "direct_chroma_then_per_candidate_semantic_matte_v1"
+)
+QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY = (
+    "alpha_preserving_rgba_canvas_512_then_byte_copy_v1"
+)
 FFMPEG_BIN = os.environ.get(
     "FFMPEG_BIN", shutil.which("ffmpeg") or "/usr/local/bin/ffmpeg"
+)
+
+SUBJECT_PROFILE_DIR = PROJECT_ROOT / "subject_profiles"
+DEFAULT_SUBJECT_PROFILE = (
+    os.environ.get("DEFAULT_SUBJECT_PROFILE", "sleek_tabby_cat_v1").strip()
+    or "sleek_tabby_cat_v1"
+)
+SUBJECT_REPLACEMENT_ACTIONS = ("eating", "grooming")
+SUBJECT_REPLACEMENT_ACTION_LABELS = {
+    "eating": "吃饭",
+    "grooming": "舔毛",
+}
+SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE = "pet-multipose-20260717-v2"
+SCAIL_PYTHON = Path(
+    os.environ.get(
+        "SCAIL_PYTHON",
+        "/opt/miniconda3/envs/comfyui/bin/python",
+    )
+).resolve()
+SCAIL_RUNNER = PROJECT_ROOT / "scail2_subject_replacement_test.py"
+SCAIL_TRANSPARENT_RUNNER = PROJECT_ROOT / "scail2_transparent_gif_from_video.py"
+SCAIL_EXPERIMENT_ROOT = DATA_ROOT / "experiments" / "scail2_tm_test"
+SCAIL_UNET = "wan2.1_14B_SCAIL_2_fp8_scaled.safetensors"
+SCAIL_DPO_LORA = "wan2.1_SCAIL_2_DPO_lora_bf16.safetensors"
+SCAIL_DISTILL_LORA = "lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors"
+SCAIL_FRAMES = 81
+SCAIL_FPS = 16.0
+SCAIL_STEPS = 6
+SCAIL_EATING_POSE_STRENGTH_MAX = 1.35
+SCAIL_DRIVING_TEMPLATE_ROOT = (
+    DATA_ROOT
+    / "profile_assets"
+    / "sleek_tabby_cat_v1"
+    / "driving"
+    / "20260731-main-case-v1"
+)
+SCAIL_ACTION_CONFIG = {
+    "eating": {
+        "driving_template": (
+            SCAIL_DRIVING_TEMPLATE_ROOT / "eating_driver_512x512_81f_16fps.mp4"
+        ),
+        "pose_strength": 1.10,
+        "seed_offset": 0,
+    },
+    "grooming": {
+        "driving_template": (
+            SCAIL_DRIVING_TEMPLATE_ROOT / "grooming_driver_512x512_81f_16fps.mp4"
+        ),
+        "pose_strength": 1.15,
+        "seed_offset": 2,
+    },
+}
+
+SUBJECT_REPLACEMENT_GROOMING_POSE_PROMPT = (
+    "grooming | A complete full-body cat in a stable seated grooming pose at a "
+    "three-quarter front angle. Exactly one foreleg rises continuously and visibly "
+    "from its shoulder to one front paw held at the mouth. The other foreleg descends "
+    "continuously from its shoulder to exactly one planted front paw. The raised "
+    "foreleg has no duplicate or leftover paw on the ground. Both hind legs remain "
+    "naturally seated at the sides and may be partly tucked behind the crouched torso. "
+    "A single tiny pink tongue touches the raised paw. Show exactly four anatomically "
+    "attached legs, both complete front paws, both ears, the complete body, and one "
+    "tail continuously from base to tip; the attached hind paws may be naturally "
+    "partly occluded by the seated pose. No food, "
+    "bowl, collar, clothing, accessory, detached paw, ghost limb, or extra subject."
 )
 
 QWEN_MODEL = "qwen_image_edit_2511_fp8mixed.safetensors"
@@ -278,6 +734,10 @@ if not 0.0 <= QWEN_STYLE_LORA_STRENGTH <= 2.0:
     raise ValueError("QWEN_STYLE_LORA_STRENGTH must be between 0.0 and 2.0")
 if not 0.0 <= QWEN_POSE_STYLE_LORA_STRENGTH <= 2.0:
     raise ValueError("QWEN_POSE_STYLE_LORA_STRENGTH must be between 0.0 and 2.0")
+if not 0.0 <= GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH <= 2.0:
+    raise ValueError(
+        "GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH must be between 0.0 and 2.0"
+    )
 if not 0.0 <= QWEN_RECOVERY_USER_LORA_STRENGTH <= 2.0:
     raise ValueError("QWEN_RECOVERY_USER_LORA_STRENGTH must be between 0.0 and 2.0")
 for name, value in {
@@ -328,8 +788,10 @@ BASELINE_IMAGE_PROMPT_ZH = (
 BASELINE_IMAGE_PROMPT_EN = (
     "Use the cat in the reference image as the only identity standard. Preserve "
     "its exact fur colors and marking placement, face shape, eye color and spacing, "
-    "ear shape, nose color, fur length, body proportions, and tail features. Render "
-    "it as a high-quality cute stylized 3D character with finely groomed soft fur "
+    "ear shape, nose color, natural coat-length category, body proportions, and tail "
+    "features. Render it as an identity-faithful restrained stylized 3D digital double "
+    "with the same apparent age, head-to-body ratio, and eye-to-head ratio, using compact, "
+    "finely groomed soft fur lying naturally along the body surface "
     "and bright gentle lighting, showing its complete natural unclothed body with "
     "no accessories. Do not inherit or lock the reference pose, limb coordinates, "
     "or composition; the selected pose alone controls the action."
@@ -374,18 +836,17 @@ MULTIPOSE_PRESETS: tuple[dict[str, str], ...] = (
         "label": "吃饭",
         "prompt_zh": BASELINE_IMAGE_SOURCE_PROMPT_ZH,
         "prompt_en": (
-            "A complete full-body cat in a natural low quadruped feeding crouch. Both "
-            "forelegs extend down from the shoulders and both complete front paws are "
-            "visibly planted on the same baseline. Exactly one small shallow light-beige "
-            "matte ceramic food bowl is centered directly below the lowered muzzle and "
-            "slightly ahead of the planted paws. Keep a narrow visible green gap between "
-            "the bowl and every paw, so it never touches, overlaps, hides, or replaces a "
-            "limb. The nose is immediately above the bowl opening in a calm pre-bite "
-            "feeding posture. The mouth is closed or hidden naturally behind the bowl "
-            "rim. All brown kibble remains below the rim inside the bowl: no kibble at "
-            "the mouth, above the rim, or in a paw. The cat never raises a foreleg and "
-            "never grasps, lifts, carries, or holds food. The bowl is the only prop. Keep "
-            "the eyes, face silhouette, all paws, body, and full tail readable."
+            "A complete full-body cat in a natural low crouch, leaning forward with "
+            "the head fully lowered so the lower muzzle physically enters and overlaps "
+            "the clearly visible brown kibble by 6 to 10 output pixels in exactly one "
+            "small shallow light-beige matte ceramic food bowl. The nose and lower "
+            "muzzle may be partially hidden by kibble and the near bowl rim; this "
+            "occlusion is required evidence of eating, not a framing defect. "
+            "The bowl touches or slightly overlaps the front paws and is the only prop. "
+            "Both complete front paws are visibly planted; the cat never grasps, lifts, "
+            "carries, or holds food. Keep the paws, body, ears, upper face markings, and "
+            "full tail readable, but never raise the head merely to show the eyes, nose, "
+            "or complete face. Do not let the bowl hide or replace any limb."
         ),
         "video_prompt_en": (
             "Keep the food bowl completely fixed. Animate a restrained natural eating "
@@ -517,7 +978,7 @@ IMAGE_PROFILES: dict[str, dict[str, Any]] = {
         "pose_seed_offsets": dict(MULTIPOSE_SEED_OFFSETS),
         "default_poses": list(DEFAULT_POSES),
         "identity_palette_guard": True,
-        "identity_palette_policy": "source_palette_guard_v1",
+        "identity_palette_policy": "source_palette_guard_v2",
         "user_loras": [dict(item) for item in BASELINE_IMAGE_USER_LORAS],
         **BASELINE_IMAGE_GENERATION_SETTINGS,
     },
@@ -586,14 +1047,51 @@ RESOLUTIONS = {
 }
 OUTPUT_FORMATS = {"mp4", "transparent_gif"}
 
-CHROMA_BACKGROUND_PROMPT = """The entire background must be a perfectly flat, uniform pure #00FF00 chroma-key green field for later background removal. There must be no floor plane, cast shadow, contact shadow, gradient, texture, reflection, vignette, or lighting variation in the green background. Keep generous green padding around the complete subject, and do not use green anywhere on the subject."""
+CHROMA_BACKGROUND_PROMPT = """The entire background must be a perfectly flat, uniform pure #00FF00 chroma-key green field for later background removal. Treat it as a digitally inserted color plate, never as a physical green studio: it emits no light and creates no green or cyan bounce, rim light, reflection, translucency, eye catchlight, or color spill on the character. There must be no floor plane, cast shadow, contact shadow, gradient, texture, reflection, vignette, or lighting variation in the green background. Light the character independently with neutral white light. Keep generous green padding around the complete subject, and do not use green anywhere on the subject except a genuinely green eye color visible in the uploaded identity views."""
 CHROMA_NEGATIVE = (
     "white background, gray background, black background, dark background, non-green background, scenery, floor, floor line, cast shadow, "
-    "contact shadow, reflection, background gradient, background texture, green subject, green fur, green clothing"
+    "contact shadow, reflection, background gradient, background texture, green subject, green fur, green clothing, "
+    "green bounce light, green color spill, green rim light, cyan rim light, chroma reflection on fur"
+)
+
+SLEEK_GROOMING_PROMPT = (
+    "Preserve the source coat colors, markings, exact natural coat-length category, "
+    "visible volume, and source-bounded outer contour. Never amplify its apparent "
+    "length or volume, and never shorten, flatten, or suppress genuine long fur, "
+    "cheek or neck ruff, chest fur, leg feathering, or plume tail when the uploaded "
+    "identity shows those traits. Keep source-matched strand direction and coherent "
+    "animation-ready grooming. Remove only generated artifacts such as isolated "
+    "rigid clumps, a new dorsal ridge, a mohawk, radial brush-bristle rays, repeated "
+    "fan-shaped streaks, detached filament bundles, or a synthetic wispy halo."
+)
+
+UPLOADED_IDENTITY_FUR_LOCK = (
+    "UPLOADED IDENTITY APPEARANCE AUTHORITY - non-negotiable: the uploaded pet "
+    "view or role-labeled view set is the only authority for coat length, coat "
+    "volume, fur texture, colors, markings, face, eyes, ears, nose, body shape, "
+    "and tail identity. The selected subject profile supplies action timing and "
+    "geometry only; never copy that profile animal's identity, palette, eye "
+    "color, breed, markings, or coat-length standard into the uploaded pet. "
+    "Preserve the uploaded pet's natural short, medium, or long coat category and "
+    "its source-bounded silhouette. Groom only enough to keep coherent strands "
+    "and clean animation-ready edges without shortening, lengthening, puffing, "
+    "or redesigning the coat."
+)
+UPLOADED_IDENTITY_FUR_NEGATIVE = (
+    "borrowed profile animal appearance, Main_case appearance, profile-specific "
+    "coat recoloring, profile-specific eye recoloring, profile-specific markings, "
+    "profile-specific breed traits, changed natural coat length, shortened source "
+    "coat, invented coat length, amplified fur volume, puffed-up fur, raised guard "
+    "hairs, bristling, spiky fur, rigid clumps, dorsal ridge, mohawk, jagged back "
+    "silhouette, changing back contour, fur crawling, texture crawling"
 )
 
 CARTOON_NEGATIVE = (
     "flat 2D drawing, hand-drawn line art, anime, comic, watercolor, low-poly, hard plastic toy, flat fur, "
+    "artificially puffed-up fur, raised guard hairs, bristled hair, spiky fur, needle-like fur, "
+    "wire-like fur, rigid fur clumps, detached strand bundles, repeated radial fur strokes, "
+    "brush-bristle rays, synthetic wispy fur halo, dorsal ridge, mohawk, changed coat length, "
+    "changed coat volume, invented mane or ruff or plume, jagged generated fur silhouette, "
     "generic cat, different breed, changed fur pattern, changed marking placement, changed face shape, "
     "changed eye color, changed ear shape, changed muzzle, changed body proportions, changed tail, "
     "invented stripes, invented spots, decorative markings, clothes, clothing, shirt, overalls, suspenders, bow tie, "
@@ -601,7 +1099,8 @@ CARTOON_NEGATIVE = (
     "deformed muzzle, white sticker border, white outer stroke, halo, unrequested object, duplicate bowl, extra bowl, "
     "floating mark, stray line, water strand from mouth, drool, falling water droplet, wink, blinking, closed eye, "
     "squint, spiral, swirl, motion symbol, "
-    "extreme caricature, extreme chibi distortion"
+    "extreme caricature, extreme chibi distortion, oversized head, oversized eyes, enlarged irises, "
+    "oversized ears, disproportionately enlarged inner-ear panels, altered facial proportions"
 )
 
 QWEN_NEGATIVE = (
@@ -621,6 +1120,9 @@ CARTOON_WAN_NEGATIVE = (
     "nose drift, muzzle deformation, mouth morphing, wide open mouth, changing expression, clothes appearing, "
     "shirt, overalls, suspenders, bow tie, collar, harness, glasses, eyewear, hat, shoes, accessories appearing, "
     "blink, wink, closed eye, eyelid motion, squint, fur crawling, texture crawling, color flicker, "
+    "fur volume expansion, puffed-up fur, raised fur, bristling, standing guard hairs, spiky fur, "
+    "needle-like fur, wire-like fur, rigid fur clumps, long isolated strands, dorsal ridge, mohawk, "
+    "jagged fur silhouette, changing back contour, "
     "changed fur markings, changed eye color, generic cat"
 )
 
@@ -730,6 +1232,1187 @@ def require_models(include_video: bool = True) -> None:
     if missing:
         raise FileNotFoundError(
             "Required local model files are missing: " + ", ".join(missing)
+        )
+
+
+def scail_model_paths() -> list[Path]:
+    return [
+        MODEL_ROOT / "diffusion_models" / SCAIL_UNET,
+        MODEL_ROOT / "loras" / SCAIL_DPO_LORA,
+        MODEL_ROOT / "loras" / SCAIL_DISTILL_LORA,
+        MODEL_ROOT / "text_encoders" / WAN_CLIP,
+        MODEL_ROOT / "vae" / "wan_2.1_vae.safetensors",
+        MODEL_ROOT / "clip_vision" / "clip_vision_h.safetensors",
+        SCAIL_PYTHON,
+        SCAIL_RUNNER,
+        SCAIL_TRANSPARENT_RUNNER,
+    ]
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def subject_profile_sha256(profile: dict[str, Any]) -> str:
+    profile_path = Path(str(profile.get("_path") or ""))
+    if profile_path.is_file():
+        return file_sha256(profile_path)
+    serializable = {key: value for key, value in profile.items() if key != "_path"}
+    payload = json.dumps(
+        serializable,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def json_value_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def fur_surface_thresholds_payload() -> dict[str, Any]:
+    return json.loads(json.dumps(asdict(FurSurfaceThresholds())))
+
+
+def resolve_profile_fur_surface_baseline(
+    profile: dict[str, Any],
+    action: str,
+    action_reference: str,
+) -> dict[str, Any] | None:
+    """Freeze profile-declared action-baseline provenance and its digest."""
+
+    if profile.get("id") != "sleek_tabby_cat_v1":
+        return None
+    validated_actions = profile.get("validated_action_baselines")
+    if not isinstance(validated_actions, dict):
+        raise ValueError(
+            "Sleek-tabby fur surface gate requires validated_action_baselines"
+        )
+    record = validated_actions.get(action)
+    if not isinstance(record, dict):
+        raise ValueError(
+            f"Sleek-tabby fur surface gate lacks the {action} validated baseline"
+        )
+    baseline_reference = str(record.get("reference") or "").strip()
+    if not baseline_reference:
+        raise ValueError(
+            f"Sleek-tabby {action} validated baseline lacks reference provenance"
+        )
+    if Path(baseline_reference).resolve() != Path(action_reference).resolve():
+        raise ValueError(
+            f"Sleek-tabby {action} validated baseline reference does not match "
+            "action_references"
+        )
+    expected_sha256 = str(record.get("reference_sha256") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise ValueError(
+            f"Sleek-tabby {action} validated baseline requires reference_sha256"
+        )
+    baseline_path = Path(baseline_reference)
+    actual_sha256 = file_sha256(baseline_path) if baseline_path.is_file() else None
+    if actual_sha256 is not None and actual_sha256 != expected_sha256:
+        raise ValueError(
+            f"Sleek-tabby {action} validated baseline reference digest changed"
+        )
+    run_id = str(record.get("run_id") or "").strip()
+    if not run_id:
+        raise ValueError(
+            f"Sleek-tabby {action} validated baseline lacks run_id provenance"
+        )
+    profile_digest = subject_profile_sha256(profile)
+    record_digest = json_value_sha256(record)
+    provenance = {
+        "profile_id": str(profile["id"]),
+        "profile_sha256": profile_digest,
+        "action": action,
+        "validated_action_baseline_run_id": run_id,
+        "validated_action_baseline_reference": baseline_reference,
+        "validated_action_baseline_reference_sha256": expected_sha256,
+        "validated_action_baseline_record_sha256": record_digest,
+    }
+    return {
+        "enabled": True,
+        "policy": FUR_SURFACE_GATE_POLICY,
+        "gate_version": FUR_SURFACE_GATE_VERSION,
+        "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+        "thresholds": fur_surface_thresholds_payload(),
+        "action": action,
+        "source": baseline_reference,
+        "source_sha256": expected_sha256,
+        "path": baseline_reference,
+        "sha256": expected_sha256,
+        "snapshot_sha256": None,
+        "provenance": provenance,
+        "provenance_sha256": json_value_sha256(provenance),
+    }
+
+
+def _runtime_path(value: Any, *, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Subject profile runtime {field} must be a non-empty path")
+    normalized = value.strip()
+    path = Path(normalized)
+    if not path.is_absolute() and not normalized.startswith("/"):
+        path = PROJECT_ROOT / path
+    return str(path)
+
+
+def subject_profile_runtime(profile: dict[str, Any]) -> dict[str, Any]:
+    runtime = profile.get("runtime")
+    if runtime is None:
+        return {
+            "schema_version": int(profile.get("schema_version") or 1),
+            "source": "legacy_defaults",
+            "engine_profile": "scail2-14b-fp8-v1",
+            "prompt_profile": "sleek-tabby-scail-v1",
+            "default_base_seed": 20260726,
+            "steps": SCAIL_STEPS,
+            "frames": SCAIL_FRAMES,
+            "fps": SCAIL_FPS,
+            "actions": {
+                action: {
+                    "driving_animation": str(
+                        SCAIL_ACTION_CONFIG[action]["driving_template"]
+                    ),
+                    "pose_strength": float(
+                        SCAIL_ACTION_CONFIG[action]["pose_strength"]
+                    ),
+                    "seed_offset": int(SCAIL_ACTION_CONFIG[action]["seed_offset"]),
+                }
+                for action in SUBJECT_REPLACEMENT_ACTIONS
+            },
+        }
+    if profile.get("schema_version") != 2 or not isinstance(runtime, dict):
+        raise ValueError("Subject profile runtime requires schema_version 2")
+
+    engine_profile = runtime.get("engine_profile")
+    prompt_profile = runtime.get("prompt_profile")
+    if not isinstance(engine_profile, str) or not engine_profile.strip():
+        raise ValueError("Subject profile runtime lacks engine_profile")
+    if not isinstance(prompt_profile, str) or not prompt_profile.strip():
+        raise ValueError("Subject profile runtime lacks prompt_profile")
+    try:
+        default_base_seed = int(runtime["default_base_seed"])
+        steps = int(runtime["steps"])
+        frames = int(runtime["frames"])
+        fps = float(runtime["fps"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Subject profile runtime numeric defaults are invalid"
+        ) from exc
+    if default_base_seed < 0:
+        raise ValueError(
+            "Subject profile runtime default_base_seed must be non-negative"
+        )
+    if not 4 <= steps <= 12:
+        raise ValueError("Subject profile runtime steps must be between 4 and 12")
+    if frames < 1 or (frames - 1) % 4:
+        raise ValueError("Subject profile runtime frames must be 1 + 4*n")
+    if fps <= 0:
+        raise ValueError("Subject profile runtime fps must be positive")
+
+    raw_actions = runtime.get("actions")
+    if not isinstance(raw_actions, dict):
+        raise ValueError("Subject profile runtime lacks actions")
+    resolved_actions: dict[str, dict[str, Any]] = {}
+    for action in SUBJECT_REPLACEMENT_ACTIONS:
+        raw_action = raw_actions.get(action)
+        if not isinstance(raw_action, dict):
+            raise ValueError(f"Subject profile runtime lacks the {action} action")
+        try:
+            action_pose_strength = float(raw_action["pose_strength"])
+            action_seed_offset = int(raw_action["seed_offset"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Subject profile runtime {action} parameters are invalid"
+            ) from exc
+        if not 0.0 <= action_pose_strength <= 2.0:
+            raise ValueError(
+                f"Subject profile runtime {action} pose_strength is out of range"
+            )
+        driving_animation_sha256 = (
+            str(raw_action.get("driving_animation_sha256") or "").strip().lower()
+        )
+        if driving_animation_sha256 and not re.fullmatch(
+            r"[0-9a-f]{64}",
+            driving_animation_sha256,
+        ):
+            raise ValueError(
+                f"Subject profile runtime {action} driving_animation_sha256 "
+                "must be a 64-character lowercase hexadecimal digest"
+            )
+        resolved_actions[action] = {
+            "driving_animation": _runtime_path(
+                raw_action.get("driving_animation"),
+                field=f"actions.{action}.driving_animation",
+            ),
+            "driving_animation_sha256": driving_animation_sha256 or None,
+            "pose_strength": action_pose_strength,
+            "seed_offset": action_seed_offset,
+        }
+    return {
+        "schema_version": 2,
+        "source": "profile.runtime",
+        "engine_profile": engine_profile.strip(),
+        "prompt_profile": prompt_profile.strip(),
+        "default_base_seed": default_base_seed,
+        "steps": steps,
+        "frames": frames,
+        "fps": fps,
+        "actions": resolved_actions,
+    }
+
+
+def profile_standard_direct_config(
+    profile: dict[str, Any],
+    runtime: dict[str, Any],
+    actions: list[str],
+) -> dict[str, Any] | None:
+    """Freeze the optional no-redraw Main_case profile contract.
+
+    This is deliberately profile data, not an implicit filename convention.  A
+    profile without the explicit opt-in continues through the regular uploaded
+    identity/SCAIL path.
+    """
+
+    raw_direct = profile.get("standard_direct")
+    if not isinstance(raw_direct, dict) or raw_direct.get("enabled") is not True:
+        return None
+    if profile.get("id") != "sleek_tabby_cat_v1":
+        raise ValueError("standard_direct is only approved for sleek_tabby_cat_v1")
+    if raw_direct.get("policy") != PROFILE_STANDARD_DIRECT_POLICY:
+        raise ValueError("Subject profile standard_direct policy is unsupported")
+    if raw_direct.get("role") != PROFILE_STANDARD_DIRECT_ROLE:
+        raise ValueError("Subject profile standard_direct role is unsupported")
+
+    driving_standards = profile.get("driving_standards")
+    if not isinstance(driving_standards, dict):
+        raise ValueError("Subject profile standard_direct lacks driving_standards")
+    revision = str(driving_standards.get("revision") or "").strip()
+    if not revision or revision != str(raw_direct.get("revision") or "").strip():
+        raise ValueError("Subject profile standard_direct revision mismatch")
+    standard_actions = driving_standards.get("actions")
+    if not isinstance(standard_actions, dict):
+        raise ValueError("Subject profile standard_direct lacks action standards")
+    reference_assets = profile.get("reference_assets")
+    if (
+        not isinstance(reference_assets, dict)
+        or str(reference_assets.get("revision") or "").strip() != revision
+        or not isinstance(reference_assets.get("actions"), dict)
+    ):
+        raise ValueError(
+            "Subject profile standard_direct lacks matching reference_assets"
+        )
+
+    resolved_actions: dict[str, Any] = {}
+    for action in actions:
+        standard = standard_actions.get(action)
+        runtime_action = runtime.get("actions", {}).get(action)
+        if not isinstance(standard, dict) or not isinstance(runtime_action, dict):
+            raise ValueError(f"Subject profile standard_direct lacks {action}")
+        source_path = _runtime_path(
+            standard.get("source"),
+            field=f"driving_standards.actions.{action}.source",
+        )
+        runtime_path = _runtime_path(
+            standard.get("runtime"),
+            field=f"driving_standards.actions.{action}.runtime",
+        )
+        source_sha256 = str(standard.get("source_sha256") or "").strip().lower()
+        runtime_sha256 = str(standard.get("runtime_sha256") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+            raise ValueError(
+                f"Subject profile standard_direct {action} source SHA is invalid"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", runtime_sha256):
+            raise ValueError(
+                f"Subject profile standard_direct {action} runtime SHA is invalid"
+            )
+        if runtime_path != str(runtime_action.get("driving_animation") or ""):
+            raise ValueError(
+                f"Subject profile standard_direct {action} runtime path mismatch"
+            )
+        if (
+            runtime_sha256
+            != str(runtime_action.get("driving_animation_sha256") or "").strip().lower()
+        ):
+            raise ValueError(
+                f"Subject profile standard_direct {action} runtime SHA mismatch"
+            )
+        reference_asset = reference_assets["actions"].get(action)
+        if not isinstance(reference_asset, dict):
+            raise ValueError(
+                f"Subject profile standard_direct lacks {action} reference assets"
+            )
+        try:
+            selected_frame_index = int(reference_asset["selected_frame_index"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Subject profile standard_direct {action} selected frame is invalid"
+            ) from exc
+        if selected_frame_index < 0 or selected_frame_index >= int(runtime["frames"]):
+            raise ValueError(
+                f"Subject profile standard_direct {action} selected frame is out of range"
+            )
+        selected_assets: dict[str, Any] = {
+            "selected_frame_index": selected_frame_index,
+            "selected_frame_timestamp_seconds": reference_asset.get(
+                "selected_frame_timestamp_seconds"
+            ),
+            "identity_mask_policy": reference_asset.get("identity_mask_policy"),
+        }
+        for asset_kind in ("preview", "cutout", "identity_mask"):
+            asset_path = _runtime_path(
+                reference_asset.get(asset_kind),
+                field=f"reference_assets.actions.{action}.{asset_kind}",
+            )
+            asset_sha = (
+                str(reference_asset.get(f"{asset_kind}_sha256") or "").strip().lower()
+            )
+            if not re.fullmatch(r"[0-9a-f]{64}", asset_sha):
+                raise ValueError(
+                    f"Subject profile standard_direct {action} {asset_kind} SHA is invalid"
+                )
+            selected_assets[asset_kind] = asset_path
+            selected_assets[f"{asset_kind}_sha256"] = asset_sha
+        resolved_actions[action] = {
+            "source": source_path,
+            "source_sha256": source_sha256,
+            "runtime": runtime_path,
+            "runtime_sha256": runtime_sha256,
+            "validated_run_id": standard.get("validated_run_id"),
+            "selected_reference": selected_assets,
+        }
+    return {
+        "enabled": True,
+        "policy": PROFILE_STANDARD_DIRECT_POLICY,
+        "role": PROFILE_STANDARD_DIRECT_ROLE,
+        "revision": revision,
+        "deterministic": True,
+        "gpu_required": False,
+        "gpu_bypass_reason": PROFILE_STANDARD_DIRECT_GPU_REASON,
+        "actions": resolved_actions,
+    }
+
+
+def verify_profile_standard_direct_assets(
+    standard_direct: dict[str, Any],
+    actions: list[str],
+) -> None:
+    """Fail closed if either the original or normalized frozen standard changed."""
+
+    for action in actions:
+        action_config = standard_direct.get("actions", {}).get(action)
+        if not isinstance(action_config, dict):
+            raise FileNotFoundError(
+                f"Frozen standard_direct {action} config is missing"
+            )
+        for kind in ("source", "runtime"):
+            path = Path(str(action_config.get(kind) or ""))
+            expected = str(action_config.get(f"{kind}_sha256") or "").strip()
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"Frozen standard_direct {action} {kind} is missing: {path}"
+                )
+            if not expected or file_sha256(path) != expected:
+                raise RuntimeError(
+                    f"Frozen standard_direct {action} {kind} digest changed."
+                )
+        selected = action_config.get("selected_reference")
+        if not isinstance(selected, dict):
+            raise FileNotFoundError(
+                f"Frozen standard_direct {action} selected reference is missing"
+            )
+        for kind in ("preview", "cutout", "identity_mask"):
+            path = Path(str(selected.get(kind) or ""))
+            expected = str(selected.get(f"{kind}_sha256") or "").strip()
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"Frozen standard_direct {action} {kind} is missing: {path}"
+                )
+            if not expected or file_sha256(path) != expected:
+                raise RuntimeError(
+                    f"Frozen standard_direct {action} {kind} digest changed."
+                )
+
+
+def uses_full_driver_eating_pose(policy: object) -> bool:
+    """Return true only for the eating runner policy that needs no legacy GIF."""
+
+    return policy == FULL_DRIVER_EATING_POSE_POLICY
+
+
+def require_expected_scail_pose_policy(
+    manifest: dict[str, Any],
+    action: str,
+    expected_policy: str | None,
+) -> None:
+    """Fail before GPU submission if a prepared driver policy drifted."""
+
+    if not expected_policy:
+        return
+    pose_metadata = manifest.get("pose_metadata")
+    actual_policy = (
+        str(pose_metadata.get("policy") or "")
+        if isinstance(pose_metadata, dict)
+        else ""
+    )
+    if actual_policy != expected_policy:
+        raise RuntimeError(
+            f"SCAIL {action} pose policy changed before GPU submission: "
+            f"expected {expected_policy}, got {actual_policy or 'missing'}"
+        )
+
+
+def require_uploaded_fur_surface_gate(
+    action_config: dict[str, Any],
+    action: str,
+) -> dict[str, Any]:
+    """Return the frozen per-action surface gate or fail the upload contract."""
+
+    gate = action_config.get("fur_surface_gate")
+    if (
+        not isinstance(gate, dict)
+        or gate.get("enabled") is not True
+        or gate.get("policy") != FUR_SURFACE_GATE_POLICY
+        or gate.get("gate_version") != FUR_SURFACE_GATE_VERSION
+        or gate.get("threshold_version") != FUR_SURFACE_THRESHOLD_VERSION
+        or gate.get("fail_closed") is not True
+    ):
+        raise RuntimeError(
+            f"Uploaded {action} reference lacks its enabled, version-locked "
+            "fur surface gate."
+        )
+    baseline = gate.get("baseline")
+    if (
+        not isinstance(baseline, dict)
+        or baseline.get("enabled") is not True
+        or baseline.get("policy") != FUR_SURFACE_GATE_POLICY
+        or baseline.get("gate_version") != FUR_SURFACE_GATE_VERSION
+        or baseline.get("threshold_version") != FUR_SURFACE_THRESHOLD_VERSION
+        or baseline.get("action") != action
+    ):
+        raise RuntimeError(
+            f"Uploaded {action} reference lacks its version-locked Profile "
+            "fur surface baseline."
+        )
+    baseline_path = Path(str(baseline.get("path") or baseline.get("source") or ""))
+    baseline_sha256 = (
+        str(baseline.get("sha256") or baseline.get("source_sha256") or "")
+        .strip()
+        .lower()
+    )
+    if (
+        not re.fullmatch(r"[0-9a-f]{64}", baseline_sha256)
+        or not baseline_path.is_file()
+        or file_sha256(baseline_path) != baseline_sha256
+    ):
+        raise RuntimeError(
+            f"Uploaded {action} Profile fur surface baseline is missing or "
+            "its digest changed."
+        )
+    return gate
+
+
+def configure_uploaded_subject_validation(
+    effective_config: dict[str, Any],
+    actions: list[str],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Freeze validation rules for uploaded Qwen references and SCAIL motion.
+
+    Every upload must first produce a normalized Qwen full-body canonical and
+    normalized transparent action keyframes.  The digest-locked Main_case
+    runtime supplies action geometry to Qwen and motion to SCAIL; it never
+    replaces the uploaded identity or the generated Qwen references.
+    """
+
+    if effective_config.get("profile_id") != "sleek_tabby_cat_v1":
+        raise RuntimeError(
+            "Uploaded full-driver validation requires sleek_tabby_cat_v1."
+        )
+    standard_direct = effective_config.get("standard_direct")
+    if (
+        not isinstance(standard_direct, dict)
+        or standard_direct.get("enabled") is not True
+        or standard_direct.get("policy") != PROFILE_STANDARD_DIRECT_POLICY
+    ):
+        raise RuntimeError(
+            "Uploaded full-driver validation requires the frozen Main_case standard."
+        )
+    verify_profile_standard_direct_assets(standard_direct, actions)
+
+    frozen = json.loads(json.dumps(effective_config))
+    expected_pose_policies: dict[str, str] = {}
+    expected_surface_gate_actions: list[str] = []
+    for action in actions:
+        action_config = frozen["actions"][action]
+        direct_action = standard_direct.get("actions", {}).get(action)
+        if not isinstance(direct_action, dict):
+            raise RuntimeError(
+                f"Uploaded full-driver validation lacks {action} standard metadata."
+            )
+        runtime_path = str(action_config.get("driving_animation") or "")
+        runtime_sha256 = str(
+            action_config.get("driving_animation_sha256") or ""
+        ).strip()
+        if (
+            runtime_path != str(direct_action.get("runtime") or "")
+            or not runtime_sha256
+            or runtime_sha256 != str(direct_action.get("runtime_sha256") or "")
+        ):
+            raise RuntimeError(
+                f"Uploaded {action} driver is not the frozen Main_case runtime."
+            )
+        require_uploaded_fur_surface_gate(action_config, action)
+        action_config["fur_surface_gate"]["candidate_comparison_mode"] = (
+            UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
+        )
+        expected_surface_gate_actions.append(action)
+
+        if action == "eating":
+            expected_pose_policies[action] = FULL_DRIVER_EATING_POSE_POLICY
+            fur_silhouette_gate = action_config.get("fur_silhouette_gate")
+            if isinstance(fur_silhouette_gate, dict):
+                fur_silhouette_gate["required_pose_policy"] = (
+                    FULL_DRIVER_EATING_POSE_POLICY
+                )
+
+    frozen["upload_validation"] = {
+        "policy": QWEN_FULL_BODY_FIRST_FRAME_PIPELINE,
+        "scope": "qwen_full_body_and_action_keyframes_then_scail",
+        "qwen_full_body_required": True,
+        "qwen_action_keyframes_required": True,
+        "normalized_transparent_references_required": True,
+        "identity_upload_view_counts": [1, 3],
+        "three_view_roles": list(UPLOADED_IDENTITY_VIEW_ROLES),
+        "three_view_policy": UPLOADED_IDENTITY_VIEW_POLICY,
+        "three_view_qwen_node_inputs": ["image1", "image2", "image3"],
+        "three_view_canonical_supported": True,
+        "three_view_action_stage_raw_views_used": False,
+        "uploaded_identity_appearance_authority": True,
+        "subject_profile_appearance_role": "action_geometry_only",
+        "canonical_palette_input": "final_alpha_cutout",
+        "canonical_upper_body_palette_reference_policy": (
+            CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY
+        ),
+        "canonical_raw_palette_retained_for_audit": True,
+        "canonical_chroma_despill": (
+            "alpha_boundary_plus_source_palette_guarded_interior_v1"
+        ),
+        "canonical_chroma_spill_policy": (UPLOADED_IDENTITY_CHROMA_SPILL_POLICY),
+        "canonical_chroma_spill_preserves_paired_eye_accents": True,
+        "canonical_interior_hole_gate": True,
+        "surface_texture_gate_required_before_scail": True,
+        "profile_relative_surface_gate_used": False,
+        "uploaded_identity_absolute_surface_gate_used": True,
+        "surface_candidate_comparison_mode": (
+            UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
+        ),
+        "surface_texture_gate": "required_before_scail",
+        "absolute_animation_contour_gate": False,
+        "actions": list(actions),
+        "expected_surface_gate_actions": expected_surface_gate_actions,
+        "expected_pose_policies": dict(expected_pose_policies),
+    }
+    return frozen, expected_pose_policies
+
+
+def resolve_effective_subject_config(
+    profile: dict[str, Any],
+    actions: list[str],
+    *,
+    seed: int | None,
+    scail_steps: int | None,
+    pose_strength: float | None,
+) -> dict[str, Any]:
+    runtime = subject_profile_runtime(profile)
+    base_seed = int(seed if seed is not None else runtime["default_base_seed"])
+    if base_seed < 0:
+        raise ValueError("seed must be non-negative")
+    steps = int(scail_steps if scail_steps is not None else runtime["steps"])
+    if not 4 <= steps <= 12:
+        raise ValueError("scail_steps must be between 4 and 12")
+    if pose_strength is not None and not 0.0 <= float(pose_strength) <= 2.0:
+        raise ValueError("pose_strength must be between 0.0 and 2.0")
+
+    action_references = profile["action_references"]
+    raw_fur_constraints = profile.get("fur_constraints")
+    fur_constraints = (
+        json.loads(json.dumps(raw_fur_constraints))
+        if isinstance(raw_fur_constraints, dict)
+        else {}
+    )
+    raw_validated_baseline = profile.get("validated_replacement_baseline")
+    validated_baseline = (
+        json.loads(json.dumps(raw_validated_baseline))
+        if isinstance(raw_validated_baseline, dict)
+        else {}
+    )
+    resolved_actions: dict[str, dict[str, Any]] = {}
+    for action in actions:
+        action_runtime = runtime["actions"][action]
+        reference = str(action_references[action])
+        reference_path = Path(reference)
+        driving_animation = str(action_runtime["driving_animation"])
+        driving_animation_path = Path(driving_animation)
+        expected_driving_sha256 = str(
+            action_runtime.get("driving_animation_sha256") or ""
+        ).strip()
+        actual_driving_sha256 = (
+            file_sha256(driving_animation_path)
+            if driving_animation_path.is_file()
+            else None
+        )
+        if (
+            expected_driving_sha256
+            and actual_driving_sha256 is not None
+            and actual_driving_sha256 != expected_driving_sha256
+        ):
+            raise ValueError(
+                f"Subject profile {action} driving animation digest changed"
+            )
+        effective_pose_strength = float(
+            pose_strength
+            if pose_strength is not None
+            else action_runtime["pose_strength"]
+        )
+        if (
+            action == "eating"
+            and effective_pose_strength > SCAIL_EATING_POSE_STRENGTH_MAX
+        ):
+            raise ValueError(
+                "eating pose_strength must not exceed "
+                f"{SCAIL_EATING_POSE_STRENGTH_MAX:.2f}; higher values import "
+                "the driving animal's fur silhouette"
+            )
+        resolved_actions[action] = {
+            "reference": reference,
+            "reference_source": reference,
+            "reference_sha256": (
+                file_sha256(reference_path) if reference_path.is_file() else None
+            ),
+            "driving_animation": driving_animation,
+            "driving_animation_sha256": (
+                expected_driving_sha256 or actual_driving_sha256
+            ),
+            "pose_strength": effective_pose_strength,
+            "seed_offset": int(action_runtime["seed_offset"]),
+            "effective_seed": base_seed + int(action_runtime["seed_offset"]),
+        }
+        fur_surface_baseline = resolve_profile_fur_surface_baseline(
+            profile,
+            action,
+            reference,
+        )
+        if fur_surface_baseline is not None:
+            resolved_actions[action]["fur_surface_gate"] = {
+                "enabled": True,
+                "policy": FUR_SURFACE_GATE_POLICY,
+                "gate_version": FUR_SURFACE_GATE_VERSION,
+                "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+                "scope": "main_case_guided_qwen_action_candidates",
+                "reliable_inputs": ["alpha_cutout", "rembg_alpha_cutout"],
+                "fail_closed": True,
+                "max_consecutive_rejections": (FUR_SURFACE_GATE_MAX_REJECTIONS),
+                "retry_policy": FUR_SURFACE_GATE_RETRY_POLICY,
+                "preserves_configured_eating_bowl_recovery": True,
+                "configured_eating_bowl_recovery_attempts": (
+                    QWEN_BOWL_POSE_EXTRA_ATTEMPTS
+                ),
+                "baseline": fur_surface_baseline,
+            }
+        if (
+            action == "eating"
+            and profile.get("id") == "sleek_tabby_cat_v1"
+            and fur_constraints
+        ):
+            resolved_actions[action]["fur_silhouette_gate"] = {
+                "enabled": True,
+                "reference": reference,
+                "reference_source": reference,
+                "reference_sha256": (
+                    file_sha256(reference_path) if reference_path.is_file() else None
+                ),
+                "policy": "profile_relative_eating_contour_v1",
+            }
+            baseline_path_text = str(
+                validated_baseline.get("transparent_gif") or ""
+            ).strip()
+            if baseline_path_text:
+                baseline_path = Path(baseline_path_text)
+                resolved_actions[action]["fur_contour_baseline"] = {
+                    "path": baseline_path_text,
+                    "source": baseline_path_text,
+                    "sha256": (
+                        file_sha256(baseline_path) if baseline_path.is_file() else None
+                    ),
+                    "run_id": validated_baseline.get("run_id"),
+                    "policy": "validated_profile_eating_video_v2",
+                }
+    standard_direct = profile_standard_direct_config(profile, runtime, actions)
+    return {
+        "schema_version": 1,
+        "profile_schema_version": runtime["schema_version"],
+        "profile_id": profile["id"],
+        "profile_path": str(profile.get("_path") or ""),
+        "profile_sha256": subject_profile_sha256(profile),
+        "profile_fur_constraints": fur_constraints,
+        "runtime_source": runtime["source"],
+        "engine_profile": runtime["engine_profile"],
+        "prompt_profile": runtime["prompt_profile"],
+        "seed_mode": "base_plus_action_offset",
+        "base_seed": base_seed,
+        "model": SCAIL_UNET,
+        "frames": int(runtime["frames"]),
+        "fps": float(runtime["fps"]),
+        "steps": steps,
+        "actions": resolved_actions,
+        "standard_direct": standard_direct,
+    }
+
+
+def snapshot_effective_subject_references(
+    effective_config: dict[str, Any],
+    job_dir: Path,
+    actions: list[str],
+) -> dict[str, Any]:
+    snapshot = json.loads(json.dumps(effective_config))
+    reference_dir = job_dir / "profile_inputs"
+    reference_dir.mkdir(parents=True, exist_ok=True)
+    for action in actions:
+        action_config = snapshot["actions"][action]
+        source = Path(action_config["reference_source"])
+        if not source.is_file():
+            raise FileNotFoundError(
+                f"Subject profile {action} reference is missing: {source}"
+            )
+        suffix = source.suffix if source.suffix else ".png"
+        target = reference_dir / f"{action}_reference{suffix}"
+        shutil.copy2(source, target)
+        digest = file_sha256(target)
+        source_digest = file_sha256(source)
+        if digest != source_digest:
+            raise OSError(f"Subject profile {action} reference snapshot is corrupt")
+        action_config["reference"] = str(target)
+        action_config["reference_sha256"] = digest
+        fur_surface_gate = action_config.get("fur_surface_gate")
+        if isinstance(fur_surface_gate, dict) and fur_surface_gate.get("enabled"):
+            baseline = fur_surface_gate.get("baseline")
+            if not isinstance(baseline, dict):
+                raise ValueError(
+                    f"Subject profile {action} fur surface baseline is missing"
+                )
+            baseline_source = Path(str(baseline.get("source") or ""))
+            expected_source_sha256 = str(baseline.get("source_sha256") or "").strip()
+            if baseline_source.resolve() != source.resolve():
+                raise ValueError(
+                    f"Subject profile {action} fur surface baseline source "
+                    "does not match its action reference"
+                )
+            if not expected_source_sha256 or source_digest != expected_source_sha256:
+                raise ValueError(
+                    f"Subject profile {action} fur surface baseline digest changed"
+                )
+            provenance = baseline.get("provenance")
+            if (
+                not isinstance(provenance, dict)
+                or provenance.get("profile_id") != snapshot.get("profile_id")
+                or provenance.get("profile_sha256") != snapshot.get("profile_sha256")
+                or provenance.get("action") != action
+                or baseline.get("provenance_sha256") != json_value_sha256(provenance)
+            ):
+                raise ValueError(
+                    f"Subject profile {action} fur surface baseline provenance changed"
+                )
+            baseline["path"] = str(target)
+            baseline["sha256"] = digest
+            baseline["snapshot_sha256"] = digest
+            try:
+                baseline_contract = evaluate_fur_surface(
+                    target,
+                    target,
+                    baseline_is_validated=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - profile snapshot must fail closed
+                raise ValueError(
+                    f"Subject profile {action} fur surface baseline could not be audited"
+                ) from exc
+            if baseline_contract.get("acceptable") is not True:
+                raise ValueError(
+                    f"Subject profile {action} fur surface baseline fails its "
+                    "absolute contract: "
+                    + ", ".join(
+                        str(issue)
+                        for issue in baseline_contract.get(
+                            "baseline_issues",
+                            baseline_contract.get("issues", []),
+                        )
+                    )
+                )
+            baseline["absolute_contract"] = {
+                "acceptable": True,
+                "verdict": baseline_contract.get("verdict"),
+                "issues": [],
+                "input": baseline_contract["candidate"]["input"],
+                "metrics": baseline_contract["candidate"]["metrics"],
+                "policy": baseline_contract["policy"],
+            }
+        fur_gate = action_config.get("fur_silhouette_gate")
+        if isinstance(fur_gate, dict) and fur_gate.get("enabled"):
+            fur_gate["reference"] = str(target)
+            fur_gate["reference_sha256"] = digest
+        fur_baseline = action_config.get("fur_contour_baseline")
+        if isinstance(fur_baseline, dict):
+            baseline_source = Path(str(fur_baseline.get("source") or ""))
+            if not baseline_source.is_file():
+                raise FileNotFoundError(
+                    f"Subject profile eating fur baseline is missing: {baseline_source}"
+                )
+            baseline_target = reference_dir / f"{action}_fur_baseline.gif"
+            shutil.copy2(baseline_source, baseline_target)
+            baseline_digest = file_sha256(baseline_target)
+            source_baseline_digest = file_sha256(baseline_source)
+            if baseline_digest != source_baseline_digest:
+                raise OSError("Subject profile eating fur baseline snapshot is corrupt")
+            fur_baseline["path"] = str(baseline_target)
+            fur_baseline["sha256"] = baseline_digest
+    return snapshot
+
+
+def load_subject_profile(profile_id: str | None) -> dict[str, Any]:
+    normalized = (profile_id or DEFAULT_SUBJECT_PROFILE).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", normalized):
+        raise ValueError("subject_profile contains unsupported characters")
+    path = SUBJECT_PROFILE_DIR / f"{normalized}.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"Subject profile does not exist: {normalized}")
+    try:
+        profile = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Subject profile is invalid: {normalized}") from exc
+    if not isinstance(profile, dict) or profile.get("id") != normalized:
+        raise ValueError(f"Subject profile id mismatch: {normalized}")
+    action_references = profile.get("action_references")
+    if not isinstance(action_references, dict):
+        raise ValueError(f"Subject profile lacks action_references: {normalized}")
+    for action in SUBJECT_REPLACEMENT_ACTIONS:
+        reference = action_references.get(action)
+        if not isinstance(reference, str) or not reference.strip():
+            raise ValueError(
+                f"Subject profile lacks the {action} reference: {normalized}"
+            )
+    profile["_path"] = str(path)
+    subject_profile_runtime(profile)
+    return profile
+
+
+def subject_profile_fur_guard(profile: dict[str, Any]) -> tuple[str, str]:
+    """Return upload-safe fur rules without leaking the action profile identity."""
+
+    # ``fur_constraints`` describes the frozen profile animal and remains valid for
+    # deterministic profile rendering.  Uploaded replacement jobs must never inherit
+    # those identity-bearing colors, markings, eyes, breed, or coat-length words.
+    # Profiles may opt into a separate upload-only extension whose contract is
+    # explicitly appearance-neutral.
+    constraints = profile.get("upload_fur_constraints")
+    positive_extension = ""
+    negative_extension = ""
+    if isinstance(constraints, dict):
+        positive_extension = str(constraints.get("positive") or "").strip()
+        negative_extension = str(constraints.get("negative") or "").strip()
+    positive = " ".join(
+        part for part in (UPLOADED_IDENTITY_FUR_LOCK, positive_extension) if part
+    )
+    negative = ", ".join(
+        part for part in (UPLOADED_IDENTITY_FUR_NEGATIVE, negative_extension) if part
+    )
+    return positive, negative
+
+
+def subject_profile_public(profile: dict[str, Any]) -> dict[str, Any]:
+    action_references = profile.get("action_references", {})
+    driving_standards = profile.get("driving_standards")
+    raw_standard_direct = profile.get("standard_direct")
+    public_driving_standards: dict[str, Any] | None = None
+    reference_assets = profile.get("reference_assets")
+    public_reference_assets: dict[str, Any] | None = None
+    if isinstance(reference_assets, dict):
+        raw_reference_actions = reference_assets.get("actions")
+        reference_actions: dict[str, Any] = {}
+        if isinstance(raw_reference_actions, dict):
+            for action in SUBJECT_REPLACEMENT_ACTIONS:
+                record = raw_reference_actions.get(action)
+                if not isinstance(record, dict):
+                    continue
+                reference_actions[action] = {
+                    "selected_frame_index": record.get("selected_frame_index"),
+                    "selected_frame_timestamp_seconds": record.get(
+                        "selected_frame_timestamp_seconds"
+                    ),
+                    "selection_reason": record.get("selection_reason"),
+                    "preview_filename": Path(str(record.get("preview") or "")).name,
+                    "preview_sha256": record.get("preview_sha256"),
+                    "cutout_filename": Path(str(record.get("cutout") or "")).name,
+                    "cutout_sha256": record.get("cutout_sha256"),
+                    "identity_mask_filename": Path(
+                        str(record.get("identity_mask") or "")
+                    ).name,
+                    "identity_mask_sha256": record.get("identity_mask_sha256"),
+                    "identity_mask_policy": record.get("identity_mask_policy"),
+                    "validation_run_id": record.get("validation_run_id"),
+                }
+        public_reference_assets = {
+            "revision": reference_assets.get("revision"),
+            "actions": reference_actions,
+            "audit_board_filename": Path(
+                str(reference_assets.get("audit_board") or "")
+            ).name,
+            "audit_board_sha256": reference_assets.get("audit_board_sha256"),
+        }
+    asset_manifest = profile.get("profile_asset_manifest")
+    public_asset_manifest: dict[str, Any] | None = None
+    if isinstance(asset_manifest, dict):
+        public_asset_manifest = {
+            "filename": Path(str(asset_manifest.get("path") or "")).name,
+            "sha256": asset_manifest.get("sha256"),
+            "content_sha256": asset_manifest.get("content_sha256"),
+            "asset_validation_run_id": asset_manifest.get("asset_validation_run_id"),
+            "validation_scope": asset_manifest.get("validation_scope"),
+            "full_gpu_generation_validation": asset_manifest.get(
+                "full_gpu_generation_validation"
+            ),
+            "end_to_end_api_validation": asset_manifest.get(
+                "end_to_end_api_validation"
+            ),
+        }
+    if isinstance(driving_standards, dict):
+        raw_actions = driving_standards.get("actions")
+        standard_actions: dict[str, Any] = {}
+        if isinstance(raw_actions, dict):
+            for action in SUBJECT_REPLACEMENT_ACTIONS:
+                record = raw_actions.get(action)
+                if not isinstance(record, dict):
+                    continue
+                public_standard_action = {
+                    "source_filename": Path(str(record.get("source") or "")).name,
+                    "source_sha256": record.get("source_sha256"),
+                    "runtime_filename": Path(str(record.get("runtime") or "")).name,
+                    "runtime_sha256": record.get("runtime_sha256"),
+                    "validated_run_id": record.get("validated_run_id"),
+                }
+                if record.get("selected_frame_index") is not None:
+                    public_standard_action.update(
+                        {
+                            "selected_frame_index": record.get("selected_frame_index"),
+                            "preview_filename": Path(
+                                str(record.get("preview") or "")
+                            ).name,
+                            "preview_sha256": record.get("preview_sha256"),
+                            "reference_filename": Path(
+                                str(record.get("reference") or "")
+                            ).name,
+                            "reference_sha256": record.get("reference_sha256"),
+                            "identity_mask_filename": Path(
+                                str(record.get("identity_mask") or "")
+                            ).name,
+                            "identity_mask_sha256": record.get("identity_mask_sha256"),
+                        }
+                    )
+                standard_actions[action] = public_standard_action
+        public_driving_standards = {
+            "revision": driving_standards.get("revision"),
+            "role": driving_standards.get("role"),
+            "actions": standard_actions,
+        }
+    public_standard_direct_actions: dict[str, Any] = {}
+    if isinstance(raw_standard_direct, dict):
+        raw_direct_actions = raw_standard_direct.get("actions")
+        if isinstance(raw_direct_actions, dict):
+            for action in SUBJECT_REPLACEMENT_ACTIONS:
+                record = raw_direct_actions.get(action)
+                if not isinstance(record, dict):
+                    continue
+                public_standard_direct_actions[action] = {
+                    "selected_frame_index": record.get("selected_frame_index"),
+                    "preview_filename": Path(str(record.get("preview") or "")).name,
+                    "preview_sha256": record.get("preview_sha256"),
+                    "reference_filename": Path(str(record.get("reference") or "")).name,
+                    "reference_sha256": record.get("reference_sha256"),
+                    "identity_mask_filename": Path(
+                        str(record.get("identity_mask") or "")
+                    ).name,
+                    "identity_mask_sha256": record.get("identity_mask_sha256"),
+                }
+    return {
+        "id": profile["id"],
+        "display_name": profile.get("display_name") or profile["id"],
+        "status": profile.get("status"),
+        "preview_action": profile.get("preview_action", "eating"),
+        "driving_standards": public_driving_standards,
+        "reference_assets": public_reference_assets,
+        "profile_asset_manifest": public_asset_manifest,
+        "standard_direct": (
+            {
+                "enabled": raw_standard_direct.get("enabled") is True,
+                "policy": raw_standard_direct.get("policy"),
+                "role": raw_standard_direct.get("role"),
+                "revision": raw_standard_direct.get("revision"),
+                "deterministic": raw_standard_direct.get("deterministic") is True,
+                "gpu_required": False,
+                "gpu_submitted": False,
+                "gpu_bypass_reason": PROFILE_STANDARD_DIRECT_GPU_REASON,
+                "gpu_validation": raw_standard_direct.get("gpu_validation"),
+                "end_to_end_api_validation": raw_standard_direct.get(
+                    "end_to_end_api_validation"
+                ),
+                "upload_identity_excluded": True,
+                "actions": public_standard_direct_actions,
+            }
+            if isinstance(raw_standard_direct, dict)
+            else None
+        ),
+        "actions": [
+            {
+                "id": action,
+                "label": SUBJECT_REPLACEMENT_ACTION_LABELS[action],
+                "reference_filename": Path(
+                    str(action_references.get(action) or "")
+                ).name,
+                "reference_sha256": (
+                    profile.get("validated_action_baselines", {})
+                    .get(action, {})
+                    .get("reference_sha256")
+                    if isinstance(profile.get("validated_action_baselines"), dict)
+                    else None
+                ),
+                "reference_ready": bool(
+                    isinstance(action_references.get(action), str)
+                    and Path(action_references[action]).is_file()
+                ),
+            }
+            for action in SUBJECT_REPLACEMENT_ACTIONS
+        ],
+    }
+
+
+def parse_subject_actions(raw: str | None) -> list[str]:
+    if not raw or not raw.strip():
+        return ["eating"]
+    text = raw.strip()
+    try:
+        values = (
+            json.loads(text) if text.startswith("[") else re.split(r"[|,\n]+", text)
+        )
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "actions must be a JSON string array or a separated list"
+        ) from exc
+    if not isinstance(values, list) or not all(
+        isinstance(item, str) for item in values
+    ):
+        raise ValueError("actions must be an array of strings")
+    aliases = {
+        "eat": "eating",
+        "eating": "eating",
+        "吃饭": "eating",
+        "进食": "eating",
+        "groom": "grooming",
+        "grooming": "grooming",
+        "licking": "grooming",
+        "舔毛": "grooming",
+    }
+    actions: list[str] = []
+    for value in values:
+        key = aliases.get(value.strip().lower()) or aliases.get(value.strip())
+        if key is None:
+            raise ValueError(
+                "Only eating and grooming subject-replacement actions are available."
+            )
+        if key not in actions:
+            actions.append(key)
+    if not actions:
+        raise ValueError("At least one subject-replacement action is required.")
+    return actions
+
+
+def require_subject_replacement_assets(
+    profile: dict[str, Any],
+    actions: list[str],
+    *,
+    reference_paths: dict[str, str] | None = None,
+    require_profile_references: bool = True,
+    profile_reference_actions: list[str] | None = None,
+    effective_config: dict[str, Any] | None = None,
+    expected_pose_policies: dict[str, str] | None = None,
+) -> None:
+    paths = scail_model_paths()
+    paths.extend(
+        Path(effective_config["actions"][action]["driving_animation"])
+        if effective_config is not None
+        else SCAIL_ACTION_CONFIG[action]["driving_template"]
+        for action in actions
+    )
+    if effective_config is not None:
+        for action in actions:
+            action_config = effective_config["actions"][action]
+            surface_gate = action_config.get("fur_surface_gate")
+            if isinstance(surface_gate, dict) and surface_gate.get("enabled"):
+                surface_baseline = surface_gate.get("baseline")
+                if not isinstance(surface_baseline, dict):
+                    raise FileNotFoundError(
+                        f"Required {action} fur-surface baseline configuration "
+                        "is missing"
+                    )
+                paths.append(Path(str(surface_baseline.get("path") or "")))
+            fur_gate = action_config.get("fur_silhouette_gate")
+            if not isinstance(fur_gate, dict) or not fur_gate.get("enabled"):
+                continue
+            gate_policy = str(fur_gate.get("policy") or "")
+            expected_pose_policy = str((expected_pose_policies or {}).get(action) or "")
+            uploaded_absolute_gate = gate_policy == UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY
+            if uploaded_absolute_gate:
+                if action == "eating" and not uses_full_driver_eating_pose(
+                    expected_pose_policy
+                ):
+                    raise FileNotFoundError(
+                        "Uploaded eating fur gate requires the exact full-driver "
+                        "pose policy"
+                    )
+            else:
+                paths.append(Path(str(fur_gate.get("reference") or "")))
+            fur_baseline = action_config.get("fur_contour_baseline")
+            if (
+                action == "eating"
+                and not uploaded_absolute_gate
+                and not uses_full_driver_eating_pose(expected_pose_policy)
+            ):
+                if not isinstance(fur_baseline, dict):
+                    raise FileNotFoundError(
+                        "Required eating fur-contour baseline configuration is missing"
+                    )
+                paths.append(Path(str(fur_baseline.get("path") or "")))
+    if reference_paths is not None:
+        paths.extend(Path(reference_paths[action]) for action in actions)
+    elif require_profile_references:
+        paths.extend(
+            Path(profile["action_references"][action])
+            for action in (profile_reference_actions or actions)
+        )
+    missing = [str(path) for path in paths if not Path(path).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "Required subject-replacement files are missing: " + ", ".join(missing)
         )
 
 
@@ -1571,6 +3254,14 @@ def action_key(pose: str) -> str:
     return pose.split("|", 1)[0].strip().lower()
 
 
+def subject_replacement_pose_prompt(action: str) -> str:
+    if action == "eating":
+        return f"eating | {MULTIPOSE_PRESET_BY_ACTION['eating']['prompt_en']}"
+    if action == "grooming":
+        return SUBJECT_REPLACEMENT_GROOMING_POSE_PROMPT
+    raise ValueError(f"Unsupported subject-replacement action: {action}")
+
+
 def action_uses_bowl(pose: str) -> bool:
     return action_key(pose) in {"eating", "drinking"}
 
@@ -1620,15 +3311,18 @@ def action_first_frame_rules(pose: str) -> str:
         )
     if action == "eating":
         return (
-            "Include exactly one small shallow matte food bowl immediately beside the front paws, with a narrow visible "
-            "green gap so the bowl remains a separate foreground component. Center the bowl directly below the lowered "
-            "muzzle and slightly ahead of both front paws. Both forelegs extend down from the shoulders and both complete "
-            "front paws are visibly planted on the same baseline. Use a calm static pre-bite feeding posture: the nose "
-            "is immediately above the bowl opening and the mouth is closed or naturally hidden by the rim. Keep every "
-            "piece of kibble below the rim inside the bowl; no food may appear at the mouth, above the rim, or in a paw. "
-            "The cat never raises a foreleg and never grasps, lifts, carries, or holds food. The bowl is the only prop. "
-            "Do not let the bowl touch, overlap, hide, or replace a paw, and keep the eyes, face silhouette, paws, and "
-            "body readable."
+            "Include exactly one small shallow matte food bowl, touching or slightly "
+            "overlapping the front paws so it remains one compact cutout. Fill the bowl "
+            "with clearly visible brown kibble and lower the head until the lower muzzle "
+            "and mouth physically enter the food. Require 6 to 10 output pixels of "
+            "visible muzzle-to-kibble overlap: the nose or lower muzzle must be partly "
+            "occluded by kibble and the near rim. Any green, white, or background gap "
+            "between mouth and food is invalid. This is active eating, never looking at, "
+            "sniffing, or hovering above the bowl. The bowl is the only prop. Do not let the "
+            "bowl hide or replace any limb. Both complete front paws remain visibly "
+            "planted; the cat never grasps, lifts, carries, or holds food. Keep the ears, "
+            "upper head markings, paws, body, and full tail readable, but do not raise the "
+            "head to make the complete eyes, nose, or face readable."
         )
     if action == "drinking":
         return (
@@ -1640,6 +3334,17 @@ def action_first_frame_rules(pose: str) -> str:
             "twentieth of the head width. The tongue must look anatomical and remain visibly pink, never transparent, "
             "blue, elongated, or detached. Keep both eyes, the "
             "face silhouette, paws, and body readable."
+        )
+    if action == "grooming":
+        return (
+            "No prop. Use a stable seated grooming pose. Exactly one foreleg rises "
+            "continuously from its visible shoulder to one paw touching the mouth, and "
+            "the other foreleg ends in exactly one planted front paw. The raised leg "
+            "must not leave a duplicate paw on the ground. Both hind legs remain "
+            "anatomically attached and may be naturally tucked at the sides; a seated hind paw "
+            "may be partly occluded, but no leg or paw may be duplicated or detached. "
+            "Show one tiny pink tongue touching the raised paw. No food, bowl, detached "
+            "paw, ghost limb, mouth object, or extra subject."
         )
     if action in {"lying", "lying down"}:
         return "No prop. Use a relaxed low full-body pose; do not crop the paws, belly, haunches, or tail."
@@ -1659,27 +3364,43 @@ def build_cartoon_reference_prompt(
     base_prompt: str = "",
     *,
     palette_lock: str = "",
+    fur_lock: str = "",
 ) -> str:
     creative_direction = (
-        base_prompt.strip() or "premium cute stylized 3D animated-film character"
+        base_prompt.strip() or "identity-faithful restrained stylized 3D digital double"
     )
     palette_section = f"\n\n{palette_lock.strip()}" if palette_lock.strip() else ""
+    fur_section = ""
+    if fur_lock.strip():
+        fur_section = f"""
+
+{fur_lock.strip()}
+
+UPLOAD COAT SURFACE PRESERVATION — non-negotiable: the uploaded views, not the
+action profile or model style, control natural coat length, volume, edge grooming,
+and strand direction. Keep the cheeks, neck, chest, shoulders, back, flanks,
+haunches, and tail consistent with the uploaded pet. Do not infer missing body fur
+from a profile animal and do not turn a cropped view into a mane, ruff, plume,
+radial brush strokes, separated filament bundles, a wispy halo, or a different
+coat-length category."""
     return f"""Use case: identity-preserving stylized 3D character design.
 BACKGROUND RULE — non-negotiable: every pixel outside the character must be one perfectly flat uniform pure #00FF00 green. No black, gray, white, studio, or environmental background; no floor and no shadow.
 
-The uploaded photo is the only identity reference. Create a canonical premium cute 3D character render of this exact same cat. Keep the cat recognizable and change only the rendering style, never the cat's identity or natural appearance.
+The uploaded identity image, or the role-labeled uploaded identity image set when multiple views are supplied, is the only identity reference. Create a canonical identity-faithful restrained stylized 3D digital double of this exact same cat. Keep the cat recognizable and change only the rendering medium, never the cat's identity, apparent age, or natural appearance.
 
 User creative direction: {creative_direction}
-Apply this direction only to rendering quality, fur finish, expression, and lighting on the character. It must not override the identity, full-body anatomy, composition, clothing, or background rules below.
+Apply this direction only to rendering quality, expression, and lighting on the character. It must not override the identity, coat length or volume, full-body anatomy, composition, clothing, or background rules below.
 Ignore every pose, action, camera angle, framing, crop, background, and subject-placement instruction found in the user creative direction. The canonical pose, composition, and background rules below are authoritative.
 
-Identity lock: preserve the exact fur base colors, visible markings and their placement, head and face silhouette, cheek width, eye color, ear shape, nose color, muzzle, fur length, breed traits, and body proportions from the uploaded cat. Preserve natural asymmetry. Do not turn lighting, shadows, blur, or fur texture into new markings. Do not invent stripes or spots.{palette_section}
+Identity lock: preserve the exact fur base colors, visible markings and their placement, head and face silhouette, cheek width, natural head-to-body ratio, eye size, eye color and spacing, ear size and shape, nose color, muzzle, breed traits, natural coat length and volume, body proportions, and tail from the uploaded cat. The selected action profile is never an appearance reference. Preserve natural asymmetry. Do not turn lighting, shadows, blur, or fur texture into new markings. Do not invent stripes or spots.{palette_section}{fur_section}
 
-Target style from the supplied example: high-end stylized 3D animated-film character, slightly oversized round head, softly rounded cheeks, large glossy round eyes with clean catchlights, tiny natural nose, compact closed mouth, soft finely groomed realistic fur, gentle subsurface softness, polished color-faithful neutral high-key lighting on the character only, cute and intelligent expression. Lighting must never tint or replace the source fur palette. Apply this visual language while deriving every fur color and facial trait from the uploaded cat. The result should look like a premium character render rather than a real animal photograph, flat drawing, or plastic toy.
+Target style: restrained semi-realistic stylized 3D rendering applied to the exact uploaded pet, with physically plausible materials, source-matched natural fur, color-faithful neutral high-key lighting on the character, clean catchlights, and a calm expression. Identity and apparent age outrank stylization: keep the source head size, cheek width, eye diameter, iris diameter, eye spacing, ear size, muzzle length, and body ratio. Preserve the uploaded pet's mature or juvenile appearance exactly; never make it younger or more kitten-like. Do not use chibi enlargement, oversized eyes, enlarged irises, oversized ears, rounded baby-face proportions, or a generic mascot face. Lighting must never tint or replace the source fur palette. The result should look like the same recognizable pet rendered as a polished 3D digital double rather than a redesigned mascot, real photograph, flat drawing, or plastic toy.
+
+Grooming rule: {SLEEK_GROOMING_PROMPT}
 
 Natural cat only: the character is completely unclothed and wears no glasses, collar, bow tie, shirt, overalls, suspenders, harness, hat, shoes, jewelry, costume, or other accessory. Show the natural fur across the neck, chest, torso, and legs. Do not import the example image's wardrobe or eyewear.
 
-Composition lock: this is a pulled-back full-body character sheet, never a portrait or close-up. Show one complete cat from both ear tips through the torso to every paw and the full tail tip. Use a neutral compact standing pose at a slight three-quarter front angle. Show exactly four anatomically attached legs and four complete paws with visible separation; show the tail continuously from base to tip. Nothing may be hidden behind the torso, fused, shortened, cropped, fragmented, or outside the canvas. Keep at least 12% clear green margin on every side and let the cat occupy no more than 72% of the canvas width and height. Both eyes are fully open, equally sized, fully visible and level, pupils centered, face neutral and symmetrical, mouth closed. The fur silhouette must meet green directly with no white border or halo.
+Composition lock: this is a pulled-back full-body character sheet, never a portrait or close-up. Show one complete cat from both ear tips through the torso to every paw and the full tail tip. Use a neutral compact standing pose at a slight three-quarter front angle. Show exactly four anatomically attached legs and four complete paws with visible separation; show the tail continuously from base to tip. Nothing may be hidden behind the torso, fused, shortened, cropped, fragmented, or outside the canvas. Center the complete silhouette with at least 15% clear green margin on every side and let the cat occupy no more than 68% of the canvas width and height. Both eyes are fully open, equally sized, fully visible and level, pupils centered, face neutral and symmetrical, mouth closed. The fur silhouette must meet green directly with no white border or halo.
 
 {CHROMA_BACKGROUND_PROMPT} The pure green background rule overrides all aesthetic lighting language. Keep the cat at a useful readable scale. No floor, shadow, text, logo, or watermark."""
 
@@ -1689,11 +3410,57 @@ def build_qwen_prompt(
     pose: str,
     transparent_gif: bool = False,
     quality_retry: int = 0,
+    pose_reference_available: bool = False,
+    profile_fur_lock: str = "",
+    pose_identity_input_policy: str = POSE_IDENTITY_INPUT_POLICY_CANONICAL,
 ) -> str:
+    if pose_identity_input_policy not in {
+        POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+        POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,
+        POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+        POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
+    }:
+        raise ValueError(
+            f"Unsupported pose identity input policy: {pose_identity_input_policy}"
+        )
+    direct_uploaded_identity = (
+        pose_identity_input_policy == POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD
+    )
+    main_case_geometry_first = (
+        pose_identity_input_policy == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
+    )
+    grooming_geometry_canonical = (
+        pose_identity_input_policy
+        == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
+    )
+    if main_case_geometry_first and action_key(pose) not in {"eating", "grooming"}:
+        raise ValueError(
+            "Main_case geometry-first identity supports only eating and grooming."
+        )
+    if grooming_geometry_canonical and action_key(pose) != "grooming":
+        raise ValueError(
+            "Canonical-identity geometry-first input supports only grooming."
+        )
+    secondary_identity_required = (
+        direct_uploaded_identity
+        or main_case_geometry_first
+        or grooming_geometry_canonical
+    )
+    if secondary_identity_required and transparent_gif and not pose_reference_available:
+        raise ValueError(
+            "The selected pose identity policy requires a validated secondary "
+            "action or identity image."
+        )
     background_prompt = (
         CHROMA_BACKGROUND_PROMPT
         if transparent_gif
         else "Use a clean simple studio-like background with soft even lighting."
+    )
+    profile_fur_section = (
+        "\n\nUploaded identity coat preservation — non-negotiable: "
+        + profile_fur_lock.strip()
+        if profile_fur_lock.strip()
+        else ""
     )
     if transparent_gif:
         first_frame_rules = action_first_frame_rules(pose)
@@ -1706,7 +3473,7 @@ VALIDATION RETRY: the previous result failed one or more identity, pose, scale, 
         if quality_retry >= 3:
             if bowl_action:
                 retry_instruction += """
-FINAL BOWL-ACTION RETRY: keep a fixed pulled-back camera and do not enlarge the cat or bowl. Express the action only through a natural low torso, lowered head and muzzle position beside the small bowl. Keep at least 12% pure-green clearance on every edge, keep the complete cat and bowl within 72% of the canvas width and height, and keep all four canvas corners exactly pure green."""
+FINAL BOWL-ACTION RETRY: keep a fixed pulled-back camera and do not enlarge the cat or bowl. Express the action through a natural low torso and a lowered head with the lower muzzle inside and overlapping the visible kibble. Keep at least 12% pure-green clearance on every edge, keep the complete cat and bowl within 72% of the canvas width and height, and keep all four canvas corners exactly pure green."""
             elif action_key(pose) == "running":
                 retry_instruction += """
 FINAL POSE-CORRECTION RETRY: prioritize a complete grounded pre-run stance over visible motion. Keep all four legs and paws separated and readable, with at least three unambiguous ground contacts. Do not make the action dynamic and do not lift the body."""
@@ -1717,19 +3484,353 @@ FINAL POSE-CORRECTION RETRY: make the requested action unmistakable at thumbnail
             retry_instruction += """
 RUNNING GROUND-CONTACT RECOVERY: ignore the motion implied by the action name in this still frame. Render a calm static four-paw standing ready pose. All four legs and paws must be fully visible, separated, and grounded; do not lift a paw, hide a far-side leg, or depict forward motion. The later video model, not this image, will create the run."""
         if quality_retry >= 4 and bowl_action:
-            retry_instruction += """
-BOWL PALETTE-AND-CANVAS RECOVERY: use neutral-white character lighting with no warm grading or amber bounce on the fur. Copy every fur color and marking region from the approved character exactly. Keep the small bowl visually separated from both front paws by a narrow pure-green gap. Pull back enough that the complete cat and bowl have generous green padding and every canvas corner remains pure #00FF00."""
+            bowl_geometry_image = "Image 1" if main_case_geometry_first else "Image 2"
+            bowl_identity_source = (
+                "the original uploaded pet identity in Image 2"
+                if main_case_geometry_first
+                else (
+                    "the uploaded pet photo"
+                    if direct_uploaded_identity
+                    else "the approved character"
+                )
+            )
+            retry_instruction += f"""
+BOWL PALETTE-AND-CANVAS RECOVERY: use neutral-white character lighting with no warm grading or amber bounce on the fur. Copy every fur color and marking region from {bowl_identity_source} exactly. Keep exactly one shallow bowl touching or slightly overlapping the two planted front paws, exactly as shown by {bowl_geometry_image}. Never omit the bowl or visible brown kibble. Do not place a green gap between the bowl and both front paws. Pull back enough that the complete cat and bowl have generous green padding and every canvas corner remains pure #00FF00."""
         subject_contact_prompt = (
             "Fur and the single action-required bowl must touch green directly."
             if bowl_action
             else "Fur must touch green directly. No prop may appear."
         )
+        if pose_reference_available and grooming_geometry_canonical:
+            grooming_fur_lock = profile_fur_lock.strip() or (
+                "Preserve Image 2's exact natural coat length, visible volume, "
+                "strand direction, genuine tufts, and source-bounded silhouette."
+            )
+            return f"""CRITICAL GROOMING TRANSFER CONTRACT - satisfy this before every other detail:
+Output exactly one completely unclothed natural cat. Any hat, hood, shirt, coat, sweater, collar, costume, accessory, fabric, button, seam, or garment is invalid.
+
+IMAGE ROLES - fixed and non-negotiable:
+Image 1 is the appearance-free grooming geometry canvas and the sampler layout. It contains pure #00FF00 background, artificial RGB(144,144,144) for the body geometry, and artificial RGB(176,176,176) only for one continuous raised-foreleg capsule running from the shoulder to the paw at the mouth. A narrow green negative-space channel marks the torso-side boundary of that foreleg. Both grays are fixed synthetic anatomy labels: they have zero identity, fur-color, marking, material, texture, shadow, lighting, clothing, or style meaning. Image 1 controls only the exact seated pose, raised-foreleg path, paw-to-mouth contact, planted-paw placement, subject bounds, camera, and green canvas.
+Image 2 is the approved Qwen full-body canonical and the sole authority for identity and appearance: exact face, age, eye color, ears, nose, muzzle, complete coat palette, localized markings, body proportions, natural coat length and volume, strand direction, outer fur silhouette, tail, and restrained stylized 3D material. Image 2 does not control pose.
+
+TASK: repaint both artificial gray anatomy labels of Image 1 as the exact natural-fur cat from Image 2, articulated around Image 1's grooming geometry. The RGB(176) capsule must become the cat's own continuous raised foreleg and correctly colored paw at the mouth, never a sleeve, strap, zipper, cord, pen, stick, pendant, or detached object. The output must contain no gray guide material, green internal line, or garment. Close the synthetic green separator with natural fur while preserving the readable foreleg/torso boundary. Do not return Image 2's neutral seated pose.
+
+POSE CONTRACT: {first_frame_spec}
+{first_frame_rules}
+The raised foreleg must remain visibly continuous from shoulder to one correctly colored rounded paw touching the mouth. Its paw must use the same canonical paw material and corresponding fur palette as the planted paw; the synthetic label color must never survive. Exactly one other front paw is planted. A tiny pink tongue touches the raised paw. Keep both attached hind legs and the full tail. No duplicate ground paw, ghost limb, detached paw, food, bowl, object, or extra subject.
+
+IDENTITY CONTRACT: copy Image 2 only. Preserve its exact dominant/supporting coat-color balance and every localized marking. Never invent any hue, marking, or clothing color absent from Image 2; do not globally warm, cool, darken, lighten, or recolor the coat. Use neutral-white character lighting. {grooming_fur_lock}
+
+OUTPUT CONTRACT: exactly one clean static 512x512 first frame; complete cat within 72% of canvas width and height; at least 12% clear green margin on every edge. Every pixel outside the cat must be flat pure #00FF00. No floor, floor line, shadow, reflection, scenery, text, logo, or watermark. {subject_contact_prompt}
+{retry_instruction}
+Return the corrected grooming keyframe only."""
+        pose_reference_rules = ""
+        pose_edit_intro = (
+            "The input is the approved canonical character reference. Repose this exact character only; "
+            "do not redesign the face, natural fur, or rendering style."
+        )
+        style_source_rules = (
+            "Style source: always inherit the approved canonical reference in Image 1, "
+            "including its exact rendering style, fur finish, expression design, lighting, "
+            "colors, and identity. Image 2 never controls identity or style."
+        )
+        character_lock_source = "the approved canonical character in Image 1"
+        identity_image_label = "Image 1"
+        grooming_conflict_source = "the canonical reference"
+        final_style_rule = (
+            "Keep the exact identity-faithful restrained stylized 3D rendering from "
+            "the reference."
+        )
+        main_case_coat_surface_rule = ""
+        if pose_reference_available:
+            if main_case_geometry_first:
+                main_case_action = action_key(pose)
+                if main_case_action == "eating":
+                    pose_reference_rules = """
+IMAGE ROLES — non-negotiable: Image 1 is the texture-free low-frequency geometry guide derived directly from the frozen Main_case eat.mp4 standard and is the sampler's geometry canvas. It is authoritative only for joint placement, the complete full-body eating pose, low torso position, exact low head height, muzzle-to-kibble contact, bowl placement, camera layout, framing, and pure-green background. Its small light-neutral rounded field at the food is an identity-free muzzle-contact semantic: render the uploaded cat's lower muzzle there and keep it visibly overlapping the kibble; do not interpret that field as a ball, tongue, egg, accessory, marking, or separate object. Image 1 and the subject profile are not authoritative for identity, body proportions, coat length, coat volume, strand direction, edge fur, chest or cheek grooming, tail fur, outer fur silhouette, color, markings, eyes, or breed. Copy no appearance or lighting hue from Image 1.
+
+Image 2 is the original uploaded pet photo and is the sole appearance authority: preserve its exact face and head shape, eye size, color and spacing, ear shape, nose and muzzle, fur base colors, marking placement, visible body proportions, natural coat length and volume, strand direction, outer fur silhouette, and tail identity. It is not authoritative for pose, crop, camera, background, or photographic lighting. Where the crop does not show an area, extend the nearest visible proportions, coat behavior, and dominant color conservatively without borrowing anything from Main_case. Ignore Image 2's portrait head height and put the same pet into Image 1's validated low eating geometry. The muzzle must stay at the visible kibble instead of returning to portrait height. The separate identity-palette audit remains locked to the original uploaded file. Follow the written action rules whenever either image conflicts with them."""
+                    action_geometry_label = (
+                        "eating pose, bowl, muzzle contact and framing"
+                    )
+                else:
+                    pose_reference_rules = """
+IMAGE ROLES — non-negotiable: Image 1 is the appearance-free synthetic-anatomy geometry guide derived from the frozen Main_case TM.mp4 standard and is the sampler's geometry canvas. It is authoritative only for joint placement, the stable seated grooming posture, one continuous raised foreleg and rounded paw touching the mouth, one planted front paw, naturally tucked hind legs, camera layout, framing, and pure-green background. Its fixed RGB(144,144,144) label represents the body and its fixed RGB(176,176,176) capsule represents only the continuous shoulder-to-mouth raised foreleg; the narrow green channel marks that foreleg's torso-side boundary. These labels are generated only from verified geometry and have zero color, marking, material, texture, shading, lighting, clothing, or identity meaning. Image 1 and the subject profile are not authoritative for identity, body proportions, coat length, coat volume, strand direction, edge fur, outer fur silhouette, color, markings, eyes, breed, material, accessory, or black object. Copy no appearance or lighting hue from Image 1, and never leave either artificial gray or the internal green channel in the result.
+
+Image 2 is the original uploaded pet photo and is the sole appearance authority: preserve its exact face and head shape, eye size, color and spacing, ear shape, nose and muzzle, fur base colors, marking placement, visible body proportions, natural coat length and volume, strand direction, outer fur silhouette, and tail identity. It is not authoritative for pose, crop, camera, background, or photographic lighting. Where the crop does not show an area, extend the nearest visible proportions, coat behavior, and dominant color conservatively without borrowing anything from Main_case. Render Image 1's RGB(176) capsule as the cat's own correctly colored continuous foreleg ending in one rounded paw at the mouth, never as a sleeve, strap, zipper, cord, pen, stick, pendant, other object, or detached shape. Put Image 2's exact identity and appearance into Image 1's validated Main_case grooming geometry. The separate identity-palette audit remains locked to the original uploaded file. Follow the written action rules whenever either image conflicts with them."""
+                    action_geometry_label = (
+                        "seated grooming pose, raised-paw contact and framing"
+                    )
+                pose_edit_intro = (
+                    "Keep the frozen Main_case action geometry from "
+                    "Image 1, but render the exact original uploaded pet identity from "
+                    "Image 2. Image 1 owns only "
+                    + action_geometry_label
+                    + "; Image 2 alone owns identity, face, eyes, colors, markings, body "
+                    "proportions, coat length and volume, outer fur silhouette, strand "
+                    "direction, grooming, and tail appearance. The subject profile owns "
+                    "no appearance trait."
+                )
+                style_source_rules = (
+                    "Target style comes from this written instruction, not from either "
+                    "image: restrained semi-realistic stylized 3D digital-double material with "
+                    "color-faithful neutral high-key lighting and the uploaded pet's exact "
+                    "natural coat surface. On recovery attempts the dedicated pet3d style model "
+                    "may reinforce only the overall 3D material and lighting. Image 1 "
+                    "never controls identity or color, and Image 2's photographic finish "
+                    "never controls rendering style while its visible coat geometry and "
+                    "strand direction remain identity traits."
+                )
+                character_lock_source = "the original uploaded pet in Image 2"
+                identity_image_label = "Image 2"
+                grooming_conflict_source = (
+                    "Image 2's close-up crop, photographic finish, or model inference"
+                )
+                final_style_rule = (
+                    "Render the required restrained identity-faithful stylized 3D material "
+                    "while using only "
+                    "the uploaded pet's source-matched natural coat surface; do not preserve "
+                    "Image 2's photographic finish, invent coat features, or output a "
+                    "grayscale guide."
+                )
+                main_case_coat_surface_rule = """
+COAT IDENTITY LOCK — non-negotiable: preserve Image 2's visible natural coat length, volume, direction, edge behavior, genuine tufts or ruff, colors, and markings. Repose that coat around Image 1's joints without copying Image 1's tight outer outline. Remove only newly generated brush-bristle rays, repeated fan-shaped streaks, detached filament bundles, synthetic halo, or amplified volume absent from Image 2."""
+            elif direct_uploaded_identity:
+                pose_reference_rules = """
+IMAGE ROLES — non-negotiable: Image 1 is the original uploaded pet photo and is the sole appearance source for identity, face shape, fur base colors, marking placement, eye size and color, ear shape, nose, muzzle, visible body proportions, natural coat length and volume, strand direction, outer fur silhouette, and tail identity. Ignore only its photographic rendering, pose, crop, camera angle, and background. Extend unseen appearance conservatively from visible source traits.
+
+Image 2 is the frozen validated subject-profile action reference. It is authoritative only for joint placement, the complete full-body action pose, camera layout, framing, and action-required bowl placement. Its depicted animal is not the target identity: copy no fur color, marking, face identity, body proportion, coat length or volume, outer silhouette, tail appearance, accessory, or lighting hue from Image 2. Transfer the exact pet appearance from Image 1 into Image 2's validated action geometry. Follow the written action rules whenever either image conflicts with them."""
+                pose_edit_intro = (
+                    "Convert the exact pet from the original uploaded photo in Image 1 directly into "
+                    "the validated full-body action geometry in Image 2. Preserve Image 1's identity, "
+                    "face, colors, markings, body proportions, and natural coat while replacing only "
+                    "its pose, crop, photographic rendering, and background."
+                )
+                style_source_rules = (
+                    "Target rendering style — required by text: restrained semi-realistic "
+                    "stylized 3D digital double, polished without juvenile exaggeration, with color-faithful "
+                    "neutral high-key character lighting and source-matched natural fur. "
+                    "Do not copy photographic rendering from Image 1 or character identity and "
+                    "lighting from Image 2. Image 1 controls pet identity; Image 2 controls action "
+                    "geometry only."
+                )
+                character_lock_source = "the original uploaded pet in Image 1"
+                identity_image_label = "Image 1"
+                grooming_conflict_source = (
+                    "the uploaded photo, incomplete crop, or model inference"
+                )
+                final_style_rule = (
+                    "Render the required restrained identity-faithful stylized 3D target style; "
+                    "do not preserve Image 1's photographic style."
+                )
+            else:
+                pose_reference_rules = """
+IMAGE ROLES — non-negotiable: Image 1 is the approved canonical target and the only identity, face, fur-color, marking, body-proportion, natural coat-length, coat-volume, outer-silhouette, tail, and rendering-style reference. Image 2 is an appearance-free single-tone action silhouette derived from the frozen Main_case driving video. Preserve from Image 2 only its joint placement, body pose, camera layout, and action-required prop placement; its artificial gray silhouette is not the target identity. Every non-green Image 2 subject pixel has one identical synthetic gray value with zero fur-color, marking, material, texture, shading, or lighting meaning. For grooming only, the thin pure-green open curved channel inside the gray silhouette is background negative space marking the torso-side boundary of the raised viewer-left foreleg: it is open at the paw and shoulder, must guide the organic limb, and must never be rendered as a line, marking, seam, hole, or object. Repose the exact character from Image 1 into Image 2's action layout. Never reconstruct a black, white, brown, gray, warm, cool, dark, or light fur region from Image 2. Copy no identity, body proportion, fur, coat surface, outer silhouette, markings, accessory, lighting color, or character design from Image 2. Follow the written action rules whenever either image conflicts with them."""
+                pose_edit_intro = (
+                    "Keep the exact approved canonical character from Image 1, but repose it using only the "
+                    "action geometry and prop layout from Image 2. Preserve Image 1's identity, colors, "
+                    "markings, proportions, and rendering style."
+                )
+        canonical_reference_first = bool(
+            pose_reference_available
+            and not direct_uploaded_identity
+            and not main_case_geometry_first
+        )
+        if canonical_reference_first:
+            compact_retry = ""
+            if quality_retry >= 2:
+                compact_retry = (
+                    "RETRY CORRECTION: the previous candidate failed the action, "
+                    "identity, framing, or matte gate. Follow Image 2's layout more "
+                    "literally; do not return a studio portrait or neutral sitting pose."
+                )
+            if quality_retry >= 3:
+                compact_retry += (
+                    " Remove every floor, shadow, background gradient, costume, and "
+                    "extra prop. Keep the complete action silhouette smaller than "
+                    "Image 1 and inside the Image 2 bounding box."
+                )
+            if quality_retry >= 4 and action_key(pose) == "eating":
+                compact_retry += (
+                    " FINAL EATING CORRECTION: keep the bowl exactly in Image 2's "
+                    "location. Put the lower muzzle inside and overlapping the visible "
+                    "brown kibble; never omit the bowl, place the nose above it, or "
+                    "return a sniffing pose."
+                )
+            if action_key(pose) == "eating":
+                compact_geometry_role = (
+                    "Image 2 is the texture-free action-layout guide derived directly "
+                    "from the frozen Main_case driving video and is authoritative only "
+                    "for joint placement, the exact pose, the action-required prop "
+                    "layout, framing, subject scale, and pure-green background. Its "
+                    "neutral subject geometry and semantic bowl colors are not an "
+                    "identity or coat-appearance reference."
+                )
+                compact_action_contract = (
+                    "Copy Image 2's low eating joint geometry, subject bounding region, "
+                    "head height, bowl position, front-paw placement, tail layout, and "
+                    "camera exactly while preserving Image 1's body proportions and natural "
+                    "coat outline around the reposed body. The lower muzzle is inside the brown kibble and is "
+                    "partly occluded by the food and near rim. Keep exactly one shallow "
+                    "light-beige bowl. Both complete front paws remain planted beside or "
+                    "slightly touching the bowl; rear legs may be naturally tucked or "
+                    "partly occluded by the crouched torso. Never raise the head to show "
+                    "the full face."
+                )
+                compact_anatomy = (
+                    "Use one continuous cat silhouette, two complete ears, two complete "
+                    "front legs and paws, an anatomically connected crouched torso and "
+                    "hindquarters, and one continuous tail. No extra, detached, fused, "
+                    "or humanlike limb."
+                )
+            else:
+                compact_geometry_role = (
+                    "Image 2 is an appearance-free action-layout silhouette derived "
+                    "directly from the frozen Main_case driving video and is "
+                    "authoritative only for joint placement, the exact pose, framing, "
+                    "subject scale, and pure-green background. Every non-green subject "
+                    "pixel in Image 2 is the same artificial RGB(144,144,144), so it "
+                    "carries no fur color, marking, material, texture, shading, or "
+                    "lighting information. Repose the exact Image 1 character around "
+                    "Image 2's joints without copying Image 2's body proportions, coat "
+                    "surface, outer fur silhouette, or tail appearance. Never translate "
+                    "the artificial gray into black, white, gray, brown, orange, warm, "
+                    "cool, dark, or light fur regions. Do not redesign or reinterpret "
+                    "the action layout. Its one thin pure-green open curved channel is "
+                    "background negative space between the raised viewer-left foreleg "
+                    "and chest. It is open at paw and shoulder: use it to read the "
+                    "organic bent limb, but never render the channel as a colored line, "
+                    "coat marking, seam, hole, prop, or hard object."
+                )
+                compact_action_contract = (
+                    "Copy Image 2's seated grooming joint geometry, subject bounding region, "
+                    "camera, raised foreleg, paw-to-mouth contact, planted front paw, "
+                    "tucked hindquarters, and tail layout exactly while preserving Image 1's "
+                    "body proportions and natural coat outline. Do not mirror the Main_case "
+                    "limb relationship: on the 512x512 output, only the foreleg on the "
+                    "viewer's left rises from its visible shoulder near (38% width, 67% "
+                    "height), bends through a readable organic elbow and wrist, and ends in "
+                    "one rounded furry paw centered near (37% width, 51% height) touching the "
+                    "viewer's-left underside of the muzzle. The viewer's-right front paw is "
+                    "the single planted front paw. Image 2 contains one single-tone cat "
+                    "silhouette, one open green torso-side negative-space curve, and no "
+                    "prop: reconstruct the viewer-left shoulder-to-elbow-to-wrist anatomy "
+                    "from that curve and this written coordinate contract "
+                    "and render the raised paw with the exact same canonical fur palette and "
+                    "soft paw material as Image 1's planted paw. A natural bent furry foreleg "
+                    "in this region is mandatory and is not forbidden by the no-prop rule; "
+                    "the no-prop rule forbids only a detached rigid item. Keep the limb visibly "
+                    "attached to shoulder and chest, with an irregular soft-fur contour, never "
+                    "a straight, hard, uniform-width cylinder or separate object."
+                )
+                if quality_retry >= 2:
+                    compact_retry += (
+                        " GROOMING SIDE RECOVERY: do not keep both front paws down and do "
+                        "not raise the viewer's-right foreleg. Raise only the viewer's-left "
+                        "foreleg from the shoulder coordinates above until its furry paw "
+                        "physically touches the muzzle; preserve one viewer's-right planted "
+                        "front paw. The organic limb is required, not an optional prop."
+                    )
+                if quality_retry >= 3:
+                    compact_retry += (
+                        " FINAL GROOMING GEOMETRY CORRECTION: the viewer-left raised limb "
+                        "must be unmistakable at thumbnail size, visibly connected through "
+                        "shoulder, elbow and wrist, and must not be mirrored, omitted, merged "
+                        "into the torso, or replaced by a rigid object."
+                    )
+                compact_anatomy = (
+                    "Use one continuous cat silhouette, two complete ears, one foreleg "
+                    "connected from shoulder to the paw at the mouth, one planted front "
+                    "paw, naturally tucked attached hind legs, and one continuous tail. "
+                    "No extra, detached, fused, or humanlike limb."
+                )
+            compact_foreground = (
+                "the cat and exactly one shallow food bowl"
+                if action_key(pose) == "eating"
+                else "the cat"
+            )
+            compact_fur_lock = profile_fur_lock.strip() or (
+                "Preserve Image 1's exact natural coat length, visible volume, strand "
+                "direction, genuine tufts or ruff, and source-bounded outer silhouette."
+            )
+            return f"""CRITICAL OUTPUT CONTRACT - satisfy this before every style detail:
+Image 1 is the approved canonical target and the only identity, face, fur-color, marking, proportion, natural coat-length, coat-volume, outer-silhouette, tail, and rendering-style reference.
+{compact_geometry_role}
+
+{compact_action_contract}
+
+OUTPUT RESTRICTIONS - all are mandatory: exactly one cat; no hat, clothes, collar, costume, accessory, text, logo, extra object, floor, floor line, reflection, cast shadow, contact shadow, scenery, or background variation. Every pixel outside {compact_foreground} must be flat uniform pure #00FF00 green. Keep at least 12% green clearance on all four edges and keep the complete foreground within 72% of canvas width and height.
+
+Identity and style: copy Image 1's exact apparent age, face, eye size and color, ears, nose, fur colors, marking placement, body proportions, natural coat length and volume, strand direction, outer fur silhouette, tail identity, and restrained identity-faithful stylized 3D material. Style source: always inherit the approved canonical reference in Image 1. Image 2 and the Main_case profile never control any appearance trait. The cat is completely unclothed.
+
+Action contract: {first_frame_spec}
+{first_frame_rules}
+{compact_anatomy}
+
+Coat contract: {compact_fur_lock}
+Keep every source-authentic short, medium, or long coat trait from Image 1. Remove only newly generated rigid clumps, repeated radial brush rays, detached strands, synthetic halo, or amplified volume absent from Image 1; never shorten genuine long fur or suppress a genuine ruff or plume.
+
+{compact_retry}
+Return one clean static first frame only. No motion blur, duplicated limbs, motion symbols, text, logo, or watermark. {background_prompt}"""
+        if action_key(pose) == "grooming":
+            anatomy_checklist = (
+                "Anatomy checklist — all items are mandatory: exactly one continuous cat "
+                "silhouette; one foreleg rises continuously from its shoulder to one rounded "
+                "paw touching the mouth; the other foreleg ends in one planted paw; both hind "
+                "legs remain anatomically attached and may be naturally tucked in the seated "
+                "pose. Show no duplicate ground paw, detached shape, extra limb, fused limb, "
+                "human hand, or object at the mouth. Two complete ears and one continuous tail."
+            )
+        elif action_uses_bowl(pose):
+            anatomy_checklist = (
+                "Anatomy checklist — all items are mandatory: exactly one continuous cat "
+                "silhouette; both complete front legs and paws remain planted beside the "
+                "bowl; the crouched rear legs stay anatomically attached and may be "
+                "naturally tucked or partly occluded by the torso; two complete ears; one "
+                "tail visible continuously from base to tip. No limb may be fused, "
+                "duplicated, detached, or reduced to a fragment."
+            )
+        else:
+            anatomy_checklist = (
+                "Anatomy checklist — all items are mandatory: exactly one continuous cat "
+                "silhouette with anatomically attached legs and paws appropriate to the "
+                "required pose, two complete ears, and one tail continuous from base to tip. "
+                "No limb may be fused, duplicated, detached, hidden contrary to the action "
+                "rules, or reduced to a fragment. No prop may appear."
+            )
+        if action_key(pose) == "eating":
+            identity_visibility_rule = (
+                "Keep both eyes anatomically coherent when visible, but the frozen "
+                "eating angle may naturally foreshorten or partially hide them. Never "
+                "raise the head to display the eyes, nose, mouth, or complete face; "
+                "the upper head silhouette and markings carry identity while the lower "
+                "muzzle remains inside the kibble."
+            )
+            final_identity_readability_rule = (
+                "Keep the ears and upper-head identity markings readable while the "
+                "nose and lower muzzle are visibly occluded by the food and near bowl "
+                "rim. A fully unobstructed nose above the kibble is an invalid sniffing "
+                "pose and must not be returned."
+            )
+        else:
+            identity_visibility_rule = (
+                "Both eyes must remain fully open, equally sized, level, and "
+                "recognizable whenever the action angle allows."
+            )
+            final_identity_readability_rule = (
+                "Keep the identity-bearing face readable while respecting the "
+                "requested action angle."
+            )
         return f"""Use case: identity-preserving pose edit for a stylized 3D character.
-The input is the approved canonical character reference. Repose this exact character only; do not redesign the face, natural fur, or rendering style.
+{pose_edit_intro}
+{pose_reference_rules}
 
-Style source: inherit the approved canonical reference's exact rendering style, fur finish, expression design, lighting, and identity. Do not reuse any user-authored pose, action, camera, framing, crop, background, or subject-placement instruction from the canonical design stage.
+{style_source_rules} Do not reuse any user-authored pose, action, camera, framing, crop, background, or subject-placement instruction from the canonical design stage.
 
-Character lock: copy the exact same head silhouette, rounded cheeks, eye size, eye color and spacing, pupils, catchlights, ears, nose, closed muzzle, fur colors and marking placement, fur length, body proportions, soft groomed 3D fur, and character lighting. Both eyes must remain fully open, equally sized, level, and recognizable whenever the action angle allows. The cat is completely unclothed: no glasses, collar, bow tie, shirt, overalls, suspenders, harness, hat, shoes, jewelry, costume, or accessory. Do not add markings, unrequested props, floating marks, motion symbols, a white border, or a halo. Where the reference does not show an area, continue the nearest dominant body fur color conservatively with no new pattern.
+Character lock: copy the exact same head silhouette, cheek width, eye size, eye color and spacing, pupils, catchlights, ears, nose, closed muzzle, fur colors and marking placement, natural coat length and volume, body proportions, outer fur silhouette, and tail identity from {character_lock_source}. The validated profile controls action geometry only and never fills an appearance gap. Where the identity source is cropped or ambiguous, extend its nearest visible proportions, coat behavior, and dominant color conservatively without borrowing Main_case appearance. {identity_visibility_rule} The cat is completely unclothed: no glasses, collar, bow tie, shirt, overalls, suspenders, harness, hat, shoes, jewelry, costume, or accessory. Do not add markings, unrequested props, floating marks, motion symbols, a white border, or a halo. Where {identity_image_label} does not show an identity area, continue the nearest dominant body fur color conservatively with no new pattern.
+
+Coat identity rule: {SLEEK_GROOMING_PROMPT} Treat {grooming_conflict_source} only as a possible source of generated artifacts; never suppress a genuine coat trait present in the uploaded identity.{profile_fur_section}
+{main_case_coat_surface_rule}
 
 Required still-frame pose only: {first_frame_spec}
 First-frame action rules: {first_frame_rules}
@@ -1737,7 +3838,7 @@ First-frame action rules: {first_frame_rules}
 This is a clean static character keyframe that will be animated later. Do not illustrate the later motion in this image. Show only the balanced readable starting posture; do not add speed lines, duplicated limbs, motion blur, airborne action, or floating motion symbols. Do not blink, wink, or squint.
 Only the "Required still-frame pose" and "First-frame action rules" control body posture, camera angle, framing, and action props. Every conflicting instruction is void.
 
-Anatomy checklist — all items are mandatory: exactly one continuous cat silhouette; exactly four legs attached naturally to the torso; exactly four complete paws; two complete ears; one tail visible continuously from base to tip. No limb may be hidden, fused, shortened, duplicated, detached, reduced to a fragment, or strongly foreshortened. Show the complete full-body cat with at least 12% green clearance on every canvas edge. Keep the subject at no more than 72% of canvas width and height. Keep the identity-bearing face readable while respecting the requested action angle. Keep the exact premium cute 3D character style from the reference. {background_prompt} Stable centered composition. {subject_contact_prompt} No floor, shadow, text, logo, or watermark."""
+{anatomy_checklist} Show the complete full-body cat with at least 12% green clearance on every canvas edge. Keep the subject at no more than 72% of canvas width and height. {final_identity_readability_rule} {final_style_rule} {background_prompt} Stable centered composition. {subject_contact_prompt} No floor, shadow, text, logo, or watermark."""
 
     return f"""Use the input image as the exact identity and appearance reference.
 Create one polished first frame for a short image-to-video animation.
@@ -1746,6 +3847,169 @@ Creative direction: {base_prompt}
 Required still-frame pose: {qwen_first_frame_spec(pose)}
 
 Preserve the main subject's exact identity, face, distinctive colors and markings, hairstyle or fur, clothing, accessories, body proportions, and visual style. Keep the same number of main subjects as the input. Place the complete subject in the required pose, with anatomically correct limbs and the full body visible. {background_prompt} Use a stable centered composition, no text, and no watermark. The result must be a clean, coherent first frame suitable for animation."""
+
+
+def build_grooming_foreleg_repair_prompt(
+    pose: str,
+    *,
+    source_attempt: int,
+    profile_fur_lock: str = "",
+) -> str:
+    """Complete a seeded grooming foreleg from identity and anatomy references."""
+
+    fur_lock = profile_fur_lock.strip() or (
+        "Preserve Image 2's exact natural coat length, visible volume, strand "
+        "direction, genuine tufts, and source-bounded silhouette."
+    )
+    return f"""CRITICAL GROOMING FORELEG COMPLETION - perform this local edit before every other detail:
+Image 1 is the best identity-safe near-final candidate from attempt {source_attempt} and is the sampler canvas. Its seated body, head angle, face placement, tail, planted legs, scale, and full-body framing are authoritative. The bounded region between the viewer-left chest and mouth contains a deliberately band-limited identity-matched coat-color, mid-scale fur, and shading seed sampled from Image 2's planted foreleg, rotated so its paw end faces the mouth and its upper-leg end faces the chest. It supplies only approximate foreleg occupancy, the pet's color family, and genuine fur-material cues; it is not finished texture and none of its boundary or individual sampled strand pixels may be copied literally.
+Image 2 is the approved Qwen full-body canonical and is the sole authority for identity and appearance: exact face, eyes, ears, nose, coat palette, localized markings, body proportions, natural fur surface, paws, tail, and restrained stylized 3D material.
+Image 3 is a frozen neutral low-frequency anatomy map for this grooming pose. Copy only its shoulder-to-elbow-to-wrist-to-paw arrangement, head-to-paw contact, seated balance, and limb count. Its gray values are abstract geometry labels, never fur colors, markings, lighting, texture, material, clothing, or identity.
+
+LOCAL COMPLETION CONTRACT: a generously expanded feathered full-denoise mask covers the seed plus ordinary surrounding muzzle, shoulder, and chest context. The mask is an editable workspace, not the foreleg silhouette: never fill its whole area with a limb or preserve its boundary. Leave every valid part of Image 1 outside that mask unchanged. Reconstruct the masked region as one continuous cat surface from Image 2: exactly one anatomically continuous furry raised foreleg, the natural shoulder/chest attachment around it, the small mouth-contact boundary, and pure green wherever no cat belongs. Use the seed only for approximate occupancy and identity palette; replace all seed edges, internal strokes, and sampled lighting with newly coherent fur generated from Image 2. The foreleg must emerge naturally from the viewer-left shoulder/chest, taper through a readable soft elbow and wrist, and end in one rounded paw touching the mouth. Match the planted paw's soft outline, short dense fur, and subtle toe structure. Join shoulder, wrist, paw, muzzle contact, and surrounding chest fur seamlessly; no straight or uniform-width artificial contour, cutout edge, internal gap, repeated radial strand fan, or unblended patch may remain.
+
+LOCAL SURFACE PRIOR CONTRACT: the loaded low-strength Pet3D adapter is permitted only as a fine surface prior inside the sampler noise mask. Use it to break up smooth plastic or tube-like surfaces into compact irregular short fur, a soft paw outline, and restrained toe relief. It is never an identity, palette, marking, anatomy, lighting, or silhouette authority; Image 2 overrides it in every conflict. Do not lengthen the coat, inflate the limb, add brush-like strands, create radial fur fans, or alter any unmasked pixel.
+
+IDENTITY LOCK: copy Image 2 only for every rendered pixel of the completed foreleg and for any small boundary refinement. Preserve Image 1's already valid face and composition. Use neutral-white character lighting. {fur_lock}
+
+POSE CONTRACT: {qwen_first_frame_spec(pose)}
+{action_first_frame_rules(pose)}
+Exactly one foreleg is raised continuously from shoulder to mouth and exactly one other front paw is planted. Keep both attached hind legs and the complete tail. A tiny pink tongue may touch the raised paw. No duplicate ground paw, ghost limb, detached paw, food, bowl, prop, clothing, accessory, or extra subject.
+
+OUTPUT CONTRACT: return exactly one clean static 512x512 first frame. Keep the complete cat within 72% of canvas width and height with at least 12% clear green margin on every edge. Every pixel outside the completed cat must be flat pure #00FF00. No floor, floor line, shadow, reflection, scenery, text, logo, or watermark. Return the completed grooming keyframe only."""
+
+
+def build_canonical_grooming_foreleg_completion_prompt(
+    pose: str,
+    *,
+    source_attempt: int,
+    profile_fur_lock: str = "",
+) -> str:
+    """Locally add the Main_case raised foreleg to an identity-safe base."""
+
+    fur_lock = profile_fur_lock.strip() or (
+        "Preserve Image 2's exact natural coat length, visible volume, strand "
+        "direction, genuine tufts, and source-bounded silhouette."
+    )
+    return f"""CRITICAL MASKED GROOMING COMPLETION - perform only the requested local anatomy edit:
+Image 1 is the best identity-palette-safe normalized candidate from attempt {source_attempt} and is the sampler canvas. Its face, eyes, ears, head shape, seated body, viewer-right planted front paw, hind legs, tail, scale, framing, pure-green canvas, colors, markings, coat surface, and rendering style are already correct. Preserve every pixel outside the sampler noise mask.
+Image 2 is the approved Qwen full-body canonical and is the sole authority for identity and appearance inside the mask: exact face, eyes, ears, nose, coat palette, localized markings, body proportions, natural fur surface, paws, tail, and restrained stylized 3D material.
+Image 3 is the frozen appearance-free single-gray action silhouette. It has no identity or appearance role. Its thin pure-green open curved channel is background negative space between the raised viewer-left foreleg and chest and remains open at the paw and shoulder. Read only its viewer-left shoulder-to-elbow-to-wrist-to-paw path and paw-to-muzzle contact. Neither the gray fill nor green curve may become fur color, a marking, seam, lighting, texture, material, clothing, hole, or hard object.
+
+MASK CONTRACT: the feathered full-denoise mask is only an editable workspace around the viewer-left muzzle, shoulder, chest and missing foreleg. It is not a limb silhouette and must not be filled as one solid column. Outside the mask, copy Image 1 byte-for-byte in appearance. Inside the mask, use Image 2's identity and fur to replace the neutral two-paws-down anatomy with exactly one organic viewer-left foreleg visibly attached at the shoulder near (38% width, 67% height), bending through a readable soft elbow and wrist, and ending in one rounded furry paw centered near (37% width, 51% height) physically touching the viewer-left underside of the muzzle. Keep the viewer-right front paw planted. Remove any obsolete viewer-left ground paw only where the mask reaches it. Preserve natural green negative space around the curved limb; never preserve the mask boundary.
+
+SURFACE AND IDENTITY LOCK: the completed foreleg must use Image 2's exact local coat palette, short/medium/long fur category, strand direction, soft paw outline and restrained toe relief. Join muzzle, paw, wrist, shoulder and chest seamlessly. No smooth tube, straight cylinder, uniform-width capsule, pasted crop, hard edge, gray guide, green internal seam, brush fan, detached object, duplicate paw, or new marking. No Pet3D or other style adapter is an appearance authority. Use neutral-white character lighting. {fur_lock}
+
+POSE CONTRACT: {qwen_first_frame_spec(pose)}
+{action_first_frame_rules(pose)}
+Exactly one viewer-left foreleg is raised continuously from shoulder to mouth and exactly one viewer-right front paw is planted. Keep both attached hind legs and the complete tail. A tiny pink tongue may touch the raised paw. No duplicate ground paw, ghost limb, detached paw, food, bowl, prop, clothing, accessory, or extra subject.
+
+OUTPUT CONTRACT: return exactly one clean static 512x512 first frame. Keep the complete cat within 72% of canvas width and height with at least 12% clear green margin on every edge. Every pixel outside the cat must be flat pure #00FF00. No floor, floor line, shadow, reflection, scenery, text, logo, or watermark. Return the completed grooming keyframe only."""
+
+
+def build_canonical_grooming_full_pose_rescue_prompt(
+    pose: str,
+    *,
+    profile_fur_lock: str = "",
+) -> str:
+    """Force the verified Main_case grooming skeleton before identity repaint."""
+
+    fur_lock = profile_fur_lock.strip() or (
+        "Preserve Image 2's exact natural coat length, visible volume, strand "
+        "direction, genuine tufts, and source-bounded silhouette."
+    )
+    return f"""CRITICAL FULL-POSE GROOMING RESCUE - geometry first, identity exact:
+Image 1 is the frozen appearance-free action geometry canvas and the sampler. It is authoritative only for the complete outer seated silhouette, viewer-left shoulder-to-elbow-to-wrist-to-paw path, paw-to-muzzle contact, viewer-right planted front paw, both attached hind legs, tail, framing, scale, and pure-green negative space. Every subject pixel is the same synthetic RGB(144,144,144); there is no internal luma pattern, sampled Main_case color, coat patch, marking, texture, material, clothing, identity, or hard object. Its one thin pure-green open curved channel is background negative space between the raised viewer-left foreleg and chest. It remains open at the paw and shoulder, exists only to make the organic bent limb readable, and must never be rendered as a green line, seam, hole, marking, microphone, hanging object, or replacement coat design.
+Image 2 is the approved Qwen full-body canonical and is the sole identity and appearance authority. Render every cat pixel from Image 2: exact face, green eyes, ears, nose, coat palette, localized markings, body proportions, natural fur category and surface, paws, tail, restrained stylized 3D material, and neutral-white lighting. Never average Image 1's gray into Image 2 and never invent a replacement identity.
+
+FULL-POSE CONTRACT: keep Image 1's verified action geometry as one organic cat, but completely regenerate its appearance from Image 2. Exactly one viewer-left foreleg must emerge continuously from the viewer-left shoulder near (38% width, 67% height), bend through a readable soft elbow and wrist, and end in one rounded furry paw centered near (37% width, 51% height) physically touching the viewer-left underside of the muzzle. The viewer-right front paw remains planted. Preserve both attached hind legs and the complete tail. A tiny pink tongue may touch the raised paw. The raised limb is living cat anatomy, never a detachable prop.
+
+IDENTITY AND SURFACE LOCK: the raised paw and planted paw must share Image 2's local coat colors, soft outline, fur length, texture scale, lighting, and restrained toe relief. Join muzzle, paw, wrist, shoulder and chest seamlessly. No gray guide residue, achromatic recoloring, smooth tube, straight cylinder, uniform-width capsule, hard edge, brush fan, radial strands, detached object, duplicate paw, ghost limb, clothing, accessory, food, bowl, or extra subject. {fur_lock}
+
+POSE CONTRACT: {qwen_first_frame_spec(pose)}
+{action_first_frame_rules(pose)}
+
+OUTPUT CONTRACT: return exactly one clean static 512x512 first frame. Keep the complete cat within 72% of canvas width and height with at least 12% clear green margin on every edge. Every non-cat pixel must be flat pure #00FF00. No floor, floor line, shadow, reflection, scenery, text, logo, or watermark. Return only the completed grooming keyframe."""
+
+
+def build_canonical_grooming_pose_transfer_prompt(
+    pose: str,
+    *,
+    profile_fur_lock: str = "",
+) -> str:
+    """Transfer canonical identity onto the frozen grooming action anatomy."""
+
+    fur_lock = profile_fur_lock.strip() or (
+        "Preserve Image 2's exact natural coat length, visible volume, strand "
+        "direction, genuine tufts, and source-bounded silhouette."
+    )
+    return f"""CRITICAL ACTION-POSE IDENTITY TRANSFER - keep Image 1 anatomy, render the uploaded pet:
+Image 1 is the sampler canvas and a deterministic high-key anatomy maquette derived from the frozen validated grooming action reference. Its alpha silhouette, head and torso placement, real viewer-left shoulder-to-elbow-to-wrist-to-paw anatomy, paw-to-mouth contact, viewer-right planted front paw, attached hind legs, tail, camera, scale, framing, and pure-green background are authoritative. Before this request its original RGB, chroma, markings, face detail, lighting, and fur texture were removed; its remaining blurred neutral tone is only low-frequency shape relief conditioned into the target palette. It is not a pet identity, coat design, gray marking, object, cord, capsule, microphone, or rendering-style reference.
+Image 2 is the approved Qwen full-body canonical generated from the uploaded identity view set. It is the sole target rendering authority. Replace every subject pixel from Image 1 with Image 2's exact recognizable face and head silhouette, green eyes, ears, nose, coat palette and localized markings, body proportions, natural coat category, clean fur surface, paws, tail, restrained stylized 3D material, and neutral-white lighting while preserving Image 1's action anatomy.
+There is deliberately no third reference image in this recovery pass. Image 2 already consolidates the uploaded front, left, and right identity views. Do not infer a neutral sitting pose from the identity views that created Image 2, and do not replace Image 1's raised-paw action with Image 2's two-paws-down canonical pose.
+
+ACTION FREEZE CONTRACT: Image 1 already contains a real furry foreleg and paw at the mouth; repaint that anatomy in place. Do not replace it with a hanging item, curved strip, strap, pendant, banana shape, tongue-shaped object, microphone, smooth tube, or detached prop. Do not return to a neutral two-paws-down sit and do not mirror the action. Exactly one viewer-left foreleg remains continuously attached from the visible shoulder near (38% width, 67% height), through a soft organic elbow and wrist, to one rounded furry paw near (37% width, 51% height) touching the viewer-left underside of the muzzle. The viewer-right front paw remains planted. Keep both attached hind legs and the complete tail. Preserve Image 1's subject scale, crop, camera, and action silhouette.
+
+IDENTITY REPAINT CONTRACT: the final result must look exactly like Image 2, never like the grooming reference that supplied Image 1 geometry. Repaint the whole animal, including the face, torso, raised foreleg, planted paw, hind legs, and tail. The raised and planted paws must share the same canonical coat family, fur length, texture scale, lighting, and toe treatment. Join muzzle, paw, wrist, shoulder, and chest seamlessly. No residual anatomy-maquette gray, borrowed black-and-white action-reference markings, new dominant color, invented stripe, warm-brown/orange drift, cyan/blue/red/pink drift, hard object, brush fan, radial strands, duplicate limb, clothing, accessory, food, bowl, or extra subject. {fur_lock}
+
+POSE CONTRACT: {qwen_first_frame_spec(pose)}
+{action_first_frame_rules(pose)}
+
+OUTPUT CONTRACT: return exactly one clean static 512x512 first frame. Keep the complete cat within 72% of canvas width and height with at least 12% clear green margin on every edge. Every non-cat pixel must be flat pure #00FF00. No floor, floor line, shadow, reflection, scenery, text, logo, or watermark. Return only the identity-correct grooming keyframe."""
+
+
+def build_canonical_grooming_full_pose_identity_refine_prompt(
+    pose: str,
+    *,
+    source_attempt: int,
+    profile_fur_lock: str = "",
+) -> str:
+    """Repaint a structurally proven grooming candidate with canonical identity."""
+
+    fur_lock = profile_fur_lock.strip() or (
+        "Preserve Image 2's exact natural coat length, visible volume, strand "
+        "direction, genuine tufts, and source-bounded silhouette."
+    )
+    return f"""CRITICAL POSE-SAFE IDENTITY REFINE - freeze the proven grooming action and repaint the pet:
+Image 1 is the normalized grooming candidate from attempt {source_attempt} and is the sampler canvas. Its matte was reconstructed only by the union of the semantic pet matte and the digest-bound deterministic action seed. It then passed the independent complete-subject check, strict raised-foreleg pose gate, guide alignment, organic shoulder-to-paw structure, paw-to-muzzle contact, and fur-surface gate. Its complete outer silhouette, head and torso placement, viewer-left shoulder-to-elbow-to-wrist-to-paw path, viewer-right planted front paw, both attached hind legs, tail, scale, framing, camera, and pure-green negative space are authoritative. Its warm/off-model coat palette, markings, face detail, lighting and material are not identity authorities.
+Image 2 is the approved Qwen full-body canonical generated from the uploaded front, left and right identity views. It is the sole identity and target-rendering authority. Repaint every animal pixel from Image 2: exact recognizable face and head silhouette, green eyes, ears, nose, achromatic coat-value balance, localized markings, body proportions, natural coat category, clean fur surface, paws, tail, restrained stylized 3D material, and neutral-white lighting.
+Image 3 is the deterministic high-key action-anatomy seed whose digest was used to validate Image 1's matte. It corroborates geometry only: the same complete seated silhouette, real viewer-left shoulder-to-elbow-to-wrist-to-paw anatomy, paw-to-mouth contact, viewer-right planted paw, attached hind legs, tail, scale, and framing. Its blurred neutral RGB and low-frequency luma are not fur, markings, identity, material, lighting, or style. Never average Image 3's tone into Image 2.
+
+ACTION FREEZE CONTRACT: Image 1 already contains a real attached furry foreleg and paw at the mouth; repaint that anatomy in place. Image 3 confirms the same action but may not replace Image 1's pixels or silhouette. Do not return to a neutral two-paws-down sit, mirror the action, crop the body, or change camera and scale. Exactly one viewer-left foreleg remains continuously attached from the visible shoulder near (38% width, 67% height), through a soft organic elbow and wrist, to one rounded furry paw near (37% width, 51% height) touching the viewer-left underside of the muzzle. The viewer-right front paw remains planted. Keep both attached hind legs and the complete tail. Never turn the raised limb into a hanging item, curved strip, strap, pendant, tongue-shaped object, microphone, smooth tube, detached prop, or extra paw.
+
+IDENTITY REPAINT CONTRACT: replace the whole animal appearance, including face, torso, raised foreleg, planted paw, hind legs, and tail, with Image 2's identity while retaining Image 1's proven action geometry. The raised and planted paws must share Image 2's coat family, fur length, texture scale, lighting, and restrained toe treatment. Join muzzle, paw, wrist, shoulder, and chest seamlessly. No residual warm brown/orange cast, achromatic balance loss, borrowed action-reference markings, anatomy-seed gray, cyan/blue/red/pink drift, invented stripe, hard object, brush fan, radial strands, duplicate limb, clothing, accessory, food, bowl, or extra subject. {fur_lock}
+
+POSE CONTRACT: {qwen_first_frame_spec(pose)}
+{action_first_frame_rules(pose)}
+
+OUTPUT CONTRACT: return exactly one clean static 512x512 first frame. Keep the complete cat within 72% of canvas width and height with at least 12% clear green margin on every edge. Every non-cat pixel must be flat pure #00FF00. No floor, floor line, shadow, reflection, scenery, text, logo, or watermark. Return only the identity-correct grooming keyframe."""
+
+
+def build_canonical_eating_identity_refine_prompt(
+    pose: str,
+    *,
+    source_attempt: int,
+    profile_fur_lock: str = "",
+) -> str:
+    """Preserve an approved eating layout while repainting canonical identity."""
+
+    fur_lock = profile_fur_lock.strip() or (
+        "Preserve Image 2's exact natural coat length, visible volume, strand "
+        "direction, genuine tufts, and source-bounded silhouette."
+    )
+    return f"""CRITICAL EATING IDENTITY REFINE - preserve the approved action, repaint only the pet identity:
+Image 1 is the normalized eating candidate from attempt {source_attempt} and is the sampler canvas. Its complete crouched body layout, head height and angle, lower-muzzle-to-kibble overlap, both planted front paws, attached rear legs, tail, single bowl, kibble placement, subject scale, framing, and pure-green negative space are authoritative. Preserve this exact action and prop geometry. Image 1's cat colors, markings, face details, fur texture, lighting, and rendering style are not authoritative and may contain a warm or off-model identity drift.
+Image 2 is the approved Qwen full-body canonical and is the target rendering and primary identity authority for every cat pixel. Repaint the entire cat from Image 2: exact head silhouette, green eyes, ears, nose, achromatic white/gray coat balance, localized dark markings, body proportions, natural fur category and surface, paws, tail, restrained stylized 3D material, and neutral-white lighting. Do not copy a cream, tan, brown, orange, golden, pink, cyan, or blue cast from Image 1 onto the pet.
+Image 3 is the original uploaded front photograph of this same pet. It corroborates immutable real identity only: face proportions, eye color, nose, coat-value balance, actual marking placement, coat length and paw color. It has no eating-pose, bowl, crop, background, room lighting, photographic-material, or output-style authority. Image 1 remains the sole eating and bowl geometry authority; Image 2 remains the sole target-rendering authority. Do not copy the room, floor, shadow, or photographic background from Image 3.
+
+ACTION FREEZE CONTRACT: keep exactly one small shallow light-beige matte bowl with brown kibble. Keep both complete front paws visibly planted beside the bowl. The lower muzzle and mouth must remain physically inside the kibble with 6 to 10 output pixels of visible overlap; the near rim or kibble may partly occlude the nose and lower muzzle. There must be no green, white, or background gap between mouth and food. Never raise the head, move the bowl away, turn eating into sniffing, let a paw hold food, add a second bowl, or let the bowl hide or replace a limb.
+
+IDENTITY REPAINT CONTRACT: change the cat appearance everywhere while preserving Image 1's action silhouette. The bowl and kibble are props, so retain their light-beige and brown colors without transferring those warm colors into the cat. Remove every star, flower, decorative mark, floor, floor line, shadow and scenery already excluded by the normalized sampler. Preserve clean canonical fur with no radial brush fan, long artificial strands, smooth plastic, new marking, new dominant hue, clothing, accessory, or extra subject. {fur_lock}
+
+POSE CONTRACT: {qwen_first_frame_spec(pose)}
+{action_first_frame_rules(pose)}
+
+OUTPUT CONTRACT: return exactly one clean static 512x512 first frame. Keep the complete cat and its single bowl within 72% of canvas width and height with at least 12% clear green margin on every edge. Every non-cat, non-bowl pixel must be flat pure #00FF00. No floor, floor line, shadow, reflection, scenery, text, logo, or watermark. Return only the identity-correct eating keyframe."""
 
 
 def build_wan_prompt(base_prompt: str, pose: str, transparent_gif: bool = False) -> str:
@@ -1768,6 +4032,8 @@ def build_wan_prompt(base_prompt: str, pose: str, transparent_gif: bool = False)
 FACE CONSISTENCY: preserve the recognizable head silhouette, cheek width, eye color and spacing, nose, muzzle, ears, and facial fur markings while allowing natural coordinated head, ear, muzzle, and expression motion required by the action. Do not hold any facial pixel or screen coordinate fixed. Avoid melting, independent feature drift, or sudden proportion changes.
 
 STYLE AND IDENTITY LOCK: preserve this exact cat's fur colors and marking placement, soft groomed fur, premium stylized 3D rendering, color-faithful neutral high-key lighting, body proportions, paws, and full tail. Lighting must never introduce an amber, orange, brown, or sepia cast that is absent from the approved keyframe. The cat remains completely unclothed with natural fur: no glasses, collar, bow tie, shirt, overalls, suspenders, harness, hat, shoes, jewelry, costume, or accessory may appear. Never switch to a real photograph, flat 2D drawing, plastic toy, or a different character design.
+
+FUR MOTION LOCK: preserve the first frame's compact close-lying grooming and exact clean back contour. Fur strands remain short, dense, uniformly directed, and close to the body throughout the video. Allow only minute breathing-following surface motion; never increase fur length or volume, raise guard hairs, create fluffy expansion, rigid clumps, spikes, a dorsal ridge, a mohawk, a jagged silhouette, or crawling fur texture.
 
 User motion direction: {base_prompt}
 Starting pose and action: {pose}
@@ -2041,10 +4307,13 @@ def pose_generation_profiles(
         retry_name = "running_ground_contact_seed_retry"
     elif action_uses_bowl(pose):
         extra_attempts = QWEN_BOWL_POSE_EXTRA_ATTEMPTS
-        retry_name = "bowl_palette_canvas_seed_retry"
+        retry_name = QWEN_BOWL_POSE_RETRY_NAME
     else:
         return selected
-    retry_source = selected[0] if action_uses_bowl(pose) else selected[-1]
+    # Once a bowl attempt has reached the minimal LoRA profile, keep that safer
+    # coat/pose influence for the extra seed retry instead of jumping back to the
+    # stronger first profile that may have caused fur expansion.
+    retry_source = selected[-1]
     for extra_index in range(extra_attempts):
         repeated = {
             **retry_source,
@@ -2058,6 +4327,100 @@ def pose_generation_profiles(
         repeated["steps"] = max(10, int(repeated["steps"]))
         selected.append(repeated)
     return selected
+
+
+def canonical_grooming_generation_profiles(
+    pose: str,
+    profiles: list[dict[str, Any]],
+    *,
+    enabled: bool,
+) -> list[dict[str, Any]]:
+    """Append finite full-pose and identity-refine recovery attempts."""
+
+    selected = [
+        {
+            **profile,
+            "user_loras": [dict(item) for item in profile.get("user_loras", [])],
+        }
+        for profile in profiles
+    ]
+    if not enabled or action_key(pose) != "grooming" or not selected:
+        return selected
+    if len(selected) != GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT:
+        raise RuntimeError(
+            "Canonical grooming recovery requires exactly three standard attempts."
+        )
+    retry_source = selected[-1]
+    for attempt, name in (
+        (
+            GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT,
+            "canonical_palette_action_pose_transfer_primary",
+        ),
+        (
+            GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT,
+            "canonical_palette_action_pose_transfer_seed_retry",
+        ),
+    ):
+        repeated = {
+            **retry_source,
+            "user_loras": [dict(item) for item in retry_source.get("user_loras", [])],
+        }
+        repeated.update(
+            name=name,
+            quality_retry=attempt,
+            steps=max(
+                GROOMING_CANONICAL_FULL_POSE_RESCUE_STEPS,
+                int(repeated["steps"]),
+            ),
+            denoise=(
+                GROOMING_CANONICAL_FULL_POSE_RESCUE_DENOISE
+                if attempt == GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
+                else GROOMING_CANONICAL_FULL_POSE_REFINE_DENOISE
+            ),
+        )
+        selected.append(repeated)
+    return selected
+
+
+def resolve_fur_surface_retry_decision(
+    *,
+    action: str,
+    rejection_streak: int,
+    attempt: int,
+    active_profiles: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Preserve the finite eating-only bowl recovery before failing closed."""
+
+    remaining_profile_names = [
+        str(profile.get("name") or "") for profile in active_profiles[attempt:]
+    ]
+    recovery_prefix = f"{QWEN_BOWL_POSE_RETRY_NAME}_"
+    pending_eating_bowl_recovery = bool(
+        action == "eating"
+        and remaining_profile_names
+        and remaining_profile_names[0].startswith(recovery_prefix)
+    )
+    rejection_threshold_reached = bool(
+        rejection_streak >= FUR_SURFACE_GATE_MAX_REJECTIONS
+    )
+    return {
+        "policy": FUR_SURFACE_GATE_RETRY_POLICY,
+        "action": action,
+        "attempt": attempt,
+        "attempt_budget": len(active_profiles),
+        "rejection_streak": rejection_streak,
+        "max_consecutive_rejections": FUR_SURFACE_GATE_MAX_REJECTIONS,
+        "threshold_reached": rejection_threshold_reached,
+        "remaining_profiles": remaining_profile_names,
+        "next_profile": (
+            remaining_profile_names[0] if remaining_profile_names else None
+        ),
+        "pending_eating_bowl_recovery": pending_eating_bowl_recovery,
+        "short_circuit_due": bool(
+            rejection_threshold_reached and not pending_eating_bowl_recovery
+        ),
+        "blocks_scail_on_exhaustion": True,
+    }
 
 
 def pose_recovery_profiles(
@@ -2089,6 +4452,9 @@ def qwen_workflow(
     builtin_style_strength: float | None = None,
     user_loras: list[dict[str, Any]] | None = None,
     suppress_builtin_style: bool = False,
+    pose_reference_input_name: str | None = None,
+    additional_reference_input_names: list[str] | None = None,
+    noise_mask_input_name: str | None = None,
 ) -> dict[str, Any]:
     effective_user_loras = normalize_user_lora_specs(
         user_loras,
@@ -2226,6 +4592,62 @@ def qwen_workflow(
         }
         model_node = node_id
     workflow["14"]["inputs"]["model"] = link(model_node)
+    if pose_reference_input_name and additional_reference_input_names:
+        raise ValueError(
+            "pose_reference_input_name and additional_reference_input_names "
+            "cannot be used together"
+        )
+    reference_input_names = list(additional_reference_input_names or [])
+    if pose_reference_input_name:
+        reference_input_names = [pose_reference_input_name]
+    if len(reference_input_names) > 2:
+        raise ValueError("Qwen Image Edit Plus supports at most three images")
+    for image_index, reference_input_name in enumerate(
+        reference_input_names,
+        start=2,
+    ):
+        if not str(reference_input_name).strip():
+            raise ValueError("Qwen reference image names cannot be blank")
+        next_node = max(int(node_id) for node_id in workflow) + 1
+        reference_load_node = str(next_node)
+        reference_scale_node = str(next_node + 1)
+        workflow[reference_load_node] = {
+            "class_type": "LoadImage",
+            "inputs": {"image": reference_input_name},
+        }
+        workflow[reference_scale_node] = {
+            "class_type": "FluxKontextImageScale",
+            "inputs": {"image": link(reference_load_node)},
+        }
+        # Image 1 always remains the sampler latent. Canonical generation may add
+        # the left and right identity views as Images 2 and 3. Production eating
+        # and grooming both keep the approved canonical as Image 1 and use the
+        # action geometry as Image 2. Extra references remain supported only for
+        # frozen legacy geometry-first job replay.
+        input_key = f"image{image_index}"
+        workflow["6"]["inputs"][input_key] = link(reference_scale_node)
+        workflow["7"]["inputs"][input_key] = link(reference_scale_node)
+    if noise_mask_input_name is not None:
+        if not str(noise_mask_input_name).strip():
+            raise ValueError("Qwen noise-mask image name cannot be blank")
+        next_node = max(int(node_id) for node_id in workflow) + 1
+        mask_load_node = str(next_node)
+        masked_latent_node = str(next_node + 1)
+        workflow[mask_load_node] = {
+            "class_type": "LoadImage",
+            "inputs": {"image": noise_mask_input_name},
+        }
+        workflow[masked_latent_node] = {
+            "class_type": "SetLatentNoiseMask",
+            "inputs": {
+                "samples": link("10"),
+                # ComfyUI LoadImage exposes MASK as 1 - alpha. The repair
+                # mask is therefore transparent only where fresh noise and
+                # a full-denoise local redraw are required.
+                "mask": link(mask_load_node, 1),
+            },
+        }
+        workflow["14"]["inputs"]["latent_image"] = link(masked_latent_node)
     return workflow
 
 
@@ -2577,6 +4999,1474 @@ def prepare_landscape_keyframe(
     canvas.convert("RGB").save(target, format="PNG", optimize=True)
 
 
+def normalize_qwen_action_reference_rgba(
+    source: Path,
+    target: Path,
+    *,
+    size: tuple[int, int] = (TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE),
+) -> dict[str, Any]:
+    """Create the one final RGBA action reference used by every later gate.
+
+    The reliable matte is never flattened onto green and reconstructed.  RGB is
+    resized in premultiplied-alpha space while the already-approved soft alpha
+    samples are downscaled with nearest-neighbour resampling.  This avoids a
+    second chroma-key erosion while retaining the existing 512px framing.
+    """
+
+    source_digest = file_sha256(source)
+    with Image.open(source) as loaded:
+        source_mode = loaded.mode
+        source_size = loaded.size
+        source_has_alpha = "A" in loaded.getbands()
+        image = loaded.convert("RGBA")
+    if not source_has_alpha:
+        raise ValueError("qwen_action_reference_source_has_no_alpha")
+
+    alpha = image.getchannel("A")
+    alpha_minimum, alpha_maximum = alpha.getextrema()
+    if alpha_minimum == 255 or alpha_maximum == 0:
+        raise ValueError("qwen_action_reference_source_alpha_is_not_usable")
+
+    alpha_array = np.asarray(alpha, dtype=np.uint8)
+    alpha_threshold = FurSurfaceThresholds().alpha_threshold
+    foreground = np.where(alpha_array >= alpha_threshold, 255, 0).astype(np.uint8)
+    foreground_image = Image.fromarray(foreground, mode="L")
+    bbox = foreground_image.getbbox()
+    foreground_pixels = int(np.count_nonzero(foreground))
+    minimum_foreground_pixels = max(64, int(round(alpha_array.size * 0.002)))
+    if bbox is None or foreground_pixels < minimum_foreground_pixels:
+        raise ValueError("qwen_action_reference_foreground_is_not_usable")
+
+    padding = max(
+        16,
+        int(max(bbox[2] - bbox[0], bbox[3] - bbox[1]) * 0.06),
+    )
+    padded_bbox = (
+        max(0, bbox[0] - padding),
+        max(0, bbox[1] - padding),
+        min(image.width, bbox[2] + padding),
+        min(image.height, bbox[3] + padding),
+    )
+    cropped = image.crop(padded_bbox)
+    maximum_width = max(1, int(size[0] * 0.88))
+    maximum_height = max(1, int(size[1] * 0.90))
+    scale = min(
+        maximum_width / max(1, cropped.width),
+        maximum_height / max(1, cropped.height),
+        1.0,
+    )
+    resized_size = (
+        max(1, int(round(cropped.width * scale))),
+        max(1, int(round(cropped.height * scale))),
+    )
+    if resized_size != cropped.size:
+        resized = (
+            cropped.convert("RGBa")
+            .resize(resized_size, Image.Resampling.LANCZOS)
+            .convert("RGBA")
+        )
+        preserved_alpha = cropped.getchannel("A").resize(
+            resized_size,
+            Image.Resampling.NEAREST,
+        )
+        resized.putalpha(preserved_alpha)
+    else:
+        resized = cropped
+
+    canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+    offset = ((size[0] - resized.width) // 2, (size[1] - resized.height) // 2)
+    canvas.alpha_composite(resized, offset)
+    output_alpha = canvas.getchannel("A")
+    output_alpha_minimum, output_alpha_maximum = output_alpha.getextrema()
+    output_corners = [
+        output_alpha.getpixel((0, 0)),
+        output_alpha.getpixel((size[0] - 1, 0)),
+        output_alpha.getpixel((0, size[1] - 1)),
+        output_alpha.getpixel((size[0] - 1, size[1] - 1)),
+    ]
+    if output_alpha_minimum == 255 or output_alpha_maximum == 0 or any(output_corners):
+        raise ValueError("qwen_action_reference_output_alpha_is_not_usable")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(target, format="PNG", optimize=True)
+    target_digest = file_sha256(target)
+    return {
+        "policy": QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY,
+        "source_path": str(source),
+        "source_sha256": source_digest,
+        "source_mode": source_mode,
+        "source_size": list(source_size),
+        "alpha_threshold": alpha_threshold,
+        "foreground_pixels": foreground_pixels,
+        "foreground_bbox": list(bbox),
+        "padded_bbox": list(padded_bbox),
+        "resized_size": list(resized_size),
+        "output_path": str(target),
+        "output_sha256": target_digest,
+        "output_mode": "RGBA",
+        "output_size": list(size),
+        "alpha_resampling": "nearest_preserve_approved_matte_samples",
+        "rgb_resampling": "premultiplied_alpha_lanczos",
+        "output_alpha_extrema": [
+            output_alpha_minimum,
+            output_alpha_maximum,
+        ],
+        "output_alpha_corners": output_corners,
+    }
+
+
+def composite_rgba_reference_on_background(
+    source: Path,
+    target: Path,
+    background_rgb: tuple[int, int, int],
+) -> None:
+    """Derive an opaque working image from a final RGBA reference one-way."""
+
+    with Image.open(source) as loaded:
+        if "A" not in loaded.getbands():
+            raise ValueError("transparent_reference_has_no_alpha")
+        image = loaded.convert("RGBA")
+    background = Image.new("RGBA", image.size, (*background_rgb, 255))
+    background.alpha_composite(image)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    background.convert("RGB").save(target, format="PNG", optimize=True)
+
+
+def prepare_grooming_foreleg_repair_canvas(
+    source: Path,
+    geometry_guide: Path,
+    canonical_reference: Path,
+    target: Path,
+    *,
+    noise_mask_target: Path | None = None,
+    mask_dilation_px: int = GROOMING_QWEN_FORELEG_REPAIR_MASK_DILATION_PX,
+) -> dict[str, Any]:
+    """Seed and context-mask a full-denoise identity-matched foreleg redraw."""
+
+    if not 1 <= int(mask_dilation_px) <= 64:
+        raise ValueError("grooming repair mask dilation must be between 1 and 64")
+    with Image.open(source) as loaded:
+        if "A" not in loaded.getbands():
+            raise ValueError("grooming repair source has no alpha channel")
+        source_rgba_image = loaded.convert("RGBA")
+    with Image.open(geometry_guide) as loaded:
+        guide_rgb_image = loaded.convert("RGB")
+    with Image.open(canonical_reference) as loaded:
+        if "A" not in loaded.getbands():
+            raise ValueError("grooming repair canonical reference has no alpha")
+        canonical_rgba_image = loaded.convert("RGBA")
+    if source_rgba_image.size != (512, 512):
+        raise ValueError("grooming repair source must be normalized to 512x512")
+    if guide_rgb_image.size != source_rgba_image.size:
+        raise ValueError("grooming repair geometry guide size does not match source")
+    if canonical_rgba_image.size != source_rgba_image.size:
+        raise ValueError("grooming repair canonical reference size does not match")
+
+    source_rgba = np.asarray(source_rgba_image, dtype=np.uint8).copy()
+    canonical_rgba = np.asarray(canonical_rgba_image, dtype=np.uint8)
+    guide_rgb = np.asarray(guide_rgb_image, dtype=np.uint8)
+    semantic_foreleg = np.all(
+        guide_rgb == np.asarray(GROOMING_QWEN_GUIDE_FORELEG_RGB, dtype=np.uint8),
+        axis=2,
+    )
+    semantic_foreleg_pixels = int(np.count_nonzero(semantic_foreleg))
+    if not 650 <= semantic_foreleg_pixels <= 6000:
+        raise RuntimeError(
+            "Grooming repair geometry guide lacks its bounded foreleg semantic."
+        )
+    dilation = int(mask_dilation_px)
+    kernel_size = dilation * 2 + 1
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (kernel_size, kernel_size),
+    )
+    edit_mask = cv2.dilate(
+        semantic_foreleg.astype(np.uint8),
+        kernel,
+        iterations=1,
+    ).astype(bool)
+    edit_pixels = int(np.count_nonzero(edit_mask))
+    source_foreground = source_rgba[:, :, 3] >= 64
+    removed_foreground_pixels = int(np.count_nonzero(source_foreground & edit_mask))
+    if removed_foreground_pixels < 256:
+        raise RuntimeError(
+            "Grooming repair edit window did not intersect enough candidate pixels."
+        )
+
+    original_composite = Image.new("RGBA", (512, 512), (0, 255, 0, 255))
+    original_composite.alpha_composite(source_rgba_image)
+    ys, xs = np.nonzero(edit_mask)
+    edit_bbox = [
+        int(xs.min()),
+        int(ys.min()),
+        int(xs.max()) + 1,
+        int(ys.max()) + 1,
+    ]
+    canonical_foreground = canonical_rgba[:, :, 3] >= 64
+    canonical_ys, canonical_xs = np.nonzero(canonical_foreground)
+    if canonical_xs.size == 0:
+        raise RuntimeError(
+            "Grooming repair canonical reference has no reliable foreground."
+        )
+    canonical_bbox = [
+        int(canonical_xs.min()),
+        int(canonical_ys.min()),
+        int(canonical_xs.max()) + 1,
+        int(canonical_ys.max()) + 1,
+    ]
+    canonical_width = canonical_bbox[2] - canonical_bbox[0]
+    canonical_height = canonical_bbox[3] - canonical_bbox[1]
+    seed_source_bbox = [
+        int(round(canonical_bbox[0] + canonical_width * 0.18)),
+        int(round(canonical_bbox[1] + canonical_height * 0.48)),
+        int(round(canonical_bbox[0] + canonical_width * 0.52)),
+        canonical_bbox[3],
+    ]
+    if (
+        seed_source_bbox[2] - seed_source_bbox[0] < 24
+        or seed_source_bbox[3] - seed_source_bbox[1] < 64
+    ):
+        raise RuntimeError(
+            "Grooming repair canonical planted-foreleg crop is too small."
+        )
+    edit_width = edit_bbox[2] - edit_bbox[0]
+    edit_height = edit_bbox[3] - edit_bbox[1]
+    canonical_crop = canonical_rgba_image.crop(tuple(seed_source_bbox))
+    canonical_crop_array = np.asarray(canonical_crop, dtype=np.uint8)
+    crop_foreground_rgb = canonical_crop_array[:, :, :3][
+        canonical_crop_array[:, :, 3] >= 64
+    ]
+    if crop_foreground_rgb.size == 0:
+        raise RuntimeError(
+            "Grooming repair canonical foreleg crop has no identity texture."
+        )
+    fallback_rgb = np.rint(
+        np.median(crop_foreground_rgb.astype(np.float32), axis=0)
+    ).astype(np.uint8)
+
+    canonical_seed = canonical_crop.resize(
+        (edit_width, edit_height),
+        Image.Resampling.LANCZOS,
+    ).rotate(180)
+    canonical_seed_rgba_raw = np.asarray(canonical_seed, dtype=np.uint8)
+    seed_alpha_float = canonical_seed_rgba_raw[:, :, 3].astype(np.float32) / 255.0
+    seed_premultiplied = (
+        canonical_seed_rgba_raw[:, :, :3].astype(np.float32)
+        * seed_alpha_float[:, :, None]
+    )
+    lowpass_sigma = float(GROOMING_QWEN_FORELEG_REPAIR_SEED_LOWPASS_SIGMA_PX)
+    blurred_alpha = cv2.GaussianBlur(
+        seed_alpha_float,
+        (0, 0),
+        sigmaX=lowpass_sigma,
+        sigmaY=lowpass_sigma,
+    )
+    blurred_premultiplied = cv2.GaussianBlur(
+        seed_premultiplied,
+        (0, 0),
+        sigmaX=lowpass_sigma,
+        sigmaY=lowpass_sigma,
+    )
+    blurred_seed_rgb = np.divide(
+        blurred_premultiplied,
+        np.maximum(blurred_alpha[:, :, None], 1e-3),
+    )
+    # Image 1 should communicate only the pet's bounded coat palette and
+    # coarse shading. High-frequency planted-leg strands otherwise survive
+    # img2img sampling as a pasted bristle patch instead of being rerendered.
+    identity_median_blend = float(
+        GROOMING_QWEN_FORELEG_REPAIR_SEED_IDENTITY_MEDIAN_BLEND
+    )
+    lowpass_seed_rgb = (
+        np.rint(
+            blurred_seed_rgb * (1.0 - identity_median_blend)
+            + fallback_rgb.astype(np.float32)[None, None, :] * identity_median_blend
+        )
+        .clip(0, 255)
+        .astype(np.uint8)
+    )
+    canonical_seed_rgba = canonical_seed_rgba_raw.copy()
+    canonical_seed_rgba[:, :, :3] = lowpass_seed_rgb
+    seed_foreground_local = canonical_seed_rgba_raw[:, :, 3] >= 64
+    raw_seed_gray = cv2.cvtColor(
+        canonical_seed_rgba_raw[:, :, :3],
+        cv2.COLOR_RGB2GRAY,
+    ).astype(np.float32)
+    lowpass_seed_gray = cv2.cvtColor(
+        lowpass_seed_rgb,
+        cv2.COLOR_RGB2GRAY,
+    ).astype(np.float32)
+    raw_seed_high_frequency_energy = float(
+        np.mean(np.abs(cv2.Laplacian(raw_seed_gray, cv2.CV_32F))[seed_foreground_local])
+    )
+    lowpass_seed_high_frequency_energy = float(
+        np.mean(
+            np.abs(cv2.Laplacian(lowpass_seed_gray, cv2.CV_32F))[seed_foreground_local]
+        )
+    )
+    seed_canvas = np.zeros_like(canonical_rgba)
+    seed_canvas[
+        edit_bbox[1] : edit_bbox[3],
+        edit_bbox[0] : edit_bbox[2],
+    ] = canonical_seed_rgba
+    seed_foreground = seed_canvas[:, :, 3] >= 64
+    seed_direct_mask = edit_mask & seed_foreground
+    seed_direct_pixels = int(np.count_nonzero(seed_direct_mask))
+    if seed_direct_pixels < max(256, int(round(edit_pixels * 0.45))):
+        raise RuntimeError(
+            "Grooming repair canonical foreleg seed has insufficient coverage."
+        )
+    original_rgb = np.asarray(
+        original_composite.convert("RGB"),
+        dtype=np.uint8,
+    )
+    output_rgb = original_rgb.copy()
+    output_rgb[seed_direct_mask] = seed_canvas[:, :, :3][seed_direct_mask]
+    canonical_local_mask = edit_mask & ~seed_direct_mask & canonical_foreground
+    output_rgb[canonical_local_mask] = canonical_rgba[:, :, :3][canonical_local_mask]
+    median_fallback_mask = edit_mask & ~seed_direct_mask & ~canonical_local_mask
+    output_rgb[median_fallback_mask] = fallback_rgb
+    pure_green = np.asarray((0, 255, 0), dtype=np.uint8)
+    edit_window_pure_green_pixels = int(
+        np.count_nonzero(np.all(output_rgb[edit_mask] == pure_green, axis=1))
+    )
+    outside_edit_window_byte_preserved = bool(
+        np.array_equal(output_rgb[~edit_mask], original_rgb[~edit_mask])
+    )
+    if edit_window_pure_green_pixels != 0 or not outside_edit_window_byte_preserved:
+        raise RuntimeError(
+            "Grooming repair canvas violated its canonical texture-seed contract."
+        )
+
+    if noise_mask_target is None:
+        noise_mask_target = target.with_name(f"{target.stem}_noise_mask.png")
+    noise_mask_expansion = int(GROOMING_QWEN_FORELEG_REPAIR_NOISE_MASK_EXPANSION_PX)
+    noise_mask_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (noise_mask_expansion * 2 + 1, noise_mask_expansion * 2 + 1),
+    )
+    noise_mask_core = cv2.dilate(
+        edit_mask.astype(np.uint8),
+        noise_mask_kernel,
+        iterations=1,
+    ).astype(bool)
+    noise_mask_sigma = float(GROOMING_QWEN_FORELEG_REPAIR_NOISE_MASK_FEATHER_SIGMA_PX)
+    noise_mask = cv2.GaussianBlur(
+        noise_mask_core.astype(np.float32),
+        (0, 0),
+        sigmaX=noise_mask_sigma,
+        sigmaY=noise_mask_sigma,
+    ).clip(0.0, 1.0)
+    noise_mask[noise_mask < 0.01] = 0.0
+    noise_mask[noise_mask > 0.99] = 1.0
+    noise_mask_alpha = np.rint((1.0 - noise_mask) * 255.0).astype(np.uint8)
+    noise_mask_rgba = np.zeros((512, 512, 4), dtype=np.uint8)
+    noise_mask_rgba[:, :, 3] = noise_mask_alpha
+    noise_mask_nonzero_pixels = int(np.count_nonzero(noise_mask > 0.0))
+    noise_mask_full_strength_pixels = int(np.count_nonzero(noise_mask >= 1.0))
+    noise_mask_feather_pixels = int(
+        np.count_nonzero((noise_mask > 0.0) & (noise_mask < 1.0))
+    )
+    if noise_mask_full_strength_pixels < semantic_foreleg_pixels:
+        raise RuntimeError(
+            "Grooming repair noise mask lacks a full-denoise foreleg core."
+        )
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(output_rgb, mode="RGB").save(
+        target,
+        format="PNG",
+        optimize=True,
+    )
+    noise_mask_target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(noise_mask_rgba, mode="RGBA").save(
+        noise_mask_target,
+        format="PNG",
+        optimize=True,
+    )
+    return {
+        "policy": "canonical_planted_foreleg_band_limited_seed_v4",
+        "source_path": str(source),
+        "source_sha256": file_sha256(source),
+        "geometry_guide_path": str(geometry_guide),
+        "geometry_guide_sha256": file_sha256(geometry_guide),
+        "canonical_reference_path": str(canonical_reference),
+        "canonical_reference_sha256": file_sha256(canonical_reference),
+        "canonical_foreground_bbox": canonical_bbox,
+        "canonical_seed_source_bbox": seed_source_bbox,
+        "canonical_seed_rotation_degrees": 180,
+        "canonical_seed_lowpass_sigma_px": lowpass_sigma,
+        "canonical_seed_identity_median_blend": identity_median_blend,
+        "canonical_seed_high_frequency_texture_exposed": False,
+        "canonical_seed_raw_high_frequency_energy": round(
+            raw_seed_high_frequency_energy,
+            8,
+        ),
+        "canonical_seed_lowpass_high_frequency_energy": round(
+            lowpass_seed_high_frequency_energy,
+            8,
+        ),
+        "canonical_seed_direct_pixels": seed_direct_pixels,
+        "canonical_local_fallback_pixels": int(np.count_nonzero(canonical_local_mask)),
+        "canonical_median_fallback_pixels": int(np.count_nonzero(median_fallback_mask)),
+        "canonical_median_fallback_rgb": fallback_rgb.tolist(),
+        "semantic_foreleg_rgb": list(GROOMING_QWEN_GUIDE_FORELEG_RGB),
+        "semantic_foreleg_pixels": semantic_foreleg_pixels,
+        "mask_dilation_px": dilation,
+        "edit_mask_pixels": edit_pixels,
+        "edit_mask_bbox": edit_bbox,
+        "edit_mask_sha256": hashlib.sha256(edit_mask.tobytes()).hexdigest(),
+        "removed_foreground_pixels": removed_foreground_pixels,
+        "edit_window_pure_green_pixels": edit_window_pure_green_pixels,
+        "edit_window_identity_texture_seeded": True,
+        "outside_edit_window_byte_preserved": (outside_edit_window_byte_preserved),
+        "noise_mask_policy": "expanded_context_feathered_full_denoise_v2",
+        "noise_mask_core_expansion_px": noise_mask_expansion,
+        "noise_mask_core_pixels": int(np.count_nonzero(noise_mask_core)),
+        "noise_mask_feather_sigma_px": noise_mask_sigma,
+        "noise_mask_nonzero_pixels": noise_mask_nonzero_pixels,
+        "noise_mask_full_strength_pixels": noise_mask_full_strength_pixels,
+        "noise_mask_feather_pixels": noise_mask_feather_pixels,
+        "noise_mask_loadimage_contract": "mask_equals_one_minus_alpha",
+        "noise_mask_target_path": str(noise_mask_target),
+        "noise_mask_target_sha256": file_sha256(noise_mask_target),
+        "target_path": str(target),
+        "target_sha256": file_sha256(target),
+    }
+
+
+def prepare_canonical_grooming_foreleg_completion_canvas(
+    source: Path,
+    completion_mask: Path,
+    canonical_reference: Path,
+    target: Path,
+    *,
+    noise_mask_target: Path | None = None,
+    mask_dilation_px: int = GROOMING_QWEN_FORELEG_REPAIR_MASK_DILATION_PX,
+) -> dict[str, Any]:
+    """Keep an identity-safe base intact and expose only a local noise mask."""
+
+    if not 1 <= int(mask_dilation_px) <= 64:
+        raise ValueError("grooming completion mask dilation must be between 1 and 64")
+    with Image.open(source) as loaded:
+        if "A" not in loaded.getbands():
+            raise ValueError("grooming completion source has no alpha channel")
+        source_rgba_image = loaded.convert("RGBA")
+    with Image.open(completion_mask) as loaded:
+        completion_rgb_image = loaded.convert("RGB")
+    with Image.open(canonical_reference) as loaded:
+        if "A" not in loaded.getbands():
+            raise ValueError("grooming completion canonical reference has no alpha")
+        canonical_rgba_image = loaded.convert("RGBA")
+    if source_rgba_image.size != (512, 512):
+        raise ValueError("grooming completion source must be normalized to 512x512")
+    if completion_rgb_image.size != source_rgba_image.size:
+        raise ValueError("grooming completion mask size does not match source")
+    if canonical_rgba_image.size != source_rgba_image.size:
+        raise ValueError("grooming completion canonical reference size does not match")
+
+    source_rgba = np.asarray(source_rgba_image, dtype=np.uint8)
+    completion_rgb = np.asarray(completion_rgb_image, dtype=np.uint8)
+    semantic_foreleg = np.all(
+        completion_rgb == np.asarray(GROOMING_QWEN_GUIDE_FORELEG_RGB, dtype=np.uint8),
+        axis=2,
+    )
+    semantic_foreleg_pixels = int(np.count_nonzero(semantic_foreleg))
+    if not 650 <= semantic_foreleg_pixels <= 6000:
+        raise RuntimeError(
+            "Grooming completion mask lacks its bounded foreleg semantic."
+        )
+    completion_background = np.all(
+        completion_rgb == np.asarray((0, 255, 0), dtype=np.uint8),
+        axis=2,
+    )
+    completion_foreground = ~completion_background
+    allowed_foreground = (
+        np.all(
+            completion_rgb
+            == np.asarray(GROOMING_QWEN_GUIDE_FOREGROUND_RGB, dtype=np.uint8),
+            axis=2,
+        )
+        | semantic_foreleg
+    )
+    if not np.array_equal(completion_foreground, allowed_foreground):
+        raise RuntimeError(
+            "Grooming completion mask contains an unsupported semantic color."
+        )
+
+    dilation = int(mask_dilation_px)
+    edit_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (dilation * 2 + 1, dilation * 2 + 1),
+    )
+    edit_mask = cv2.dilate(
+        semantic_foreleg.astype(np.uint8),
+        edit_kernel,
+        iterations=1,
+    ).astype(bool)
+    edit_pixels = int(np.count_nonzero(edit_mask))
+    source_foreground = source_rgba[:, :, 3] >= 64
+    intersected_source_pixels = int(np.count_nonzero(source_foreground & edit_mask))
+    if intersected_source_pixels < 256:
+        raise RuntimeError(
+            "Grooming completion edit window did not intersect enough candidate pixels."
+        )
+    ys, xs = np.nonzero(edit_mask)
+    edit_bbox = [
+        int(xs.min()),
+        int(ys.min()),
+        int(xs.max()) + 1,
+        int(ys.max()) + 1,
+    ]
+
+    original_composite = Image.new("RGBA", (512, 512), (0, 255, 0, 255))
+    original_composite.alpha_composite(source_rgba_image)
+    output_rgb = np.asarray(
+        original_composite.convert("RGB"),
+        dtype=np.uint8,
+    ).copy()
+
+    if noise_mask_target is None:
+        noise_mask_target = target.with_name(f"{target.stem}_noise_mask.png")
+    noise_mask_expansion = int(GROOMING_QWEN_FORELEG_REPAIR_NOISE_MASK_EXPANSION_PX)
+    noise_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (noise_mask_expansion * 2 + 1, noise_mask_expansion * 2 + 1),
+    )
+    noise_mask_core = cv2.dilate(
+        edit_mask.astype(np.uint8),
+        noise_kernel,
+        iterations=1,
+    ).astype(bool)
+    noise_mask_sigma = float(GROOMING_QWEN_FORELEG_REPAIR_NOISE_MASK_FEATHER_SIGMA_PX)
+    noise_mask = cv2.GaussianBlur(
+        noise_mask_core.astype(np.float32),
+        (0, 0),
+        sigmaX=noise_mask_sigma,
+        sigmaY=noise_mask_sigma,
+    ).clip(0.0, 1.0)
+    noise_mask[noise_mask < 0.01] = 0.0
+    noise_mask[noise_mask > 0.99] = 1.0
+    noise_mask_alpha = np.rint((1.0 - noise_mask) * 255.0).astype(np.uint8)
+    noise_mask_rgba = np.zeros((512, 512, 4), dtype=np.uint8)
+    noise_mask_rgba[:, :, 3] = noise_mask_alpha
+    noise_mask_nonzero_pixels = int(np.count_nonzero(noise_mask > 0.0))
+    noise_mask_full_strength_pixels = int(np.count_nonzero(noise_mask >= 1.0))
+    noise_mask_feather_pixels = int(
+        np.count_nonzero((noise_mask > 0.0) & (noise_mask < 1.0))
+    )
+    if noise_mask_full_strength_pixels < semantic_foreleg_pixels:
+        raise RuntimeError(
+            "Grooming completion noise mask lacks a full-denoise foreleg core."
+        )
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(output_rgb, mode="RGB").save(
+        target,
+        format="PNG",
+        optimize=True,
+    )
+    noise_mask_target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(noise_mask_rgba, mode="RGBA").save(
+        noise_mask_target,
+        format="PNG",
+        optimize=True,
+    )
+    with Image.open(target) as loaded:
+        persisted_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    source_composite_preserved = bool(np.array_equal(persisted_rgb, output_rgb))
+    if not source_composite_preserved:
+        raise RuntimeError(
+            "Grooming completion canvas changed the identity-safe source before sampling."
+        )
+    return {
+        "policy": GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY,
+        "source_path": str(source),
+        "source_sha256": file_sha256(source),
+        "completion_mask_path": str(completion_mask),
+        "completion_mask_sha256": file_sha256(completion_mask),
+        "canonical_reference_path": str(canonical_reference),
+        "canonical_reference_sha256": file_sha256(canonical_reference),
+        "semantic_foreleg_rgb": list(GROOMING_QWEN_GUIDE_FORELEG_RGB),
+        "semantic_foreleg_pixels": semantic_foreleg_pixels,
+        "semantic_pixels_exposed_to_qwen": False,
+        "mask_dilation_px": dilation,
+        "edit_mask_pixels": edit_pixels,
+        "edit_mask_bbox": edit_bbox,
+        "edit_mask_sha256": hashlib.sha256(edit_mask.tobytes()).hexdigest(),
+        "intersected_source_foreground_pixels": intersected_source_pixels,
+        "identity_or_geometry_seed_inserted": False,
+        "source_composite_preserved_before_masked_sampling": (
+            source_composite_preserved
+        ),
+        "noise_mask_policy": "expanded_context_feathered_full_denoise_v2",
+        "noise_mask_core_expansion_px": noise_mask_expansion,
+        "noise_mask_core_pixels": int(np.count_nonzero(noise_mask_core)),
+        "noise_mask_feather_sigma_px": noise_mask_sigma,
+        "noise_mask_nonzero_pixels": noise_mask_nonzero_pixels,
+        "noise_mask_full_strength_pixels": noise_mask_full_strength_pixels,
+        "noise_mask_feather_pixels": noise_mask_feather_pixels,
+        "noise_mask_loadimage_contract": "mask_equals_one_minus_alpha",
+        "noise_mask_target_path": str(noise_mask_target),
+        "noise_mask_target_sha256": file_sha256(noise_mask_target),
+        "target_path": str(target),
+        "target_sha256": file_sha256(target),
+    }
+
+
+def prepare_canonical_action_identity_refine_canvas(
+    source: Path,
+    target: Path,
+    *,
+    action: str,
+    policy: str,
+) -> dict[str, Any]:
+    """Composite a normalized action cutout unchanged onto pure green."""
+
+    action_name = action_key(action)
+    if action_name not in {"eating", "grooming"}:
+        raise ValueError("canonical identity refine action must be eating or grooming")
+    if not str(policy).strip():
+        raise ValueError("canonical identity refine policy is required")
+
+    with Image.open(source) as loaded:
+        if "A" not in loaded.getbands():
+            raise ValueError(
+                f"{action_name} identity refine source has no alpha channel"
+            )
+        source_rgba_image = loaded.convert("RGBA")
+    if source_rgba_image.size != (512, 512):
+        raise ValueError(f"{action_name} identity refine source must be 512x512")
+    source_rgba = np.asarray(source_rgba_image, dtype=np.uint8)
+    source_foreground = source_rgba[:, :, 3] >= 64
+    foreground_pixels = int(np.count_nonzero(source_foreground))
+    if not 4096 <= foreground_pixels <= int(512 * 512 * 0.90):
+        raise RuntimeError(
+            f"{action_name} identity refine source has an invalid foreground mask."
+        )
+    ys, xs = np.nonzero(source_foreground)
+    foreground_bbox = [
+        int(xs.min()),
+        int(ys.min()),
+        int(xs.max()) + 1,
+        int(ys.max()) + 1,
+    ]
+    composite = Image.new("RGBA", (512, 512), (0, 255, 0, 255))
+    composite.alpha_composite(source_rgba_image)
+    output_rgb = np.asarray(composite.convert("RGB"), dtype=np.uint8)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(output_rgb, mode="RGB").save(
+        target,
+        format="PNG",
+        optimize=True,
+    )
+    with Image.open(target) as loaded:
+        persisted_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    if not np.array_equal(persisted_rgb, output_rgb):
+        raise RuntimeError(
+            f"{action_name} identity refine canvas changed during persistence."
+        )
+    transparent_background = source_rgba[:, :, 3] == 0
+    transparent_background_is_green = bool(
+        np.all(
+            persisted_rgb[transparent_background]
+            == np.asarray((0, 255, 0), dtype=np.uint8)
+        )
+    )
+    if not transparent_background_is_green:
+        raise RuntimeError(
+            f"{action_name} identity refine canvas did not preserve pure-green background."
+        )
+    return {
+        "policy": str(policy),
+        "action": action_name,
+        "source_path": str(source),
+        "source_sha256": file_sha256(source),
+        "source_foreground_pixels": foreground_pixels,
+        "source_foreground_bbox": foreground_bbox,
+        "source_rgba_pixels_modified_before_composite": False,
+        "transparent_background_composited_to_pure_green": True,
+        "sampler_canvas_scope": "full_frame_identity_repaint_pose_preserved",
+        "target_path": str(target),
+        "target_sha256": file_sha256(target),
+    }
+
+
+def prepare_canonical_grooming_full_pose_refine_canvas(
+    source: Path,
+    target: Path,
+) -> dict[str, Any]:
+    """Prepare the grooming pose-bearing sampler for canonical repaint."""
+
+    return prepare_canonical_action_identity_refine_canvas(
+        source,
+        target,
+        action="grooming",
+        policy=GROOMING_CANONICAL_FULL_POSE_REFINE_POLICY,
+    )
+
+
+def prepare_canonical_grooming_pose_transfer_seed(
+    action_reference: Path,
+    canonical_reference: Path,
+    target: Path,
+) -> dict[str, Any]:
+    """Build a pose-clear, appearance-neutral sampler for grooming transfer.
+
+    The frozen action reference has the unambiguous paw-to-mouth anatomy that
+    was lost by the one-tone silhouette guide.  Its RGB, chroma, markings and
+    high-frequency texture must not reach Qwen, however.  Preserve only its
+    alpha geometry and a heavily low-passed luminance ordering, remapped into
+    the canonical subject's coarse LAB range.  The resulting Image 1 is a
+    high-key anatomy maquette; Image 2/3 remain the identity authorities.
+    """
+
+    with Image.open(action_reference) as loaded:
+        if "A" not in loaded.getbands():
+            raise ValueError("grooming action reference requires alpha")
+        action_image = loaded.convert("RGBA")
+    with Image.open(canonical_reference) as loaded:
+        canonical_has_alpha = "A" in loaded.getbands()
+        canonical_image = loaded.convert("RGBA")
+    if action_image.size != (512, 512):
+        raise ValueError("grooming action reference must be 512x512")
+    if canonical_image.size != action_image.size:
+        raise ValueError("grooming canonical reference must be 512x512")
+
+    action_rgba = np.asarray(action_image, dtype=np.uint8)
+    canonical_rgba = np.asarray(canonical_image, dtype=np.uint8)
+    action_mask_raw = action_rgba[:, :, 3] >= 64
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        action_mask_raw.astype(np.uint8),
+        connectivity=8,
+    )
+    if component_count <= 1:
+        raise RuntimeError("grooming action reference foreground is empty")
+    action_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    action_mask = labels == action_label
+    action_foreground_pixels = int(np.count_nonzero(action_mask))
+    if action_foreground_pixels < 4096:
+        raise RuntimeError("grooming action reference foreground is too small")
+
+    if canonical_has_alpha and np.any(canonical_rgba[:, :, 3] < 250):
+        canonical_mask_raw = canonical_rgba[:, :, 3] >= 64
+        canonical_mask_method = "alpha"
+    else:
+        canonical_rgb = canonical_rgba[:, :, :3]
+        red = canonical_rgb[:, :, 0].astype(np.int16)
+        green = canonical_rgb[:, :, 1].astype(np.int16)
+        blue = canonical_rgb[:, :, 2].astype(np.int16)
+        green_candidate = (
+            (green >= 150)
+            & ((green - red) >= 65)
+            & ((green - blue) >= 65)
+        )
+        green_count, green_labels = cv2.connectedComponents(
+            green_candidate.astype(np.uint8),
+            connectivity=8,
+        )
+        border_labels = np.unique(
+            np.concatenate(
+                [
+                    green_labels[0, :],
+                    green_labels[-1, :],
+                    green_labels[:, 0],
+                    green_labels[:, -1],
+                ]
+            )
+        )
+        background = np.isin(
+            green_labels,
+            border_labels[(border_labels > 0) & (border_labels < green_count)],
+        )
+        canonical_mask_raw = ~background
+        canonical_mask_method = "border_connected_green_screen"
+    canonical_count, canonical_labels, canonical_stats, _ = (
+        cv2.connectedComponentsWithStats(
+            canonical_mask_raw.astype(np.uint8),
+            connectivity=8,
+        )
+    )
+    if canonical_count <= 1:
+        raise RuntimeError("grooming canonical reference foreground is empty")
+    canonical_label = 1 + int(
+        np.argmax(canonical_stats[1:, cv2.CC_STAT_AREA])
+    )
+    canonical_mask = canonical_labels == canonical_label
+    canonical_foreground_pixels = int(np.count_nonzero(canonical_mask))
+    if canonical_foreground_pixels < 4096:
+        raise RuntimeError("grooming canonical reference foreground is too small")
+
+    action_lab = cv2.cvtColor(action_rgba[:, :, :3], cv2.COLOR_RGB2LAB)
+    canonical_lab = cv2.cvtColor(
+        canonical_rgba[:, :, :3],
+        cv2.COLOR_RGB2LAB,
+    )
+    action_alpha = action_mask.astype(np.float32)
+    sigma = float(GROOMING_CANONICAL_POSE_TRANSFER_LOWPASS_SIGMA_PX)
+    blurred_alpha = cv2.GaussianBlur(
+        action_alpha,
+        (0, 0),
+        sigmaX=sigma,
+        sigmaY=sigma,
+    )
+    blurred_luma_premultiplied = cv2.GaussianBlur(
+        action_lab[:, :, 0].astype(np.float32) * action_alpha,
+        (0, 0),
+        sigmaX=sigma,
+        sigmaY=sigma,
+    )
+    low_frequency_luma = np.divide(
+        blurred_luma_premultiplied,
+        np.maximum(blurred_alpha, 1e-3),
+    )
+    source_luma = low_frequency_luma[action_mask]
+    source_luma_low, source_luma_high = np.percentile(source_luma, [5.0, 95.0])
+    source_luma_span = float(source_luma_high - source_luma_low)
+    if source_luma_span < 8.0:
+        raise RuntimeError("grooming action anatomy lacks usable luminance structure")
+
+    canonical_values = canonical_lab[canonical_mask]
+    canonical_luma = canonical_values[:, 0].astype(np.float32)
+    canonical_luma_median = float(np.median(canonical_luma))
+    canonical_luma_low = float(
+        np.quantile(
+            canonical_luma,
+            GROOMING_CANONICAL_POSE_TRANSFER_LUMA_LOW_QUANTILE,
+        )
+    )
+    canonical_luma_high = float(
+        np.quantile(
+            canonical_luma,
+            GROOMING_CANONICAL_POSE_TRANSFER_LUMA_HIGH_QUANTILE,
+        )
+    )
+    target_luma_low = max(
+        8.0,
+        min(
+            canonical_luma_low,
+            canonical_luma_median
+            - GROOMING_CANONICAL_POSE_TRANSFER_LUMA_LOW_OFFSET,
+        ),
+    )
+    target_luma_high = min(
+        247.0,
+        max(
+            canonical_luma_high,
+            canonical_luma_median
+            + GROOMING_CANONICAL_POSE_TRANSFER_LUMA_HIGH_OFFSET,
+        ),
+    )
+    if target_luma_high - target_luma_low < 24.0:
+        midpoint = (target_luma_low + target_luma_high) / 2.0
+        target_luma_low = max(8.0, midpoint - 12.0)
+        target_luma_high = min(247.0, midpoint + 12.0)
+    normalized_luma = np.clip(
+        (low_frequency_luma - source_luma_low) / source_luma_span,
+        0.0,
+        1.0,
+    )
+    remapped_luma = np.rint(
+        target_luma_low
+        + normalized_luma * (target_luma_high - target_luma_low)
+    ).astype(np.uint8)
+    canonical_ab = np.rint(
+        np.median(canonical_values[:, 1:3].astype(np.float32), axis=0)
+    ).astype(np.uint8)
+    seed_lab = np.empty((512, 512, 3), dtype=np.uint8)
+    seed_lab[:, :, 0] = remapped_luma
+    seed_lab[:, :, 1] = canonical_ab[0]
+    seed_lab[:, :, 2] = canonical_ab[1]
+    seed_rgb = cv2.cvtColor(seed_lab, cv2.COLOR_LAB2RGB)
+    output_rgb = np.empty((512, 512, 3), dtype=np.uint8)
+    output_rgb[:, :] = (0, 255, 0)
+    output_rgb[action_mask] = seed_rgb[action_mask]
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(output_rgb, mode="RGB").save(
+        target,
+        format="PNG",
+        optimize=True,
+    )
+    with Image.open(target) as loaded:
+        persisted = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    if not np.all(
+        persisted[~action_mask]
+        == np.asarray((0, 255, 0), dtype=np.uint8)
+    ):
+        raise RuntimeError("grooming pose-transfer seed background changed")
+    if not np.array_equal(persisted[action_mask], output_rgb[action_mask]):
+        raise RuntimeError("grooming pose-transfer seed changed during persistence")
+
+    ys, xs = np.nonzero(action_mask)
+    source_gray = action_lab[:, :, 0].astype(np.float32)
+    seed_gray = seed_lab[:, :, 0].astype(np.float32)
+    source_high_frequency_energy = float(
+        np.mean(np.abs(cv2.Laplacian(source_gray, cv2.CV_32F))[action_mask])
+    )
+    seed_high_frequency_energy = float(
+        np.mean(np.abs(cv2.Laplacian(seed_gray, cv2.CV_32F))[action_mask])
+    )
+    return {
+        "policy": GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY,
+        "action_reference_path": str(action_reference),
+        "action_reference_sha256": file_sha256(action_reference),
+        "canonical_reference_path": str(canonical_reference),
+        "canonical_reference_sha256": file_sha256(canonical_reference),
+        "canonical_mask_method": canonical_mask_method,
+        "action_foreground_pixels": action_foreground_pixels,
+        "action_foreground_bbox": [
+            int(xs.min()),
+            int(ys.min()),
+            int(xs.max()) + 1,
+            int(ys.max()) + 1,
+        ],
+        "canonical_foreground_pixels": canonical_foreground_pixels,
+        "lowpass_sigma_px": sigma,
+        "source_luma_p05": round(float(source_luma_low), 6),
+        "source_luma_p95": round(float(source_luma_high), 6),
+        "target_luma_low": round(float(target_luma_low), 6),
+        "target_luma_high": round(float(target_luma_high), 6),
+        "canonical_luma_median": round(canonical_luma_median, 6),
+        "canonical_ab_median": canonical_ab.tolist(),
+        "source_high_frequency_energy": round(source_high_frequency_energy, 8),
+        "seed_high_frequency_energy": round(seed_high_frequency_energy, 8),
+        "source_alpha_geometry_preserved": True,
+        "source_rgb_preserved": False,
+        "source_chroma_preserved": False,
+        "source_raw_luma_values_preserved": False,
+        "source_high_frequency_texture_exposed": False,
+        "canonical_spatial_pixels_copied": False,
+        "canonical_palette_conditioning_only": True,
+        "sampler_role": "high_key_lowpass_action_anatomy_only",
+        "target_path": str(target),
+        "target_sha256": file_sha256(target),
+    }
+
+
+def prepare_canonical_grooming_seed_bound_matte(
+    source: Path,
+    semantic_cutout: Path,
+    pose_transfer_seed: Path,
+    target: Path,
+    *,
+    green_target: Path | None = None,
+) -> dict[str, Any]:
+    """Recover a complete Qwen grooming matte from two independent signals.
+
+    The semantic matte identifies pet pixels in the generated image. The
+    deterministic pose-transfer seed contributes alpha geometry only where
+    rembg omitted light fur. No seed RGB, luma, chroma, or texture is copied.
+    Strict overlap bounds make a shifted subject, background object, or an
+    unrelated semantic component fail closed before any pose gate can run.
+    """
+
+    source_digest = file_sha256(source)
+    semantic_digest = file_sha256(semantic_cutout)
+    seed_digest = file_sha256(pose_transfer_seed)
+    with Image.open(source) as loaded:
+        source_mode = loaded.mode
+        source_image = loaded.convert("RGB")
+    with Image.open(semantic_cutout) as loaded:
+        semantic_has_alpha = "A" in loaded.getbands()
+        semantic_image = loaded.convert("RGBA")
+    with Image.open(pose_transfer_seed) as loaded:
+        seed_image = loaded.convert("RGB")
+
+    if not semantic_has_alpha:
+        raise ValueError("grooming_seed_bound_semantic_cutout_has_no_alpha")
+    if semantic_image.size != source_image.size:
+        raise ValueError("grooming_seed_bound_source_semantic_size_mismatch")
+    if source_image.width != source_image.height or not 512 <= source_image.width <= 2048:
+        raise ValueError("grooming_seed_bound_source_canvas_is_not_supported_square")
+    if seed_image.size != (512, 512):
+        raise ValueError("grooming_seed_bound_pose_transfer_seed_must_be_512_square")
+
+    source_rgb = np.asarray(source_image, dtype=np.uint8)
+    semantic_rgba = np.asarray(semantic_image, dtype=np.uint8)
+    semantic_alpha = semantic_rgba[:, :, 3]
+    semantic_mask = semantic_alpha >= FurSurfaceThresholds().alpha_threshold
+    seed_rgb = np.asarray(seed_image, dtype=np.uint8)
+    pure_green = np.asarray((0, 255, 0), dtype=np.uint8)
+    seed_background = np.all(seed_rgb == pure_green, axis=2)
+    seed_mask_raw = ~seed_background
+    seed_corners_are_background = bool(
+        not seed_mask_raw[0, 0]
+        and not seed_mask_raw[0, -1]
+        and not seed_mask_raw[-1, 0]
+        and not seed_mask_raw[-1, -1]
+    )
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        seed_mask_raw.astype(np.uint8),
+        connectivity=8,
+    )
+    if component_count <= 1:
+        raise ValueError("grooming_seed_bound_pose_transfer_seed_foreground_is_empty")
+    seed_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    seed_mask = labels == seed_label
+    seed_raw_pixels = int(np.count_nonzero(seed_mask_raw))
+    seed_component_pixels = int(np.count_nonzero(seed_mask))
+    discarded_seed_fraction = float(
+        max(0, seed_raw_pixels - seed_component_pixels) / max(1, seed_raw_pixels)
+    )
+    resized_seed_mask = np.asarray(
+        Image.fromarray(seed_mask.astype(np.uint8) * 255, mode="L").resize(
+            source_image.size,
+            Image.Resampling.NEAREST,
+        ),
+        dtype=np.uint8,
+    ) >= 128
+
+    semantic_pixels = int(np.count_nonzero(semantic_mask))
+    seed_pixels = int(np.count_nonzero(resized_seed_mask))
+    intersection = semantic_mask & resized_seed_mask
+    union_mask = semantic_mask | resized_seed_mask
+    added_seed_mask = resized_seed_mask & ~semantic_mask
+    intersection_pixels = int(np.count_nonzero(intersection))
+    union_pixels = int(np.count_nonzero(union_mask))
+    added_seed_pixels = int(np.count_nonzero(added_seed_mask))
+    pixel_count = int(semantic_mask.size)
+    intersection_over_seed = float(intersection_pixels / max(1, seed_pixels))
+    intersection_over_semantic = float(
+        intersection_pixels / max(1, semantic_pixels)
+    )
+    semantic_to_seed = float(semantic_pixels / max(1, seed_pixels))
+    added_over_seed = float(added_seed_pixels / max(1, seed_pixels))
+    checks = {
+        "semantic_foreground_usable": bool(0.02 <= semantic_pixels / pixel_count <= 0.70),
+        "seed_foreground_usable": bool(0.08 <= seed_pixels / pixel_count <= 0.70),
+        "union_foreground_usable": bool(0.08 <= union_pixels / pixel_count <= 0.75),
+        "seed_corners_are_exact_green_background": seed_corners_are_background,
+        "seed_has_one_dominant_component": bool(discarded_seed_fraction <= 0.005),
+        "intersection_over_seed_passed": bool(
+            intersection_over_seed
+            >= GROOMING_CANONICAL_SEED_BOUND_INTERSECTION_OVER_SEED_MIN
+        ),
+        "intersection_over_semantic_passed": bool(
+            intersection_over_semantic
+            >= GROOMING_CANONICAL_SEED_BOUND_INTERSECTION_OVER_SEMANTIC_MIN
+        ),
+        "semantic_to_seed_area_passed": bool(
+            GROOMING_CANONICAL_SEED_BOUND_SEMANTIC_TO_SEED_MIN
+            <= semantic_to_seed
+            <= GROOMING_CANONICAL_SEED_BOUND_SEMANTIC_TO_SEED_MAX
+        ),
+        "seed_added_area_bounded": bool(
+            added_over_seed <= GROOMING_CANONICAL_SEED_BOUND_ADDED_OVER_SEED_MAX
+        ),
+    }
+    failed_checks = [name for name, passed in checks.items() if not passed]
+    if failed_checks:
+        raise ValueError(
+            "grooming_seed_bound_matte_alignment_failed: " + ", ".join(failed_checks)
+        )
+
+    union_alpha = np.maximum(
+        semantic_alpha,
+        resized_seed_mask.astype(np.uint8) * 255,
+    )
+    output_rgba = np.empty((*source_rgb.shape[:2], 4), dtype=np.uint8)
+    output_rgba[:, :, :3] = source_rgb
+    output_rgba[:, :, 3] = union_alpha
+    output_rgba[union_alpha == 0, :3] = 0
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(output_rgba, mode="RGBA").save(
+        target,
+        format="PNG",
+        optimize=True,
+    )
+    with Image.open(target) as loaded:
+        persisted = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+    if not np.array_equal(persisted, output_rgba):
+        raise RuntimeError("grooming_seed_bound_matte_changed_during_persistence")
+    if not np.array_equal(
+        persisted[:, :, :3][union_alpha > 0],
+        source_rgb[union_alpha > 0],
+    ):
+        raise RuntimeError("grooming_seed_bound_matte_did_not_preserve_source_rgb")
+
+    if green_target is not None:
+        alpha_float = union_alpha[:, :, None].astype(np.float32) / 255.0
+        green_rgb = np.empty_like(source_rgb)
+        green_rgb[:, :] = pure_green
+        green_composite = source_rgb.astype(np.float32) * alpha_float + green_rgb.astype(
+            np.float32
+        ) * (1.0 - alpha_float)
+        green_target.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(
+            np.clip(np.rint(green_composite), 0, 255).astype(np.uint8),
+            mode="RGB",
+        ).save(green_target, format="PNG", optimize=True)
+
+    def mask_bbox(mask: np.ndarray) -> list[int]:
+        ys, xs = np.nonzero(mask)
+        return [
+            int(xs.min()),
+            int(ys.min()),
+            int(xs.max()) + 1,
+            int(ys.max()) + 1,
+        ]
+
+    return {
+        "policy": GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY,
+        "acceptable": True,
+        "fail_closed": True,
+        "source_path": str(source),
+        "source_sha256": source_digest,
+        "source_mode": source_mode,
+        "source_size": list(source_image.size),
+        "semantic_cutout_path": str(semantic_cutout),
+        "semantic_cutout_sha256": semantic_digest,
+        "pose_transfer_seed_path": str(pose_transfer_seed),
+        "pose_transfer_seed_sha256": seed_digest,
+        "pose_transfer_seed_size": list(seed_image.size),
+        "target_path": str(target),
+        "target_sha256": file_sha256(target),
+        "green_target_path": str(green_target) if green_target is not None else None,
+        "green_target_sha256": (
+            file_sha256(green_target)
+            if green_target is not None and green_target.is_file()
+            else None
+        ),
+        "alpha_threshold": FurSurfaceThresholds().alpha_threshold,
+        "semantic_foreground_pixels": semantic_pixels,
+        "semantic_foreground_fraction": round(semantic_pixels / pixel_count, 6),
+        "semantic_foreground_bbox": mask_bbox(semantic_mask),
+        "seed_foreground_pixels": seed_pixels,
+        "seed_foreground_fraction": round(seed_pixels / pixel_count, 6),
+        "seed_foreground_bbox": mask_bbox(resized_seed_mask),
+        "seed_discarded_component_fraction": round(discarded_seed_fraction, 8),
+        "intersection_pixels": intersection_pixels,
+        "intersection_over_seed": round(intersection_over_seed, 6),
+        "intersection_over_semantic": round(intersection_over_semantic, 6),
+        "semantic_to_seed_area_ratio": round(semantic_to_seed, 6),
+        "seed_added_pixels": added_seed_pixels,
+        "seed_added_over_seed": round(added_over_seed, 6),
+        "union_foreground_pixels": union_pixels,
+        "union_foreground_fraction": round(union_pixels / pixel_count, 6),
+        "union_foreground_bbox": mask_bbox(union_mask),
+        "semantic_alpha_sha256": hashlib.sha256(semantic_alpha.tobytes()).hexdigest(),
+        "seed_alpha_sha256": hashlib.sha256(
+            (resized_seed_mask.astype(np.uint8) * 255).tobytes()
+        ).hexdigest(),
+        "union_alpha_sha256": hashlib.sha256(union_alpha.tobytes()).hexdigest(),
+        "checks": checks,
+        "source_rgb_preserved_where_alpha_nonzero": True,
+        "transparent_background_rgb_zeroed": True,
+        "semantic_rgb_copied": False,
+        "pose_transfer_seed_rgb_copied": False,
+        "pose_transfer_seed_luma_or_chroma_copied": False,
+        "pose_transfer_seed_used_for_alpha_geometry_only": True,
+    }
+
+
+def prepare_canonical_eating_identity_refine_canvas(
+    source: Path,
+    target: Path,
+) -> dict[str, Any]:
+    """Prepare an action-safe eating sampler for canonical repaint."""
+
+    return prepare_canonical_action_identity_refine_canvas(
+        source,
+        target,
+        action="eating",
+        policy=EATING_CANONICAL_IDENTITY_REFINE_POLICY,
+    )
+
+
+def prepare_grooming_foreleg_repair_anatomy_guide(
+    source: Path,
+    target: Path,
+) -> dict[str, Any]:
+    """Freeze the public one-gray open-channel guide as repair Image 3."""
+
+    with Image.open(source) as loaded:
+        image = loaded.convert("RGB")
+    if image.size != (512, 512):
+        raise ValueError("grooming repair anatomy guide must be 512x512")
+    rgb = np.asarray(image, dtype=np.uint8)
+    background = np.all(
+        rgb == np.asarray((0, 255, 0), dtype=np.uint8),
+        axis=2,
+    )
+    foreground = np.all(
+        rgb
+        == np.asarray(GROOMING_QWEN_GUIDE_FOREGROUND_RGB, dtype=np.uint8),
+        axis=2,
+    )
+    if not np.all(background | foreground):
+        # Compatibility for queued legacy geometry-first jobs: their repair
+        # Image 3 remains the already-neutral private CV map. New canonical
+        # jobs never take this branch.
+        red = rgb[:, :, 0].astype(np.int16)
+        green = rgb[:, :, 1].astype(np.int16)
+        blue = rgb[:, :, 2].astype(np.int16)
+        legacy_background = (
+            (green > 80)
+            & ((green - np.maximum(red, blue)) > 35)
+            & (green > red * 1.18)
+            & (green > blue * 1.18)
+        )
+        legacy_foreground = ~legacy_background
+        legacy_foreground_pixels = int(np.count_nonzero(legacy_foreground))
+        channel_spread = rgb.max(axis=2).astype(np.int16) - rgb.min(axis=2).astype(
+            np.int16
+        )
+        achromatic_fraction = float(
+            np.count_nonzero(legacy_foreground & (channel_spread <= 3))
+        ) / float(max(1, legacy_foreground_pixels))
+        if (
+            not 4096
+            <= legacy_foreground_pixels
+            <= int(512 * 512 * 0.90)
+            or achromatic_fraction < 0.995
+        ):
+            raise RuntimeError(
+                "Grooming repair anatomy guide contains appearance-bearing pixels."
+            )
+        source_sha256 = file_sha256(source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        target_sha256 = file_sha256(target)
+        if target_sha256 != source_sha256:
+            raise RuntimeError(
+                "Grooming repair anatomy guide digest changed during copy."
+            )
+        return {
+            "policy": GROOMING_QWEN_FORELEG_REPAIR_ANATOMY_POLICY,
+            "source_path": str(source),
+            "source_sha256": source_sha256,
+            "target_path": str(target),
+            "target_sha256": target_sha256,
+            "foreground_pixels": legacy_foreground_pixels,
+            "foreground_achromatic_fraction": round(achromatic_fraction, 6),
+            "internal_open_channel_pixels": None,
+            "unique_foreground_rgb_count": int(
+                np.unique(rgb[legacy_foreground], axis=0).shape[0]
+            ),
+            "original_profile_rgb_preserved": False,
+            "original_profile_luma_values_preserved": False,
+            "legacy_private_cv_compatibility": True,
+            "role": "image3_pose_anatomy_only",
+        }
+    foreground_pixels = int(np.count_nonzero(foreground))
+    if not 4096 <= foreground_pixels <= int(512 * 512 * 0.90):
+        raise RuntimeError(
+            "Grooming repair anatomy guide has an invalid foreground mask."
+        )
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        background.astype(np.uint8),
+        connectivity=8,
+    )
+    border_labels = set(
+        np.unique(
+            np.concatenate(
+                [labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]]
+            )
+        ).tolist()
+    )
+    internal_labels = [
+        label
+        for label in range(1, component_count)
+        if label not in border_labels
+    ]
+    if len(internal_labels) != 1:
+        raise RuntimeError(
+            "Grooming repair anatomy guide lacks one open-curve interior channel."
+        )
+    internal_channel_pixels = int(stats[internal_labels[0], cv2.CC_STAT_AREA])
+    if not 300 <= internal_channel_pixels <= 1800:
+        raise RuntimeError(
+            "Grooming repair anatomy guide interior channel has invalid area."
+        )
+    source_sha256 = file_sha256(source)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    target_sha256 = file_sha256(target)
+    if target_sha256 != source_sha256:
+        raise RuntimeError("Grooming repair anatomy guide digest changed during copy.")
+    return {
+        "policy": GROOMING_QWEN_FORELEG_REPAIR_ANATOMY_POLICY,
+        "source_path": str(source),
+        "source_sha256": source_sha256,
+        "target_path": str(target),
+        "target_sha256": target_sha256,
+        "foreground_pixels": foreground_pixels,
+        "foreground_achromatic_fraction": 1.0,
+        "internal_open_channel_pixels": internal_channel_pixels,
+        "unique_foreground_rgb_count": 1,
+        "original_profile_rgb_preserved": False,
+        "original_profile_luma_values_preserved": False,
+        "role": "image3_single_tone_open_channel_action_geometry_only",
+    }
+
+
+def prepare_grooming_full_pose_recovery_guide(
+    public_geometry_source: Path,
+    private_geometry_source: Path,
+    semantic_foreleg_source: Path,
+    canonical_reference: Path,
+    target: Path,
+) -> dict[str, Any]:
+    """Freeze the public one-gray open-channel guide as rescue Image 1.
+
+    The earlier rescue exposed compressed private luma and Qwen interpreted its
+    low-frequency regions as a tuxedo coat while still omitting the raised paw.
+    Rescue now receives exactly the same appearance-free public geometry used
+    by direct attempts: one synthetic gray plus a source-anchor-derived green
+    open curve.  The private CV guide and legacy foreleg semantic are validated
+    and digest-bound for auditing only; neither contributes a visible pixel.
+    """
+
+    def load_rgb(path: Path, label: str) -> np.ndarray:
+        if not path.is_file():
+            raise FileNotFoundError(f"{label} is missing: {path}")
+        with Image.open(path) as loaded:
+            image = loaded.convert("RGB")
+        if image.size != (512, 512):
+            raise ValueError(f"{label} must be 512x512")
+        return np.asarray(image, dtype=np.uint8)
+
+    def green_background(rgb: np.ndarray) -> np.ndarray:
+        red = rgb[:, :, 0].astype(np.int16)
+        green = rgb[:, :, 1].astype(np.int16)
+        blue = rgb[:, :, 2].astype(np.int16)
+        return (
+            (green > 80)
+            & ((green - np.maximum(red, blue)) > 35)
+            & (green > red * 1.18)
+            & (green > blue * 1.18)
+        )
+
+    public_rgb = load_rgb(public_geometry_source, "public grooming geometry")
+    private_rgb = load_rgb(private_geometry_source, "private grooming geometry")
+    semantic_rgb = load_rgb(semantic_foreleg_source, "grooming foreleg semantic")
+    canonical_rgb = load_rgb(canonical_reference, "approved canonical reference")
+
+    public_background = np.all(public_rgb == (0, 255, 0), axis=2)
+    public_foreground = np.all(
+        public_rgb
+        == np.asarray(GROOMING_QWEN_GUIDE_FOREGROUND_RGB, dtype=np.uint8),
+        axis=2,
+    )
+    if not np.all(public_background | public_foreground):
+        raise RuntimeError(
+            "Grooming full-pose public guide contains appearance-bearing pixels."
+        )
+    foreground_pixels = int(np.count_nonzero(public_foreground))
+    if not 4096 <= foreground_pixels <= int(512 * 512 * 0.90):
+        raise RuntimeError("Grooming full-pose public guide foreground is invalid.")
+    private_foreground = ~green_background(private_rgb)
+    private_foreground_pixels = int(np.count_nonzero(private_foreground))
+    removed_foreground = private_foreground & ~public_foreground
+    removed_foreground_pixels = int(np.count_nonzero(removed_foreground))
+    if (
+        private_foreground_pixels < foreground_pixels
+        or np.any(public_foreground & ~private_foreground)
+        or not 300 <= removed_foreground_pixels <= 1800
+    ):
+        raise RuntimeError(
+            "Grooming full-pose public/private open-channel contract changed."
+        )
+    background_components, background_labels, background_stats, _ = (
+        cv2.connectedComponentsWithStats(
+            public_background.astype(np.uint8),
+            connectivity=8,
+        )
+    )
+    border_labels = set(
+        np.unique(
+            np.concatenate(
+                [
+                    background_labels[0, :],
+                    background_labels[-1, :],
+                    background_labels[:, 0],
+                    background_labels[:, -1],
+                ]
+            )
+        ).tolist()
+    )
+    internal_labels = [
+        label
+        for label in range(1, background_components)
+        if label not in border_labels
+    ]
+    if len(internal_labels) != 1:
+        raise RuntimeError(
+            "Grooming full-pose public guide lacks one interior open curve."
+        )
+    internal_channel_pixels = int(
+        background_stats[internal_labels[0], cv2.CC_STAT_AREA]
+    )
+    if not 300 <= internal_channel_pixels <= 1800:
+        raise RuntimeError(
+            "Grooming full-pose public open channel has invalid area."
+        )
+    semantic_foreleg = (
+        np.all(
+            semantic_rgb == np.asarray(GROOMING_QWEN_GUIDE_FORELEG_RGB, dtype=np.uint8),
+            axis=2,
+        )
+        & private_foreground
+    )
+    semantic_foreleg_pixels = int(np.count_nonzero(semantic_foreleg))
+    if not 650 <= semantic_foreleg_pixels <= 6000:
+        raise RuntimeError(
+            "Grooming full-pose guide lacks a valid raised-foreleg semantic."
+        )
+
+    canonical_foreground = ~green_background(canonical_rgb)
+    canonical_foreground_pixels = int(np.count_nonzero(canonical_foreground))
+    # The canonical has already passed the production foreground gate.  This
+    # helper only needs enough pixels for a stable median-luma estimate; keeping
+    # the local minimum small also supports compact deterministic test fixtures.
+    if not 256 <= canonical_foreground_pixels <= int(512 * 512 * 0.90):
+        raise RuntimeError(
+            "Grooming full-pose guide lacks a valid canonical foreground."
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(public_geometry_source, target)
+    with Image.open(target) as loaded:
+        persisted = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    if (
+        not np.array_equal(persisted, public_rgb)
+        or file_sha256(target) != file_sha256(public_geometry_source)
+    ):
+        raise RuntimeError(
+            "Grooming full-pose sampler changed the public open-channel guide."
+        )
+
+    return {
+        "policy": GROOMING_CANONICAL_FULL_POSE_GUIDE_POLICY,
+        "public_geometry_source": str(public_geometry_source),
+        "public_geometry_sha256": file_sha256(public_geometry_source),
+        "private_geometry_source": str(private_geometry_source),
+        "private_geometry_sha256": file_sha256(private_geometry_source),
+        "semantic_foreleg_source": str(semantic_foreleg_source),
+        "semantic_foreleg_source_sha256": file_sha256(semantic_foreleg_source),
+        "canonical_reference": str(canonical_reference),
+        "canonical_reference_sha256": file_sha256(canonical_reference),
+        "foreground_pixels": foreground_pixels,
+        "private_foreground_pixels": private_foreground_pixels,
+        "removed_foreground_pixels": removed_foreground_pixels,
+        "internal_open_channel_pixels": internal_channel_pixels,
+        "semantic_foreleg_pixels": semantic_foreleg_pixels,
+        "semantic_foreleg_exposed_as_discrete_label": False,
+        "canonical_foreground_pixels": canonical_foreground_pixels,
+        "single_foreground_rgb": list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB),
+        "unique_foreground_rgb_count": 1,
+        "open_curve_exposed": True,
+        "open_curve_is_background_negative_space": True,
+        "private_luma_exposed": False,
+        "private_raw_luma_values_preserved": False,
+        "spatial_canonical_pixels_copied": False,
+        "main_case_rgb_or_luma_preserved": False,
+        "target_path": str(target),
+        "target_sha256": file_sha256(target),
+        "role": "image1_single_tone_open_channel_action_geometry_only",
+    }
+
+
 def require_ffmpeg() -> None:
     if not Path(FFMPEG_BIN).is_file():
         raise FileNotFoundError(f"FFmpeg executable was not found at {FFMPEG_BIN}.")
@@ -2609,7 +6499,114 @@ def convert_chroma_image_to_transparent_png(
     )
 
 
-def evaluate_chroma_cutout(source: Path, target: Path) -> dict[str, Any]:
+def canonical_cutout_interior_quality(path: Path) -> dict[str, Any]:
+    """Reject a large chroma-carved void through a canonical pet's head/neck."""
+
+    with Image.open(path) as loaded:
+        alpha = np.asarray(loaded.convert("RGBA").getchannel("A"))
+    foreground = (alpha >= 64).astype(np.uint8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        foreground,
+        connectivity=8,
+    )
+    if component_count <= 1:
+        return {
+            "acceptable": False,
+            "issues": ["canonical_subject_missing_after_chroma_key"],
+            "foreground_pixels": 0,
+        }
+    largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    component = (labels == largest_label).astype(np.uint8)
+    foreground_pixels = int(stats[largest_label, cv2.CC_STAT_AREA])
+    x0 = int(stats[largest_label, cv2.CC_STAT_LEFT])
+    y0 = int(stats[largest_label, cv2.CC_STAT_TOP])
+    width = int(stats[largest_label, cv2.CC_STAT_WIDTH])
+    height = int(stats[largest_label, cv2.CC_STAT_HEIGHT])
+    contours, _ = cv2.findContours(
+        component,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    if not contours:
+        return {
+            "acceptable": False,
+            "issues": ["canonical_subject_contour_unavailable"],
+            "foreground_pixels": foreground_pixels,
+        }
+    contour = max(contours, key=cv2.contourArea)
+    hull = cv2.convexHull(contour)
+    hull_mask = np.zeros(component.shape, dtype=np.uint8)
+    cv2.drawContours(hull_mask, [hull], -1, 1, thickness=-1)
+    roi = np.zeros(component.shape, dtype=np.uint8)
+    focus_x0 = x0 + int(round(width * 0.18))
+    focus_x1 = x0 + int(round(width * 0.82))
+    focus_y0 = y0 + int(round(height * 0.28))
+    focus_y1 = y0 + int(round(height * 0.58))
+    roi[focus_y0:focus_y1, focus_x0:focus_x1] = 1
+    void = ((hull_mask > 0) & (component == 0) & (roi > 0)).astype(np.uint8)
+    if min(void.shape) >= 24:
+        void = cv2.morphologyEx(
+            void,
+            cv2.MORPH_OPEN,
+            np.ones((3, 3), dtype=np.uint8),
+        )
+    void_count, void_labels, void_stats, _ = cv2.connectedComponentsWithStats(
+        void,
+        connectivity=8,
+    )
+    largest_void_area = 0
+    largest_void_width = 0
+    largest_void_height = 0
+    largest_void_medial_overlap = 0
+    medial_x0 = x0 + int(round(width * 0.36))
+    medial_x1 = x0 + int(round(width * 0.64))
+    if void_count > 1:
+        for void_label in range(1, void_count):
+            medial_overlap = int(
+                np.count_nonzero(
+                    void_labels[focus_y0:focus_y1, medial_x0:medial_x1] == void_label
+                )
+            )
+            # Outer silhouette concavities can legitimately appear inside the convex
+            # hull.  A chroma-carved mouth/neck hole must cross the subject's medial
+            # corridor, so side-only voids are ignored.
+            if not medial_overlap:
+                continue
+            void_area = int(void_stats[void_label, cv2.CC_STAT_AREA])
+            if void_area <= largest_void_area:
+                continue
+            largest_void_area = void_area
+            largest_void_width = int(void_stats[void_label, cv2.CC_STAT_WIDTH])
+            largest_void_height = int(void_stats[void_label, cv2.CC_STAT_HEIGHT])
+            largest_void_medial_overlap = medial_overlap
+    area_fraction = largest_void_area / float(max(1, foreground_pixels))
+    width_ratio = largest_void_width / float(max(1, width))
+    height_ratio = largest_void_height / float(max(1, height))
+    invalid_void = bool(
+        largest_void_area >= max(96, int(round(foreground_pixels * 0.004)))
+        and width_ratio >= 0.08
+        and height_ratio >= 0.015
+    )
+    return {
+        "acceptable": not invalid_void,
+        "issues": ["canonical_subject_interior_chroma_hole"] if invalid_void else [],
+        "foreground_pixels": foreground_pixels,
+        "focus_box": [focus_x0, focus_y0, focus_x1, focus_y1],
+        "medial_box": [medial_x0, focus_y0, medial_x1, focus_y1],
+        "largest_void_area": largest_void_area,
+        "largest_void_medial_overlap": largest_void_medial_overlap,
+        "largest_void_area_fraction": round(area_fraction, 6),
+        "largest_void_width_ratio": round(width_ratio, 6),
+        "largest_void_height_ratio": round(height_ratio, 6),
+    }
+
+
+def evaluate_chroma_cutout(
+    source: Path,
+    target: Path,
+    *,
+    validate_canonical_interior: bool = False,
+) -> dict[str, Any]:
     metrics = dict(
         convert_chroma_image_to_transparent_png(
             source,
@@ -2617,15 +6614,20 @@ def evaluate_chroma_cutout(source: Path, target: Path) -> dict[str, Any]:
             require_clean_background=False,
         )
     )
-    issues: list[str] = []
+    base_issues: list[str] = []
     if float(metrics["foreground_fraction"]) > 0.85:
-        issues.append("foreground_fraction_too_large")
+        base_issues.append("foreground_fraction_too_large")
     if any(int(value) > 0 for value in metrics["corners"]):
-        issues.append("nontransparent_canvas_corner")
+        base_issues.append("nontransparent_canvas_corner")
+    issues = list(base_issues)
+    if validate_canonical_interior and not base_issues:
+        interior_quality = canonical_cutout_interior_quality(target)
+        metrics["canonical_interior_quality"] = interior_quality
+        issues.extend(interior_quality["issues"])
     metrics["acceptable"] = not issues
     metrics["issues"] = issues
     metrics["method"] = "chroma_key"
-    if issues:
+    if base_issues:
         target.unlink(missing_ok=True)
     return metrics
 
@@ -2804,7 +6806,8 @@ def identity_palette_signature(
             np.ones((3, 3), dtype=np.uint8),
             iterations=1,
         )
-    pixels = rgb[foreground_u8 > 0]
+    foreground_rows, foreground_columns = np.where(foreground_u8 > 0)
+    pixels = rgb[foreground_rows, foreground_columns]
     if len(pixels) < 64:
         return {
             "available": False,
@@ -2816,8 +6819,11 @@ def identity_palette_signature(
             ),
         }
     if len(pixels) > 250_000:
-        stride = max(1, len(pixels) // 250_000)
+        stride = max(1, (len(pixels) + 249_999) // 250_000)
         pixels = pixels[::stride]
+        sampled_rows = foreground_rows[::stride]
+    else:
+        sampled_rows = foreground_rows
     hsv = cv2.cvtColor(pixels.reshape(-1, 1, 3), cv2.COLOR_RGB2HSV).reshape(-1, 3)
     hue = hsv[:, 0]
     saturation = hsv[:, 1]
@@ -2887,6 +6893,27 @@ def identity_palette_signature(
     saturated_warm_fraction = float(
         np.count_nonzero(warm_mask & (saturation >= 96))
     ) / float(len(pixels))
+    foreground_y0 = int(foreground_rows.min())
+    foreground_y1 = int(foreground_rows.max()) + 1
+    foreground_x0 = int(foreground_columns.min())
+    foreground_x1 = int(foreground_columns.max()) + 1
+    body_start_y = foreground_y0 + int(round((foreground_y1 - foreground_y0) * 0.45))
+    red_or_pink_pixels = category_masks["red_or_pink"]
+    red_or_pink_count = int(np.count_nonzero(red_or_pink_pixels))
+    red_or_pink_body_count = int(
+        np.count_nonzero(red_or_pink_pixels & (sampled_rows >= body_start_y))
+    )
+    red_or_pink_body_fraction = red_or_pink_body_count / total
+    red_or_pink_body_share = red_or_pink_body_count / float(max(1, red_or_pink_count))
+    green_or_cyan_pixels = category_masks["green"] | category_masks["blue_or_cyan"]
+    green_or_cyan_count = int(np.count_nonzero(green_or_cyan_pixels))
+    green_or_cyan_body_count = int(
+        np.count_nonzero(green_or_cyan_pixels & (sampled_rows >= body_start_y))
+    )
+    green_or_cyan_body_fraction = green_or_cyan_body_count / total
+    green_or_cyan_body_share = green_or_cyan_body_count / float(
+        max(1, green_or_cyan_count)
+    )
     return {
         "available": True,
         "mask_method": mask_method,
@@ -2904,7 +6931,258 @@ def identity_palette_signature(
         "warm_saturation_mean": round(warm_saturation_mean, 6),
         "warm_saturation_p90": round(warm_saturation_p90, 6),
         "saturated_warm_fraction": round(saturated_warm_fraction, 6),
+        "foreground_bbox": [
+            foreground_x0,
+            foreground_y0,
+            foreground_x1,
+            foreground_y1,
+        ],
+        "red_or_pink_body_fraction": round(red_or_pink_body_fraction, 6),
+        "red_or_pink_body_share": round(red_or_pink_body_share, 6),
+        "red_or_pink_localized_to_head": bool(
+            red_or_pink_count > 0
+            and red_or_pink_body_fraction <= 0.025
+            and red_or_pink_body_share <= 0.20
+        ),
+        "green_or_cyan_body_fraction": round(
+            green_or_cyan_body_fraction,
+            6,
+        ),
+        "green_or_cyan_body_share": round(green_or_cyan_body_share, 6),
+        "green_or_cyan_localized_to_head": bool(
+            green_or_cyan_count > 0
+            and green_or_cyan_body_fraction <= 0.020
+            and green_or_cyan_body_share <= 0.25
+        ),
     }
+
+
+def neutralize_uploaded_identity_chroma_spill(
+    path: Path,
+    source_identity_palette: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Remove green-screen reflection without recoloring genuine green identity.
+
+    The generic chroma key only despills the matte boundary.  For uploaded
+    identities whose source coat has no green/cyan body region, Qwen can still
+    paint the screen reflection into opaque muzzle, chest, or flank pixels.  A
+    paired compact eye detector protects plausible irises; remaining
+    green-dominant foreground pixels are neutralized while alpha stays byte
+    identical.  A downstream localized palette gate verifies the result.
+    """
+
+    result: dict[str, Any] = {
+        "policy": UPLOADED_IDENTITY_CHROMA_SPILL_POLICY,
+        "path": str(path),
+        "applied": False,
+    }
+    if not isinstance(source_identity_palette, dict) or not source_identity_palette.get(
+        "available"
+    ):
+        result["reason"] = "source_identity_palette_unavailable"
+        return result
+    source_fractions = source_identity_palette.get("fractions")
+    if not isinstance(source_fractions, dict):
+        result["reason"] = "source_identity_palette_fractions_unavailable"
+        return result
+    source_green_or_cyan = float(source_fractions.get("green", 0.0)) + float(
+        source_fractions.get("blue_or_cyan", 0.0)
+    )
+    source_green_or_cyan_body = float(
+        source_identity_palette.get("green_or_cyan_body_fraction", 0.0)
+    )
+    result["source_green_or_cyan_fraction"] = round(source_green_or_cyan, 6)
+    result["source_green_or_cyan_body_fraction"] = round(
+        source_green_or_cyan_body,
+        6,
+    )
+    if source_green_or_cyan > 0.07 or source_green_or_cyan_body > 0.012:
+        result["reason"] = "source_green_or_cyan_identity_requires_preservation"
+        return result
+
+    with Image.open(path) as loaded:
+        rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8).copy()
+    alpha = rgba[:, :, 3]
+    foreground = alpha >= 64
+    foreground_count = int(np.count_nonzero(foreground))
+    if foreground_count < 64:
+        result["reason"] = "foreground_unavailable"
+        return result
+    rows, columns = np.where(foreground)
+    x0, x1 = int(columns.min()), int(columns.max()) + 1
+    y0, y1 = int(rows.min()), int(rows.max()) + 1
+    subject_width = x1 - x0
+    subject_height = y1 - y0
+
+    def spill_mask(rgb: np.ndarray) -> np.ndarray:
+        red = rgb[:, :, 0].astype(np.int16)
+        green = rgb[:, :, 1].astype(np.int16)
+        blue = rgb[:, :, 2].astype(np.int16)
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        return (
+            foreground
+            & (green >= 52)
+            & (green - red >= 7)
+            & (green - blue >= -4)
+            & (hsv[:, :, 0] >= 38)
+            & (hsv[:, :, 0] < 112)
+            & (hsv[:, :, 1] >= 28)
+        )
+
+    detected = spill_mask(rgba[:, :, :3])
+    detected_count = int(np.count_nonzero(detected))
+    body_start_y = y0 + int(round(subject_height * 0.42))
+    row_grid = np.indices(foreground.shape)[0]
+    detected_body_count = int(np.count_nonzero(detected & (row_grid >= body_start_y)))
+    result.update(
+        {
+            "foreground_bbox": [x0, y0, x1, y1],
+            "foreground_pixels": foreground_count,
+            "detected_pixels_before": detected_count,
+            "detected_fraction_before": round(
+                detected_count / float(foreground_count),
+                6,
+            ),
+            "detected_body_fraction_before": round(
+                detected_body_count / float(foreground_count),
+                6,
+            ),
+        }
+    )
+    if not detected_count:
+        result["reason"] = "no_green_screen_spill_detected"
+        return result
+
+    paired_eye_mask = np.zeros(foreground.shape, dtype=bool)
+    eye_components_mask = cv2.morphologyEx(
+        detected.astype(np.uint8),
+        cv2.MORPH_CLOSE,
+        np.ones((3, 3), dtype=np.uint8),
+    )
+    component_count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        eye_components_mask,
+        connectivity=8,
+    )
+    minimum_eye_area = max(6, int(round(foreground_count * 0.00003)))
+    maximum_eye_area = max(96, int(round(foreground_count * 0.025)))
+    eye_candidates: list[dict[str, Any]] = []
+    for label in range(1, component_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        center_x, center_y = (float(value) for value in centroids[label])
+        aspect = width / float(max(1, height))
+        if (
+            minimum_eye_area <= area <= maximum_eye_area
+            and width <= max(8, int(round(subject_width * 0.18)))
+            and height <= max(8, int(round(subject_height * 0.14)))
+            and 0.35 <= aspect <= 2.8
+            and x0 + subject_width * 0.12 <= center_x <= x1 - subject_width * 0.12
+            and center_y <= y0 + subject_height * 0.66
+        ):
+            eye_candidates.append(
+                {
+                    "label": label,
+                    "area": area,
+                    "center": [center_x, center_y],
+                }
+            )
+    best_pair: tuple[float, dict[str, Any], dict[str, Any]] | None = None
+    for left_index, first in enumerate(eye_candidates):
+        for second in eye_candidates[left_index + 1 :]:
+            first_x, first_y = first["center"]
+            second_x, second_y = second["center"]
+            separation = abs(second_x - first_x)
+            y_delta = abs(second_y - first_y)
+            area_ratio = min(first["area"], second["area"]) / float(
+                max(first["area"], second["area"])
+            )
+            midpoint = (first_x + second_x) / 2.0
+            if (
+                subject_width * 0.10 <= separation <= subject_width * 0.58
+                and y_delta <= subject_height * 0.09
+                and area_ratio >= 0.20
+                and abs(midpoint - (x0 + subject_width / 2.0)) <= subject_width * 0.20
+            ):
+                relative_y = ((first_y + second_y) / 2.0 - y0) / float(
+                    max(1, subject_height)
+                )
+                score = (
+                    relative_y
+                    + y_delta / float(max(1, subject_height))
+                    + abs(midpoint - (x0 + subject_width / 2.0))
+                    / float(max(1, subject_width))
+                    + (1.0 - area_ratio) * 0.10
+                )
+                if best_pair is None or score < best_pair[0]:
+                    best_pair = (score, first, second)
+    protected_labels: list[int] = []
+    if best_pair is not None:
+        protected_labels = [best_pair[1]["label"], best_pair[2]["label"]]
+        paired_eye_mask = np.isin(labels, protected_labels)
+        paired_eye_mask = cv2.dilate(
+            paired_eye_mask.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        paired_eye_mask &= detected
+
+    correction = detected & ~paired_eye_mask
+    corrected_count = int(np.count_nonzero(correction))
+    alpha_hash_before = hashlib.sha256(alpha.tobytes()).hexdigest()
+    if corrected_count:
+        rgb = rgba[:, :, :3]
+        # Neutralize chroma in Lab while preserving luminance and therefore fur
+        # texture.  Reducing only G converts a green reflection into cyan when
+        # B becomes the new maximum; setting a/b to neutral removes both casts.
+        lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+        neutral_lab = lab.copy()
+        neutral_lab[:, :, 1][correction] = 128
+        neutral_lab[:, :, 2][correction] = 128
+        neutral_rgb = cv2.cvtColor(neutral_lab, cv2.COLOR_LAB2RGB)
+        rgb[correction] = neutral_rgb[correction]
+        Image.fromarray(rgba, mode="RGBA").save(path, format="PNG", optimize=True)
+
+    remaining = spill_mask(rgba[:, :, :3])
+    remaining_count = int(np.count_nonzero(remaining))
+    remaining_body_count = int(np.count_nonzero(remaining & (row_grid >= body_start_y)))
+    result.update(
+        {
+            "applied": bool(corrected_count),
+            "reason": "corrected" if corrected_count else "only_paired_eye_accents",
+            "corrected_pixels": corrected_count,
+            "protected_eye_pixels": int(np.count_nonzero(paired_eye_mask)),
+            "protected_eye_component_labels": protected_labels,
+            "detected_pixels_after": remaining_count,
+            "detected_fraction_after": round(
+                remaining_count / float(foreground_count),
+                6,
+            ),
+            "detected_body_fraction_after": round(
+                remaining_body_count / float(foreground_count),
+                6,
+            ),
+            "alpha_sha256_before": alpha_hash_before,
+            "alpha_sha256_after": hashlib.sha256(rgba[:, :, 3].tobytes()).hexdigest(),
+            "alpha_unchanged": alpha_hash_before
+            == hashlib.sha256(rgba[:, :, 3].tobytes()).hexdigest(),
+        }
+    )
+    return result
+
+
+def identity_palette_is_achromatic(signature: dict[str, Any]) -> bool:
+    """Treat a small low-saturation photographic cast as lighting, not coat identity."""
+
+    achromatic = float(signature.get("achromatic_fraction", 0.0))
+    warm = float(signature.get("warm_fraction", 0.0))
+    saturated_warm_raw = signature.get("saturated_warm_fraction")
+    low_saturation_lighting = bool(
+        saturated_warm_raw is not None
+        and float(saturated_warm_raw) <= 0.03
+        and warm <= 0.14
+    )
+    return bool(achromatic >= 0.72 and (warm <= 0.12 or low_saturation_lighting))
 
 
 def identity_palette_prompt(
@@ -2927,10 +7205,7 @@ def identity_palette_prompt(
         for item in IDENTITY_PALETTE_CHROMATIC
         if float(fractions.get(item, 0.0)) <= 0.025
     ]
-    source_is_achromatic = (
-        float(signature["achromatic_fraction"]) >= 0.72
-        and float(signature.get("warm_fraction", 0.0)) <= 0.12
-    )
+    source_is_achromatic = identity_palette_is_achromatic(signature)
     if source_is_achromatic:
         achromatic_dominant = [
             item for item in dominant if item in {"black", "white", "gray"}
@@ -2947,7 +7222,24 @@ def identity_palette_prompt(
             "sepia, orange, ginger, brown, or golden color cast over neutral fur. "
             "Any genuinely warm source color may remain only in the same localized "
             "marking regions and proportion; it must never spread across gray, black, "
-            "or white fur."
+            "or white fur. Red or pink is a small skin accent, never a fur color: keep "
+            "it only in the same tiny low-saturation nose pad and small inner-ear cores "
+            "visible in the original upload. Do not enlarge, saturate, or spread it into "
+            "the ear panels, cheeks, forehead, or coat, and override any oversized "
+            "salmon or pink ear fill inherited from an intermediate canonical image."
+        )
+        black_fraction = float(fractions.get("black", 0.0))
+        neutral_light_fraction = float(fractions.get("gray", 0.0)) + float(
+            fractions.get("white", 0.0)
+        )
+        rule += (
+            " Preserve the source's coarse dark-marking versus neutral-light coat "
+            f"balance (approximately black/dark {black_fraction * 100.0:.1f}% and "
+            f"combined neutral gray-or-white {neutral_light_fraction * 100.0:.1f}% "
+            "over the segmented visible coat). Photographic shadowed white may become "
+            "brighter neutral white in the stylized render, but every dark marking "
+            "must keep its placement and approximate area. Never erase the dark "
+            "markings or expand them into large invented black patches."
         )
     else:
         rule = f"The visible source coat palette is predominantly {palette}."
@@ -2981,10 +7273,7 @@ def identity_palette_negative_prompt(signature: dict[str, Any]) -> str:
     if not signature.get("available"):
         return ", ".join(negative)
     fractions = signature["fractions"]
-    if (
-        float(signature.get("achromatic_fraction", 0.0)) >= 0.72
-        and float(signature.get("warm_fraction", 0.0)) <= 0.12
-    ):
+    if identity_palette_is_achromatic(signature):
         negative.extend(
             [
                 "overall warm color cast",
@@ -2993,6 +7282,15 @@ def identity_palette_negative_prompt(signature: dict[str, Any]) -> str:
                 "neutral gray fur turned orange",
                 "neutral gray fur turned brown",
                 "ginger recolor",
+                "large pink inner-ear fill",
+                "salmon ear panels",
+                "saturated pink ears",
+                "pink cheek fur",
+                "red or pink coat",
+                "rosy facial cast",
+                "dark identity markings erased",
+                "dark markings expanded into invented black patches",
+                "large invented black and white patches",
             ]
         )
     if float(fractions.get("warm_brown_or_orange", 0.0)) <= 0.025:
@@ -3018,10 +7316,14 @@ def identity_palette_quality(
     if not source.get("available") or not candidate.get("available"):
         return {
             "available": False,
-            "acceptable": True,
+            # Identity preservation is a safety gate for uploaded subjects.
+            # An unavailable signature is not evidence that the candidate
+            # preserved the source palette, so fail closed and try another
+            # generation instead of silently accepting it.
+            "acceptable": False,
             "warning": True,
             "issues": ["identity_palette_signature_unavailable"],
-            "penalty": 0.0,
+            "penalty": 1000.0,
             "source": source,
             "candidate": candidate,
         }
@@ -3037,6 +7339,16 @@ def identity_palette_quality(
         )
         for category in IDENTITY_PALETTE_CATEGORIES
     }
+    source_green_or_cyan = float(source_fractions.get("green", 0.0)) + float(
+        source_fractions.get("blue_or_cyan", 0.0)
+    )
+    candidate_green_or_cyan = float(candidate_fractions.get("green", 0.0)) + float(
+        candidate_fractions.get("blue_or_cyan", 0.0)
+    )
+    source_green_or_cyan_body = float(source.get("green_or_cyan_body_fraction", 0.0))
+    candidate_green_or_cyan_body = float(
+        candidate.get("green_or_cyan_body_fraction", 0.0)
+    )
     for category in IDENTITY_PALETTE_CHROMATIC:
         source_fraction = float(source_fractions.get(category, 0.0))
         candidate_fraction = float(candidate_fractions.get(category, 0.0))
@@ -3047,27 +7359,110 @@ def identity_palette_quality(
             and candidate_fraction >= candidate_threshold
             and candidate_fraction - source_fraction >= delta_threshold
         ):
-            issues.append(f"new_dominant_{category}")
+            if (
+                category == "red_or_pink"
+                and bool(candidate.get("red_or_pink_localized_to_head"))
+                and float(candidate.get("red_or_pink_body_fraction", 1.0))
+                <= max(
+                    0.025,
+                    float(source.get("red_or_pink_body_fraction", 0.0)) + 0.015,
+                )
+            ):
+                warnings.append("localized_red_or_pink_skin_accent_expanded")
+            else:
+                issues.append(f"new_dominant_{category}")
+    green_or_cyan_body_spill = bool(
+        source_green_or_cyan <= 0.07
+        and candidate_green_or_cyan - source_green_or_cyan >= 0.035
+        and candidate_green_or_cyan_body
+        >= max(0.020, source_green_or_cyan_body + 0.015)
+        and not bool(candidate.get("green_or_cyan_localized_to_head"))
+    )
+    if green_or_cyan_body_spill:
+        issues.append("green_or_cyan_chroma_spill_on_body")
     source_achromatic = float(source["achromatic_fraction"])
     candidate_achromatic = float(candidate["achromatic_fraction"])
     source_warm = float(source["warm_fraction"])
     candidate_warm = float(candidate["warm_fraction"])
+    source_localized_skin_red = (
+        float(source_fractions.get("red_or_pink", 0.0))
+        if bool(source.get("red_or_pink_localized_to_head"))
+        else 0.0
+    )
+    candidate_localized_skin_red = (
+        float(candidate_fractions.get("red_or_pink", 0.0))
+        if bool(candidate.get("red_or_pink_localized_to_head"))
+        else 0.0
+    )
+    source_coat_warm = max(0.0, source_warm - source_localized_skin_red)
+    candidate_coat_warm = max(
+        0.0,
+        candidate_warm - candidate_localized_skin_red,
+    )
+    source_chromatic = float(
+        source.get("chromatic_fraction", max(0.0, 1.0 - source_achromatic))
+    )
+    candidate_chromatic = float(
+        candidate.get(
+            "chromatic_fraction",
+            max(0.0, 1.0 - candidate_achromatic),
+        )
+    )
     source_saturated_warm = float(source.get("saturated_warm_fraction", 0.0))
     candidate_saturated_warm = float(candidate.get("saturated_warm_fraction", 0.0))
+    source_fur_warm = float(source_fractions.get("warm_brown_or_orange", 0.0)) + float(
+        source_fractions.get("yellow_or_gold", 0.0)
+    )
+    candidate_fur_warm = float(
+        candidate_fractions.get("warm_brown_or_orange", 0.0)
+    ) + float(candidate_fractions.get("yellow_or_gold", 0.0))
+    achromatic_balance_deltas = {
+        category: round(
+            float(candidate_fractions.get(category, 0.0))
+            - float(source_fractions.get(category, 0.0)),
+            6,
+        )
+        for category in ("black", "gray", "white")
+    }
+    achromatic_balance_l1 = sum(
+        abs(value) for value in achromatic_balance_deltas.values()
+    )
+    source_black_fraction = float(source_fractions.get("black", 0.0))
+    candidate_black_fraction = float(candidate_fractions.get("black", 0.0))
+    achromatic_dark_marking_lost = bool(
+        source_black_fraction >= 0.08
+        and candidate_black_fraction <= max(0.025, source_black_fraction * 0.35)
+    )
+    achromatic_dark_marking_expanded = bool(
+        candidate_black_fraction - source_black_fraction >= 0.22
+    )
+    achromatic_value_balance_lost = bool(
+        source_achromatic >= 0.72
+        and candidate_achromatic >= 0.72
+        and (achromatic_dark_marking_lost or achromatic_dark_marking_expanded)
+    )
+    if achromatic_value_balance_lost:
+        issues.append("achromatic_coat_value_balance_lost")
     broad_warm_drift = bool(
         source_achromatic - candidate_achromatic >= 0.12
-        and candidate_warm - source_warm >= 0.12
+        and candidate_coat_warm - source_coat_warm >= 0.12
     )
     saturated_warm_drift = bool(
         candidate_saturated_warm >= 0.055
         and candidate_saturated_warm - source_saturated_warm >= 0.035
+        and candidate_fur_warm - source_fur_warm >= 0.035
     )
-    if (
-        source_achromatic >= 0.72
-        and source_warm <= 0.12
-        and (broad_warm_drift or saturated_warm_drift)
+    if identity_palette_is_achromatic(source) and (
+        broad_warm_drift or saturated_warm_drift
     ):
         issues.append("achromatic_source_recolored_with_warm_fur")
+    chromatic_accents_lost = bool(
+        source_chromatic >= 0.04
+        and source_chromatic - candidate_chromatic >= 0.04
+        and candidate_chromatic <= source_chromatic * 0.35
+    )
+    if chromatic_accents_lost:
+        issues.append("source_chromatic_identity_accents_lost")
     if source_warm >= 0.18 and candidate_warm <= 0.06:
         warnings.append("source_warm_coat_color_may_be_hidden")
     l1_distance = sum(abs(value) for value in deltas.values())
@@ -3086,10 +7481,547 @@ def identity_palette_quality(
         "candidate_achromatic_fraction": candidate["achromatic_fraction"],
         "source_warm_fraction": source["warm_fraction"],
         "candidate_warm_fraction": candidate["warm_fraction"],
+        "source_coat_warm_fraction": round(source_coat_warm, 6),
+        "candidate_coat_warm_fraction": round(candidate_coat_warm, 6),
+        "source_chromatic_fraction": round(source_chromatic, 6),
+        "candidate_chromatic_fraction": round(candidate_chromatic, 6),
+        "chromatic_accents_lost": chromatic_accents_lost,
         "source_saturated_warm_fraction": round(source_saturated_warm, 6),
         "candidate_saturated_warm_fraction": round(candidate_saturated_warm, 6),
+        "source_fur_warm_fraction": round(source_fur_warm, 6),
+        "candidate_fur_warm_fraction": round(candidate_fur_warm, 6),
+        "source_red_or_pink_body_fraction": round(
+            float(source.get("red_or_pink_body_fraction", 0.0)),
+            6,
+        ),
+        "candidate_red_or_pink_body_fraction": round(
+            float(candidate.get("red_or_pink_body_fraction", 0.0)),
+            6,
+        ),
+        "candidate_red_or_pink_body_share": round(
+            float(candidate.get("red_or_pink_body_share", 0.0)),
+            6,
+        ),
+        "candidate_red_or_pink_localized_to_head": bool(
+            candidate.get("red_or_pink_localized_to_head", False)
+        ),
+        "source_green_or_cyan_fraction": round(source_green_or_cyan, 6),
+        "candidate_green_or_cyan_fraction": round(
+            candidate_green_or_cyan,
+            6,
+        ),
+        "source_green_or_cyan_body_fraction": round(
+            source_green_or_cyan_body,
+            6,
+        ),
+        "candidate_green_or_cyan_body_fraction": round(
+            candidate_green_or_cyan_body,
+            6,
+        ),
+        "candidate_green_or_cyan_body_share": round(
+            float(candidate.get("green_or_cyan_body_share", 0.0)),
+            6,
+        ),
+        "candidate_green_or_cyan_localized_to_head": bool(
+            candidate.get("green_or_cyan_localized_to_head", False)
+        ),
+        "green_or_cyan_body_spill": green_or_cyan_body_spill,
+        "achromatic_balance_deltas": achromatic_balance_deltas,
+        "achromatic_balance_l1": round(achromatic_balance_l1, 6),
+        "achromatic_value_balance_lost": achromatic_value_balance_lost,
+        "achromatic_dark_marking_lost": achromatic_dark_marking_lost,
+        "achromatic_dark_marking_expanded": achromatic_dark_marking_expanded,
         "broad_warm_drift": broad_warm_drift,
         "saturated_warm_drift": saturated_warm_drift,
+    }
+
+
+def canonical_action_identity_palette_quality(
+    quality: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Tighten achromatic value continuity for canonical-first action edits.
+
+    The general uploaded-identity palette gate intentionally tolerates broad
+    shadow/highlight redistribution while creating the initial canonical. Once
+    that canonical is approved, an action edit has no such freedom: replacing
+    a mostly white canonical with the synthetic gray action guide is identity
+    drift even when both images remain globally achromatic.
+    """
+
+    if not isinstance(quality, dict):
+        return quality
+    issues = [str(issue) for issue in quality.get("issues", [])]
+    warnings = [str(warning) for warning in quality.get("warnings", [])]
+    source_achromatic = float(quality.get("source_achromatic_fraction", 0.0))
+    candidate_achromatic = float(quality.get("candidate_achromatic_fraction", 0.0))
+    achromatic_balance_l1 = float(quality.get("achromatic_balance_l1", 0.0))
+    balance_drift = bool(
+        quality.get("available") is True
+        and source_achromatic >= 0.72
+        and candidate_achromatic >= 0.72
+        and achromatic_balance_l1 > CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX
+    )
+    issue = "canonical_action_achromatic_value_balance_drift"
+    if balance_drift and issue not in issues:
+        issues.append(issue)
+    acceptable = bool(quality.get("acceptable")) and not balance_drift
+    return {
+        **quality,
+        "acceptable": acceptable,
+        "warning": bool(issues or warnings),
+        "issues": issues,
+        "warnings": warnings,
+        "penalty": round(
+            float(quality.get("penalty", 0.0)) + (100.0 if balance_drift else 0.0),
+            6,
+        ),
+        "canonical_action_identity_palette_policy": (
+            CANONICAL_ACTION_IDENTITY_PALETTE_POLICY
+        ),
+        "canonical_action_achromatic_balance_l1_max": (
+            CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX
+        ),
+        "canonical_action_achromatic_balance_enforced": True,
+        "canonical_action_achromatic_balance_drift": balance_drift,
+    }
+
+
+def apply_canonical_grooming_organic_paw_palette_evidence(
+    quality: dict[str, Any] | None,
+    pose_gate: dict[str, Any] | None,
+    *,
+    attempt: int,
+) -> dict[str, Any] | None:
+    """Identify bounded achromatic drift on a proven direct organic paw.
+
+    This is an eligibility probe, not the final identity verdict. It does not
+    forgive a new hue or lost/expanded dark markings. Both off-guide and raw
+    pose-pass routes require strict raised/planted paw material evidence, so a
+    curved beige/red hanging object cannot request palette normalization.
+    """
+
+    if not isinstance(quality, dict):
+        return quality
+    result = dict(quality)
+
+    def number(value: Any) -> float | None:
+        try:
+            converted = float(value)
+        except (TypeError, ValueError):
+            return None
+        return converted if np.isfinite(converted) else None
+
+    pose_gate = pose_gate if isinstance(pose_gate, dict) else {}
+    structural = pose_gate.get("canonical_direct_structural_edge_evidence")
+    structural = structural if isinstance(structural, dict) else {}
+    offguide = structural.get("offguide_organic_paw_evidence")
+    offguide = offguide if isinstance(offguide, dict) else {}
+    aligned = structural.get("aligned_organic_paw_evidence")
+    aligned = aligned if isinstance(aligned, dict) else {}
+    raw_issues = [str(issue) for issue in quality.get("issues", [])]
+    source_achromatic = number(quality.get("source_achromatic_fraction"))
+    candidate_achromatic = number(quality.get("candidate_achromatic_fraction"))
+    balance_l1 = number(quality.get("achromatic_balance_l1"))
+    checks = {
+        "direct_attempt_in_scope": bool(
+            isinstance(attempt, int)
+            and 1 <= attempt <= GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+        ),
+        "organic_paw_evidence_accepted": bool(
+            structural.get("accepted") is True
+            and (
+                (
+                    offguide.get("accepted") is True
+                    and pose_gate.get("verdict")
+                    == "accepted_canonical_direct_offguide_organic_paw_evidence"
+                )
+                or (
+                    aligned.get("accepted") is True
+                    and pose_gate.get("verdict")
+                    == "accepted_canonical_direct_aligned_organic_paw_evidence"
+                )
+            )
+        ),
+        "only_achromatic_balance_issue": bool(
+            raw_issues == ["canonical_action_achromatic_value_balance_drift"]
+        ),
+        "source_and_candidate_remain_achromatic": bool(
+            source_achromatic is not None
+            and candidate_achromatic is not None
+            and source_achromatic
+            >= GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_ACHROMATIC_MIN
+            and candidate_achromatic
+            >= GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_ACHROMATIC_MIN
+        ),
+        "bounded_value_redistribution": bool(
+            balance_l1 is not None
+            and balance_l1
+            <= GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_BALANCE_L1_MAX
+        ),
+        "no_warm_or_saturated_drift": bool(
+            quality.get("broad_warm_drift") is False
+            and quality.get("saturated_warm_drift") is False
+        ),
+        "dark_markings_not_lost_or_expanded": bool(
+            quality.get("achromatic_dark_marking_lost") is False
+            and quality.get("achromatic_dark_marking_expanded") is False
+        ),
+    }
+    accepted = bool(
+        quality.get("available") is True
+        and quality.get("acceptable") is not True
+        and all(checks.values())
+    )
+    evidence = {
+        "policy": GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_PALETTE_POLICY,
+        "evaluated": True,
+        "accepted": accepted,
+        "fail_closed": True,
+        "attempt": attempt,
+        "achromatic_fraction_min": (
+            GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_ACHROMATIC_MIN
+        ),
+        "achromatic_balance_l1": balance_l1,
+        "achromatic_balance_l1_max": (
+            GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_BALANCE_L1_MAX
+        ),
+        "new_hue_or_marking_drift_allowed": False,
+        "independent_fur_surface_gate_still_required": True,
+        "checks": checks,
+    }
+    result["canonical_direct_organic_paw_palette_evidence"] = evidence
+    result["grooming_achromatic_palette_normalization_eligible"] = accepted
+    if not accepted:
+        return result
+    result["normalization_eligibility_verdict"] = (
+        "eligible_for_organic_paw_achromatic_histogram_match"
+    )
+    result["warnings"] = list(
+        dict.fromkeys(
+            [
+                *[str(item) for item in quality.get("warnings", [])],
+                "bounded_achromatic_value_drift_eligible_only_for_strict_"
+                "direct_organic_paw_histogram_normalization",
+            ]
+        )
+    )
+    return result
+
+
+def canonical_grooming_palette_normalization_eligibility(
+    quality: dict[str, Any] | None,
+    pose_gate: dict[str, Any] | None,
+    *,
+    attempt: int,
+) -> dict[str, Any]:
+    """Prove that a direct organic-paw candidate may be luma-normalized."""
+
+    probe = apply_canonical_grooming_organic_paw_palette_evidence(
+        quality,
+        pose_gate,
+        attempt=attempt,
+    )
+    evidence = (
+        probe.get("canonical_direct_organic_paw_palette_evidence")
+        if isinstance(probe, dict)
+        else None
+    )
+    evidence = dict(evidence) if isinstance(evidence, dict) else {
+        "policy": GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_PALETTE_POLICY,
+        "evaluated": True,
+        "accepted": False,
+        "fail_closed": True,
+        "attempt": attempt,
+        "checks": {},
+    }
+    evidence.update(
+        eligible=bool(evidence.get("accepted") is True),
+        operation="foreground_lab_l_histogram_match_only",
+        source_alpha_geometry_must_remain_exact=True,
+        source_ab_chroma_must_remain_with_roundtrip_delta_lte=2,
+        pose_gate_must_be_re_evaluated=True,
+        identity_palette_gate_must_be_re_evaluated=True,
+        fur_surface_gate_must_run_afterward=True,
+    )
+    return evidence
+
+
+def canonical_grooming_pose_safe_identity_refine_eligibility(
+    *,
+    attempt: int,
+    seed_bound_matte: dict[str, Any] | None,
+    pose_gate: dict[str, Any] | None,
+    pose_quality: dict[str, Any] | None,
+    identity_palette_quality: dict[str, Any] | None,
+    fur_surface_gate: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Admit only attempt 4's proven real grooming pose as attempt 5 sampler."""
+
+    matte = seed_bound_matte if isinstance(seed_bound_matte, dict) else {}
+    gate = pose_gate if isinstance(pose_gate, dict) else {}
+    quality = pose_quality if isinstance(pose_quality, dict) else {}
+    palette = (
+        identity_palette_quality
+        if isinstance(identity_palette_quality, dict)
+        else {}
+    )
+    surface = fur_surface_gate if isinstance(fur_surface_gate, dict) else {}
+    metrics = gate.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    structural = metrics.get("raised_foreleg_structural_evidence")
+    structural = structural if isinstance(structural, dict) else {}
+    chamfer = metrics.get("chamfer")
+    chamfer = chamfer if isinstance(chamfer, dict) else {}
+    matte_checks = matte.get("checks")
+    matte_checks = matte_checks if isinstance(matte_checks, dict) else {}
+    surface_provenance = surface.get("gate")
+    surface_provenance = (
+        surface_provenance if isinstance(surface_provenance, dict) else {}
+    )
+
+    def finite_number(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if np.isfinite(number) else None
+
+    structural_density = finite_number(structural.get("edge_density"))
+    chamfer_coverage = finite_number(chamfer.get("coverage_within_radius"))
+    chamfer_mean = finite_number(chamfer.get("mean_distance_px"))
+    chamfer_p90 = finite_number(chamfer.get("p90_distance_px"))
+    palette_issues = {
+        str(issue) for issue in palette.get("issues", []) if str(issue).strip()
+    }
+    unexpected_palette_issues = sorted(
+        palette_issues - GROOMING_CANONICAL_POSE_SAFE_IDENTITY_ONLY_ISSUES
+    )
+    required_digests = [
+        str(matte.get(name) or "")
+        for name in (
+            "source_sha256",
+            "semantic_cutout_sha256",
+            "pose_transfer_seed_sha256",
+            "target_sha256",
+            "union_alpha_sha256",
+        )
+    ]
+    digest_bound = bool(
+        all(
+            len(digest) == 64
+            and all(character in "0123456789abcdef" for character in digest)
+            for digest in required_digests
+        )
+    )
+    checks = {
+        "attempt_is_deterministic_full_pose_primary": bool(
+            attempt == GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
+        ),
+        "seed_bound_matte_policy_exact": bool(
+            matte.get("policy") == GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY
+            and matte.get("acceptable") is True
+            and matte.get("fail_closed") is True
+        ),
+        "seed_bound_matte_all_checks_passed": bool(
+            matte_checks and all(value is True for value in matte_checks.values())
+        ),
+        "seed_bound_matte_digest_complete": digest_bound,
+        "seed_used_for_alpha_geometry_only": bool(
+            matte.get("pose_transfer_seed_used_for_alpha_geometry_only") is True
+            and matte.get("pose_transfer_seed_rgb_copied") is False
+            and matte.get("pose_transfer_seed_luma_or_chroma_copied") is False
+        ),
+        "complete_subject_quality_passed": bool(quality.get("acceptable") is True),
+        "raw_pose_gate_passed": bool(gate.get("acceptable") is True),
+        "organic_structural_density_passed": bool(
+            structural.get("available") is True
+            and structural_density is not None
+            and structural_density
+            >= GROOMING_CANONICAL_POSE_SAFE_STRUCTURAL_EDGE_DENSITY_MIN
+        ),
+        "strict_guide_alignment_passed": bool(
+            chamfer.get("available") is True
+            and chamfer_coverage is not None
+            and chamfer_coverage >= GROOMING_CANONICAL_DIRECT_CHAMFER_COVERAGE_MIN
+            and chamfer_mean is not None
+            and chamfer_mean <= GROOMING_CANONICAL_DIRECT_CHAMFER_MEAN_DISTANCE_MAX
+            and chamfer_p90 is not None
+            and chamfer_p90 <= GROOMING_CANONICAL_DIRECT_CHAMFER_P90_DISTANCE_MAX
+        ),
+        "identity_gate_failed_only_for_repaintable_palette_drift": bool(
+            palette.get("available") is True
+            and palette.get("acceptable") is not True
+            and bool(palette_issues)
+            and not unexpected_palette_issues
+        ),
+        "independent_fur_surface_passed": bool(
+            surface.get("available") is True
+            and surface.get("evaluated") is True
+            and surface.get("acceptable") is True
+            and surface_provenance.get("alpha_provenance")
+            == GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE
+        ),
+    }
+    return {
+        "policy": GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY,
+        "attempt": attempt,
+        "evaluated": True,
+        "eligible": bool(all(checks.values())),
+        "checks": checks,
+        "allowed_identity_only_issues": sorted(
+            GROOMING_CANONICAL_POSE_SAFE_IDENTITY_ONLY_ISSUES
+        ),
+        "observed_identity_issues": sorted(palette_issues),
+        "unexpected_identity_issues": unexpected_palette_issues,
+        "observed": {
+            "structural_edge_density": structural_density,
+            "chamfer_coverage": chamfer_coverage,
+            "chamfer_mean_distance_px": chamfer_mean,
+            "chamfer_p90_distance_px": chamfer_p90,
+            "pose_transfer_seed_sha256": matte.get("pose_transfer_seed_sha256"),
+            "union_alpha_sha256": matte.get("union_alpha_sha256"),
+        },
+        "thresholds": {
+            "structural_edge_density_min": (
+                GROOMING_CANONICAL_POSE_SAFE_STRUCTURAL_EDGE_DENSITY_MIN
+            ),
+            "chamfer_coverage_min": GROOMING_CANONICAL_DIRECT_CHAMFER_COVERAGE_MIN,
+            "chamfer_mean_distance_max": (
+                GROOMING_CANONICAL_DIRECT_CHAMFER_MEAN_DISTANCE_MAX
+            ),
+            "chamfer_p90_distance_max": (
+                GROOMING_CANONICAL_DIRECT_CHAMFER_P90_DISTANCE_MAX
+            ),
+        },
+        "identity_palette_gate_bypassed": False,
+        "source_is_final_candidate": False,
+        "attempt5_must_revalidate_all_gates": True,
+        "fail_closed": True,
+    }
+
+
+def prepare_canonical_grooming_achromatic_palette_normalization(
+    candidate: Path,
+    canonical_reference: Path,
+    target: Path,
+) -> dict[str, Any]:
+    """Match foreground LAB-L distribution while preserving action and chroma."""
+
+    if not candidate.is_file() or not canonical_reference.is_file():
+        raise FileNotFoundError("Grooming palette-normalization input is missing.")
+    with Image.open(candidate) as loaded:
+        candidate_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+    with Image.open(canonical_reference) as loaded:
+        canonical_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+        canonical_has_alpha = "A" in loaded.getbands()
+    if candidate_rgba.shape != (512, 512, 4) or canonical_rgba.shape != (
+        512,
+        512,
+        4,
+    ):
+        raise ValueError("Grooming palette-normalization inputs must be 512x512.")
+
+    candidate_alpha = candidate_rgba[:, :, 3]
+    candidate_foreground = candidate_alpha > 96
+    if not 4096 <= int(np.count_nonzero(candidate_foreground)) <= int(
+        512 * 512 * 0.90
+    ):
+        raise ValueError("Grooming candidate alpha geometry is invalid.")
+
+    canonical_alpha = canonical_rgba[:, :, 3]
+    canonical_foreground = canonical_alpha > 96
+    if not canonical_has_alpha or np.all(canonical_alpha == 255):
+        canonical_rgb = canonical_rgba[:, :, :3]
+        red = canonical_rgb[:, :, 0].astype(np.int16)
+        green = canonical_rgb[:, :, 1].astype(np.int16)
+        blue = canonical_rgb[:, :, 2].astype(np.int16)
+        canonical_background = (
+            (green > 80)
+            & ((green - np.maximum(red, blue)) > 35)
+            & (green > red * 1.18)
+            & (green > blue * 1.18)
+        )
+        canonical_foreground = ~canonical_background
+    if not 4096 <= int(np.count_nonzero(canonical_foreground)) <= int(
+        512 * 512 * 0.90
+    ):
+        raise ValueError("Canonical palette foreground is invalid.")
+
+    candidate_lab = cv2.cvtColor(candidate_rgba[:, :, :3], cv2.COLOR_RGB2LAB)
+    canonical_lab = cv2.cvtColor(canonical_rgba[:, :, :3], cv2.COLOR_RGB2LAB)
+    source_luma = candidate_lab[:, :, 0][candidate_foreground]
+    canonical_luma = canonical_lab[:, :, 0][canonical_foreground]
+    source_histogram = np.bincount(source_luma, minlength=256).astype(np.float64)
+    canonical_histogram = np.bincount(
+        canonical_luma,
+        minlength=256,
+    ).astype(np.float64)
+    source_cdf = np.cumsum(source_histogram) / float(source_histogram.sum())
+    canonical_cdf = np.cumsum(canonical_histogram) / float(
+        canonical_histogram.sum()
+    )
+    luma_lut = np.interp(
+        source_cdf,
+        canonical_cdf,
+        np.arange(256, dtype=np.float64),
+    )
+    luma_lut = np.rint(luma_lut).clip(0, 255).astype(np.uint8)
+    normalized_lab = candidate_lab.copy()
+    normalized_lab[:, :, 0][candidate_foreground] = luma_lut[source_luma]
+    normalized_rgb = cv2.cvtColor(normalized_lab, cv2.COLOR_LAB2RGB)
+    output_rgba = candidate_rgba.copy()
+    output_rgba[:, :, :3] = normalized_rgb
+    output_rgba[~candidate_foreground, :3] = 0
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(output_rgba, mode="RGBA").save(target)
+    with Image.open(target) as loaded:
+        verified = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+    if not np.array_equal(verified[:, :, 3], candidate_alpha):
+        raise RuntimeError("Grooming palette normalization changed alpha geometry.")
+    verified_lab = cv2.cvtColor(verified[:, :, :3], cv2.COLOR_RGB2LAB)
+    ab_delta = np.abs(
+        verified_lab[:, :, 1:].astype(np.int16)
+        - normalized_lab[:, :, 1:].astype(np.int16)
+    )[candidate_foreground]
+    maximum_ab_roundtrip_delta = int(np.max(ab_delta)) if ab_delta.size else 0
+    if maximum_ab_roundtrip_delta > 2:
+        raise RuntimeError("Grooming palette normalization changed LAB chroma.")
+
+    return {
+        "policy": GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_PALETTE_POLICY,
+        "source_path": str(candidate),
+        "source_sha256": file_sha256(candidate),
+        "canonical_reference_path": str(canonical_reference),
+        "canonical_reference_sha256": file_sha256(canonical_reference),
+        "target_path": str(target),
+        "target_sha256": file_sha256(target),
+        "foreground_pixels": int(np.count_nonzero(candidate_foreground)),
+        "source_alpha_geometry_preserved_exactly": True,
+        "source_ab_chroma_preserved_with_roundtrip_tolerance": True,
+        "maximum_ab_roundtrip_delta": maximum_ab_roundtrip_delta,
+        "source_spatial_luma_rank_preserved": True,
+        "canonical_spatial_pixels_copied": False,
+        "canonical_luma_distribution_only": True,
+        "luma_lut_monotonic": bool(np.all(np.diff(luma_lut.astype(int)) >= 0)),
+        "source_luma_changed_pixels": int(
+            np.count_nonzero(luma_lut[source_luma] != source_luma)
+        ),
+        "source_luma_p10_p50_p90": [
+            round(float(value), 6)
+            for value in np.percentile(source_luma, [10, 50, 90])
+        ],
+        "canonical_luma_p10_p50_p90": [
+            round(float(value), 6)
+            for value in np.percentile(canonical_luma, [10, 50, 90])
+        ],
+        "output_luma_p10_p50_p90": [
+            round(float(value), 6)
+            for value in np.percentile(
+                verified_lab[:, :, 0][candidate_foreground],
+                [10, 50, 90],
+            )
+        ],
     }
 
 
@@ -3166,6 +8098,106 @@ def bowl_aware_identity_palette_quality(
         "method": "bowl_upper_body_confirmation",
         "primary_quality": primary_quality,
         "upper_body_quality": upper_body_quality,
+    }
+
+
+def canonical_identity_palette_quality(
+    primary_quality: dict[str, Any] | None,
+    upper_body_quality: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Require both full canonical and upper-body palette audits to pass."""
+    if not isinstance(primary_quality, dict):
+        return upper_body_quality
+    if not isinstance(upper_body_quality, dict):
+        return primary_quality
+    issues = list(
+        dict.fromkeys(
+            [
+                *(primary_quality.get("issues") or []),
+                *(upper_body_quality.get("issues") or []),
+            ]
+        )
+    )
+    warnings = list(
+        dict.fromkeys(
+            [
+                *(primary_quality.get("warnings") or []),
+                *(upper_body_quality.get("warnings") or []),
+            ]
+        )
+    )
+    available = bool(
+        primary_quality.get("available") and upper_body_quality.get("available")
+    )
+    acceptable = bool(
+        primary_quality.get("acceptable") and upper_body_quality.get("acceptable")
+    )
+    return {
+        **primary_quality,
+        "available": available,
+        "acceptable": acceptable,
+        "warning": bool(issues or warnings),
+        "issues": issues,
+        "warnings": warnings,
+        "penalty": round(
+            max(
+                float(primary_quality.get("penalty", 0.0)),
+                float(upper_body_quality.get("penalty", 0.0)),
+            ),
+            6,
+        ),
+        "method": "canonical_primary_and_upper_body_v1",
+        "primary_quality": primary_quality,
+        "upper_body_quality": upper_body_quality,
+    }
+
+
+def evaluate_pose_identity_palette(
+    candidate_path: Path,
+    *,
+    primary_reference: dict[str, Any] | None,
+    upper_body_reference: dict[str, Any] | None,
+    bottom_exclusion: float,
+    bowl_action: bool,
+) -> dict[str, Any]:
+    """Evaluate a pose subject while keeping bowl colors out of the coat audit."""
+    candidate = (
+        identity_palette_signature(
+            candidate_path,
+            exclude_bottom_fraction=bottom_exclusion,
+        )
+        if primary_reference is not None
+        else None
+    )
+    primary_quality = (
+        identity_palette_quality(primary_reference, candidate)
+        if primary_reference is not None and candidate is not None
+        else None
+    )
+    upper_candidate = (
+        identity_palette_signature(
+            candidate_path,
+            exclude_bottom_fraction=BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION,
+        )
+        if upper_body_reference is not None
+        else None
+    )
+    upper_quality = (
+        identity_palette_quality(upper_body_reference, upper_candidate)
+        if upper_body_reference is not None and upper_candidate is not None
+        else None
+    )
+    quality = (
+        bowl_aware_identity_palette_quality(primary_quality, upper_quality)
+        if primary_quality is not None and bowl_action
+        else primary_quality
+    )
+    return {
+        "candidate": candidate,
+        "primary_quality": primary_quality,
+        "upper_body_candidate": upper_candidate,
+        "upper_body_quality": upper_quality,
+        "quality": quality,
     }
 
 
@@ -3253,6 +8285,366 @@ def select_canonical_fallback_attempt(
     )
 
 
+SEMANTIC_RECOVERABLE_FRAMING_ISSUES = frozenset(
+    {
+        "subject_too_close_to_canvas_edge",
+        "subject_too_large",
+    }
+)
+
+
+def semantic_quality_blocking_issues(quality: dict[str, Any]) -> list[str]:
+    """Return defects that cannot be repaired by final canvas normalization."""
+    return [
+        str(issue)
+        for issue in quality.get("issues", [])
+        if issue not in SEMANTIC_RECOVERABLE_FRAMING_ISSUES
+    ]
+
+
+def semantic_recovery_gate_failure(
+    chroma: dict[str, Any],
+    quality: dict[str, Any],
+    similarity: dict[str, Any],
+    palette: dict[str, Any] | None,
+    fur_silhouette: dict[str, Any] | None = None,
+    fur_surface_gate: dict[str, Any] | None = None,
+) -> str | None:
+    """Return the first fail-closed rejection reason for a recovered keyframe."""
+    if not bool(chroma.get("acceptable")):
+        return "semantic_chroma_invalid"
+    if not bool(quality.get("acceptable")):
+        return "semantic_subject_quality_invalid"
+    if not bool(similarity.get("acceptable")):
+        return "semantic_pose_similarity_invalid"
+    if palette is not None and not bool(palette.get("acceptable")):
+        return "semantic_identity_palette_invalid"
+    if fur_silhouette is not None and not bool(fur_silhouette.get("acceptable")):
+        return "semantic_fur_silhouette_invalid"
+    if fur_surface_gate is not None and fur_surface_gate.get("acceptable") is not True:
+        return "semantic_fur_surface_invalid"
+    return None
+
+
+def neutralize_achromatic_warm_cast(
+    source_path: Path,
+    candidate_path: Path,
+    output_path: Path,
+    *,
+    green_target: Path | None = None,
+) -> dict[str, Any]:
+    """Correct a proven global Lab warm cast without touching local accents."""
+
+    output_resolved = output_path.resolve()
+    if output_resolved in {source_path.resolve(), candidate_path.resolve()}:
+        raise ValueError("Warm-cast recovery output must be a derived file")
+
+    def foreground_mask(rgba: np.ndarray) -> np.ndarray:
+        alpha = rgba[:, :, 3]
+        if np.any(alpha < 250):
+            mask = alpha >= 64
+        else:
+            rgb = rgba[:, :, :3]
+            red = rgb[:, :, 0].astype(np.int16)
+            green = rgb[:, :, 1].astype(np.int16)
+            blue = rgb[:, :, 2].astype(np.int16)
+            background = (
+                (green > 80)
+                & ((green - np.maximum(red, blue)) > 35)
+                & (green > red * 1.18)
+                & (green > blue * 1.18)
+            )
+            mask = ~background
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            mask.astype(np.uint8),
+            connectivity=8,
+        )
+        if count <= 1:
+            return mask
+        largest = max(
+            range(1, count),
+            key=lambda label: int(stats[label, cv2.CC_STAT_AREA]),
+        )
+        return labels == largest
+
+    def analysis_assets(rgba: np.ndarray) -> dict[str, Any] | None:
+        mask = foreground_mask(rgba)
+        ys, xs = np.where(mask)
+        if not len(ys):
+            return None
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        height = max(1, y1 - y0)
+        rows, cols = np.indices(mask.shape)
+        upper = rows < y0 + int(round(height * 0.55))
+        interior = cv2.erode(
+            mask.astype(np.uint8),
+            np.ones((5, 5), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        rgb = rgba[:, :, :3]
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+        lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+        hue = hsv[:, :, 0]
+        saturation = hsv[:, :, 1]
+        value = hsv[:, :, 2]
+        warm_hue = (hue <= 41) | (hue >= 165)
+        red_or_pink = ((hue <= 7) | (hue >= 165)) & (saturation >= 20)
+        # A warm lighting cast can put large areas of neutral gray fur into the
+        # red/pink hue bin. Preserve only high-chroma red/pink pixels and small
+        # localized components (nose/ear accents); broad low-chroma regions stay
+        # eligible for global cast recovery.
+        localized_red_or_pink = np.zeros(mask.shape, dtype=bool)
+        redpink_accent_seed = mask & red_or_pink & (saturation >= 52)
+        component_count, component_labels, component_stats, _ = (
+            cv2.connectedComponentsWithStats(
+                redpink_accent_seed.astype(np.uint8),
+                connectivity=8,
+            )
+        )
+        maximum_accent_area = max(
+            96,
+            int(round(np.count_nonzero(mask) * 0.012)),
+        )
+        for component_label in range(1, component_count):
+            if (
+                int(component_stats[component_label, cv2.CC_STAT_AREA])
+                <= maximum_accent_area
+            ):
+                localized_red_or_pink |= component_labels == component_label
+        red_or_pink_accent = red_or_pink & localized_red_or_pink
+        blue_green_accent = (hue >= 35) & (hue <= 140) & (saturation >= 20)
+        high_chroma = saturation >= 96
+        protected_high_chroma = high_chroma & (~warm_hue | localized_red_or_pink)
+        neutral = (
+            interior
+            & upper
+            & (value >= 24)
+            & (value <= 248)
+            & ~red_or_pink_accent
+            & ~blue_green_accent
+            & (saturation < 80)
+        )
+        return {
+            "mask": mask,
+            "interior": interior,
+            "upper": upper,
+            "bbox": (x0, y0, x1, y1),
+            "rgb": rgb,
+            "hsv": hsv,
+            "lab": lab,
+            "neutral": neutral,
+            "red_or_pink_accent": red_or_pink_accent,
+            "blue_green_accent": blue_green_accent,
+            "high_chroma": protected_high_chroma,
+            "rows": rows,
+            "cols": cols,
+        }
+
+    with Image.open(source_path) as loaded:
+        source_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+    with Image.open(candidate_path) as loaded:
+        candidate_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8).copy()
+    alpha_sha256_before = hashlib.sha256(candidate_rgba[:, :, 3].tobytes()).hexdigest()
+    source = analysis_assets(source_rgba)
+    candidate = analysis_assets(candidate_rgba)
+    if source is None or candidate is None:
+        return {"applied": False, "reason": "no_foreground"}
+    source_neutral = source["neutral"]
+    candidate_neutral = candidate["neutral"]
+    if (
+        np.count_nonzero(source_neutral) < 256
+        or np.count_nonzero(candidate_neutral) < 256
+    ):
+        return {"applied": False, "reason": "insufficient_neutral_fur_samples"}
+    source_lab = source["lab"]
+    candidate_lab = candidate["lab"]
+    source_ab = np.median(source_lab[:, :, 1:3][source_neutral], axis=0)
+    candidate_ab = np.median(candidate_lab[:, :, 1:3][candidate_neutral], axis=0)
+    cast_delta = candidate_ab.astype(np.float32) - source_ab.astype(np.float32)
+    cast_magnitude = float(np.linalg.norm(cast_delta))
+    # Positive b* is yellow and positive a* is red. Require a meaningful warm
+    # direction before changing any pixel; cool or localized recolors fail closed.
+    warm_direction = bool(cast_delta[1] >= 3.0 or cast_delta[0] >= 3.0)
+    if cast_magnitude < 4.0 or not warm_direction:
+        return {
+            "applied": False,
+            "reason": "global_warm_cast_not_proven",
+            "cast_delta_ab": [round(float(value), 4) for value in cast_delta],
+            "cast_magnitude": round(cast_magnitude, 4),
+        }
+    direction = cast_delta / max(cast_magnitude, 1e-6)
+    deviations = candidate_lab[:, :, 1:3].astype(np.float32) - source_ab.astype(
+        np.float32
+    )
+    projection = deviations[:, :, 0] * direction[0] + deviations[:, :, 1] * direction[1]
+    globally_shifted = candidate_neutral & (projection >= cast_magnitude * 0.45)
+    upper_foreground_count = int(
+        np.count_nonzero(candidate["mask"] & candidate["upper"])
+    )
+    shifted_count = int(np.count_nonzero(globally_shifted))
+    neutral_coverage = float(shifted_count) / float(
+        max(1, np.count_nonzero(candidate_neutral))
+    )
+    foreground_coverage = float(shifted_count) / float(max(1, upper_foreground_count))
+    x0, y0, x1, y1 = candidate["bbox"]
+    upper_y1 = y0 + max(1, int(round((y1 - y0) * 0.55)))
+    grid_projections: list[float] = []
+    for row in range(2):
+        gy0 = y0 + (upper_y1 - y0) * row // 2
+        gy1 = y0 + (upper_y1 - y0) * (row + 1) // 2
+        for column in range(3):
+            gx0 = x0 + (x1 - x0) * column // 3
+            gx1 = x0 + (x1 - x0) * (column + 1) // 3
+            grid = np.zeros(candidate_neutral.shape, dtype=bool)
+            grid[gy0:gy1, gx0:gx1] = True
+            samples = candidate_neutral & grid
+            if np.count_nonzero(samples) < 128:
+                continue
+            median_ab = np.median(
+                candidate_lab[:, :, 1:3][samples],
+                axis=0,
+            )
+            grid_delta = median_ab.astype(np.float32) - source_ab.astype(np.float32)
+            grid_projections.append(float(np.dot(grid_delta, direction)))
+    consistent_grids = sum(value >= cast_magnitude * 0.45 for value in grid_projections)
+    grid_iqr = (
+        float(np.percentile(grid_projections, 75) - np.percentile(grid_projections, 25))
+        if len(grid_projections) >= 4
+        else float("inf")
+    )
+    if (
+        neutral_coverage < 0.15
+        or foreground_coverage < 0.06
+        or consistent_grids < 4
+        or grid_iqr > 12.0
+    ):
+        return {
+            "applied": False,
+            "reason": "warm_shift_is_not_spatially_global",
+            "cast_delta_ab": [round(float(value), 4) for value in cast_delta],
+            "cast_magnitude": round(cast_magnitude, 4),
+            "neutral_coverage": round(neutral_coverage, 6),
+            "foreground_coverage": round(foreground_coverage, 6),
+            "consistent_grids": consistent_grids,
+            "grid_count": len(grid_projections),
+            "grid_iqr": round(grid_iqr, 4) if np.isfinite(grid_iqr) else None,
+        }
+    saturation = candidate["hsv"][:, :, 1].astype(np.float32)
+    hue = candidate["hsv"][:, :, 0]
+    rows = candidate["rows"]
+    cols = candidate["cols"]
+    height = max(1, y1 - y0)
+    width = max(1, x1 - x0)
+    bowl_roi = (
+        # Keep the actual lower-central bowl untouched. Starting this region
+        # only after the vertical correction has almost faded prevents a hard
+        # horizontal colour seam across the muzzle or chest.
+        (rows >= y0 + int(round(height * 0.82)))
+        & (cols >= x0 + int(round(width * 0.25)))
+        & (cols <= x0 + int(round(width * 0.75)))
+    )
+    warm_low_chroma = ((hue <= 41) | (hue >= 165)) & (saturation < 168)
+    protected = (
+        ~candidate["interior"]
+        | candidate["red_or_pink_accent"]
+        | candidate["blue_green_accent"]
+        | candidate["high_chroma"]
+        | bowl_roi
+    )
+    correction_mask = candidate["mask"] & warm_low_chroma & ~protected
+    saturation_weight = np.clip((168.0 - saturation) / 72.0, 0.0, 1.0)
+    relative_y = (rows.astype(np.float32) - float(y0)) / float(height)
+    vertical_weight = np.clip((0.85 - relative_y) / 0.30, 0.0, 1.0)
+    projection_strength = np.clip(
+        projection / max(cast_magnitude, 1e-6),
+        0.0,
+        2.0,
+    )
+    weight = (
+        correction_mask.astype(np.float32)
+        * saturation_weight
+        * vertical_weight
+        * projection_strength
+    )
+    active = weight > 0.01
+    weight[~active] = 0.0
+    corrected_count = int(np.count_nonzero(active))
+    if corrected_count < max(128, int(upper_foreground_count * 0.10)):
+        return {
+            "applied": False,
+            "reason": "insufficient_safe_pixels_for_correction",
+            "neutral_coverage": round(neutral_coverage, 6),
+            "foreground_coverage": round(foreground_coverage, 6),
+            "corrected_pixels": corrected_count,
+        }
+    protected_hash_before = hashlib.sha256(
+        candidate["rgb"][protected & candidate["mask"]].tobytes()
+    ).hexdigest()
+    corrected_lab = candidate_lab.astype(np.float32).copy()
+    bounded_delta = np.clip(cast_delta, -24.0, 24.0)
+    corrected_lab[:, :, 1] -= bounded_delta[0] * weight
+    corrected_lab[:, :, 2] -= bounded_delta[1] * weight
+    corrected_rgb = cv2.cvtColor(
+        np.clip(np.rint(corrected_lab), 0, 255).astype(np.uint8),
+        cv2.COLOR_LAB2RGB,
+    )
+    # Lab conversion is not perfectly lossless. Keep every pixel outside the
+    # weighted correction region byte-for-byte identical to the candidate so
+    # the recovery cannot introduce unrelated colour or edge changes.
+    corrected_rgb[~active] = candidate["rgb"][~active]
+    corrected_rgb[protected] = candidate["rgb"][protected]
+    candidate_rgba[:, :, :3] = corrected_rgb
+    protected_hash_after = hashlib.sha256(
+        candidate_rgba[:, :, :3][protected & candidate["mask"]].tobytes()
+    ).hexdigest()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(candidate_rgba, mode="RGBA").save(
+        output_path,
+        format="PNG",
+        optimize=True,
+    )
+    if green_target is not None:
+        alpha_float = candidate_rgba[:, :, 3:4].astype(np.float32) / 255.0
+        green = np.empty_like(candidate_rgba[:, :, :3])
+        green[:, :, :] = (0, 255, 0)
+        composite = candidate_rgba[:, :, :3].astype(
+            np.float32
+        ) * alpha_float + green.astype(np.float32) * (1.0 - alpha_float)
+        Image.fromarray(
+            np.clip(np.rint(composite), 0, 255).astype(np.uint8),
+            mode="RGB",
+        ).save(green_target, format="PNG", optimize=True)
+    return {
+        "applied": True,
+        "method": "robust_lab_global_warm_cast_recovery",
+        "source": source_path.name,
+        "candidate": candidate_path.name,
+        "output": output_path.name,
+        "source_median_ab": [round(float(value), 4) for value in source_ab],
+        "candidate_median_ab": [round(float(value), 4) for value in candidate_ab],
+        "cast_delta_ab": [round(float(value), 4) for value in cast_delta],
+        "applied_delta_ab": [round(float(value), 4) for value in bounded_delta],
+        "cast_magnitude": round(cast_magnitude, 4),
+        "neutral_coverage": round(neutral_coverage, 6),
+        "foreground_coverage": round(foreground_coverage, 6),
+        "consistent_grids": consistent_grids,
+        "grid_count": len(grid_projections),
+        "grid_iqr": round(grid_iqr, 4),
+        "corrected_pixels": corrected_count,
+        "adaptive_projection_strength_p95": round(
+            float(np.percentile(projection_strength[active], 95)),
+            4,
+        ),
+        "protected_hash_before": protected_hash_before,
+        "protected_hash_after": protected_hash_after,
+        "alpha_sha256_before": alpha_sha256_before,
+        "alpha_sha256_after": hashlib.sha256(
+            candidate_rgba[:, :, 3].tobytes()
+        ).hexdigest(),
+    }
+
+
 def semantic_background_recovery(
     source: Path,
     chroma_target: Path,
@@ -3298,10 +8690,14 @@ def semantic_background_recovery(
             "Semantic background recovery did not find a usable pet subject."
         )
     semantic_quality = pose_cutout_quality(semantic_target, pose)
-    if not semantic_quality["acceptable"]:
+    # The raw rembg canvas can legitimately be tight even when the complete pet
+    # was recovered. prepare_landscape_keyframe below recenters and scales it, so
+    # framing-only issues are evaluated again on the normalized final cutout.
+    blocking_semantic_issues = semantic_quality_blocking_issues(semantic_quality)
+    if blocking_semantic_issues:
         raise RuntimeError(
             "Semantic background recovery produced an incomplete or invalid pet subject: "
-            + ", ".join(semantic_quality["issues"])
+            + ", ".join(blocking_semantic_issues)
         )
     prepare_landscape_keyframe(
         semantic_target,
@@ -3327,28 +8723,2314 @@ def semantic_background_recovery(
     return metrics
 
 
+def finalize_qwen_action_reference_candidate(
+    metrics: dict[str, Any],
+    cutout: Path,
+    final_target: Path | None = None,
+) -> tuple[dict[str, Any], Path]:
+    """Normalize one reliable matte into the exact 512 RGBA gate/SCAIL file."""
+
+    final_target = final_target or cutout.with_name(f"{cutout.stem}_reference_512.png")
+    try:
+        normalization = normalize_qwen_action_reference_rgba(
+            cutout,
+            final_target,
+        )
+    except Exception as exc:  # noqa: BLE001 - candidate must fail closed
+        final_target.unlink(missing_ok=True)
+        return (
+            {
+                **metrics,
+                "acceptable": False,
+                "issues": list(
+                    dict.fromkeys(
+                        [
+                            *[str(issue) for issue in metrics.get("issues", [])],
+                            "final_reference_normalization_failed",
+                        ]
+                    )
+                ),
+                "normalized_after_qwen": False,
+                "matte_policy": QWEN_ACTION_CANDIDATE_MATTE_POLICY,
+                "normalization_policy": (QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY),
+                "final_reference_normalization_error": (
+                    f"{type(exc).__name__}: {str(exc)[:1000]}"
+                ),
+            },
+            cutout,
+        )
+    return (
+        {
+            **metrics,
+            "normalized_after_qwen": True,
+            "matte_policy": QWEN_ACTION_CANDIDATE_MATTE_POLICY,
+            "normalization_policy": QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY,
+            "final_reference_normalization": normalization,
+            "final_reference_sha256": normalization["output_sha256"],
+        },
+        final_target,
+    )
+
+
+def normalize_qwen_action_candidate(
+    source: Path,
+    direct_cutout_target: Path,
+    semantic_green_target: Path,
+    semantic_cutout_target: Path,
+    semantic_raw_target: Path,
+    *,
+    pose: str,
+    allow_semantic_matte: bool,
+) -> tuple[dict[str, Any], Path]:
+    """Normalize one Qwen action candidate before any action or SCAIL gate."""
+
+    try:
+        direct_metrics = evaluate_chroma_cutout(source, direct_cutout_target)
+    except Exception as exc:  # noqa: BLE001 - fail closed and preserve audit detail
+        direct_metrics = {
+            "acceptable": False,
+            "issues": ["background_removal_exception"],
+            "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+            "method": "chroma_key_exception",
+        }
+    if direct_metrics.get("acceptable"):
+        final_metrics, final_cutout = finalize_qwen_action_reference_candidate(
+            direct_metrics,
+            direct_cutout_target,
+        )
+        return (
+            {
+                **final_metrics,
+                "direct_chroma": direct_metrics,
+                "semantic_recovery_attempted": False,
+                "semantic_recovery_acceptable": None,
+            },
+            final_cutout,
+        )
+    if not allow_semantic_matte:
+        return (
+            {
+                **direct_metrics,
+                "direct_chroma": direct_metrics,
+                "semantic_recovery_attempted": False,
+                "semantic_recovery_acceptable": None,
+                "normalized_after_qwen": False,
+                "matte_policy": QWEN_ACTION_CANDIDATE_MATTE_POLICY,
+                "normalization_policy": QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY,
+            },
+            direct_cutout_target,
+        )
+
+    try:
+        semantic_metrics = semantic_background_recovery(
+            source,
+            semantic_green_target,
+            semantic_cutout_target,
+            semantic_raw_target,
+            pose=pose,
+        )
+    except Exception as exc:  # noqa: BLE001 - candidate remains rejected
+        return (
+            {
+                **direct_metrics,
+                "direct_chroma": direct_metrics,
+                "semantic_recovery_attempted": True,
+                "semantic_recovery_acceptable": False,
+                "semantic_recovery_error": (f"{type(exc).__name__}: {str(exc)[:1000]}"),
+                "normalized_after_qwen": False,
+                "matte_policy": QWEN_ACTION_CANDIDATE_MATTE_POLICY,
+                "normalization_policy": QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY,
+            },
+            direct_cutout_target,
+        )
+    final_metrics, final_cutout = finalize_qwen_action_reference_candidate(
+        semantic_metrics,
+        semantic_cutout_target,
+    )
+    return (
+        {
+            **final_metrics,
+            "direct_chroma": direct_metrics,
+            "semantic_recovery_attempted": True,
+            "semantic_recovery_acceptable": bool(final_metrics.get("acceptable")),
+        },
+        final_cutout,
+    )
+
+
+def fur_surface_gate_failure(
+    action: str,
+    issue: str,
+    *,
+    baseline: dict[str, Any] | None = None,
+    candidate: Path | None = None,
+    alpha_provenance: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Return a JSON-safe surface verdict that can never be mistaken for pass."""
+
+    result: dict[str, Any] = {
+        "available": False,
+        "evaluated": False,
+        "acceptable": False,
+        "verdict": "rejected",
+        "status": "rejected",
+        "issues": [issue],
+        "candidate_absolute_issues": [issue],
+        "relative_issues": [],
+        "baseline_issues": [],
+        "candidate": None,
+        "baseline": None,
+        "comparisons": {},
+        "thresholds": fur_surface_thresholds_payload(),
+        "gate": {
+            "policy": FUR_SURFACE_GATE_POLICY,
+            "gate_version": FUR_SURFACE_GATE_VERSION,
+            "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+            "action": action,
+            "reliable_alpha_required": True,
+            "alpha_provenance": alpha_provenance,
+            "candidate_path": str(candidate) if candidate is not None else None,
+            "baseline_provenance": (
+                baseline.get("provenance") if isinstance(baseline, dict) else None
+            ),
+            "baseline_snapshot_sha256": (
+                baseline.get("snapshot_sha256") if isinstance(baseline, dict) else None
+            ),
+        },
+        "penalty": 1000.0,
+        "policy": {
+            "name": FUR_SURFACE_GATE_POLICY,
+            "gate_version": FUR_SURFACE_GATE_VERSION,
+            "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+            "production_integrated": True,
+            "validated_baseline_required_for_acceptance": True,
+            "opaque_background_can_be_rejected_but_not_accepted": True,
+            "limitations": [issue],
+        },
+    }
+    if error:
+        result["error"] = error[:1000]
+    return result
+
+
+def resolve_main_case_fur_surface_baseline(
+    effective_subject_config: dict[str, Any],
+    action: str,
+) -> tuple[Path, dict[str, Any]]:
+    """Resolve a job-frozen baseline and verify every provenance boundary."""
+
+    if effective_subject_config.get("profile_id") != "sleek_tabby_cat_v1":
+        raise RuntimeError("Fur surface gate received an unsupported profile")
+    action_config = effective_subject_config.get("actions", {}).get(action)
+    if not isinstance(action_config, dict):
+        raise RuntimeError(f"Fur surface gate lacks {action} action configuration")
+    gate = action_config.get("fur_surface_gate")
+    if (
+        not isinstance(gate, dict)
+        or gate.get("enabled") is not True
+        or gate.get("policy") != FUR_SURFACE_GATE_POLICY
+        or gate.get("gate_version") != FUR_SURFACE_GATE_VERSION
+        or gate.get("threshold_version") != FUR_SURFACE_THRESHOLD_VERSION
+    ):
+        raise RuntimeError(f"Fur surface gate lacks frozen {action} policy provenance")
+    baseline = gate.get("baseline")
+    if not isinstance(baseline, dict):
+        raise RuntimeError(f"Fur surface gate lacks {action} baseline provenance")
+    baseline_path = Path(str(baseline.get("path") or ""))
+    if not baseline_path.is_file():
+        raise RuntimeError(f"Fur surface gate {action} baseline snapshot is missing")
+    digest = file_sha256(baseline_path)
+    expected_digests = {
+        str(baseline.get("sha256") or ""),
+        str(baseline.get("snapshot_sha256") or ""),
+        str(baseline.get("source_sha256") or ""),
+    }
+    if "" in expected_digests or expected_digests != {digest}:
+        raise RuntimeError(
+            f"Fur surface gate {action} baseline snapshot digest changed"
+        )
+    provenance = baseline.get("provenance")
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("profile_id") != effective_subject_config.get("profile_id")
+        or provenance.get("profile_sha256")
+        != effective_subject_config.get("profile_sha256")
+        or provenance.get("action") != action
+        or provenance.get("validated_action_baseline_reference_sha256") != digest
+        or baseline.get("provenance_sha256") != json_value_sha256(provenance)
+    ):
+        raise RuntimeError(f"Fur surface gate {action} baseline provenance changed")
+    contract = baseline.get("absolute_contract")
+    if not isinstance(contract, dict) or contract.get("acceptable") is not True:
+        raise RuntimeError(
+            f"Fur surface gate {action} baseline absolute contract is unavailable"
+        )
+    return baseline_path, baseline
+
+
+def evaluate_main_case_fur_surface_candidate(
+    cutout: Path,
+    *,
+    action: str,
+    alpha_provenance: str,
+    effective_subject_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Evaluate one reliable alpha/rembg candidate against its action snapshot."""
+
+    upload_validation = effective_subject_config.get("upload_validation")
+    uploaded_identity_absolute = bool(
+        isinstance(upload_validation, dict)
+        and upload_validation.get("uploaded_identity_appearance_authority") is True
+        and effective_subject_config.get("actions", {})
+        .get(action, {})
+        .get("fur_surface_gate", {})
+        .get("candidate_comparison_mode")
+        == UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
+    )
+    baseline_path: Path | None = None
+    baseline: dict[str, Any] | None = None
+    if not uploaded_identity_absolute:
+        try:
+            baseline_path, baseline = resolve_main_case_fur_surface_baseline(
+                effective_subject_config,
+                action,
+            )
+        except Exception as exc:  # noqa: BLE001 - retry/fail closed
+            return fur_surface_gate_failure(
+                action,
+                "fur_surface_baseline_provenance_invalid",
+                candidate=cutout,
+                alpha_provenance=alpha_provenance,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+    allowed_provenance = {
+        "chroma_key",
+        "rembg_u2net_fallback",
+        "rembg_u2net_grooming_pose_gate",
+        "rembg_then_lab_warm_cast_recovery",
+        GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE,
+    }
+    if alpha_provenance not in allowed_provenance or not cutout.is_file():
+        return fur_surface_gate_failure(
+            action,
+            "fur_surface_reliable_alpha_cutout_unavailable",
+            baseline=baseline,
+            candidate=cutout,
+            alpha_provenance=alpha_provenance,
+        )
+    try:
+        with Image.open(cutout) as loaded:
+            if "A" not in loaded.getbands():
+                raise ValueError("cutout_has_no_alpha_channel")
+            alpha = loaded.convert("RGBA").getchannel("A")
+            alpha_minimum, alpha_maximum = alpha.getextrema()
+            if alpha_minimum == 255 or alpha_maximum == 0:
+                raise ValueError("cutout_alpha_is_not_a_usable_subject_matte")
+        result = evaluate_fur_surface(
+            cutout,
+            baseline_path,
+            baseline_is_validated=not uploaded_identity_absolute,
+            accept_absolute_contract=uploaded_identity_absolute,
+        )
+        result = json.loads(json.dumps(result, ensure_ascii=False, allow_nan=False))
+    except Exception as exc:  # noqa: BLE001 - malformed CV inputs fail closed
+        return fur_surface_gate_failure(
+            action,
+            "fur_surface_gate_evaluation_failed",
+            baseline=baseline,
+            candidate=cutout,
+            alpha_provenance=alpha_provenance,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    result["available"] = True
+    result["evaluated"] = True
+    result["status"] = "passed" if result.get("acceptable") is True else "rejected"
+    result["penalty"] = 0.0 if result.get("acceptable") is True else 1000.0
+    result["gate"] = {
+        "policy": FUR_SURFACE_GATE_POLICY,
+        "gate_version": FUR_SURFACE_GATE_VERSION,
+        "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+        "action": action,
+        "reliable_alpha_required": True,
+        "alpha_provenance": alpha_provenance,
+        "candidate_path": str(cutout),
+        "candidate_sha256": file_sha256(cutout),
+        "candidate_comparison_mode": (
+            UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
+            if uploaded_identity_absolute
+            else "validated_profile_relative_baseline"
+        ),
+        "profile_pixels_used_for_candidate_appearance_validation": False
+        if uploaded_identity_absolute
+        else True,
+        "baseline_path": str(baseline_path) if baseline_path is not None else None,
+        "baseline_snapshot_sha256": (
+            baseline.get("snapshot_sha256") if isinstance(baseline, dict) else None
+        ),
+        "baseline_provenance": (
+            baseline.get("provenance") if isinstance(baseline, dict) else None
+        ),
+        "baseline_provenance_sha256": (
+            baseline.get("provenance_sha256") if isinstance(baseline, dict) else None
+        ),
+    }
+    if result.get("acceptable") is not True and not result.get("issues"):
+        result["issues"] = ["fur_surface_candidate_not_proven_acceptable"]
+    return result
+
+
+def apply_canonical_grooming_direct_surface_nonexpansion_gate(
+    surface_gate: dict[str, Any],
+    *,
+    pose_gate: dict[str, Any] | None,
+    identity_palette_quality: dict[str, Any] | None,
+    attempt: int,
+    canonical_reference_path: Path,
+    canonical_reference_sha256: str,
+) -> dict[str, Any]:
+    """Recover one inherited brush issue only when canonical debt shrinks.
+
+    This is not an alternate global fur threshold. It applies only after the
+    strict direct-canonical raised-paw recovery and identity-palette pass. The
+    transparent canonical is digest-bound, independently analyzed with the
+    unchanged absolute contract, and every relevant candidate brush/line
+    metric must remain bounded and non-expanding against that canonical.
+    """
+
+    result = dict(surface_gate)
+
+    def number(value: Any) -> float | None:
+        try:
+            converted = float(value)
+        except (TypeError, ValueError):
+            return None
+        return converted if np.isfinite(converted) else None
+
+    def texture_metrics(audit: dict[str, Any]) -> dict[str, Any]:
+        candidate = audit.get("candidate")
+        candidate = candidate if isinstance(candidate, dict) else {}
+        metrics = candidate.get("metrics")
+        metrics = metrics if isinstance(metrics, dict) else {}
+        texture = metrics.get("texture")
+        return texture if isinstance(texture, dict) else {}
+
+    def hough_metrics(texture: dict[str, Any]) -> dict[str, Any]:
+        hough = texture.get("hough")
+        return hough if isinstance(hough, dict) else {}
+
+    gate = surface_gate.get("gate")
+    gate = gate if isinstance(gate, dict) else {}
+    thresholds = surface_gate.get("thresholds")
+    thresholds = thresholds if isinstance(thresholds, dict) else {}
+    candidate_record = surface_gate.get("candidate")
+    candidate_record = candidate_record if isinstance(candidate_record, dict) else {}
+    candidate_input = candidate_record.get("input")
+    candidate_input = candidate_input if isinstance(candidate_input, dict) else {}
+    candidate_texture = texture_metrics(surface_gate)
+    candidate_hough = hough_metrics(candidate_texture)
+    pose_gate = pose_gate if isinstance(pose_gate, dict) else {}
+    pose_recovery = pose_gate.get("canonical_direct_structural_edge_evidence")
+    pose_recovery = pose_recovery if isinstance(pose_recovery, dict) else {}
+    identity_palette_quality = (
+        identity_palette_quality if isinstance(identity_palette_quality, dict) else {}
+    )
+
+    expected_digest = str(canonical_reference_sha256 or "").strip().lower()
+    canonical_result: dict[str, Any] = {}
+    canonical_error: str | None = None
+    canonical_digest_valid = False
+    try:
+        canonical_digest_valid = bool(
+            canonical_reference_path.is_file()
+            and re.fullmatch(r"[0-9a-f]{64}", expected_digest) is not None
+            and file_sha256(canonical_reference_path) == expected_digest
+        )
+        if canonical_digest_valid:
+            canonical_result = evaluate_fur_surface(
+                canonical_reference_path,
+                accept_absolute_contract=True,
+            )
+            canonical_result = json.loads(
+                json.dumps(
+                    canonical_result,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+            )
+    except Exception as exc:  # noqa: BLE001 - recovery must fail closed
+        canonical_error = f"{type(exc).__name__}: {str(exc)[:1000]}"
+        canonical_result = {}
+
+    canonical_record = canonical_result.get("candidate")
+    canonical_record = canonical_record if isinstance(canonical_record, dict) else {}
+    canonical_input = canonical_record.get("input")
+    canonical_input = canonical_input if isinstance(canonical_input, dict) else {}
+    canonical_texture = texture_metrics(canonical_result)
+    canonical_hough = hough_metrics(canonical_texture)
+    raw_issues = [str(issue) for issue in surface_gate.get("issues", [])]
+    raw_absolute_issues = [
+        str(issue) for issue in surface_gate.get("candidate_absolute_issues", [])
+    ]
+    attempt_number = number(attempt)
+    canonical_issues = [str(issue) for issue in canonical_result.get("issues", [])]
+    allowed_canonical_debt = {
+        "brush_texture_coherence",
+        "coherent_long_fur_energy",
+    }
+    default_thresholds = asdict(FurSurfaceThresholds())
+
+    candidate_path = Path(str(gate.get("candidate_path") or ""))
+    candidate_sha256 = str(gate.get("candidate_sha256") or "").lower()
+    candidate_digest_valid = False
+    try:
+        candidate_digest_valid = bool(
+            candidate_path.is_file()
+            and re.fullmatch(r"[0-9a-f]{64}", candidate_sha256) is not None
+            and file_sha256(candidate_path) == candidate_sha256
+            and Path(str(pose_gate.get("candidate") or "")).resolve()
+            == candidate_path.resolve()
+        )
+    except (OSError, RuntimeError, ValueError):
+        candidate_digest_valid = False
+
+    candidate_coarse = number(candidate_texture.get("coarse_gradient_p90"))
+    candidate_coherence_mean = number(
+        candidate_texture.get("structure_tensor_coherence_mean")
+    )
+    candidate_coherent_fraction = number(
+        candidate_texture.get("structure_tensor_coherent_fraction")
+    )
+    candidate_orientation = number(
+        candidate_texture.get("orientation_persistence_fraction")
+    )
+    candidate_fine_radial = number(candidate_texture.get("fine_radial_brush_fraction"))
+    candidate_fine_radial_energy = number(
+        candidate_texture.get("fine_radial_brush_energy")
+    )
+    candidate_coarse_radial = number(
+        candidate_texture.get("coarse_radial_brush_fraction")
+    )
+    candidate_coarse_radial_energy = number(
+        candidate_texture.get("coarse_radial_brush_energy")
+    )
+    candidate_long = number(candidate_texture.get("coherent_long_line_energy"))
+    candidate_hough_radial = number(candidate_hough.get("radial_line_fraction"))
+    coarse_gradient_max = number(thresholds.get("coarse_gradient_p90_max"))
+    radial_brush_max = number(thresholds.get("radial_brush_fraction_max"))
+    hough_radial_max = number(thresholds.get("hough_radial_line_fraction_max"))
+    coherent_long_max = number(thresholds.get("coherent_long_line_energy_max"))
+    canonical_coarse = number(canonical_texture.get("coarse_gradient_p90"))
+    canonical_coherence_mean = number(
+        canonical_texture.get("structure_tensor_coherence_mean")
+    )
+    canonical_coherent_fraction = number(
+        canonical_texture.get("structure_tensor_coherent_fraction")
+    )
+    canonical_orientation = number(
+        canonical_texture.get("orientation_persistence_fraction")
+    )
+    canonical_fine_radial = number(canonical_texture.get("fine_radial_brush_fraction"))
+    canonical_fine_radial_energy = number(
+        canonical_texture.get("fine_radial_brush_energy")
+    )
+    canonical_coarse_radial = number(
+        canonical_texture.get("coarse_radial_brush_fraction")
+    )
+    canonical_coarse_radial_energy = number(
+        canonical_texture.get("coarse_radial_brush_energy")
+    )
+    canonical_long = number(canonical_texture.get("coherent_long_line_energy"))
+    canonical_hough_radial = number(canonical_hough.get("radial_line_fraction"))
+
+    checks = {
+        "surface_gate_contract_valid": bool(
+            surface_gate.get("available") is True
+            and surface_gate.get("evaluated") is True
+            and surface_gate.get("acceptable") is not True
+            and surface_gate.get("status") == "rejected"
+            and gate.get("policy") == FUR_SURFACE_GATE_POLICY
+            and gate.get("gate_version") == FUR_SURFACE_GATE_VERSION
+            and gate.get("threshold_version") == FUR_SURFACE_THRESHOLD_VERSION
+            and gate.get("action") == "grooming"
+            and gate.get("candidate_comparison_mode")
+            == UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
+            and gate.get("profile_pixels_used_for_candidate_appearance_validation")
+            is False
+            and candidate_input.get("supported_contract") is True
+            and candidate_input.get("foreground_method") == "alpha"
+            and candidate_digest_valid
+        ),
+        "global_surface_thresholds_unchanged": bool(
+            all(
+                number(thresholds.get(name)) == number(default_thresholds.get(name))
+                for name in (
+                    "coarse_gradient_p90_max",
+                    "coarse_coherent_fraction_max",
+                    "radial_brush_fraction_max",
+                    "hough_radial_line_fraction_max",
+                    "coherent_long_line_energy_max",
+                )
+            )
+        ),
+        "raw_brush_issue_is_exclusive": bool(
+            raw_issues == ["brush_texture_coherence"]
+            and raw_absolute_issues == ["brush_texture_coherence"]
+            and surface_gate.get("relative_issues") == []
+            and surface_gate.get("baseline_issues") == []
+        ),
+        "strict_pose_recovery_bound_to_candidate": bool(
+            pose_gate.get("acceptable") is True
+            and pose_gate.get("verdict")
+            == "accepted_canonical_direct_organic_foreleg_structural_evidence"
+            and pose_recovery.get("policy")
+            == GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_EVIDENCE_POLICY
+            and pose_recovery.get("accepted") is True
+            and attempt_number is not None
+            and attempt_number.is_integer()
+            and number(pose_recovery.get("attempt")) == attempt_number
+            and 1
+            <= attempt_number
+            <= GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+        ),
+        "identity_palette_independently_passed": bool(
+            identity_palette_quality.get("available") is True
+            and identity_palette_quality.get("acceptable") is True
+            and identity_palette_quality.get("issues") == []
+        ),
+        "canonical_reference_digest_valid": canonical_digest_valid,
+        "canonical_reference_contract_reliable": bool(
+            canonical_record.get("valid") is True
+            and canonical_input.get("supported_contract") is True
+            and canonical_input.get("foreground_method") == "alpha"
+        ),
+        "candidate_issue_already_present_in_bounded_canonical": bool(
+            canonical_issues
+            and set(canonical_issues).issubset(allowed_canonical_debt)
+            and set(raw_absolute_issues).issubset(set(canonical_issues))
+        ),
+        "candidate_surface_absolute_bounds_passed": bool(
+            candidate_coarse is not None
+            and coarse_gradient_max is not None
+            and candidate_coarse <= coarse_gradient_max
+            and candidate_coherence_mean is not None
+            and candidate_coherence_mean
+            <= GROOMING_CANONICAL_DIRECT_SURFACE_COHERENCE_MEAN_MAX
+            and candidate_coherent_fraction is not None
+            and candidate_coherent_fraction
+            <= GROOMING_CANONICAL_DIRECT_SURFACE_COHERENT_FRACTION_MAX
+            and candidate_orientation is not None
+            and candidate_orientation
+            <= GROOMING_CANONICAL_DIRECT_SURFACE_ORIENTATION_MAX
+            and candidate_fine_radial is not None
+            and radial_brush_max is not None
+            and candidate_fine_radial <= radial_brush_max
+            and candidate_hough_radial is not None
+            and hough_radial_max is not None
+            and candidate_hough_radial <= hough_radial_max
+            and candidate_long is not None
+            and coherent_long_max is not None
+            and candidate_long <= coherent_long_max
+        ),
+        "canonical_surface_debt_bounded": bool(
+            canonical_coarse is not None
+            and coarse_gradient_max is not None
+            and canonical_coarse <= coarse_gradient_max
+            and canonical_coherence_mean is not None
+            and canonical_coherence_mean
+            <= GROOMING_CANONICAL_DIRECT_SURFACE_COHERENCE_MEAN_MAX
+            and canonical_coherent_fraction is not None
+            and canonical_coherent_fraction
+            <= GROOMING_CANONICAL_DIRECT_SURFACE_COHERENT_FRACTION_MAX
+            and canonical_orientation is not None
+            and canonical_orientation
+            <= GROOMING_CANONICAL_DIRECT_SURFACE_ORIENTATION_MAX
+            and canonical_fine_radial is not None
+            and radial_brush_max is not None
+            and canonical_fine_radial <= radial_brush_max
+            and canonical_hough_radial is not None
+            and hough_radial_max is not None
+            and canonical_hough_radial <= hough_radial_max
+            and canonical_long is not None
+            and canonical_long
+            <= GROOMING_CANONICAL_DIRECT_SURFACE_CANONICAL_LONG_ENERGY_MAX
+        ),
+        "canonical_surface_debt_not_expanded": bool(
+            candidate_coarse is not None
+            and canonical_coarse is not None
+            and candidate_coarse <= canonical_coarse
+            and candidate_coherence_mean is not None
+            and canonical_coherence_mean is not None
+            and candidate_coherence_mean
+            <= canonical_coherence_mean
+            + GROOMING_CANONICAL_DIRECT_SURFACE_COHERENCE_MEAN_DELTA_MAX
+            and candidate_coherent_fraction is not None
+            and canonical_coherent_fraction is not None
+            and candidate_coherent_fraction
+            <= canonical_coherent_fraction
+            + GROOMING_CANONICAL_DIRECT_SURFACE_COHERENT_FRACTION_DELTA_MAX
+            and candidate_orientation is not None
+            and canonical_orientation is not None
+            and candidate_orientation
+            <= canonical_orientation
+            + GROOMING_CANONICAL_DIRECT_SURFACE_ORIENTATION_DELTA_MAX
+            and candidate_fine_radial is not None
+            and canonical_fine_radial is not None
+            and candidate_fine_radial <= canonical_fine_radial
+            and candidate_fine_radial_energy is not None
+            and canonical_fine_radial_energy is not None
+            and candidate_fine_radial_energy <= canonical_fine_radial_energy
+            and candidate_coarse_radial is not None
+            and canonical_coarse_radial is not None
+            and candidate_coarse_radial <= canonical_coarse_radial
+            and candidate_coarse_radial_energy is not None
+            and canonical_coarse_radial_energy is not None
+            and candidate_coarse_radial_energy <= canonical_coarse_radial_energy
+            and candidate_long is not None
+            and canonical_long is not None
+            and candidate_long <= canonical_long
+            and candidate_hough_radial is not None
+            and canonical_hough_radial is not None
+            and candidate_hough_radial
+            <= canonical_hough_radial
+            + GROOMING_CANONICAL_DIRECT_SURFACE_HOUGH_RADIAL_DELTA_MAX
+        ),
+    }
+    accepted = bool(all(checks.values()) and canonical_error is None)
+    recovery = {
+        "policy": GROOMING_CANONICAL_DIRECT_SURFACE_NONEXPANSION_POLICY,
+        "evaluated": True,
+        "accepted": accepted,
+        "fail_closed": True,
+        "attempt": (
+            int(attempt_number)
+            if attempt_number is not None and attempt_number.is_integer()
+            else None
+        ),
+        "global_surface_thresholds_changed": False,
+        "raw_issues": raw_issues,
+        "canonical_reference": {
+            "path": str(canonical_reference_path),
+            "sha256": expected_digest or None,
+            "issues": canonical_issues,
+            "error": canonical_error,
+        },
+        "candidate_metrics": {
+            "coarse_gradient_p90": candidate_coarse,
+            "coherence_mean": candidate_coherence_mean,
+            "coherent_fraction": candidate_coherent_fraction,
+            "orientation_persistence_fraction": candidate_orientation,
+            "fine_radial_brush_fraction": candidate_fine_radial,
+            "fine_radial_brush_energy": candidate_fine_radial_energy,
+            "coarse_radial_brush_fraction": candidate_coarse_radial,
+            "coarse_radial_brush_energy": candidate_coarse_radial_energy,
+            "coherent_long_line_energy": candidate_long,
+            "hough_radial_line_fraction": candidate_hough_radial,
+        },
+        "canonical_metrics": {
+            "coarse_gradient_p90": canonical_coarse,
+            "coherence_mean": canonical_coherence_mean,
+            "coherent_fraction": canonical_coherent_fraction,
+            "orientation_persistence_fraction": canonical_orientation,
+            "fine_radial_brush_fraction": canonical_fine_radial,
+            "fine_radial_brush_energy": canonical_fine_radial_energy,
+            "coarse_radial_brush_fraction": canonical_coarse_radial,
+            "coarse_radial_brush_energy": canonical_coarse_radial_energy,
+            "coherent_long_line_energy": canonical_long,
+            "hough_radial_line_fraction": canonical_hough_radial,
+        },
+        "independent_final_video_fur_audit_still_required": True,
+        "checks": checks,
+    }
+    result["canonical_direct_surface_nonexpansion"] = recovery
+    if not accepted:
+        return result
+
+    result.update(
+        raw_acceptable=surface_gate.get("acceptable"),
+        raw_verdict=surface_gate.get("verdict"),
+        raw_status=surface_gate.get("status"),
+        raw_issues=raw_issues,
+        raw_candidate_absolute_issues=raw_absolute_issues,
+        raw_penalty=surface_gate.get("penalty"),
+        acceptable=True,
+        verdict="accepted_canonical_direct_surface_debt_nonexpansion",
+        status="passed",
+        issues=[],
+        candidate_absolute_issues=[],
+        penalty=0.0,
+    )
+    result["warnings"] = list(
+        dict.fromkeys(
+            [
+                *[str(item) for item in surface_gate.get("warnings", [])],
+                "canonical_brush_texture_debt_accepted_only_when_bounded_"
+                "and_nonexpanding",
+            ]
+        )
+    )
+    result["gate"] = {
+        **gate,
+        "canonical_direct_surface_nonexpansion_policy": (
+            GROOMING_CANONICAL_DIRECT_SURFACE_NONEXPANSION_POLICY
+        ),
+        "canonical_direct_surface_nonexpansion_accepted": True,
+        "global_surface_thresholds_changed": False,
+    }
+    return result
+
+
+def select_final_video_fur_surface_comparison_scope(
+    *,
+    action: str,
+    action_config: dict[str, Any],
+    output_format: str | None,
+    reference_policy: str | None,
+    pose_metadata: dict[str, Any] | None,
+) -> str:
+    """Select the final audit baseline for a persisted Qwen action reference.
+
+    Uploaded transparent routes must compare SCAIL frames with the exact Qwen
+    action keyframe that entered SCAIL. Eating additionally requires the
+    separated-bowl and later GIF contour contracts. Grooming instead requires
+    the explicit no-prop mask contract; its unmasked contour comparison is
+    already part of the validated-action v2 audit.
+    """
+
+    uploaded_qwen_transparent = bool(
+        action_config.get("reference_kind") == "qwen_generated_upload"
+        and output_format == "transparent_gif"
+    )
+    if not uploaded_qwen_transparent:
+        return FINAL_VIDEO_PROFILE_FULL_SCOPE
+
+    expected_reference_policy = FINAL_VIDEO_VALIDATED_ACTION_REFERENCE_POLICIES.get(
+        action
+    )
+    if expected_reference_policy is None:
+        raise RuntimeError(
+            "Uploaded Qwen transparent route has no validated-action final "
+            f"surface policy for {action!r}."
+        )
+    if reference_policy != expected_reference_policy:
+        raise RuntimeError(
+            f"Uploaded {action} transparent route has unexpected reference "
+            f"policy {reference_policy!r}; expected "
+            f"{expected_reference_policy!r}."
+        )
+    if not isinstance(pose_metadata, dict):
+        raise RuntimeError(
+            f"Uploaded {action} transparent route lacks SCAIL pose metadata "
+            "required by final surface audit v2."
+        )
+
+    scene_prop_separated = pose_metadata.get("scene_prop_separated")
+    if action == "eating":
+        post_animation_contour_gate = action_config.get("fur_silhouette_gate")
+        if (
+            scene_prop_separated is not True
+            or not isinstance(post_animation_contour_gate, dict)
+            or post_animation_contour_gate.get("enabled") is not True
+        ):
+            raise RuntimeError(
+                "Uploaded eating transparent route lacks the separated-prop "
+                "and post-animation contour contracts required by final "
+                "surface audit v2."
+            )
+    elif action == "grooming" and scene_prop_separated is not False:
+        raise RuntimeError(
+            "Uploaded grooming transparent route lacks the explicit no-prop "
+            "identity-mask contract required by final surface audit v2."
+        )
+
+    return FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+
+
+def evaluate_final_video_fur_surface(
+    video_path: Path,
+    *,
+    action: str,
+    effective_subject_config: dict[str, Any],
+    comparison_scope: str = FINAL_VIDEO_PROFILE_FULL_SCOPE,
+    validated_action_reference_path: Path | None = None,
+    validated_action_reference_sha256: str | None = None,
+    validated_action_reference_gate: dict[str, Any] | None = None,
+    reference_policy: str | None = None,
+    pose_identity_mask_video_path: Path | None = None,
+    pose_identity_mask_video_sha256: str | None = None,
+    reference_identity_mask_path: Path | None = None,
+    reference_identity_mask_sha256: str | None = None,
+    grooming_pose_gate_composite_recovery: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Audit MP4 samples against the exact accepted uploaded action reference."""
+
+    try:
+        baseline_path, baseline = resolve_main_case_fur_surface_baseline(
+            effective_subject_config,
+            action,
+        )
+        action_config = effective_subject_config.get("actions", {}).get(action)
+        if not isinstance(action_config, dict):
+            raise RuntimeError(f"Final fur audit lacks {action} action config")
+        reference_provenance: dict[str, Any] | None = None
+        if comparison_scope == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE:
+            expected_reference_policy = (
+                FINAL_VIDEO_VALIDATED_ACTION_REFERENCE_POLICIES.get(action)
+            )
+            if expected_reference_policy is None:
+                raise RuntimeError(
+                    "Validated-action final surface v2 does not support "
+                    f"action {action!r}"
+                )
+            if action_config.get("reference_kind") != "qwen_generated_upload":
+                raise RuntimeError(
+                    "Validated-action final surface v2 requires a Qwen upload reference"
+                )
+            if reference_policy != expected_reference_policy:
+                raise RuntimeError(
+                    "Validated-action final surface v2 reference policy changed "
+                    f"for {action}: expected {expected_reference_policy!r}, "
+                    f"got {reference_policy!r}"
+                )
+            if validated_action_reference_path is None:
+                raise RuntimeError("Validated Qwen action reference path is missing")
+            configured_reference_path = Path(str(action_config.get("reference") or ""))
+            configured_reference_sha = (
+                str(action_config.get("reference_sha256") or "").strip().lower()
+            )
+            expected_reference_sha = (
+                str(validated_action_reference_sha256 or "").strip().lower()
+            )
+            gate = (
+                validated_action_reference_gate.get("gate")
+                if isinstance(validated_action_reference_gate, dict)
+                else None
+            )
+            gate_sha = (
+                str(gate.get("candidate_sha256") or "").strip().lower()
+                if isinstance(gate, dict)
+                else ""
+            )
+            selected_sha = (
+                str(
+                    validated_action_reference_gate.get("selected_candidate_sha256")
+                    or ""
+                )
+                .strip()
+                .lower()
+                if isinstance(validated_action_reference_gate, dict)
+                else ""
+            )
+            actual_reference_sha = (
+                file_sha256(validated_action_reference_path)
+                if validated_action_reference_path.is_file()
+                else ""
+            )
+            if (
+                configured_reference_path != validated_action_reference_path
+                or not re.fullmatch(r"[0-9a-f]{64}", expected_reference_sha)
+                or not (
+                    configured_reference_sha
+                    == expected_reference_sha
+                    == actual_reference_sha
+                    == gate_sha
+                    == selected_sha
+                )
+            ):
+                raise RuntimeError(
+                    "Validated Qwen action reference provenance changed after SCAIL"
+                )
+            reference_provenance = {
+                "reference_kind": action_config.get("reference_kind"),
+                "reference_policy": reference_policy,
+                "configured_reference": str(configured_reference_path),
+                "configured_reference_sha256": configured_reference_sha,
+                "selected_candidate_sha256": selected_sha,
+                "gate_candidate_sha256": gate_sha,
+                "pre_scail_revalidated": True,
+                "gate": json.loads(
+                    json.dumps(
+                        validated_action_reference_gate,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                ),
+            }
+            if grooming_pose_gate_composite_recovery is not None:
+                if action != "grooming" or not isinstance(
+                    grooming_pose_gate_composite_recovery,
+                    dict,
+                ):
+                    raise RuntimeError(
+                        "Grooming pose composite recovery provenance has an "
+                        "invalid action scope or schema."
+                    )
+                reference_provenance["grooming_pose_gate_composite_recovery"] = (
+                    json.loads(
+                        json.dumps(
+                            grooming_pose_gate_composite_recovery,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        )
+                    )
+                )
+        result = audit_final_video(
+            video_path,
+            action=action,
+            baseline_path=baseline_path,
+            baseline_sha256=str(baseline["snapshot_sha256"]),
+            baseline_provenance=json.loads(json.dumps(baseline["provenance"])),
+            sample_count=FINAL_VIDEO_FUR_SAMPLE_COUNT,
+            rembg_model=CHROMA_FALLBACK_REMBG_MODEL,
+            comparison_scope=comparison_scope,
+            validated_action_reference_path=validated_action_reference_path,
+            validated_action_reference_sha256=(validated_action_reference_sha256),
+            validated_action_reference_provenance=reference_provenance,
+            pose_identity_mask_video_path=pose_identity_mask_video_path,
+            pose_identity_mask_video_sha256=pose_identity_mask_video_sha256,
+            reference_identity_mask_path=reference_identity_mask_path,
+            reference_identity_mask_sha256=reference_identity_mask_sha256,
+        )
+        result = json.loads(json.dumps(result, ensure_ascii=False, allow_nan=False))
+    except Exception as exc:  # noqa: BLE001 - final output must fail closed
+        return {
+            "passed": False,
+            "verdict": "audit_error_fail_closed",
+            "action": action,
+            "video": {
+                "path": str(video_path),
+                "sha256": file_sha256(video_path) if video_path.is_file() else None,
+            },
+            "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+            "policy": {
+                "name": FINAL_VIDEO_FUR_AUDIT_POLICY,
+                "version": FINAL_VIDEO_FUR_AUDIT_VERSION,
+                "sample_count": FINAL_VIDEO_FUR_SAMPLE_COUNT,
+                "comparison_scope": comparison_scope,
+                "fail_closed": True,
+            },
+        }
+    result["production_integrated"] = True
+    return result
+
+
+def grooming_pose_gate_failure(
+    issue: str,
+    *,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Return a JSON-safe, fail-closed grooming-pose verdict."""
+
+    result: dict[str, Any] = {
+        "policy": GROOMING_POSE_GATE_POLICY,
+        "version": GROOMING_POSE_GATE_VERSION,
+        "available": False,
+        "acceptable": False,
+        "issues": [issue],
+        "warnings": [],
+        "penalty": 1000.0,
+    }
+    if error:
+        result["error"] = error[:1000]
+    return result
+
+
+def apply_masked_pet3d_grooming_composite_gate(
+    pose_gate: dict[str, Any],
+    fur_surface_gate: dict[str, Any] | None,
+    repair_audit: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Accept only scoped edge/flat-paw ratio artifacts with independent evidence.
+
+    The global grooming-pose thresholds remain unchanged. This recovery is
+    available only to the final noise-masked Pet3D foreleg repair, when the
+    raw pose evaluator reports no geometry, contact, or palette defect and the
+    independent fur-surface gate passes its absolute contract. A high paw-
+    texture ratio can recover only when its denominator is a nearly flat
+    planted paw and the raised-paw texture remains bounded.
+    """
+
+    result = dict(pose_gate)
+
+    def number(value: Any) -> float | None:
+        try:
+            converted = float(value)
+        except (TypeError, ValueError):
+            return None
+        return converted if np.isfinite(converted) else None
+
+    raw_issues = [str(issue) for issue in pose_gate.get("issues", [])]
+    thresholds = pose_gate.get("thresholds")
+    metrics = pose_gate.get("metrics")
+    thresholds = thresholds if isinstance(thresholds, dict) else {}
+    metrics = metrics if isinstance(metrics, dict) else {}
+    chamfer = metrics.get("chamfer")
+    continuous = metrics.get("continuous_edge")
+    contact = metrics.get("paw_muzzle_contact")
+    appearance = metrics.get("appearance_consistency")
+    chamfer = chamfer if isinstance(chamfer, dict) else {}
+    continuous = continuous if isinstance(continuous, dict) else {}
+    contact = contact if isinstance(contact, dict) else {}
+    appearance = appearance if isinstance(appearance, dict) else {}
+    histogram = appearance.get("lab_histogram_bhattacharyya")
+    histogram = histogram if isinstance(histogram, dict) else {}
+    raised_appearance = appearance.get("raised")
+    planted_appearance = appearance.get("planted")
+    raised_appearance = raised_appearance if isinstance(raised_appearance, dict) else {}
+    planted_appearance = (
+        planted_appearance if isinstance(planted_appearance, dict) else {}
+    )
+
+    edge_density = number(metrics.get("raised_foreleg_edge_density"))
+    edge_density_min = number(thresholds.get("edge_density_min"))
+    edge_density_floor = (
+        edge_density_min * GROOMING_QWEN_FORELEG_REPAIR_EDGE_DENSITY_RATIO_MIN
+        if edge_density_min is not None
+        else None
+    )
+    chamfer_coverage = number(chamfer.get("coverage_within_radius"))
+    chamfer_coverage_min = number(thresholds.get("chamfer_coverage_min"))
+    chamfer_distance = number(chamfer.get("mean_distance_px"))
+    chamfer_distance_max = number(thresholds.get("chamfer_mean_distance_max"))
+    continuous_span = number(continuous.get("span_fraction"))
+    continuous_span_min = number(thresholds.get("continuous_edge_span_min"))
+    contact_gap = number(contact.get("gap_fraction_of_bbox_height"))
+    contact_gap_max = number(thresholds.get("paw_muzzle_gap_max"))
+    lab_delta = number(appearance.get("lab_median_delta"))
+    lab_delta_max = number(thresholds.get("lab_median_delta_max"))
+    histogram_mean = number(histogram.get("mean"))
+    histogram_max = number(thresholds.get("lab_histogram_distance_max"))
+    texture_ratio = number(appearance.get("texture_gradient_p90_ratio"))
+    texture_ratio_min = number(thresholds.get("texture_p90_ratio_min"))
+    texture_ratio_max = number(thresholds.get("texture_p90_ratio_max"))
+    raised_gradient_p90 = number(raised_appearance.get("gradient_p90"))
+    planted_gradient_p90 = number(planted_appearance.get("gradient_p90"))
+
+    repair_digest = (
+        str(repair_audit.get("sampler_noise_mask_sha256") or "")
+        if isinstance(repair_audit, dict)
+        else ""
+    )
+    configured_repair_model = Path(QWEN_STYLE_LORA).name.casefold()
+    pose_gate_contract_valid = bool(
+        pose_gate.get("policy") == GROOMING_POSE_GATE_POLICY
+        and pose_gate.get("version") == GROOMING_POSE_GATE_VERSION
+        and edge_density_min == GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN
+    )
+    repair_contract_valid = bool(
+        isinstance(repair_audit, dict)
+        and repair_audit.get("policy") == GROOMING_QWEN_FORELEG_REPAIR_POLICY
+        and repair_audit.get("composite_gate_policy")
+        == GROOMING_QWEN_FORELEG_REPAIR_COMPOSITE_GATE_POLICY
+        and number(repair_audit.get("composite_edge_density_ratio_min"))
+        == GROOMING_QWEN_FORELEG_REPAIR_EDGE_DENSITY_RATIO_MIN
+        and number(repair_audit.get("composite_planted_paw_gradient_p90_max"))
+        == GROOMING_QWEN_FORELEG_REPAIR_PLANTED_PAW_GRADIENT_P90_MAX
+        and number(repair_audit.get("composite_raised_paw_gradient_p90_max"))
+        == GROOMING_QWEN_FORELEG_REPAIR_RAISED_PAW_GRADIENT_P90_MAX
+        and repair_audit.get("global_pose_threshold_changed") is False
+        and repair_audit.get("localized_style_policy")
+        == GROOMING_QWEN_FORELEG_REPAIR_STYLE_POLICY
+        and bool(QWEN_STYLE_LORA)
+        and "pet3d" in configured_repair_model
+        and repair_audit.get("localized_style_lora") == QWEN_STYLE_LORA
+        and number(repair_audit.get("localized_style_strength"))
+        == GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH
+        and repair_audit.get("localized_style_scope")
+        == (
+            "sampler_noise_mask_only; image2_remains_identity_"
+            "palette_marking_and_coat_length_authority"
+        )
+        and re.fullmatch(r"[0-9a-f]{64}", repair_digest) is not None
+    )
+    fur_gate_audit = (
+        fur_surface_gate.get("gate") if isinstance(fur_surface_gate, dict) else None
+    )
+    fur_gate_audit = fur_gate_audit if isinstance(fur_gate_audit, dict) else {}
+    fur_candidate_digest = str(fur_gate_audit.get("candidate_sha256") or "")
+    fur_contract_valid = bool(
+        isinstance(fur_surface_gate, dict)
+        and fur_surface_gate.get("available") is True
+        and fur_surface_gate.get("evaluated") is True
+        and fur_surface_gate.get("status") == "passed"
+        and fur_surface_gate.get("acceptable") is True
+        and not fur_surface_gate.get("issues")
+        and fur_gate_audit.get("policy") == FUR_SURFACE_GATE_POLICY
+        and fur_gate_audit.get("gate_version") == FUR_SURFACE_GATE_VERSION
+        and fur_gate_audit.get("threshold_version") == FUR_SURFACE_THRESHOLD_VERSION
+        and fur_gate_audit.get("action") == "grooming"
+        and fur_gate_audit.get("reliable_alpha_required") is True
+        and re.fullmatch(r"[0-9a-f]{64}", fur_candidate_digest) is not None
+    )
+    edge_issue = "raised_foreleg_edge_density_too_low"
+    paw_texture_issue = "raised_paw_texture_inconsistent_with_planted_paw"
+    raw_issue_contract_valid = bool(
+        raw_issues == [edge_issue]
+        or (len(raw_issues) == 2 and set(raw_issues) == {edge_issue, paw_texture_issue})
+    )
+    color_histogram_passed = bool(
+        appearance.get("available") is True
+        and lab_delta is not None
+        and lab_delta_max is not None
+        and lab_delta <= lab_delta_max
+        and histogram_mean is not None
+        and histogram_max is not None
+        and histogram_mean <= histogram_max
+    )
+    standard_texture_ratio_passed = bool(
+        texture_ratio is not None
+        and texture_ratio_min is not None
+        and texture_ratio_max is not None
+        and texture_ratio_min <= texture_ratio <= texture_ratio_max
+    )
+    low_texture_planted_paw_rescue = bool(
+        paw_texture_issue in raw_issues
+        and texture_ratio is not None
+        and texture_ratio_max is not None
+        and texture_ratio > texture_ratio_max
+        and raised_gradient_p90 is not None
+        and raised_gradient_p90
+        <= GROOMING_QWEN_FORELEG_REPAIR_RAISED_PAW_GRADIENT_P90_MAX
+        and planted_gradient_p90 is not None
+        and planted_gradient_p90
+        <= GROOMING_QWEN_FORELEG_REPAIR_PLANTED_PAW_GRADIENT_P90_MAX
+    )
+    checks = {
+        "global_pose_gate_contract_valid": pose_gate_contract_valid,
+        "raw_issue_contract_valid": raw_issue_contract_valid,
+        "edge_density_within_recovery_band": bool(
+            edge_density is not None
+            and edge_density_floor is not None
+            and edge_density_min is not None
+            and edge_density_floor <= edge_density < edge_density_min
+        ),
+        "chamfer_geometry_passed": bool(
+            chamfer.get("available") is True
+            and chamfer_coverage is not None
+            and chamfer_coverage_min is not None
+            and chamfer_coverage >= chamfer_coverage_min
+            and chamfer_distance is not None
+            and chamfer_distance_max is not None
+            and chamfer_distance <= chamfer_distance_max
+        ),
+        "continuous_foreleg_passed": bool(
+            continuous_span is not None
+            and continuous_span_min is not None
+            and continuous_span >= continuous_span_min
+        ),
+        "paw_muzzle_contact_passed": bool(
+            contact.get("available") is True
+            and contact_gap is not None
+            and contact_gap_max is not None
+            and contact_gap <= contact_gap_max
+        ),
+        "raised_planted_paw_color_histogram_passed": color_histogram_passed,
+        "raised_planted_paw_texture_contract_passed": bool(
+            standard_texture_ratio_passed or low_texture_planted_paw_rescue
+        ),
+        "independent_fur_surface_gate_passed": fur_contract_valid,
+        "masked_pet3d_repair_contract_valid": repair_contract_valid,
+    }
+    accepted = bool(
+        pose_gate.get("available") is True
+        and pose_gate.get("acceptable") is not True
+        and all(checks.values())
+    )
+    composite = {
+        "policy": GROOMING_QWEN_FORELEG_REPAIR_COMPOSITE_GATE_POLICY,
+        "evaluated": True,
+        "accepted": accepted,
+        "fail_closed": True,
+        "global_pose_threshold_changed": False,
+        "required_global_edge_density_min": (
+            GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN
+        ),
+        "required_edge_density_ratio": (
+            GROOMING_QWEN_FORELEG_REPAIR_EDGE_DENSITY_RATIO_MIN
+        ),
+        "edge_density": edge_density,
+        "edge_density_threshold": edge_density_min,
+        "edge_density_floor": edge_density_floor,
+        "allowed_raw_issue_sets": [
+            [edge_issue],
+            [edge_issue, paw_texture_issue],
+        ],
+        "paw_texture_evidence": {
+            "texture_gradient_p90_ratio": texture_ratio,
+            "standard_ratio_passed": standard_texture_ratio_passed,
+            "raised_gradient_p90": raised_gradient_p90,
+            "raised_gradient_p90_max": (
+                GROOMING_QWEN_FORELEG_REPAIR_RAISED_PAW_GRADIENT_P90_MAX
+            ),
+            "planted_gradient_p90": planted_gradient_p90,
+            "planted_gradient_p90_max": (
+                GROOMING_QWEN_FORELEG_REPAIR_PLANTED_PAW_GRADIENT_P90_MAX
+            ),
+            "low_texture_planted_paw_rescue_used": (low_texture_planted_paw_rescue),
+        },
+        "repair_noise_mask_sha256": repair_digest or None,
+        "checks": checks,
+    }
+    result["composite_recovery"] = composite
+    if not accepted:
+        return result
+
+    result.update(
+        raw_acceptable=pose_gate.get("acceptable"),
+        raw_verdict=pose_gate.get("verdict"),
+        raw_issues=raw_issues,
+        raw_penalty=pose_gate.get("penalty"),
+        acceptable=True,
+        verdict="accepted_masked_pet3d_surface_composite",
+        issues=[],
+        penalty=0.0,
+    )
+    result["warnings"] = list(
+        dict.fromkeys(
+            [
+                *[str(item) for item in pose_gate.get("warnings", [])],
+                "raised_foreleg_edge_density_shortfall_accepted_only_by_"
+                "masked_pet3d_surface_composite",
+                *(
+                    [
+                        "raised_paw_texture_ratio_accepted_only_for_low_texture_"
+                        "planted_paw_with_independent_fur_surface_pass"
+                    ]
+                    if low_texture_planted_paw_rescue
+                    else []
+                ),
+            ]
+        )
+    )
+    return result
+
+
+def apply_canonical_grooming_direct_structural_edge_evidence_gate(
+    pose_gate: dict[str, Any],
+    *,
+    attempt: int,
+    canonical_action_reference: bool,
+    canonical_completion_active: bool,
+    canonical_full_pose_recovery_active: bool,
+) -> dict[str, Any]:
+    """Recover tightly bounded organic-paw evidence on direct attempts.
+
+    The global raw and structural pose thresholds remain unchanged. Recovery
+    either requires the historical narrow raw-edge shortfall with strict guide
+    alignment, or a real-fur paw whose only failures are bounded guide offset.
+    The second route requires substantially tighter raised/planted paw color,
+    histogram and texture agreement. Identity-palette and fur-surface gates
+    still run independently afterward.
+    """
+
+    result = dict(pose_gate)
+
+    def number(value: Any) -> float | None:
+        try:
+            converted = float(value)
+        except (TypeError, ValueError):
+            return None
+        return converted if np.isfinite(converted) else None
+
+    thresholds = pose_gate.get("thresholds")
+    metrics = pose_gate.get("metrics")
+    thresholds = thresholds if isinstance(thresholds, dict) else {}
+    metrics = metrics if isinstance(metrics, dict) else {}
+    structural = metrics.get("raised_foreleg_structural_evidence")
+    chamfer = metrics.get("chamfer")
+    continuous = metrics.get("continuous_edge")
+    contact = metrics.get("paw_muzzle_contact")
+    appearance = metrics.get("appearance_consistency")
+    structural = structural if isinstance(structural, dict) else {}
+    chamfer = chamfer if isinstance(chamfer, dict) else {}
+    continuous = continuous if isinstance(continuous, dict) else {}
+    contact = contact if isinstance(contact, dict) else {}
+    appearance = appearance if isinstance(appearance, dict) else {}
+    histogram = appearance.get("lab_histogram_bhattacharyya")
+    histogram = histogram if isinstance(histogram, dict) else {}
+
+    edge_density = number(metrics.get("raised_foreleg_edge_density"))
+    edge_density_min = number(thresholds.get("edge_density_min"))
+    edge_density_floor = (
+        edge_density_min * GROOMING_CANONICAL_DIRECT_EDGE_DENSITY_RATIO_MIN
+        if edge_density_min is not None
+        else None
+    )
+    structural_density = number(structural.get("edge_density"))
+    structural_threshold = number(thresholds.get("structural_edge_density_min"))
+    chamfer_coverage = number(chamfer.get("coverage_within_radius"))
+    chamfer_mean = number(chamfer.get("mean_distance_px"))
+    chamfer_p90 = number(chamfer.get("p90_distance_px"))
+    attempt_number = number(attempt)
+    raw_issues = [str(issue) for issue in pose_gate.get("issues", [])]
+    checks = {
+        "global_pose_gate_contract_valid": bool(
+            pose_gate.get("policy") == GROOMING_POSE_GATE_POLICY
+            and pose_gate.get("version") == GROOMING_POSE_GATE_VERSION
+            and edge_density_min == GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN
+            and number(thresholds.get("structural_blur_sigma"))
+            == GROOMING_POSE_STRUCTURAL_BLUR_SIGMA
+            and structural_threshold == GROOMING_POSE_STRUCTURAL_EDGE_DENSITY_MIN
+        ),
+        "direct_canonical_attempt_contract_valid": bool(
+            canonical_action_reference
+            and attempt_number is not None
+            and attempt_number.is_integer()
+            and 1
+            <= attempt_number
+            <= GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+            and canonical_completion_active is False
+            and canonical_full_pose_recovery_active is False
+            and "canonical_completion_edge_evidence" not in pose_gate
+            and "composite_recovery" not in pose_gate
+        ),
+        "raw_edge_issue_is_exclusive": raw_issues
+        == ["raised_foreleg_edge_density_too_low"],
+        "raw_edge_density_within_antialias_band": bool(
+            edge_density is not None
+            and edge_density_floor is not None
+            and edge_density_min is not None
+            and edge_density_floor <= edge_density < edge_density_min
+        ),
+        "lowpass_organic_structure_strong": bool(
+            structural.get("available") is True
+            and structural.get("policy")
+            == "gaussian_lowpass_organic_foreleg_structure_v1"
+            and number(structural.get("blur_sigma"))
+            == GROOMING_POSE_STRUCTURAL_BLUR_SIGMA
+            and structural_density is not None
+            and structural_density
+            >= GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_DENSITY_MIN
+            and structural_threshold is not None
+            and structural_density >= structural_threshold
+        ),
+        "strict_organic_guide_alignment_passed": bool(
+            chamfer.get("available") is True
+            and chamfer_coverage is not None
+            and chamfer_coverage >= GROOMING_CANONICAL_DIRECT_CHAMFER_COVERAGE_MIN
+            and chamfer_mean is not None
+            and chamfer_mean <= GROOMING_CANONICAL_DIRECT_CHAMFER_MEAN_DISTANCE_MAX
+            and chamfer_p90 is not None
+            and chamfer_p90 <= GROOMING_CANONICAL_DIRECT_CHAMFER_P90_DISTANCE_MAX
+        ),
+        "continuous_foreleg_passed": bool(
+            number(continuous.get("span_fraction")) is not None
+            and number(thresholds.get("continuous_edge_span_min")) is not None
+            and number(continuous.get("span_fraction"))
+            >= number(thresholds.get("continuous_edge_span_min"))
+        ),
+        "paw_muzzle_contact_passed": bool(
+            contact.get("available") is True
+            and number(contact.get("gap_fraction_of_bbox_height")) is not None
+            and number(thresholds.get("paw_muzzle_gap_max")) is not None
+            and number(contact.get("gap_fraction_of_bbox_height"))
+            <= number(thresholds.get("paw_muzzle_gap_max"))
+        ),
+        "paw_appearance_passed": bool(
+            appearance.get("available") is True
+            and number(appearance.get("lab_median_delta")) is not None
+            and number(thresholds.get("lab_median_delta_max")) is not None
+            and number(appearance.get("lab_median_delta"))
+            <= number(thresholds.get("lab_median_delta_max"))
+            and number(histogram.get("mean")) is not None
+            and number(thresholds.get("lab_histogram_distance_max")) is not None
+            and number(histogram.get("mean"))
+            <= number(thresholds.get("lab_histogram_distance_max"))
+            and number(appearance.get("texture_gradient_p90_ratio")) is not None
+            and number(thresholds.get("texture_p90_ratio_min")) is not None
+            and number(thresholds.get("texture_p90_ratio_max")) is not None
+            and number(thresholds.get("texture_p90_ratio_min"))
+            <= number(appearance.get("texture_gradient_p90_ratio"))
+            <= number(thresholds.get("texture_p90_ratio_max"))
+        ),
+    }
+    strict_accepted = bool(
+        pose_gate.get("available") is True
+        and pose_gate.get("acceptable") is not True
+        and all(checks.values())
+    )
+    offguide_checks = {
+        "global_pose_gate_contract_valid": checks[
+            "global_pose_gate_contract_valid"
+        ],
+        "direct_canonical_attempt_contract_valid": checks[
+            "direct_canonical_attempt_contract_valid"
+        ],
+        "only_bounded_chamfer_issues": bool(
+            len(raw_issues) == 2
+            and set(raw_issues)
+            == {
+                "guide_chamfer_coverage_too_low",
+                "guide_chamfer_distance_too_large",
+            }
+        ),
+        "raw_edge_density_passed": bool(
+            edge_density is not None
+            and edge_density_min is not None
+            and edge_density >= edge_density_min
+        ),
+        "lowpass_organic_structure_bounded": bool(
+            structural.get("available") is True
+            and structural.get("policy")
+            == "gaussian_lowpass_organic_foreleg_structure_v1"
+            and number(structural.get("blur_sigma"))
+            == GROOMING_POSE_STRUCTURAL_BLUR_SIGMA
+            and structural_density is not None
+            and structural_density
+            >= GROOMING_CANONICAL_DIRECT_OFFGUIDE_STRUCTURAL_EDGE_DENSITY_MIN
+        ),
+        "bounded_guide_offset": bool(
+            chamfer.get("available") is True
+            and chamfer_coverage is not None
+            and chamfer_coverage
+            >= GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_COVERAGE_MIN
+            and chamfer_mean is not None
+            and chamfer_mean
+            <= GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_MEAN_DISTANCE_MAX
+            and chamfer_p90 is not None
+            and chamfer_p90
+            <= GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_P90_DISTANCE_MAX
+        ),
+        "continuous_foreleg_passed": checks["continuous_foreleg_passed"],
+        "paw_muzzle_contact_passed": checks["paw_muzzle_contact_passed"],
+        "raised_planted_paw_fur_match": bool(
+            appearance.get("available") is True
+            and number(appearance.get("lab_median_delta")) is not None
+            and number(appearance.get("lab_median_delta"))
+            <= GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_LAB_DELTA_MAX
+            and number(histogram.get("mean")) is not None
+            and number(histogram.get("mean"))
+            <= GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_HISTOGRAM_MAX
+            and number(appearance.get("texture_gradient_p90_ratio")) is not None
+            and GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_TEXTURE_RATIO_MIN
+            <= number(appearance.get("texture_gradient_p90_ratio"))
+            <= GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_TEXTURE_RATIO_MAX
+        ),
+    }
+    offguide_accepted = bool(
+        pose_gate.get("available") is True
+        and pose_gate.get("acceptable") is not True
+        and all(offguide_checks.values())
+    )
+    aligned_checks = {
+        "global_pose_gate_contract_valid": checks[
+            "global_pose_gate_contract_valid"
+        ],
+        "direct_canonical_attempt_contract_valid": checks[
+            "direct_canonical_attempt_contract_valid"
+        ],
+        "raw_pose_gate_passed_without_issue": bool(
+            pose_gate.get("acceptable") is True and not raw_issues
+        ),
+        "raw_edge_density_passed": bool(
+            edge_density is not None
+            and edge_density_min is not None
+            and edge_density >= edge_density_min
+        ),
+        "lowpass_organic_structure_strong": bool(
+            structural.get("available") is True
+            and structural.get("policy")
+            == "gaussian_lowpass_organic_foreleg_structure_v1"
+            and number(structural.get("blur_sigma"))
+            == GROOMING_POSE_STRUCTURAL_BLUR_SIGMA
+            and structural_density is not None
+            and structural_density
+            >= GROOMING_CANONICAL_DIRECT_ALIGNED_STRUCTURAL_EDGE_DENSITY_MIN
+        ),
+        "strict_organic_guide_alignment_passed": checks[
+            "strict_organic_guide_alignment_passed"
+        ],
+        "continuous_foreleg_passed": checks["continuous_foreleg_passed"],
+        "paw_muzzle_contact_passed": checks["paw_muzzle_contact_passed"],
+        "raised_planted_paw_fur_match": bool(
+            appearance.get("available") is True
+            and number(appearance.get("lab_median_delta")) is not None
+            and number(appearance.get("lab_median_delta"))
+            <= GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_LAB_DELTA_MAX
+            and number(histogram.get("mean")) is not None
+            and number(histogram.get("mean"))
+            <= GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_HISTOGRAM_MAX
+            and number(appearance.get("texture_gradient_p90_ratio")) is not None
+            and GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MIN
+            <= number(appearance.get("texture_gradient_p90_ratio"))
+            <= GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MAX
+        ),
+    }
+    aligned_accepted = bool(
+        pose_gate.get("available") is True and all(aligned_checks.values())
+    )
+    accepted = bool(strict_accepted or offguide_accepted or aligned_accepted)
+    recovery = {
+        "policy": (GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_EVIDENCE_POLICY),
+        "evaluated": True,
+        "accepted": accepted,
+        "fail_closed": True,
+        "global_pose_threshold_changed": False,
+        "attempt": (
+            int(attempt_number)
+            if attempt_number is not None and attempt_number.is_integer()
+            else None
+        ),
+        "maximum_attempt": (GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT),
+        "required_global_edge_density_min": edge_density_min,
+        "required_edge_density_ratio": (
+            GROOMING_CANONICAL_DIRECT_EDGE_DENSITY_RATIO_MIN
+        ),
+        "edge_density": edge_density,
+        "edge_density_floor": edge_density_floor,
+        "required_structural_edge_density_min": (
+            GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_DENSITY_MIN
+        ),
+        "structural_edge_density": structural_density,
+        "strict_chamfer": {
+            "coverage": chamfer_coverage,
+            "coverage_min": (GROOMING_CANONICAL_DIRECT_CHAMFER_COVERAGE_MIN),
+            "mean_distance_px": chamfer_mean,
+            "mean_distance_max": (GROOMING_CANONICAL_DIRECT_CHAMFER_MEAN_DISTANCE_MAX),
+            "p90_distance_px": chamfer_p90,
+            "p90_distance_max": (GROOMING_CANONICAL_DIRECT_CHAMFER_P90_DISTANCE_MAX),
+        },
+        "strict_antialias_edge_evidence_accepted": strict_accepted,
+        "offguide_organic_paw_evidence": {
+            "accepted": offguide_accepted,
+            "structural_edge_density_min": (
+                GROOMING_CANONICAL_DIRECT_OFFGUIDE_STRUCTURAL_EDGE_DENSITY_MIN
+            ),
+            "chamfer_coverage_min": (
+                GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_COVERAGE_MIN
+            ),
+            "chamfer_mean_distance_max": (
+                GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_MEAN_DISTANCE_MAX
+            ),
+            "chamfer_p90_distance_max": (
+                GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_P90_DISTANCE_MAX
+            ),
+            "paw_lab_delta_max": (
+                GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_LAB_DELTA_MAX
+            ),
+            "paw_histogram_max": (
+                GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_HISTOGRAM_MAX
+            ),
+            "paw_texture_ratio_range": [
+                GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_TEXTURE_RATIO_MIN,
+                GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_TEXTURE_RATIO_MAX,
+            ],
+            "checks": offguide_checks,
+        },
+        "aligned_organic_paw_evidence": {
+            "accepted": aligned_accepted,
+            "structural_edge_density_min": (
+                GROOMING_CANONICAL_DIRECT_ALIGNED_STRUCTURAL_EDGE_DENSITY_MIN
+            ),
+            "paw_lab_delta_max": (
+                GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_LAB_DELTA_MAX
+            ),
+            "paw_histogram_max": (
+                GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_HISTOGRAM_MAX
+            ),
+            "paw_texture_ratio_range": [
+                GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MIN,
+                GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MAX,
+            ],
+            "checks": aligned_checks,
+        },
+        "identity_palette_gate_still_required": True,
+        "independent_fur_surface_gate_still_required": True,
+        "checks": checks,
+    }
+    result["canonical_direct_structural_edge_evidence"] = recovery
+    if not accepted:
+        return result
+
+    result.update(
+        raw_acceptable=pose_gate.get("acceptable"),
+        raw_verdict=pose_gate.get("verdict"),
+        raw_issues=raw_issues,
+        raw_penalty=pose_gate.get("penalty"),
+        acceptable=True,
+        verdict=(
+            "accepted_canonical_direct_organic_foreleg_structural_evidence"
+            if strict_accepted
+            else (
+                "accepted_canonical_direct_offguide_organic_paw_evidence"
+                if offguide_accepted
+                else "accepted_canonical_direct_aligned_organic_paw_evidence"
+            )
+        ),
+        issues=[],
+        penalty=0.0,
+    )
+    result["warnings"] = list(
+        dict.fromkeys(
+            [
+                *[str(item) for item in pose_gate.get("warnings", [])],
+                (
+                    "raised_foreleg_raw_edge_antialias_shortfall_accepted_only_"
+                    "with_strict_lowpass_structure_and_guide_alignment"
+                    if strict_accepted
+                    else (
+                        "bounded_guide_offset_accepted_only_with_strict_"
+                        "raised_planted_paw_fur_match"
+                        if offguide_accepted
+                        else "aligned_pose_palette_recovery_eligible_only_with_"
+                        "strict_raised_planted_paw_fur_match"
+                    )
+                ),
+            ]
+        )
+    )
+    return result
+
+
+def apply_canonical_grooming_completion_edge_evidence_gate(
+    pose_gate: dict[str, Any],
+    repair_audit: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Recover only a sub-1.5% antialias edge-count shortfall.
+
+    The global 0.11 edge-density threshold remains unchanged. This scoped
+    verdict is available only to the final digest-bound canonical masked
+    completion when edge density is the sole raw issue and every independent
+    geometry, contact, paw-color, histogram, and texture measurement already
+    passes its original threshold. The ordinary fur-surface gate still runs
+    after this decision and can independently reject the candidate.
+    """
+
+    result = dict(pose_gate)
+
+    def number(value: Any) -> float | None:
+        try:
+            converted = float(value)
+        except (TypeError, ValueError):
+            return None
+        return converted if np.isfinite(converted) else None
+
+    thresholds = pose_gate.get("thresholds")
+    metrics = pose_gate.get("metrics")
+    thresholds = thresholds if isinstance(thresholds, dict) else {}
+    metrics = metrics if isinstance(metrics, dict) else {}
+    chamfer = metrics.get("chamfer")
+    continuous = metrics.get("continuous_edge")
+    contact = metrics.get("paw_muzzle_contact")
+    appearance = metrics.get("appearance_consistency")
+    chamfer = chamfer if isinstance(chamfer, dict) else {}
+    continuous = continuous if isinstance(continuous, dict) else {}
+    contact = contact if isinstance(contact, dict) else {}
+    appearance = appearance if isinstance(appearance, dict) else {}
+    histogram = appearance.get("lab_histogram_bhattacharyya")
+    histogram = histogram if isinstance(histogram, dict) else {}
+
+    edge_density = number(metrics.get("raised_foreleg_edge_density"))
+    edge_density_min = number(thresholds.get("edge_density_min"))
+    edge_density_floor = (
+        edge_density_min * GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN
+        if edge_density_min is not None
+        else None
+    )
+    completion_canvas = (
+        repair_audit.get("completion_canvas")
+        if isinstance(repair_audit, dict)
+        else None
+    )
+    completion_canvas = completion_canvas if isinstance(completion_canvas, dict) else {}
+    mask_digest = (
+        str(repair_audit.get("sampler_noise_mask_sha256") or "")
+        if isinstance(repair_audit, dict)
+        else ""
+    )
+    raw_issues = [str(issue) for issue in pose_gate.get("issues", [])]
+    checks = {
+        "global_pose_gate_contract_valid": bool(
+            pose_gate.get("policy") == GROOMING_POSE_GATE_POLICY
+            and pose_gate.get("version") == GROOMING_POSE_GATE_VERSION
+            and edge_density_min == GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN
+        ),
+        "raw_edge_issue_is_exclusive": raw_issues
+        == ["raised_foreleg_edge_density_too_low"],
+        "edge_density_within_antialias_band": bool(
+            edge_density is not None
+            and edge_density_floor is not None
+            and edge_density_min is not None
+            and edge_density_floor <= edge_density < edge_density_min
+        ),
+        "chamfer_geometry_passed": bool(
+            chamfer.get("available") is True
+            and number(chamfer.get("coverage_within_radius")) is not None
+            and number(thresholds.get("chamfer_coverage_min")) is not None
+            and number(chamfer.get("coverage_within_radius"))
+            >= number(thresholds.get("chamfer_coverage_min"))
+            and number(chamfer.get("mean_distance_px")) is not None
+            and number(thresholds.get("chamfer_mean_distance_max")) is not None
+            and number(chamfer.get("mean_distance_px"))
+            <= number(thresholds.get("chamfer_mean_distance_max"))
+        ),
+        "continuous_foreleg_passed": bool(
+            number(continuous.get("span_fraction")) is not None
+            and number(thresholds.get("continuous_edge_span_min")) is not None
+            and number(continuous.get("span_fraction"))
+            >= number(thresholds.get("continuous_edge_span_min"))
+        ),
+        "paw_muzzle_contact_passed": bool(
+            contact.get("available") is True
+            and number(contact.get("gap_fraction_of_bbox_height")) is not None
+            and number(thresholds.get("paw_muzzle_gap_max")) is not None
+            and number(contact.get("gap_fraction_of_bbox_height"))
+            <= number(thresholds.get("paw_muzzle_gap_max"))
+        ),
+        "paw_appearance_passed": bool(
+            appearance.get("available") is True
+            and number(appearance.get("lab_median_delta")) is not None
+            and number(thresholds.get("lab_median_delta_max")) is not None
+            and number(appearance.get("lab_median_delta"))
+            <= number(thresholds.get("lab_median_delta_max"))
+            and number(histogram.get("mean")) is not None
+            and number(thresholds.get("lab_histogram_distance_max")) is not None
+            and number(histogram.get("mean"))
+            <= number(thresholds.get("lab_histogram_distance_max"))
+            and number(appearance.get("texture_gradient_p90_ratio")) is not None
+            and number(thresholds.get("texture_p90_ratio_min")) is not None
+            and number(thresholds.get("texture_p90_ratio_max")) is not None
+            and number(thresholds.get("texture_p90_ratio_min"))
+            <= number(appearance.get("texture_gradient_p90_ratio"))
+            <= number(thresholds.get("texture_p90_ratio_max"))
+        ),
+        "canonical_masked_completion_contract_valid": bool(
+            isinstance(repair_audit, dict)
+            and repair_audit.get("policy")
+            == GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
+            and repair_audit.get("production_canonical_masked_completion") is True
+            and repair_audit.get("source_identity_palette_acceptable") is True
+            and repair_audit.get("localized_style_policy")
+            == "disabled_for_canonical_masked_completion"
+            and repair_audit.get("localized_style_lora") is None
+            and number(repair_audit.get("localized_style_strength")) == 0.0
+            and repair_audit.get("composite_recovery_enabled") is False
+            and repair_audit.get("global_pose_threshold_changed") is False
+            and repair_audit.get("main_case_rgb_appearance_exposed_on_repair_attempt")
+            is False
+            and re.fullmatch(r"[0-9a-f]{64}", mask_digest) is not None
+            and completion_canvas.get("policy")
+            == GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
+            and completion_canvas.get("semantic_pixels_exposed_to_qwen") is False
+            and completion_canvas.get("identity_or_geometry_seed_inserted") is False
+            and completion_canvas.get(
+                "source_composite_preserved_before_masked_sampling"
+            )
+            is True
+        ),
+    }
+    accepted = bool(
+        pose_gate.get("available") is True
+        and pose_gate.get("acceptable") is not True
+        and all(checks.values())
+    )
+    recovery = {
+        "policy": GROOMING_CANONICAL_COMPLETION_EDGE_EVIDENCE_POLICY,
+        "evaluated": True,
+        "accepted": accepted,
+        "fail_closed": True,
+        "global_pose_threshold_changed": False,
+        "required_global_edge_density_min": edge_density_min,
+        "required_edge_density_ratio": (
+            GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN
+        ),
+        "edge_density": edge_density,
+        "edge_density_floor": edge_density_floor,
+        "repair_noise_mask_sha256": mask_digest or None,
+        "independent_fur_surface_gate_still_required": True,
+        "checks": checks,
+    }
+    result["canonical_completion_edge_evidence"] = recovery
+    if not accepted:
+        return result
+
+    result.update(
+        raw_acceptable=pose_gate.get("acceptable"),
+        raw_verdict=pose_gate.get("verdict"),
+        raw_issues=raw_issues,
+        raw_penalty=pose_gate.get("penalty"),
+        acceptable=True,
+        verdict="accepted_canonical_masked_completion_edge_evidence",
+        issues=[],
+        penalty=0.0,
+    )
+    result["warnings"] = list(
+        dict.fromkeys(
+            [
+                *[str(item) for item in pose_gate.get("warnings", [])],
+                "raised_foreleg_edge_density_antialias_shortfall_accepted_"
+                "only_by_canonical_masked_completion_evidence",
+            ]
+        )
+    )
+    return result
+
+
+def resolve_main_case_grooming_pose_gate_metadata(
+    job: dict[str, Any],
+    guide_path: Path,
+) -> tuple[Path, Path, Path | None]:
+    """Resolve the frozen neutral guide for CV and repair-only anatomy use."""
+
+    metadata_by_action = job.get("pose_reference_metadata")
+    action_metadata = (
+        metadata_by_action.get("grooming")
+        if isinstance(metadata_by_action, dict)
+        else None
+    )
+    if not isinstance(action_metadata, dict):
+        raise RuntimeError(
+            "Main_case grooming pose gate requires persisted geometry metadata."
+        )
+    generator_metadata = action_metadata.get("generator_metadata")
+    if not isinstance(generator_metadata, dict):
+        raise RuntimeError("Main_case grooming pose gate requires generator metadata.")
+    if (
+        action_metadata.get("policy") != GROOMING_QWEN_POSE_REFERENCE_POLICY
+        or action_metadata.get("generator_policy")
+        != GROOMING_QWEN_GEOMETRY_GUIDE_POLICY
+        or generator_metadata.get("policy") != GROOMING_QWEN_GEOMETRY_GUIDE_POLICY
+    ):
+        raise RuntimeError(
+            "Main_case grooming pose gate received unsupported geometry metadata."
+        )
+    guide_sha256 = file_sha256(guide_path)
+    persisted_guide_sha256 = str(action_metadata.get("guide_sha256") or "").strip()
+    generator_guide_sha256 = str(generator_metadata.get("guide_sha256") or "").strip()
+    if (
+        not persisted_guide_sha256
+        or persisted_guide_sha256 != guide_sha256
+        or not generator_guide_sha256
+        or generator_guide_sha256 != guide_sha256
+    ):
+        raise RuntimeError("Main_case grooming Qwen geometry-guide digest changed.")
+    metadata_text = str(generator_metadata.get("metadata_path") or "").strip()
+    metadata_path = (
+        Path(metadata_text)
+        if metadata_text
+        else guide_path.with_name(guide_path.stem + "_metadata.json")
+    )
+    guide_parent = guide_path.resolve().parent
+    if metadata_path.resolve().parent != guide_parent or not metadata_path.is_file():
+        raise RuntimeError("Main_case grooming Qwen metadata file is missing or moved.")
+    try:
+        metadata_file = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Main_case grooming Qwen metadata file is invalid.") from exc
+    if (
+        not isinstance(metadata_file, dict)
+        or metadata_file.get("policy") != GROOMING_QWEN_GEOMETRY_GUIDE_POLICY
+        or metadata_file.get("guide_sha256") != guide_sha256
+    ):
+        raise RuntimeError("Main_case grooming Qwen metadata contract is invalid.")
+
+    qwen_metadata = metadata_file.get("qwen_guide")
+    if not isinstance(qwen_metadata, dict):
+        raise RuntimeError("Main_case grooming Qwen guide metadata is missing.")
+    structural_negative_space = qwen_metadata.get("structural_negative_space")
+    synthetic_foreleg = qwen_metadata.get("synthetic_foreleg_semantic")
+    qwen_path_text = str(qwen_metadata.get("path") or "").strip()
+    production_open_channel = bool(
+        qwen_metadata.get("role") == "image2_action_geometry_guide"
+        and qwen_metadata.get("foreground_rgb")
+        == list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB)
+        and qwen_metadata.get("foreground_palette_rgb")
+        == [list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB)]
+        and qwen_metadata.get("unique_foreground_rgb_count") == 1
+        and qwen_metadata.get("internal_luma_variation") is False
+        and qwen_metadata.get("appearance_bearing_internal_luma_variation") is False
+        and qwen_metadata.get("main_case_appearance_exposed_to_qwen") is False
+        and synthetic_foreleg is None
+        and isinstance(structural_negative_space, dict)
+        and structural_negative_space.get("method")
+        == GROOMING_QWEN_NEGATIVE_SPACE_METHOD
+        and structural_negative_space.get("curve_closed") is False
+        and structural_negative_space.get("paw_endpoint_open") is True
+        and structural_negative_space.get("shoulder_endpoint_open") is True
+        and structural_negative_space.get("foreleg_remains_attached_at_shoulder")
+        is True
+        and structural_negative_space.get("paw_muzzle_contact_remains_connected")
+        is True
+        and structural_negative_space.get("source_rgb_or_luma_sampled") is False
+        and structural_negative_space.get("appearance_bearing") is False
+        and structural_negative_space.get("adds_foreground_color") is False
+        and 300 <= int(structural_negative_space.get("pixels") or 0) <= 1800
+        and 7 <= int(structural_negative_space.get("line_width") or 0) <= 11
+        and isinstance(structural_negative_space.get("points"), list)
+        and len(structural_negative_space.get("points")) == 6
+        and qwen_metadata.get("closed_foreleg_capsule_exposed") is False
+        and qwen_metadata.get("internal_green_separator_exposed") is True
+        and qwen_metadata.get("raised_foreleg_validation_role")
+        == "public_open_curve_geometry_plus_private_cv"
+    )
+    if (
+        not qwen_path_text
+        or Path(qwen_path_text).resolve() != guide_path.resolve()
+        or qwen_metadata.get("sha256") != guide_sha256
+    ):
+        raise RuntimeError("Main_case grooming Qwen guide path or digest changed.")
+    if not production_open_channel and (
+        qwen_metadata.get("role") != "image1_action_geometry_sampler"
+        or qwen_metadata.get("foreground_rgb")
+        != list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB)
+        or qwen_metadata.get("foreground_palette_rgb")
+        != [
+            list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB),
+            list(GROOMING_QWEN_GUIDE_FORELEG_RGB),
+        ]
+        or qwen_metadata.get("unique_foreground_rgb_count") != 2
+        or qwen_metadata.get("internal_luma_variation") is not True
+        or qwen_metadata.get("appearance_bearing_internal_luma_variation") is not False
+        or qwen_metadata.get("main_case_appearance_exposed_to_qwen") is not False
+        or not isinstance(synthetic_foreleg, dict)
+        or synthetic_foreleg.get("method") != GROOMING_QWEN_FORELEG_SEMANTIC_METHOD
+        or synthetic_foreleg.get("rgb") != list(GROOMING_QWEN_GUIDE_FORELEG_RGB)
+        or synthetic_foreleg.get("source_rgb_or_luma_sampled") is not False
+        or synthetic_foreleg.get("appearance_bearing") is not False
+        or int(synthetic_foreleg.get("pixels") or 0) < 650
+        or int(synthetic_foreleg.get("pixels") or 0) > 6000
+        or int(synthetic_foreleg.get("pixels_before_separator") or 0)
+        < int(synthetic_foreleg.get("pixels") or 0)
+        or not isinstance(structural_negative_space, dict)
+        or structural_negative_space.get("method")
+        != GROOMING_QWEN_NEGATIVE_SPACE_METHOD
+        or structural_negative_space.get("appearance_bearing") is not False
+        or structural_negative_space.get("adds_foreground_color") is not False
+        or int(structural_negative_space.get("pixels") or 0) < 80
+        or int(structural_negative_space.get("pixels") or 0) > 1600
+    ):
+        raise RuntimeError("Main_case grooming Qwen guide is not appearance-isolated.")
+    with Image.open(guide_path) as loaded:
+        qwen_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    qwen_foreground = ~np.all(qwen_rgb == (0, 255, 0), axis=2)
+    unique_qwen_foreground = np.unique(qwen_rgb[qwen_foreground], axis=0)
+    expected_foreground_palette = np.asarray(
+        (
+            [GROOMING_QWEN_GUIDE_FOREGROUND_RGB]
+            if production_open_channel
+            else [
+                GROOMING_QWEN_GUIDE_FOREGROUND_RGB,
+                GROOMING_QWEN_GUIDE_FORELEG_RGB,
+            ]
+        ),
+        dtype=np.uint8,
+    )
+    qwen_semantic_foreleg_pixels = int(
+        np.count_nonzero(
+            np.all(
+                qwen_rgb == np.asarray(GROOMING_QWEN_GUIDE_FORELEG_RGB, dtype=np.uint8),
+                axis=2,
+            )
+        )
+    )
+    if (
+        qwen_rgb.shape != (512, 512, 3)
+        or not np.any(qwen_foreground)
+        or unique_qwen_foreground.shape != expected_foreground_palette.shape
+        or not np.array_equal(
+            unique_qwen_foreground,
+            expected_foreground_palette,
+        )
+        or (production_open_channel and qwen_semantic_foreleg_pixels != 0)
+        or (
+            not production_open_channel
+            and qwen_semantic_foreleg_pixels
+            != int(synthetic_foreleg.get("pixels") or 0)
+        )
+    ):
+        raise RuntimeError(
+            "Main_case grooming Qwen guide violates its synthetic anatomy palette."
+        )
+
+    private_gate = metadata_file.get("private_pose_gate")
+    if not isinstance(private_gate, dict):
+        raise RuntimeError("Main_case grooming private pose-gate metadata is missing.")
+    gate_path_text = str(private_gate.get("guide_path") or "").strip()
+    gate_metadata_text = str(private_gate.get("metadata_path") or "").strip()
+    gate_path = Path(gate_path_text) if gate_path_text else Path()
+    gate_metadata_path = Path(gate_metadata_text) if gate_metadata_text else Path()
+    expected_gate_sha256 = str(private_gate.get("guide_sha256") or "").strip()
+    if (
+        not gate_path_text
+        or not gate_metadata_text
+        or gate_path.resolve().parent != guide_parent
+        or gate_metadata_path.resolve().parent != guide_parent
+        or not gate_path.is_file()
+        or not gate_metadata_path.is_file()
+        or private_gate.get("policy") != GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY
+        or private_gate.get("exposed_to_qwen") is not False
+        or not expected_gate_sha256
+        or file_sha256(gate_path) != expected_gate_sha256
+        or action_metadata.get("private_pose_gate_guide_sha256") != expected_gate_sha256
+        or Path(
+            str(action_metadata.get("private_pose_gate_guide_path") or "")
+        ).resolve()
+        != gate_path.resolve()
+        or action_metadata.get("private_pose_gate_exposed_to_qwen") is not False
+    ):
+        raise RuntimeError(
+            "Main_case grooming private pose-gate guide changed or escaped its job directory."
+        )
+    try:
+        gate_metadata_file = json.loads(gate_metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "Main_case grooming private pose-gate metadata file is invalid."
+        ) from exc
+    relation = (
+        gate_metadata_file.get("raised_paw_muzzle_relation")
+        if isinstance(gate_metadata_file, dict)
+        else None
+    )
+    output_encoding = (
+        relation.get("output_encoding") if isinstance(relation, dict) else None
+    )
+    wrapper_relation = metadata_file.get("raised_paw_muzzle_relation")
+    if (
+        not isinstance(gate_metadata_file, dict)
+        or gate_metadata_file.get("policy") != GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY
+        or not isinstance(relation, dict)
+        or relation.get("passed") is not True
+        or relation.get("source_luma_values_preserved") is not False
+        or relation.get("black_or_tool_semantics_preserved") is not False
+        or not isinstance(output_encoding, dict)
+        or output_encoding.get("method")
+        != "compressed_blurred_quantized_neutral_anatomy"
+        or not isinstance(wrapper_relation, dict)
+        or wrapper_relation.get("passed") is not True
+    ):
+        raise RuntimeError(
+            "Main_case grooming pose gate metadata lacks verified paw/muzzle geometry."
+        )
+    with Image.open(gate_path) as loaded:
+        private_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    if private_rgb.shape != qwen_rgb.shape:
+        raise RuntimeError(
+            "Main_case grooming public/private guide dimensions changed."
+        )
+    private_foreground = ~np.all(private_rgb == (0, 255, 0), axis=2)
+    removed_foreground = private_foreground & ~qwen_foreground
+    expected_removed_pixels = int(structural_negative_space.get("pixels") or 0)
+    if (
+        not np.any(private_foreground)
+        or np.any(qwen_foreground & ~private_foreground)
+        or int(np.count_nonzero(removed_foreground)) != expected_removed_pixels
+    ):
+        raise RuntimeError(
+            "Main_case grooming Qwen foreleg negative-space channel changed."
+        )
+    completion_mask_path: Path | None = None
+    if production_open_channel:
+        completion_mask = metadata_file.get("private_completion_mask")
+        if not isinstance(completion_mask, dict):
+            raise RuntimeError(
+                "Main_case grooming private completion mask metadata is missing."
+            )
+        completion_path_text = str(completion_mask.get("path") or "").strip()
+        completion_mask_path = (
+            Path(completion_path_text) if completion_path_text else Path()
+        )
+        completion_sha256 = str(completion_mask.get("sha256") or "").strip()
+        if (
+            not completion_path_text
+            or completion_mask_path.resolve().parent != guide_parent
+            or not completion_mask_path.is_file()
+            or completion_mask.get("policy") != GROOMING_PRIVATE_COMPLETION_MASK_POLICY
+            or completion_mask.get("role") != "local_noise_mask_derivation_only"
+            or completion_mask.get("exposed_to_qwen") is not False
+            or completion_mask.get("loaded_as_qwen_image") is not False
+            or not completion_sha256
+            or file_sha256(completion_mask_path) != completion_sha256
+            or action_metadata.get("private_completion_mask_path")
+            != str(completion_mask_path)
+            or action_metadata.get("private_completion_mask_sha256")
+            != completion_sha256
+            or action_metadata.get("private_completion_mask_exposed_to_qwen")
+            is not False
+        ):
+            raise RuntimeError(
+                "Main_case grooming private completion mask changed or escaped its job directory."
+            )
+        with Image.open(completion_mask_path) as loaded:
+            completion_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+        if completion_rgb.shape != qwen_rgb.shape:
+            raise RuntimeError(
+                "Main_case grooming private completion mask dimensions changed."
+            )
+        completion_background = np.all(
+            completion_rgb == np.asarray((0, 255, 0), dtype=np.uint8),
+            axis=2,
+        )
+        completion_body = np.all(
+            completion_rgb
+            == np.asarray(GROOMING_QWEN_GUIDE_FOREGROUND_RGB, dtype=np.uint8),
+            axis=2,
+        )
+        completion_foreleg = np.all(
+            completion_rgb
+            == np.asarray(GROOMING_QWEN_GUIDE_FORELEG_RGB, dtype=np.uint8),
+            axis=2,
+        )
+        completion_semantic_pixels = int(np.count_nonzero(completion_foreleg))
+        if (
+            not np.all(completion_background | completion_body | completion_foreleg)
+            or completion_semantic_pixels
+            != int(completion_mask.get("semantic_foreleg_pixels") or 0)
+            or not 650 <= completion_semantic_pixels <= 6000
+        ):
+            raise RuntimeError(
+                "Main_case grooming private completion mask palette changed."
+            )
+    return gate_path, gate_metadata_path, completion_mask_path
+
+
+def evaluate_main_case_grooming_pose_candidate(
+    source: Path,
+    *,
+    pose: str,
+    green_target: Path,
+    cutout_target: Path,
+    semantic_target: Path,
+    normalized_cutout_target: Path,
+    geometry_guide: Path,
+    geometry_metadata: Path,
+    pose_transfer_seed: Path | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Recover an alpha subject and evaluate the Main_case grooming pose."""
+
+    semantic_recovery_error: str | None = None
+    try:
+        chroma = semantic_background_recovery(
+            source,
+            green_target,
+            cutout_target,
+            semantic_target,
+            pose=pose,
+        )
+    except Exception as exc:  # noqa: BLE001 - retries must survive gate failures
+        semantic_recovery_error = f"{type(exc).__name__}: {str(exc)[:1000]}"
+        chroma = {
+            "acceptable": False,
+            "issues": ["grooming_pose_gate_alpha_recovery_failed"],
+            "method": "rembg_u2net_grooming_pose_gate",
+            "error": semantic_recovery_error,
+        }
+        if pose_transfer_seed is None or not semantic_target.is_file():
+            return (
+                chroma,
+                grooming_pose_gate_failure(
+                    "grooming_pose_gate_alpha_recovery_failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                ),
+            )
+    if pose_transfer_seed is not None:
+        semantic_recovery_chroma = dict(chroma)
+        try:
+            seed_bound_matte = prepare_canonical_grooming_seed_bound_matte(
+                source,
+                semantic_target,
+                pose_transfer_seed,
+                cutout_target,
+                green_target=green_target,
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed and advance retry
+            return (
+                {
+                    **chroma,
+                    "acceptable": False,
+                    "issues": list(
+                        dict.fromkeys(
+                            [
+                                *[str(issue) for issue in chroma.get("issues", [])],
+                                "grooming_seed_bound_matte_recovery_failed",
+                            ]
+                        )
+                    ),
+                    "method": GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE,
+                    "semantic_recovery": semantic_recovery_chroma,
+                    "semantic_recovery_error": semantic_recovery_error,
+                    "seed_bound_matte_error": (
+                        f"{type(exc).__name__}: {str(exc)[:1000]}"
+                    ),
+                },
+                grooming_pose_gate_failure(
+                    "grooming_seed_bound_matte_recovery_failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                ),
+            )
+        chroma = {
+            **chroma,
+            "acceptable": True,
+            "issues": [],
+            "method": GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE,
+            "semantic_recovery": semantic_recovery_chroma,
+            "semantic_recovery_error": semantic_recovery_error,
+            "seed_bound_matte": seed_bound_matte,
+            "seed_bound_matte_policy": GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY,
+        }
+    chroma, normalized_cutout = finalize_qwen_action_reference_candidate(
+        chroma,
+        cutout_target,
+        normalized_cutout_target,
+    )
+    if pose_transfer_seed is not None:
+        chroma["matte_policy"] = GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY
+    if chroma.get("acceptable") is not True:
+        return (
+            chroma,
+            grooming_pose_gate_failure(
+                "grooming_pose_gate_final_reference_normalization_failed",
+                error=str(chroma.get("final_reference_normalization_error") or ""),
+            ),
+        )
+    try:
+        gate = evaluate_grooming_pose(
+            normalized_cutout,
+            geometry_guide,
+            geometry_metadata=geometry_metadata,
+        )
+        # Serialize and reload at the boundary so attempt and job metadata can
+        # never receive NumPy scalars, Paths, or another non-JSON value.
+        gate = json.loads(json.dumps(gate, ensure_ascii=False))
+    except Exception as exc:  # noqa: BLE001 - fail closed and advance retry
+        gate = grooming_pose_gate_failure(
+            "grooming_pose_gate_evaluation_failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    return chroma, gate
+
+
 def semantic_recovery_candidate_eligible(record: dict[str, Any]) -> bool:
-    """Only use rembg when chroma failed; it cannot repair anatomy or pose quality."""
+    """Allow rembg for a distinct raw pose; audit palette again after removal."""
     chroma = record.get("chroma")
     similarity = record.get("similarity")
-    palette = record.get("identity_palette")
     return bool(
         isinstance(chroma, dict)
         and not chroma.get("acceptable", False)
         and isinstance(similarity, dict)
         and similarity.get("acceptable", False)
-        and (
-            palette is None
-            or (isinstance(palette, dict) and palette.get("acceptable", False))
-        )
     )
 
 
 def pose_attempt_failure_issues(attempts: list[dict[str, Any]]) -> list[str]:
     issues: list[str] = []
     for failed_attempt in attempts:
-        for section_name in ("chroma", "quality", "similarity", "identity_palette"):
+        for section_name in (
+            "chroma",
+            "quality",
+            "similarity",
+            "identity_palette",
+            "fur_silhouette",
+            "fur_surface_gate",
+            "grooming_pose_gate",
+        ):
             section = failed_attempt.get(section_name)
+            if (
+                section_name == "fur_surface_gate"
+                and isinstance(section, dict)
+                and section.get("evaluated") is False
+            ):
+                continue
             if isinstance(section, dict) and isinstance(section.get("issues"), list):
                 issues.extend(str(issue) for issue in section["issues"])
     return list(dict.fromkeys(issues))
@@ -3362,8 +11044,22 @@ def pose_attempt_failure_summary(attempts: list[dict[str, Any]]) -> str:
     issues_by_attempt: list[tuple[int, list[str]]] = []
     for fallback_index, failed_attempt in enumerate(attempts, start=1):
         attempt_issues: list[str] = []
-        for section_name in ("chroma", "quality", "similarity", "identity_palette"):
+        for section_name in (
+            "chroma",
+            "quality",
+            "similarity",
+            "identity_palette",
+            "fur_silhouette",
+            "fur_surface_gate",
+            "grooming_pose_gate",
+        ):
             section = failed_attempt.get(section_name)
+            if (
+                section_name == "fur_surface_gate"
+                and isinstance(section, dict)
+                and section.get("evaluated") is False
+            ):
+                continue
             if isinstance(section, dict) and isinstance(section.get("issues"), list):
                 attempt_issues.extend(str(issue) for issue in section["issues"])
         issues_by_attempt.append(
@@ -3390,7 +11086,270 @@ def pose_attempt_failure_summary(attempts: list[dict[str, Any]]) -> str:
     return "; ".join(parts) or "no usable subject"
 
 
-def pose_cutout_quality(path: Path, pose: str) -> dict[str, Any]:
+def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
+    """Require a real face/muzzle anchor immediately above the detected food bowl.
+
+    The action reference splitter is shared with the SCAIL stage so the keyframe
+    gate and final reference-space mouth motion agree about which pixels are the
+    bowl, planted paws and cat identity. A low/wide silhouette alone is not an
+    eating action: the warm nose/muzzle component must be centered over the bowl
+    opening with at most the small gap that SCAIL can safely close at low phase.
+    """
+
+    try:
+        from scail2_subject_replacement_test import (
+            make_eating_reference_identity_mask,
+        )
+
+        with Image.open(path) as loaded:
+            reference = loaded.convert("RGBA")
+        colored_mask, _prop_exclusion, prop_metadata = (
+            make_eating_reference_identity_mask(reference)
+        )
+    except Exception as exc:  # noqa: BLE001 - convert splitter failures to gate data
+        error = f"{type(exc).__name__}: {str(exc)[:1000]}"
+        lowered = str(exc).lower()
+        if any(
+            token in lowered
+            for token in (
+                "warm_seed",
+                "warm_food",
+                "bowl_body",
+                "warm_bowl",
+                "prop_fraction",
+            )
+        ):
+            issue = "eating_bowl_or_food_not_detected"
+        elif "paw_support" in lowered:
+            issue = "eating_bowl_paw_layout_invalid"
+        else:
+            issue = "eating_bowl_contact_unreliable"
+        return {
+            "acceptable": False,
+            "issues": [issue],
+            "penalty": 125.0,
+            "method": EATING_MOUTH_BOWL_CONTACT_POLICY,
+            "error": error,
+        }
+
+    reference_rgba = np.asarray(reference, dtype=np.uint8)
+    colored = np.asarray(colored_mask.convert("RGB"), dtype=np.uint8)
+    reference_subject = np.all(colored == (0, 0, 255), axis=2)
+    reference_bowl = np.all(colored == (255, 0, 0), axis=2)
+    if (
+        int(np.count_nonzero(reference_subject)) < 500
+        or int(np.count_nonzero(reference_bowl)) < 100
+    ):
+        return {
+            "acceptable": False,
+            "issues": ["eating_bowl_contact_unreliable"],
+            "penalty": 125.0,
+            "method": EATING_MOUTH_BOWL_CONTACT_POLICY,
+        }
+
+    subject_rows, subject_columns = np.where(reference_subject)
+    bowl_rows, bowl_columns = np.where(reference_bowl)
+    subject_left = int(subject_columns.min())
+    subject_top = int(subject_rows.min())
+    subject_right = int(subject_columns.max()) + 1
+    subject_bottom = int(subject_rows.max()) + 1
+    bowl_left = int(bowl_columns.min())
+    bowl_top = int(bowl_rows.min())
+    bowl_right = int(bowl_columns.max()) + 1
+    bowl_bottom = int(bowl_rows.max()) + 1
+    subject_height = subject_bottom - subject_top
+    bowl_width = bowl_right - bowl_left
+
+    rgb = reference_rgba[..., :3]
+    red = rgb[..., 0].astype(np.int16)
+    green = rgb[..., 1].astype(np.int16)
+    blue = rgb[..., 2].astype(np.int16)
+    row_indices, column_indices = np.indices(reference_subject.shape)
+    face_search_x0 = max(
+        subject_left,
+        bowl_left - int(round(bowl_width * 0.32)),
+    )
+    face_search_x1 = min(
+        subject_right,
+        bowl_right + int(round(bowl_width * 0.32)),
+    )
+    face_search_y0 = max(
+        subject_top,
+        bowl_top - int(round(max(bowl_width * 0.90, subject_height * 0.40))),
+    )
+    face_search = (
+        (column_indices >= face_search_x0)
+        & (column_indices < face_search_x1)
+        & (row_indices >= face_search_y0)
+        & (row_indices < bowl_top)
+    )
+    face_seed_candidates = (
+        reference_subject
+        & face_search
+        & (red >= 90)
+        & (red - green >= 18)
+        & (red - blue >= 8)
+        & (np.abs(green - blue) <= 25)
+    )
+    face_count, face_labels, face_stats, face_centroids = (
+        cv2.connectedComponentsWithStats(
+            face_seed_candidates.astype(np.uint8),
+            connectivity=8,
+        )
+    )
+    minimum_face_pixels = max(
+        12,
+        int(round(np.count_nonzero(reference_subject) * 0.00015)),
+    )
+    maximum_face_width = int(bowl_width * EATING_MUZZLE_COMPONENT_WIDTH_BOWL_RATIO_MAX)
+    maximum_face_height = int(
+        bowl_width * EATING_MUZZLE_COMPONENT_HEIGHT_BOWL_RATIO_MAX
+    )
+    bowl_center_x = (bowl_left + bowl_right) / 2.0
+    center_min = (
+        bowl_left - bowl_width * EATING_MUZZLE_COMPONENT_CENTER_MARGIN_BOWL_RATIO
+    )
+    center_max = (
+        bowl_right + bowl_width * EATING_MUZZLE_COMPONENT_CENTER_MARGIN_BOWL_RATIO
+    )
+    contact_thresholds = {
+        "minimum_component_pixels": minimum_face_pixels,
+        "gap_px_min": 0,
+        "gap_px_max": EATING_MUZZLE_BOWL_GAP_MAX_PX,
+        "component_width_px_min": 3,
+        "component_width_px_max": maximum_face_width,
+        "component_width_bowl_ratio_max": (
+            EATING_MUZZLE_COMPONENT_WIDTH_BOWL_RATIO_MAX
+        ),
+        "component_height_px_min": 2,
+        "component_height_px_max": maximum_face_height,
+        "component_height_bowl_ratio_max": (
+            EATING_MUZZLE_COMPONENT_HEIGHT_BOWL_RATIO_MAX
+        ),
+        "component_center_margin_bowl_ratio": (
+            EATING_MUZZLE_COMPONENT_CENTER_MARGIN_BOWL_RATIO
+        ),
+    }
+    face_components: list[tuple[int, int, float, int]] = []
+    face_component_audits: list[dict[str, Any]] = []
+    face_component_audit_by_label: dict[int, dict[str, Any]] = {}
+    for label in range(1, face_count):
+        area = int(face_stats[label, cv2.CC_STAT_AREA])
+        component_x = int(face_stats[label, cv2.CC_STAT_LEFT])
+        component_y = int(face_stats[label, cv2.CC_STAT_TOP])
+        component_width = int(face_stats[label, cv2.CC_STAT_WIDTH])
+        component_height = int(face_stats[label, cv2.CC_STAT_HEIGHT])
+        component_bottom = component_y + component_height
+        component_gap = bowl_top - component_bottom
+        center_x = float(face_centroids[label][0])
+        rejection_reasons: list[str] = []
+        if area < minimum_face_pixels:
+            rejection_reasons.append("area_below_minimum")
+        if not 0 <= component_gap <= EATING_MUZZLE_BOWL_GAP_MAX_PX:
+            rejection_reasons.append("gap_outside_contact_range")
+        if not 3 <= component_width <= maximum_face_width:
+            rejection_reasons.append("width_outside_muzzle_range")
+        if not 2 <= component_height <= maximum_face_height:
+            rejection_reasons.append("height_outside_muzzle_range")
+        if not center_min <= center_x <= center_max:
+            rejection_reasons.append("center_outside_bowl_corridor")
+        component_audit = {
+            "label": label,
+            "bbox": [
+                component_x,
+                component_y,
+                component_x + component_width,
+                component_bottom,
+            ],
+            "area": area,
+            "gap_px": component_gap,
+            "width_bowl_ratio": round(
+                component_width / max(1, bowl_width),
+                6,
+            ),
+            "height_bowl_ratio": round(
+                component_height / max(1, bowl_width),
+                6,
+            ),
+            "center_offset_bowl_ratio": round(
+                abs(center_x - bowl_center_x) / max(1, bowl_width),
+                6,
+            ),
+            "rejection_reasons": rejection_reasons,
+        }
+        face_component_audits.append(component_audit)
+        face_component_audit_by_label[label] = component_audit
+        if not rejection_reasons:
+            face_components.append(
+                (
+                    component_bottom,
+                    area,
+                    -abs(center_x - bowl_center_x),
+                    label,
+                )
+            )
+    face_component_audits.sort(
+        key=lambda item: (
+            abs(int(item["gap_px"])),
+            len(item["rejection_reasons"]),
+            -int(item["area"]),
+        )
+    )
+    audited_components = face_component_audits[:12]
+    if not face_components:
+        return {
+            "acceptable": False,
+            "issues": ["eating_muzzle_not_at_bowl"],
+            "penalty": 125.0,
+            "method": EATING_MOUTH_BOWL_CONTACT_POLICY,
+            "bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
+            "face_search_bbox": [
+                face_search_x0,
+                face_search_y0,
+                face_search_x1,
+                bowl_top,
+            ],
+            "face_seed_pixels": int(np.count_nonzero(face_seed_candidates)),
+            "component_candidates": audited_components,
+            "thresholds": contact_thresholds,
+            "prop": prop_metadata,
+        }
+
+    _bottom_rank, _area_rank, _center_rank, face_label = max(face_components)
+    face_x = int(face_stats[face_label, cv2.CC_STAT_LEFT])
+    face_y = int(face_stats[face_label, cv2.CC_STAT_TOP])
+    face_width = int(face_stats[face_label, cv2.CC_STAT_WIDTH])
+    face_height = int(face_stats[face_label, cv2.CC_STAT_HEIGHT])
+    face_bottom = face_y + face_height
+    gap = bowl_top - face_bottom
+    muzzle_x = int(round(float(face_centroids[face_label][0])))
+    return {
+        "acceptable": True,
+        "issues": [],
+        "penalty": round(float(max(0, gap)) * 0.5, 6),
+        "method": EATING_MOUTH_BOWL_CONTACT_POLICY,
+        "muzzle_anchor": [muzzle_x, face_bottom - 1],
+        "muzzle_bowl_gap_px": int(gap),
+        "face_seed_bbox": [
+            face_x,
+            face_y,
+            face_x + face_width,
+            face_bottom,
+        ],
+        "selected_component": face_component_audit_by_label[face_label],
+        "component_candidates": audited_components,
+        "thresholds": contact_thresholds,
+        "bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
+        "prop": prop_metadata,
+    }
+
+
+def pose_cutout_quality(
+    path: Path,
+    pose: str,
+    *,
+    require_eating_mouth_contact: bool = False,
+) -> dict[str, Any]:
     rgba = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if rgba is None or rgba.ndim != 3 or rgba.shape[2] < 4:
         raise RuntimeError(f"Could not inspect transparent pose output {path.name}.")
@@ -3399,10 +11358,15 @@ def pose_cutout_quality(path: Path, pose: str) -> dict[str, Any]:
     component_count, _, stats, _ = cv2.connectedComponentsWithStats(
         foreground, connectivity=8
     )
-    areas = sorted(
-        (int(stats[label, cv2.CC_STAT_AREA]) for label in range(1, component_count)),
+    area_records = sorted(
+        (
+            (label, int(stats[label, cv2.CC_STAT_AREA]))
+            for label in range(1, component_count)
+        ),
+        key=lambda item: item[1],
         reverse=True,
     )
+    areas = [area for _, area in area_records]
     total_area = sum(areas)
     if not areas or total_area <= 0:
         return {
@@ -3412,7 +11376,11 @@ def pose_cutout_quality(path: Path, pose: str) -> dict[str, Any]:
             "component_count": 0,
         }
     meaningful_minimum = max(48, int(total_area * 0.001))
-    meaningful_areas = [area for area in areas if area >= meaningful_minimum]
+    meaningful_records = [
+        (label, area) for label, area in area_records if area >= meaningful_minimum
+    ]
+    meaningful_labels = [label for label, _ in meaningful_records]
+    meaningful_areas = [area for _, area in meaningful_records]
     minor_fraction = float(sum(meaningful_areas[1:])) / float(total_area)
     ys, xs = np.where(foreground > 0)
     height, width = foreground.shape
@@ -3437,10 +11405,56 @@ def pose_cutout_quality(path: Path, pose: str) -> dict[str, Any]:
     bbox_width = max(1, bbox[2] - bbox[0])
     bbox_height = max(1, bbox[3] - bbox[1])
     bbox_aspect_ratio = bbox_width / float(bbox_height)
-    if action in {"eating", "drinking"} and bbox_aspect_ratio < 0.78:
+    if (
+        action in {"eating", "drinking"}
+        and bbox_aspect_ratio < QWEN_BOWL_ACTION_MIN_ASPECT_RATIO
+    ):
         issues.append("pose_not_low_or_wide_enough_for_bowl_action")
+    bowl_components: list[dict[str, Any]] = []
+    if action in {"eating", "drinking"}:
+        for label in meaningful_labels[1:]:
+            component_area = int(stats[label, cv2.CC_STAT_AREA])
+            component_x = int(stats[label, cv2.CC_STAT_LEFT])
+            component_y = int(stats[label, cv2.CC_STAT_TOP])
+            component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+            component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            component_fraction = component_area / float(total_area)
+            component_aspect_ratio = component_width / float(max(1, component_height))
+            component_center_y = (
+                component_y + component_height / 2.0 - bbox[1]
+            ) / float(bbox_height)
+            if (
+                0.008 <= component_fraction <= 0.30
+                and component_aspect_ratio >= 0.75
+                and component_width >= bbox_width * 0.10
+                and component_center_y >= 0.52
+            ):
+                bowl_components.append(
+                    {
+                        "area": component_area,
+                        "fraction": round(component_fraction, 6),
+                        "bbox": [
+                            component_x,
+                            component_y,
+                            component_x + component_width,
+                            component_y + component_height,
+                        ],
+                        "aspect_ratio": round(component_aspect_ratio, 6),
+                        "center_y": round(component_center_y, 6),
+                    }
+                )
+        # A correct bowl often touches the muzzle or paws after alpha matting, so
+        # connected-component separation is diagnostic only. Enforcing it as a
+        # hard gate rejects validated eating references. The hard geometric gate
+        # above instead requires the character-plus-bowl layout to be low and
+        # wide; the validated action guide and written prompt supply semantics.
     if action in {"lying", "lying down"} and bbox_aspect_ratio < 0.90:
         issues.append("pose_not_low_or_wide_enough_for_lying")
+    eating_contact = None
+    if action == "eating" and require_eating_mouth_contact:
+        eating_contact = eating_mouth_bowl_contact_quality(path)
+        if not eating_contact["acceptable"]:
+            issues.extend(eating_contact["issues"])
     lower_body_component_peak = 0
     lower_body_components: dict[str, int] = {}
     if action == "running":
@@ -3478,6 +11492,161 @@ def pose_cutout_quality(path: Path, pose: str) -> dict[str, Any]:
         "margins": {key: round(value, 6) for key, value in margins.items()},
         "lower_body_component_peak": lower_body_component_peak,
         "lower_body_components": lower_body_components,
+        "bowl_component_count": len(bowl_components),
+        "bowl_components": bowl_components,
+        "eating_mouth_bowl_contact": eating_contact,
+    }
+
+
+def fur_silhouette_signature(path: Path) -> dict[str, Any]:
+    """Measure coat-edge expansion on a normalized eating reference."""
+    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if image is None or image.ndim != 3 or image.shape[2] < 3:
+        raise RuntimeError(f"Could not inspect fur silhouette {path.name}.")
+    height, width = image.shape[:2]
+    if image.shape[2] >= 4 and np.any(image[:, :, 3] < 250):
+        foreground = image[:, :, 3] >= 128
+        mask_method = "alpha"
+    else:
+        blue = image[:, :, 0].astype(np.int16)
+        green = image[:, :, 1].astype(np.int16)
+        red = image[:, :, 2].astype(np.int16)
+        green_background = (green > 80) & ((green - np.maximum(red, blue)) > 35)
+        green_fraction = float(np.count_nonzero(green_background)) / float(
+            green_background.size
+        )
+        if green_fraction < 0.05:
+            raise RuntimeError(
+                f"Fur silhouette reference {path.name} has neither alpha nor "
+                "a clean green background."
+            )
+        foreground = ~green_background
+        mask_method = "green_screen"
+
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        foreground.astype(np.uint8),
+        connectivity=8,
+    )
+    if component_count <= 1:
+        raise RuntimeError(f"Fur silhouette {path.name} has no foreground subject.")
+    largest_label = max(
+        range(1, component_count),
+        key=lambda label: int(stats[label, cv2.CC_STAT_AREA]),
+    )
+    subject = labels == largest_label
+    ys, xs = np.where(subject)
+    if xs.size < 256:
+        raise RuntimeError(f"Fur silhouette {path.name} is too small to inspect.")
+    bbox = [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1]
+    bbox_width = max(1, bbox[2] - bbox[0])
+    bbox_height = max(1, bbox[3] - bbox[1])
+
+    # This band is the back/upper-torso region in the validated eating layout.
+    # Relative coordinates keep the metric stable under harmless translation and
+    # small framing changes while excluding most of the bowl and front paws.
+    x0 = bbox[0] + int(round(bbox_width * 0.11))
+    x1 = bbox[0] + int(round(bbox_width * 0.61))
+    top_values: list[float] = []
+    for x in range(max(0, x0), min(width, x1)):
+        column = np.flatnonzero(subject[:, x])
+        if column.size:
+            top_values.append(float(column[0]))
+    if len(top_values) < 48:
+        raise RuntimeError(
+            f"Fur silhouette {path.name} has insufficient upper contour coverage."
+        )
+    top = np.asarray(top_values, dtype=np.float32)
+    smoothing_window = max(7, int(round(bbox_width * 15.0 / 400.0)))
+    if smoothing_window % 2 == 0:
+        smoothing_window += 1
+    smoothing_window = min(smoothing_window, max(7, len(top) // 3 * 2 + 1))
+    kernel = np.ones(smoothing_window, dtype=np.float32) / float(smoothing_window)
+    smoothed = np.convolve(top, kernel, mode="same")
+    edge_trim = max(4, smoothing_window // 2 + 1)
+    residual = top[edge_trim:-edge_trim] - smoothed[edge_trim:-edge_trim]
+    if residual.size < 24:
+        raise RuntimeError(
+            f"Fur silhouette {path.name} has insufficient contour samples."
+        )
+    canvas_scale = 512.0 / float(max(height, width))
+    top_roughness = float(np.sqrt(np.mean(np.square(residual)))) * canvas_scale
+
+    upper_cutoff = min(
+        height,
+        bbox[1] + int(round(bbox_height * 0.72)),
+    )
+    upper = subject.copy()
+    upper[upper_cutoff:, :] = False
+    upper_area = int(np.count_nonzero(upper))
+    if upper_area < 256:
+        raise RuntimeError(f"Fur silhouette {path.name} has no usable upper body.")
+    horizontal_transitions = int(np.count_nonzero(upper[:, 1:] != upper[:, :-1]))
+    vertical_transitions = int(np.count_nonzero(upper[1:, :] != upper[:-1, :]))
+    upper_perimeter_normalized = float(
+        (horizontal_transitions + vertical_transitions) / np.sqrt(upper_area)
+    )
+    return {
+        "path": str(path),
+        "sha256": file_sha256(path),
+        "mask_method": mask_method,
+        "canvas": [width, height],
+        "bbox": bbox,
+        "foreground_area": int(np.count_nonzero(subject)),
+        "upper_area": upper_area,
+        "contour_sample_count": len(top_values),
+        "smoothing_window": smoothing_window,
+        "top_contour_roughness_px_512": round(top_roughness, 6),
+        "upper_perimeter_normalized": round(upper_perimeter_normalized, 6),
+    }
+
+
+def eating_fur_silhouette_quality(
+    candidate_path: Path,
+    reference_path: Path,
+) -> dict[str, Any]:
+    """Fail closed when an eating reference grows a jagged or expanded coat."""
+    reference = fur_silhouette_signature(reference_path)
+    candidate = fur_silhouette_signature(candidate_path)
+    reference_roughness = float(reference["top_contour_roughness_px_512"])
+    candidate_roughness = float(candidate["top_contour_roughness_px_512"])
+    roughness_limit = max(
+        reference_roughness * 1.45,
+        reference_roughness + 1.50,
+    )
+    reference_perimeter = float(reference["upper_perimeter_normalized"])
+    candidate_perimeter = float(candidate["upper_perimeter_normalized"])
+    perimeter_limit = max(
+        reference_perimeter * 1.20,
+        reference_perimeter + 0.65,
+    )
+    issues: list[str] = []
+    if candidate_roughness > roughness_limit:
+        issues.append("fur_top_contour_too_rough")
+    if candidate_perimeter > perimeter_limit:
+        issues.append("fur_upper_silhouette_too_jagged")
+    roughness_overage = max(0.0, candidate_roughness / roughness_limit - 1.0)
+    perimeter_overage = max(0.0, candidate_perimeter / perimeter_limit - 1.0)
+    return {
+        "acceptable": not issues,
+        "issues": issues,
+        "penalty": round((roughness_overage + perimeter_overage) * 100.0, 6),
+        "policy": "profile_relative_eating_contour_v1",
+        "reference": reference,
+        "candidate": candidate,
+        "thresholds": {
+            "top_contour_roughness_px_512_max": round(roughness_limit, 6),
+            "upper_perimeter_normalized_max": round(perimeter_limit, 6),
+        },
+        "ratios": {
+            "top_contour_roughness": round(
+                candidate_roughness / max(reference_roughness, 1e-6),
+                6,
+            ),
+            "upper_perimeter": round(
+                candidate_perimeter / max(reference_perimeter, 1e-6),
+                6,
+            ),
+        },
     }
 
 
@@ -3679,19 +11848,22 @@ def pose_similarity_quality(
             unavailable_references.append(str(reference_info["label"]))
             continue
         reference_action = action_key(str(reference_info["pose"]))
+        action_requires_canonical_change = bool(
+            reference_info["label"] == "canonical"
+            and current_action in {"eating", "drinking", "grooming"}
+        )
         related_pair = (
             reference_info["label"] == "canonical" and current_action == "running"
         ) or {current_action, reference_action} == {"eating", "drinking"}
-        iou_threshold = (
-            QWEN_POSE_RELATED_IOU_THRESHOLD
-            if related_pair
-            else QWEN_POSE_SIMILARITY_IOU_THRESHOLD
-        )
-        dhash_threshold = (
-            QWEN_POSE_RELATED_DHASH_THRESHOLD
-            if related_pair
-            else QWEN_POSE_SIMILARITY_DHASH_THRESHOLD
-        )
+        if action_requires_canonical_change:
+            iou_threshold = QWEN_ACTION_CANONICAL_IOU_THRESHOLD
+            dhash_threshold = QWEN_ACTION_CANONICAL_DHASH_THRESHOLD
+        elif related_pair:
+            iou_threshold = QWEN_POSE_RELATED_IOU_THRESHOLD
+            dhash_threshold = QWEN_POSE_RELATED_DHASH_THRESHOLD
+        else:
+            iou_threshold = QWEN_POSE_SIMILARITY_IOU_THRESHOLD
+            dhash_threshold = QWEN_POSE_SIMILARITY_DHASH_THRESHOLD
         hard_duplicate = bool(
             comparison["sha256_equal"]
             or (
@@ -3706,6 +11878,7 @@ def pose_similarity_quality(
         comparison.update(
             {
                 "related_pose_threshold": related_pair,
+                "action_requires_canonical_change": action_requires_canonical_change,
                 "iou_threshold": iou_threshold,
                 "dhash_threshold": dhash_threshold,
                 "hard_duplicate": hard_duplicate,
@@ -3849,49 +12022,4228 @@ def prepare_pose_input(
     width: int,
     height: int,
     transparent: bool,
+    preserve_gated_alpha: bool = False,
 ) -> Path:
     wan_input = job_dir / f"pose_{pose_index:02d}_wan_input.png"
-    background_rgb = (0, 255, 0) if transparent else (255, 255, 255)
-    prepare_landscape_keyframe(
-        keyframe, wan_input, (width, height), background_rgb=background_rgb
-    )
-    if transparent:
+    transparent_keyframe: Path | None = None
+    reference_digest: str | None = None
+    if transparent and preserve_gated_alpha:
+        if (width, height) != (TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE):
+            raise RuntimeError(
+                "Gated Qwen action reference target is not the required 512x512."
+            )
+        with Image.open(keyframe) as loaded:
+            if loaded.size != (width, height) or "A" not in loaded.getbands():
+                raise RuntimeError(
+                    "Gated Qwen action reference is not a 512x512 RGBA image."
+                )
+            alpha = loaded.convert("RGBA").getchannel("A")
+            alpha_minimum, alpha_maximum = alpha.getextrema()
+            if alpha_minimum == 255 or alpha_maximum == 0:
+                raise RuntimeError(
+                    "Gated Qwen action reference lacks a usable alpha matte."
+                )
         transparent_keyframe = (
             job_dir / f"pose_{pose_index:02d}_keyframe_transparent.png"
         )
-        convert_chroma_image_to_transparent_png(
-            wan_input,
+        shutil.copy2(keyframe, transparent_keyframe)
+        reference_digest = file_sha256(keyframe)
+        if file_sha256(transparent_keyframe) != reference_digest:
+            raise RuntimeError(
+                "Gated Qwen action reference changed during byte-preserving publish."
+            )
+        composite_rgba_reference_on_background(
             transparent_keyframe,
-            require_clean_background=True,
+            wan_input,
+            (0, 255, 0),
         )
+    else:
+        background_rgb = (0, 255, 0) if transparent else (255, 255, 255)
+        prepare_landscape_keyframe(
+            keyframe, wan_input, (width, height), background_rgb=background_rgb
+        )
+    if transparent:
+        if transparent_keyframe is None:
+            transparent_keyframe = (
+                job_dir / f"pose_{pose_index:02d}_keyframe_transparent.png"
+            )
+            convert_chroma_image_to_transparent_png(
+                wan_input,
+                transparent_keyframe,
+                require_clean_background=True,
+            )
+            reference_digest = file_sha256(transparent_keyframe)
         append_output(
             job_id,
             {
                 "type": "transparent_keyframe",
                 "pose_index": pose_index,
                 "pose": pose,
+                "action": (
+                    action_key(pose)
+                    if action_key(pose) in SUBJECT_REPLACEMENT_ACTIONS
+                    else None
+                ),
+                "action_label": SUBJECT_REPLACEMENT_ACTION_LABELS.get(action_key(pose)),
                 "filename": transparent_keyframe.name,
                 "width": TRANSPARENT_GIF_SIZE,
                 "height": TRANSPARENT_GIF_SIZE,
                 "transparent": True,
                 "visual_style": "identity_preserving_cute_3d_studio",
                 "source_role": "cartoon_animation_keyframe",
+                "normalization_policy": (
+                    QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+                    if preserve_gated_alpha
+                    else "landscape_green_then_chroma_key_legacy"
+                ),
+                "byte_preserved_from_gated_candidate": preserve_gated_alpha,
+                "sha256": reference_digest,
             },
         )
     return wan_input
 
 
-def run_job(job_id: str) -> None:
+def run_cancelable_process(
+    job_id: str,
+    command: list[str],
+    *,
+    log_path: Path,
+    stage_name: str,
+    timeout: int,
+) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        process = subprocess.Popen(
+            command,
+            cwd=str(PROJECT_ROOT),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        while process.poll() is None:
+            if cancel_requested(job_id):
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+                raise JobCancelled("Generation was cancelled by the user.")
+            if time.monotonic() - started > timeout:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+                raise TimeoutError(f"{stage_name} timed out after {timeout} seconds.")
+            time.sleep(1)
+    if process.returncode:
+        detail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+        raise RuntimeError(f"{stage_name} failed: {detail.strip()}")
+
+
+def logged_json(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    start = text.find("{")
+    if start < 0:
+        raise RuntimeError(f"No JSON result was written to {path}")
+    try:
+        value = json.loads(text[start:])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON result in {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Unexpected JSON result in {path}")
+    return value
+
+
+def available_scail_run_id(job_id: str, action: str) -> str:
+    """Return a stable SCAIL run id without overwriting an earlier retry."""
+    base = f"{job_id}-{action}"
+    if not (SCAIL_EXPERIMENT_ROOT / base).exists():
+        return base
+    for retry_index in range(1, 1000):
+        candidate = f"{base}-retry{retry_index:03d}"
+        if not (SCAIL_EXPERIMENT_ROOT / candidate).exists():
+            return candidate
+    raise RuntimeError(
+        f"No available SCAIL experiment directory remains for {job_id} {action}."
+    )
+
+
+def prepare_eating_qwen_geometry_guide(
+    job_id: str,
+    source: Path,
+    target: Path,
+    *,
+    frames: int,
+    fps: float,
+) -> dict[str, Any]:
+    """Derive and validate the texture-free eating Image 2 guide."""
+    if not source.is_file():
+        raise FileNotFoundError(f"Eating driving animation is missing: {source}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path = target.with_name(target.stem + "_metadata.json")
+    log_path = OUTPUT_ROOT / job_id / "eating_geometry_guide.log"
+    command = [
+        str(SCAIL_PYTHON),
+        str(SCAIL_RUNNER),
+        "--source",
+        str(source),
+        "--action",
+        "eating",
+        "--width",
+        "512",
+        "--height",
+        "512",
+        "--frames",
+        str(frames),
+        "--fps",
+        str(fps),
+        "--eating-geometry-guide-output",
+        str(target),
+        "--eating-geometry-guide-metadata",
+        str(metadata_path),
+    ]
+    run_cancelable_process(
+        job_id,
+        command,
+        log_path=log_path,
+        stage_name="eating Qwen geometry-guide preparation",
+        timeout=300,
+    )
+    if not target.is_file() or not metadata_path.is_file():
+        raise RuntimeError(
+            "Eating geometry guide completed without its PNG or metadata."
+        )
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Eating geometry guide metadata is invalid.") from exc
+    if not isinstance(metadata, dict):
+        raise RuntimeError("Eating geometry guide metadata must be an object.")
+    expected_source_sha256 = file_sha256(source)
+    if metadata.get("source_sha256") != expected_source_sha256:
+        raise RuntimeError("Eating geometry guide source digest does not match.")
+    if int(metadata.get("sampled_frame_count", -1)) != int(frames):
+        raise RuntimeError("Eating geometry guide frame count does not match.")
+    if abs(float(metadata.get("sampled_fps", -1.0)) - float(fps)) > 1e-6:
+        raise RuntimeError("Eating geometry guide frame rate does not match.")
+    if not 0 <= int(metadata.get("selected_frame_index", -1)) < int(frames):
+        raise RuntimeError("Eating geometry guide selected frame is invalid.")
+    if metadata.get("policy") != "driving_eating_geometry_image2_v4":
+        raise RuntimeError("Eating geometry guide policy is unsupported.")
+    if metadata.get("method") != (
+        "temporal_head_lowering_continuous_muzzle_semantic_food_fields_v5"
+    ):
+        raise RuntimeError("Eating geometry guide method is unsupported.")
+    if not 0 <= int(metadata.get("muzzle_bowl_gap_px", -1)) <= 4:
+        raise RuntimeError("Eating geometry guide did not reach the food bowl.")
+    if int(metadata.get("contact_pixels", 0)) < 24:
+        raise RuntimeError("Eating geometry guide contact region is too small.")
+    muzzle_contact = metadata.get("muzzle_contact_semantic")
+    if (
+        not isinstance(muzzle_contact, dict)
+        or muzzle_contact.get("method")
+        != "source_anchored_continuous_neutral_muzzle_tip_v2"
+        or not 0 <= int(muzzle_contact.get("muzzle_food_gap_px", -1)) <= 4
+        or muzzle_contact.get("artificial_shape_added") is not False
+        or muzzle_contact.get("detached_marker_added") is not False
+        or muzzle_contact.get("source_rgb_preserved") is not False
+        or muzzle_contact.get("source_chroma_preserved") is not False
+        or muzzle_contact.get("identity_preserved") is not False
+        or muzzle_contact.get("passed") is not True
+    ):
+        raise RuntimeError(
+            "Eating geometry guide lacks verified muzzle-to-food overlap semantics."
+        )
+    semantic_food = metadata.get("semantic_food")
+    if (
+        not isinstance(semantic_food, dict)
+        or semantic_food.get("method")
+        != "fixed_beige_bowl_brown_kibble_from_source_mask_v1"
+        or int(semantic_food.get("minimum_food_core_pixels", 0)) < 24
+        or int(semantic_food.get("food_core_pixels", 0))
+        < int(semantic_food.get("minimum_food_core_pixels", 0))
+        or semantic_food.get("source_rgb_preserved") is not False
+        or semantic_food.get("semantic_chroma_only") is not True
+        or semantic_food.get("passed") is not True
+    ):
+        raise RuntimeError("Eating geometry guide lacks verified semantic food.")
+    head_lowering = metadata.get("head_lowering_selection")
+    if (
+        not isinstance(head_lowering, dict)
+        or head_lowering.get("method") != "central_upper_subject_row_p10_v1"
+        or int(head_lowering.get("selected_head_support_pixels", 0)) <= 0
+        or float(head_lowering.get("head_y_p10_span", -1.0))
+        < float(head_lowering.get("head_y_p10_span_min", 0.0))
+        or head_lowering.get("passed") is not True
+    ):
+        raise RuntimeError("Eating geometry guide lacks verified head lowering.")
+    outline_smoothing = metadata.get("outline_smoothing")
+    if (
+        not isinstance(outline_smoothing, dict)
+        or not 0.0 < float(outline_smoothing.get("perimeter_ratio", -1.0)) <= 1.01
+        or outline_smoothing.get("high_frequency_outline_preserved") is not False
+    ):
+        raise RuntimeError("Eating geometry guide retained source outline texture.")
+    semantic_structure = metadata.get("semantic_structure")
+    if (
+        not isinstance(semantic_structure, dict)
+        or semantic_structure.get("method")
+        != "percentile_normalized_low_frequency_luma_v1"
+        or semantic_structure.get("source_luma_values_preserved") is not False
+        or semantic_structure.get("source_rgb_preserved") is not False
+        or semantic_structure.get("source_chroma_preserved") is not False
+        or semantic_structure.get("high_frequency_texture_preserved") is not False
+    ):
+        raise RuntimeError(
+            "Eating geometry guide retained source identity or texture structure."
+        )
+    palette = metadata.get("palette")
+    expected_prop_colors = {
+        "bowl": [214, 208, 196],
+        "bowl_rim": [232, 228, 218],
+        "food": [142, 86, 45],
+    }
+    if (
+        not isinstance(palette, dict)
+        or palette.get("background") != [0, 255, 0]
+        or palette.get("subject_gray_range") != [96, 174]
+        or palette.get("prop_semantic_colors") != expected_prop_colors
+        or palette.get("source_rgb_preserved") is not False
+        or palette.get("source_chroma_preserved") is not False
+        or palette.get("semantic_prop_chroma_preserved") is not True
+        or palette.get("source_luma_values_preserved") is not False
+        or palette.get("high_frequency_texture_preserved") is not False
+    ):
+        raise RuntimeError("Eating geometry guide retained source identity colors.")
+
+    with Image.open(target) as loaded:
+        rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    if rgb.shape != (512, 512, 3):
+        raise RuntimeError("Eating geometry guide must be exactly 512x512 RGB.")
+    green = np.all(rgb == (0, 255, 0), axis=2)
+    foreground = ~green
+    foreground_fraction = float(np.count_nonzero(foreground)) / float(green.size)
+    if not 0.02 <= foreground_fraction <= 0.80:
+        raise RuntimeError(
+            "Eating geometry guide foreground fraction is invalid: "
+            f"{foreground_fraction:.4f}"
+        )
+    foreground_rgb = rgb[foreground]
+    grayscale = np.all(foreground_rgb == foreground_rgb[:, :1], axis=1)
+    allowed_semantic = np.zeros(foreground_rgb.shape[0], dtype=bool)
+    for color in expected_prop_colors.values():
+        allowed_semantic |= np.all(
+            foreground_rgb == np.asarray(color, dtype=np.uint8),
+            axis=1,
+        )
+    if np.any(~(grayscale | allowed_semantic)):
+        raise RuntimeError(
+            "Eating geometry guide contains unsupported chromatic identity color."
+        )
+    grayscale_values = foreground_rgb[grayscale, 0]
+    if (
+        grayscale_values.size == 0
+        or int(grayscale_values.min()) < 96
+        or int(grayscale_values.max()) > 174
+        or int(grayscale_values.size) != int(metadata.get("subject_pixels", -1))
+        or int(grayscale_values.size) < 500
+    ):
+        raise RuntimeError("Eating geometry guide subject gray range is invalid.")
+    prop_pixel_count = 0
+    for name, color in expected_prop_colors.items():
+        color_count = int(
+            np.count_nonzero(np.all(rgb == np.asarray(color, dtype=np.uint8), axis=2))
+        )
+        prop_pixel_count += color_count
+        if color_count == 0:
+            raise RuntimeError(
+                f"Eating geometry guide lacks its {name} semantic color."
+            )
+        if name == "food" and color_count != int(semantic_food["food_core_pixels"]):
+            raise RuntimeError(
+                "Eating geometry guide food pixels do not match metadata."
+            )
+    if (
+        prop_pixel_count != int(metadata.get("bowl_pixels", -1))
+        or prop_pixel_count < 100
+    ):
+        raise RuntimeError("Eating geometry guide prop pixels do not match metadata.")
+    metadata["validated_foreground_fraction"] = round(foreground_fraction, 6)
+    metadata["guide_sha256"] = file_sha256(target)
+    metadata["metadata_path"] = str(metadata_path)
+    return metadata
+
+
+def _prepare_grooming_qwen_geometry_guide_legacy_two_tone(
+    job_id: str,
+    source: Path,
+    target: Path,
+    *,
+    frames: int,
+    fps: float,
+) -> dict[str, Any]:
+    """Build an appearance-free Qwen guide plus a private CV gate guide."""
+    if not source.is_file():
+        raise FileNotFoundError(f"Grooming driving animation is missing: {source}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path = target.with_name(target.stem + "_metadata.json")
+    gate_target = target.with_name(target.stem + "_cv_gate.png")
+    gate_metadata_path = gate_target.with_name(gate_target.stem + "_metadata.json")
+    log_path = OUTPUT_ROOT / job_id / "grooming_geometry_guide.log"
+    command = [
+        str(SCAIL_PYTHON),
+        str(SCAIL_RUNNER),
+        "--source",
+        str(source),
+        "--action",
+        "grooming",
+        "--width",
+        "512",
+        "--height",
+        "512",
+        "--frames",
+        str(frames),
+        "--fps",
+        str(fps),
+        "--grooming-geometry-guide-output",
+        str(gate_target),
+        "--grooming-geometry-guide-metadata",
+        str(gate_metadata_path),
+    ]
+    run_cancelable_process(
+        job_id,
+        command,
+        log_path=log_path,
+        stage_name="grooming Qwen geometry-guide preparation",
+        timeout=300,
+    )
+    if not gate_target.is_file() or not gate_metadata_path.is_file():
+        raise RuntimeError(
+            "Grooming private pose-gate guide completed without its PNG or metadata."
+        )
+    try:
+        gate_metadata = json.loads(gate_metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Grooming private pose-gate metadata is invalid.") from exc
+    if not isinstance(gate_metadata, dict):
+        raise RuntimeError("Grooming private pose-gate metadata must be an object.")
+    expected_source_sha256 = file_sha256(source)
+    if gate_metadata.get("source_sha256") != expected_source_sha256:
+        raise RuntimeError("Grooming private pose-gate source digest does not match.")
+    if gate_metadata.get("policy") != GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY:
+        raise RuntimeError("Grooming private pose-gate guide policy is unsupported.")
+    palette = gate_metadata.get("palette")
+    if (
+        not isinstance(palette, dict)
+        or palette.get("source_rgb_preserved") is not False
+    ):
+        raise RuntimeError(
+            "Grooming private pose-gate guide retained source identity colors."
+        )
+    relation = gate_metadata.get("raised_paw_muzzle_relation")
+    if not isinstance(relation, dict) or relation.get("passed") is not True:
+        raise RuntimeError(
+            "Grooming private pose-gate metadata lacks verified paw/muzzle geometry."
+        )
+
+    with Image.open(gate_target) as loaded:
+        gate_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    if gate_rgb.shape != (512, 512, 3):
+        raise RuntimeError(
+            "Grooming private pose-gate guide must be exactly 512x512 RGB."
+        )
+    green = np.all(gate_rgb == (0, 255, 0), axis=2)
+    foreground = ~green
+    foreground_fraction = float(np.count_nonzero(foreground)) / float(green.size)
+    if not 0.02 <= foreground_fraction <= 0.80:
+        raise RuntimeError(
+            "Grooming private pose-gate guide foreground fraction is invalid: "
+            f"{foreground_fraction:.4f}"
+        )
+    if np.any(gate_rgb[..., 0][foreground] != gate_rgb[..., 1][foreground]) or np.any(
+        gate_rgb[..., 1][foreground] != gate_rgb[..., 2][foreground]
+    ):
+        raise RuntimeError(
+            "Grooming private pose-gate guide contains non-neutral identity color."
+        )
+
+    # The runner's compressed luma field remains useful to the deterministic CV
+    # gate, but even low-frequency Main_case light/dark regions can make Qwen
+    # repaint another cat's markings. Qwen therefore receives a hard-coded body
+    # gray plus a second hard-coded gray capsule for the raised foreleg. The
+    # capsule is generated only from the verified shoulder, paw and foreleg-box
+    # geometry; no source RGB/luma sample selects either value. A narrow green
+    # channel on the torso side makes the internal foreleg boundary readable.
+    qwen_rgb = np.empty_like(gate_rgb)
+    qwen_rgb[:, :] = (0, 255, 0)
+    qwen_rgb[foreground] = GROOMING_QWEN_GUIDE_FOREGROUND_RGB
+    shoulder_anchor = relation.get("shoulder_anchor")
+    paw_center = relation.get("paw_center")
+    raised_foreleg_bbox = relation.get("raised_foreleg_region_bbox")
+    if (
+        not isinstance(shoulder_anchor, list)
+        or len(shoulder_anchor) != 2
+        or not isinstance(paw_center, list)
+        or len(paw_center) != 2
+        or not isinstance(raised_foreleg_bbox, list)
+        or len(raised_foreleg_bbox) != 4
+    ):
+        raise RuntimeError(
+            "Grooming private pose-gate metadata lacks foreleg channel geometry."
+        )
+    shoulder = np.asarray(shoulder_anchor, dtype=np.float64)
+    paw = np.asarray(paw_center, dtype=np.float64)
+    foreleg_bbox = np.asarray(raised_foreleg_bbox, dtype=np.float64)
+    if (
+        np.any(~np.isfinite(shoulder))
+        or np.any(~np.isfinite(paw))
+        or np.any(~np.isfinite(foreleg_bbox))
+        or np.linalg.norm(paw - shoulder) < 24.0
+        or np.any(shoulder < 0.0)
+        or np.any(shoulder >= 512.0)
+        or np.any(paw < 0.0)
+        or np.any(paw >= 512.0)
+    ):
+        raise RuntimeError(
+            "Grooming private pose-gate foreleg channel geometry is invalid."
+        )
+    foreground_x = np.flatnonzero(np.any(foreground, axis=0))
+    if foreground_x.size == 0:
+        raise RuntimeError("Grooming private pose-gate foreground is empty.")
+    body_center_x = float(foreground_x.min() + foreground_x.max()) / 2.0
+    foreleg_width = max(1.0, float(foreleg_bbox[2] - foreleg_bbox[0]))
+    semantic_width = int(round(min(42.0, max(18.0, foreleg_width * 0.62))))
+    paw_radius = int(round(min(24.0, max(11.0, foreleg_width * 0.38))))
+    torso_side = 1.0 if body_center_x >= float((shoulder[0] + paw[0]) / 2.0) else -1.0
+    foreleg_vector = paw - shoulder
+    shoulder_px = tuple(np.clip(np.rint(shoulder), 0, 511).astype(int).tolist())
+    paw_px = tuple(np.clip(np.rint(paw), 0, 511).astype(int).tolist())
+    foreleg_semantic_mask = np.zeros(foreground.shape, dtype=np.uint8)
+    cv2.line(
+        foreleg_semantic_mask,
+        shoulder_px,
+        paw_px,
+        255,
+        thickness=semantic_width,
+        lineType=cv2.LINE_8,
+    )
+    cv2.circle(
+        foreleg_semantic_mask,
+        paw_px,
+        paw_radius,
+        255,
+        thickness=-1,
+        lineType=cv2.LINE_8,
+    )
+    semantic_foreleg = (foreleg_semantic_mask > 0) & foreground
+    raw_semantic_foreleg_pixels = int(np.count_nonzero(semantic_foreleg))
+    if not 700 <= raw_semantic_foreleg_pixels <= 6000:
+        raise RuntimeError(
+            "Grooming Qwen synthetic foreleg semantic has invalid area: "
+            f"{raw_semantic_foreleg_pixels}"
+        )
+    qwen_rgb[semantic_foreleg] = GROOMING_QWEN_GUIDE_FORELEG_RGB
+
+    channel_offset = min(22.0, max(10.0, semantic_width * 0.55))
+    channel_start = shoulder + foreleg_vector * 0.08
+    channel_end = shoulder + foreleg_vector * 0.92
+    channel_start[0] += torso_side * channel_offset
+    channel_end[0] += torso_side * channel_offset
+    channel_start_px = tuple(
+        np.clip(np.rint(channel_start), 0, 511).astype(int).tolist()
+    )
+    channel_end_px = tuple(np.clip(np.rint(channel_end), 0, 511).astype(int).tolist())
+    channel_mask = np.zeros(foreground.shape, dtype=np.uint8)
+    cv2.line(
+        channel_mask,
+        channel_start_px,
+        channel_end_px,
+        255,
+        thickness=5,
+        lineType=cv2.LINE_8,
+    )
+    structural_negative_space = (channel_mask > 0) & foreground
+    structural_negative_space_pixels = int(np.count_nonzero(structural_negative_space))
+    if not 80 <= structural_negative_space_pixels <= 1600:
+        raise RuntimeError(
+            "Grooming Qwen foreleg negative-space channel has invalid area: "
+            f"{structural_negative_space_pixels}"
+        )
+    qwen_rgb[structural_negative_space] = (0, 255, 0)
+    semantic_foreleg_pixels = int(
+        np.count_nonzero(semantic_foreleg & ~structural_negative_space)
+    )
+    if not 650 <= semantic_foreleg_pixels <= raw_semantic_foreleg_pixels:
+        raise RuntimeError(
+            "Grooming Qwen synthetic foreleg was erased by its separator."
+        )
+    Image.fromarray(qwen_rgb).save(target)
+
+    with Image.open(target) as loaded:
+        persisted_qwen_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    qwen_green = np.all(persisted_qwen_rgb == (0, 255, 0), axis=2)
+    qwen_foreground = ~qwen_green
+    private_foreground_pixels = int(np.count_nonzero(foreground))
+    qwen_foreground_pixels = int(np.count_nonzero(qwen_foreground))
+    qwen_foreground_fraction = float(qwen_foreground_pixels) / float(qwen_green.size)
+    foreground_retained_fraction = float(qwen_foreground_pixels) / float(
+        private_foreground_pixels
+    )
+    unique_qwen_foreground = np.unique(
+        persisted_qwen_rgb[qwen_foreground],
+        axis=0,
+    )
+    expected_foreground_palette = np.asarray(
+        [
+            GROOMING_QWEN_GUIDE_FOREGROUND_RGB,
+            GROOMING_QWEN_GUIDE_FORELEG_RGB,
+        ],
+        dtype=np.uint8,
+    )
+    persisted_semantic_foreleg_pixels = int(
+        np.count_nonzero(
+            np.all(
+                persisted_qwen_rgb
+                == np.asarray(GROOMING_QWEN_GUIDE_FORELEG_RGB, dtype=np.uint8),
+                axis=2,
+            )
+        )
+    )
+    if (
+        persisted_qwen_rgb.shape != (512, 512, 3)
+        or np.any(qwen_foreground & ~foreground)
+        or not 0.97 <= foreground_retained_fraction < 1.0
+        or unique_qwen_foreground.shape != (2, 3)
+        or not np.array_equal(
+            unique_qwen_foreground,
+            expected_foreground_palette,
+        )
+        or persisted_semantic_foreleg_pixels != semantic_foreleg_pixels
+    ):
+        raise RuntimeError(
+            "Grooming Qwen guide is not the synthetic two-tone geometry contract."
+        )
+
+    gate_guide_sha256 = file_sha256(gate_target)
+    qwen_guide_sha256 = file_sha256(target)
+    metadata: dict[str, Any] = {
+        "policy": GROOMING_QWEN_GEOMETRY_GUIDE_POLICY,
+        "method": GROOMING_QWEN_GEOMETRY_GUIDE_METHOD,
+        "source_path": str(source),
+        "source_sha256": expected_source_sha256,
+        "sampled_frame_count": gate_metadata.get("sampled_frame_count"),
+        "sampled_fps": gate_metadata.get("sampled_fps"),
+        "selected_frame_index": gate_metadata.get("selected_frame_index"),
+        "raised_paw_muzzle_relation": relation,
+        "validated_foreground_fraction": round(qwen_foreground_fraction, 6),
+        "guide_sha256": qwen_guide_sha256,
+        "metadata_path": str(metadata_path),
+        "qwen_guide": {
+            "role": "image1_action_geometry_sampler",
+            "path": str(target),
+            "sha256": qwen_guide_sha256,
+            "background_rgb": [0, 255, 0],
+            "foreground_rgb": list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB),
+            "foreground_palette_rgb": [
+                list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB),
+                list(GROOMING_QWEN_GUIDE_FORELEG_RGB),
+            ],
+            "foreground_pixels": qwen_foreground_pixels,
+            "foreground_fraction": round(qwen_foreground_fraction, 6),
+            "private_foreground_pixels": private_foreground_pixels,
+            "foreground_retained_fraction": round(
+                foreground_retained_fraction,
+                6,
+            ),
+            "unique_foreground_rgb_count": 2,
+            "internal_luma_variation": True,
+            "internal_luma_variation_role": "synthetic_anatomy_labels_only",
+            "appearance_bearing_internal_luma_variation": False,
+            "source_rgb_preserved": False,
+            "source_chroma_preserved": False,
+            "source_luma_values_preserved": False,
+            "main_case_appearance_exposed_to_qwen": False,
+            "synthetic_foreleg_semantic": {
+                "method": GROOMING_QWEN_FORELEG_SEMANTIC_METHOD,
+                "rgb": list(GROOMING_QWEN_GUIDE_FORELEG_RGB),
+                "pixels": semantic_foreleg_pixels,
+                "pixels_before_separator": raw_semantic_foreleg_pixels,
+                "capsule_width": semantic_width,
+                "paw_radius": paw_radius,
+                "shoulder": list(shoulder_px),
+                "paw_center": list(paw_px),
+                "derived_from": ("verified_raised_paw_muzzle_relation_geometry_only"),
+                "source_rgb_or_luma_sampled": False,
+                "appearance_bearing": False,
+            },
+            "structural_negative_space": {
+                "method": GROOMING_QWEN_NEGATIVE_SPACE_METHOD,
+                "pixels": structural_negative_space_pixels,
+                "line_width": 5,
+                "start": list(channel_start_px),
+                "end": list(channel_end_px),
+                "derived_from": ("verified_raised_paw_muzzle_relation_geometry_only"),
+                "appearance_bearing": False,
+                "adds_foreground_color": False,
+            },
+        },
+        "private_pose_gate": {
+            "role": "cv_geometry_validation_only",
+            "guide_path": str(gate_target),
+            "guide_sha256": gate_guide_sha256,
+            "metadata_path": str(gate_metadata_path),
+            "policy": GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY,
+            "exposed_to_qwen": False,
+            "generator_metadata": gate_metadata,
+        },
+        "palette": {
+            "background": [0, 255, 0],
+            "subject_rgb": [
+                list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB),
+                list(GROOMING_QWEN_GUIDE_FORELEG_RGB),
+            ],
+            "source_rgb_preserved": False,
+            "source_chroma_preserved": False,
+            "source_luma_values_preserved": False,
+            "internal_luma_variation": True,
+            "internal_luma_variation_role": "synthetic_anatomy_labels_only",
+            "appearance_bearing_internal_luma_variation": False,
+        },
+    }
+    write_json_atomic(metadata_path, metadata)
+    return metadata
+
+
+def build_grooming_open_foreleg_negative_space(
+    foreground: np.ndarray,
+    relation: dict[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Carve one source-anchor-derived open curve between foreleg and torso.
+
+    Only the verified shoulder, paw, foreleg-box geometry and the binary outer
+    silhouette participate.  No Main_case RGB, luma, texture, or marking value
+    is sampled.  The curve is deliberately open at both ends so the living
+    foreleg remains attached at the shoulder and touches the muzzle; unlike the
+    retired two-tone capsule it does not label or fill a detachable object.
+    """
+
+    if foreground.shape != (512, 512) or foreground.dtype != np.bool_:
+        raise RuntimeError(
+            "Grooming open-channel construction requires a 512x512 binary silhouette."
+        )
+    shoulder_anchor = relation.get("shoulder_anchor")
+    paw_center = relation.get("paw_center")
+    raised_foreleg_bbox = relation.get("raised_foreleg_region_bbox")
+    if (
+        not isinstance(shoulder_anchor, list)
+        or len(shoulder_anchor) != 2
+        or not isinstance(paw_center, list)
+        or len(paw_center) != 2
+        or not isinstance(raised_foreleg_bbox, list)
+        or len(raised_foreleg_bbox) != 4
+    ):
+        raise RuntimeError(
+            "Grooming private pose-gate metadata lacks open-channel geometry."
+        )
+    shoulder = np.asarray(shoulder_anchor, dtype=np.float64)
+    paw = np.asarray(paw_center, dtype=np.float64)
+    foreleg_bbox = np.asarray(raised_foreleg_bbox, dtype=np.float64)
+    foreleg_vector = shoulder - paw
+    foreleg_length = float(np.linalg.norm(foreleg_vector))
+    foreleg_width = float(foreleg_bbox[2] - foreleg_bbox[0])
+    foreleg_height = float(foreleg_bbox[3] - foreleg_bbox[1])
+    if (
+        np.any(~np.isfinite(shoulder))
+        or np.any(~np.isfinite(paw))
+        or np.any(~np.isfinite(foreleg_bbox))
+        or not 24.0 <= foreleg_length <= 220.0
+        or not 18.0 <= foreleg_width <= 128.0
+        or not 40.0 <= foreleg_height <= 240.0
+        or np.any(shoulder < 0.0)
+        or np.any(shoulder >= 512.0)
+        or np.any(paw < 0.0)
+        or np.any(paw >= 512.0)
+    ):
+        raise RuntimeError(
+            "Grooming private pose-gate open-channel geometry is invalid."
+        )
+    foreground_x = np.flatnonzero(np.any(foreground, axis=0))
+    if foreground_x.size == 0:
+        raise RuntimeError("Grooming private pose-gate foreground is empty.")
+    body_center_x = float(foreground_x.min() + foreground_x.max()) / 2.0
+    anchor_center_x = float(shoulder[0] + paw[0]) / 2.0
+    torso_side = 1.0 if body_center_x >= anchor_center_x else -1.0
+
+    # The varying offset makes a shallow organic C/J curve rather than the old
+    # uniform straight separator.  Endpoints stop short of paw and shoulder so
+    # Qwen receives explicit mouth contact and shoulder attachment.
+    samples = (
+        (0.14, 0.35),
+        (0.28, 0.50),
+        (0.46, 0.59),
+        (0.64, 0.54),
+        (0.80, 0.39),
+        (0.90, 0.20),
+    )
+    points: list[list[int]] = []
+    for position, width_scale in samples:
+        point = paw + foreleg_vector * position
+        point[0] += torso_side * foreleg_width * width_scale
+        point_px = np.clip(np.rint(point), 0, 511).astype(np.int32)
+        points.append([int(point_px[0]), int(point_px[1])])
+    line_width = int(round(min(11.0, max(7.0, foreleg_width * 0.20))))
+    curve = np.zeros(foreground.shape, dtype=np.uint8)
+    cv2.polylines(
+        curve,
+        [np.asarray(points, dtype=np.int32)],
+        False,
+        255,
+        thickness=line_width,
+        lineType=cv2.LINE_AA,
+    )
+    negative_space = (curve >= 64) & foreground
+    negative_space_pixels = int(np.count_nonzero(negative_space))
+    component_count, _, stats, _ = cv2.connectedComponentsWithStats(
+        negative_space.astype(np.uint8),
+        connectivity=8,
+    )
+    if component_count != 2:
+        raise RuntimeError(
+            "Grooming public foreleg negative-space curve is not one component."
+        )
+    curve_bbox = [
+        int(stats[1, cv2.CC_STAT_LEFT]),
+        int(stats[1, cv2.CC_STAT_TOP]),
+        int(stats[1, cv2.CC_STAT_LEFT] + stats[1, cv2.CC_STAT_WIDTH]),
+        int(stats[1, cv2.CC_STAT_TOP] + stats[1, cv2.CC_STAT_HEIGHT]),
+    ]
+    curve_span = float(curve_bbox[3] - curve_bbox[1]) / foreleg_length
+    if (
+        not 300 <= negative_space_pixels <= 1800
+        or not 0.45 <= curve_span <= 1.15
+        or np.any(negative_space & ~foreground)
+    ):
+        raise RuntimeError(
+            "Grooming public foreleg negative-space curve failed its geometry bounds."
+        )
+    return negative_space, {
+        "method": GROOMING_QWEN_NEGATIVE_SPACE_METHOD,
+        "pixels": negative_space_pixels,
+        "line_width": line_width,
+        "points": points,
+        "bbox": curve_bbox,
+        "span_vs_paw_shoulder": round(curve_span, 6),
+        "curve_closed": False,
+        "paw_endpoint_open": True,
+        "shoulder_endpoint_open": True,
+        "foreleg_remains_attached_at_shoulder": True,
+        "paw_muzzle_contact_remains_connected": True,
+        "derived_from": "verified_raised_paw_muzzle_relation_geometry_only",
+        "source_rgb_or_luma_sampled": False,
+        "appearance_bearing": False,
+        "adds_foreground_color": False,
+    }
+
+
+def prepare_grooming_qwen_geometry_guide(
+    job_id: str,
+    source: Path,
+    target: Path,
+    *,
+    frames: int,
+    fps: float,
+) -> dict[str, Any]:
+    """Build a one-gray grooming guide with an organic open foreleg channel.
+
+    The retired two-tone guide drew a closed light-gray capsule and encouraged
+    Qwen to render a microphone.  The subsequent solid silhouette removed that
+    artifact but also erased the internal raised-foreleg boundary, repeatedly
+    yielding a neutral two-paws-down sit.  Production now exposes one synthetic
+    gray only, with a narrow pure-green open curve between the source-derived
+    paw/foreleg and torso.  The curve carries geometry, never appearance, and
+    remains open at paw and shoulder.  Rich CV luma and the old completion
+    semantic stay digest-bound private inputs.
+    """
+
+    metadata = _prepare_grooming_qwen_geometry_guide_legacy_two_tone(
+        job_id,
+        source,
+        target,
+        frames=frames,
+        fps=fps,
+    )
+    completion_mask_path = target.with_name(target.stem + "_completion_mask.png")
+    shutil.copy2(target, completion_mask_path)
+    completion_mask_sha256 = file_sha256(completion_mask_path)
+    with Image.open(completion_mask_path) as loaded:
+        completion_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    completion_foreleg_pixels = int(
+        np.count_nonzero(
+            np.all(
+                completion_rgb
+                == np.asarray(GROOMING_QWEN_GUIDE_FORELEG_RGB, dtype=np.uint8),
+                axis=2,
+            )
+        )
+    )
+    if not 650 <= completion_foreleg_pixels <= 6000:
+        raise RuntimeError(
+            "Grooming private completion mask lacks its foreleg semantic."
+        )
+    private_gate = metadata.get("private_pose_gate")
+    if not isinstance(private_gate, dict):
+        raise RuntimeError("Grooming geometry preparation lacks its private CV guide.")
+    private_path_text = str(private_gate.get("guide_path") or "").strip()
+    private_path = Path(private_path_text) if private_path_text else Path()
+    if not private_path.is_file():
+        raise RuntimeError("Grooming private CV guide disappeared.")
+    with Image.open(private_path) as loaded:
+        private_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    if private_rgb.shape != (512, 512, 3):
+        raise RuntimeError("Grooming private CV guide dimensions changed.")
+    private_foreground = ~np.all(private_rgb == (0, 255, 0), axis=2)
+    foreground_pixels = int(np.count_nonzero(private_foreground))
+    if foreground_pixels < 1024:
+        raise RuntimeError("Grooming private CV guide foreground is empty.")
+
+    relation = metadata.get("raised_paw_muzzle_relation")
+    if not isinstance(relation, dict) or relation.get("passed") is not True:
+        raise RuntimeError(
+            "Grooming geometry preparation lacks verified paw/muzzle anchors."
+        )
+    structural_negative_space, structural_negative_space_metadata = (
+        build_grooming_open_foreleg_negative_space(private_foreground, relation)
+    )
+    qwen_rgb = np.empty_like(private_rgb)
+    qwen_rgb[:, :] = (0, 255, 0)
+    qwen_foreground = private_foreground & ~structural_negative_space
+    qwen_rgb[qwen_foreground] = GROOMING_QWEN_GUIDE_FOREGROUND_RGB
+    Image.fromarray(qwen_rgb, mode="RGB").save(
+        target,
+        format="PNG",
+        optimize=True,
+    )
+    guide_sha256 = file_sha256(target)
+    metadata_path = target.with_name(target.stem + "_metadata.json")
+    qwen_foreground_pixels = int(np.count_nonzero(qwen_foreground))
+    removed_foreground_pixels = int(np.count_nonzero(structural_negative_space))
+    foreground_fraction = float(qwen_foreground_pixels) / float(
+        private_foreground.size
+    )
+    foreground_retained_fraction = float(qwen_foreground_pixels) / float(
+        foreground_pixels
+    )
+    metadata.update(
+        policy=GROOMING_QWEN_GEOMETRY_GUIDE_POLICY,
+        method=GROOMING_QWEN_GEOMETRY_GUIDE_METHOD,
+        validated_foreground_fraction=round(foreground_fraction, 6),
+        guide_sha256=guide_sha256,
+        metadata_path=str(metadata_path),
+        private_completion_mask={
+            "role": "local_noise_mask_derivation_only",
+            "policy": GROOMING_PRIVATE_COMPLETION_MASK_POLICY,
+            "path": str(completion_mask_path),
+            "sha256": completion_mask_sha256,
+            "exposed_to_qwen": False,
+            "loaded_as_qwen_image": False,
+            "semantic_foreleg_rgb": list(GROOMING_QWEN_GUIDE_FORELEG_RGB),
+            "semantic_foreleg_pixels": completion_foreleg_pixels,
+        },
+        qwen_guide={
+            "role": "image2_action_geometry_guide",
+            "path": str(target),
+            "sha256": guide_sha256,
+            "background_rgb": [0, 255, 0],
+            "foreground_rgb": list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB),
+            "foreground_palette_rgb": [list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB)],
+            "foreground_pixels": qwen_foreground_pixels,
+            "foreground_fraction": round(foreground_fraction, 6),
+            "private_foreground_pixels": foreground_pixels,
+            "foreground_retained_fraction": round(
+                foreground_retained_fraction,
+                6,
+            ),
+            "unique_foreground_rgb_count": 1,
+            "internal_luma_variation": False,
+            "internal_luma_variation_role": "none",
+            "appearance_bearing_internal_luma_variation": False,
+            "source_rgb_preserved": False,
+            "source_chroma_preserved": False,
+            "source_luma_values_preserved": False,
+            "main_case_appearance_exposed_to_qwen": False,
+            "synthetic_foreleg_semantic": None,
+            "structural_negative_space": structural_negative_space_metadata,
+            "closed_foreleg_capsule_exposed": False,
+            "internal_green_separator_exposed": True,
+            "raised_foreleg_validation_role": (
+                "public_open_curve_geometry_plus_private_cv"
+            ),
+            "removed_foreground_pixels": removed_foreground_pixels,
+        },
+        palette={
+            "background": [0, 255, 0],
+            "subject_rgb": [list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB)],
+            "source_rgb_preserved": False,
+            "source_chroma_preserved": False,
+            "source_luma_values_preserved": False,
+            "internal_luma_variation": False,
+            "internal_luma_variation_role": "none",
+            "appearance_bearing_internal_luma_variation": False,
+        },
+    )
+    write_json_atomic(metadata_path, metadata)
+    return metadata
+
+
+def persist_uploaded_identity_views(
+    job_dir: Path,
+    raw_views: dict[str, bytes],
+) -> dict[str, dict[str, Any]]:
+    """Normalize and freeze one or three role-addressed identity photographs."""
+
+    roles = tuple(raw_views)
+    if roles not in {("front",), UPLOADED_IDENTITY_VIEW_ROLES}:
+        raise ValueError(
+            "Uploaded identity views must be front only or front, left, and right."
+        )
+    records: dict[str, dict[str, Any]] = {}
+    for role in roles:
+        input_filename, source_filename = UPLOADED_IDENTITY_VIEW_FILES[role]
+        input_path = job_dir / input_filename
+        source_path = job_dir / source_filename
+        normalize_uploaded_image(
+            raw_views[role],
+            input_path,
+            identity_source_path=source_path,
+        )
+        records[role] = {
+            "role": role,
+            "input_filename": input_filename,
+            "source_filename": source_filename,
+            "input_sha256": file_sha256(input_path),
+            "source_sha256": file_sha256(source_path),
+        }
+    return records
+
+
+def verify_uploaded_identity_submission(
+    job: dict[str, Any],
+    job_dir: Path,
+) -> dict[str, Any]:
+    """Verify every normalized/original identity view against queue-time digests."""
+
+    persisted_views = job.get("uploaded_identity_views")
+    if isinstance(persisted_views, dict) and persisted_views:
+        mode = str(job.get("uploaded_identity_view_mode") or "").strip()
+        expected_roles = (
+            ("front",)
+            if mode == "single_view"
+            else UPLOADED_IDENTITY_VIEW_ROLES
+            if mode == "front_left_right"
+            else ()
+        )
+        if not expected_roles:
+            raise RuntimeError("Uploaded identity view mode is invalid.")
+        if list(job.get("uploaded_identity_view_roles") or []) != list(expected_roles):
+            raise RuntimeError("Uploaded identity view roles changed after submission.")
+        if int(job.get("uploaded_identity_view_count") or 0) != len(expected_roles):
+            raise RuntimeError("Uploaded identity view count changed after submission.")
+        if str(job.get("uploaded_identity_view_policy") or "") != (
+            UPLOADED_IDENTITY_VIEW_POLICY
+        ):
+            raise RuntimeError(
+                "Uploaded identity view policy changed after submission."
+            )
+        if set(persisted_views) != set(expected_roles):
+            raise RuntimeError("Uploaded identity view set changed after submission.")
+
+        verified_views: dict[str, dict[str, Any]] = {}
+        for role in expected_roles:
+            record = persisted_views.get(role)
+            if not isinstance(record, dict) or record.get("role") != role:
+                raise RuntimeError(f"Uploaded identity {role} record is invalid.")
+            input_filename, source_filename = UPLOADED_IDENTITY_VIEW_FILES[role]
+            if (
+                record.get("input_filename") != input_filename
+                or record.get("source_filename") != source_filename
+            ):
+                raise RuntimeError(
+                    f"Uploaded identity {role} filenames changed after submission."
+                )
+            input_sha256 = str(record.get("input_sha256") or "").strip().lower()
+            source_sha256 = str(record.get("source_sha256") or "").strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", input_sha256):
+                raise RuntimeError(
+                    f"Uploaded identity {role} input lacks its submission-time digest."
+                )
+            if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+                raise RuntimeError(
+                    f"Uploaded identity {role} source lacks its submission-time digest."
+                )
+            input_path = job_dir / input_filename
+            source_path = job_dir / source_filename
+            if not input_path.is_file() or file_sha256(input_path) != input_sha256:
+                raise RuntimeError(
+                    f"Uploaded identity {role} input is missing or changed after submission."
+                )
+            if not source_path.is_file() or file_sha256(source_path) != source_sha256:
+                raise RuntimeError(
+                    f"Uploaded identity {role} source is missing or changed after submission."
+                )
+            verified_views[role] = {
+                **record,
+                "input_path": input_path,
+                "source_path": source_path,
+                "input_sha256": input_sha256,
+                "source_sha256": source_sha256,
+            }
+
+        front = verified_views["front"]
+        legacy_input_sha256 = (
+            str(job.get("uploaded_identity_input_sha256") or "").strip().lower()
+        )
+        legacy_source_sha256 = (
+            str(job.get("uploaded_identity_source_sha256") or "").strip().lower()
+        )
+        if (
+            legacy_input_sha256 != front["input_sha256"]
+            or legacy_source_sha256 != front["source_sha256"]
+        ):
+            raise RuntimeError(
+                "Uploaded front identity digests disagree with legacy submission fields."
+            )
+        return {
+            "input_path": front["input_path"],
+            "source_path": front["source_path"],
+            "input_sha256": front["input_sha256"],
+            "source_sha256": front["source_sha256"],
+            "view_mode": mode,
+            "view_roles": list(expected_roles),
+            "views": verified_views,
+        }
+
+    # Backward compatibility for already queued v1.0 single-view jobs.
+    input_path = job_dir / "input.png"
+    source_path = job_dir / "input_identity_source.png"
+    expected_input_sha256 = (
+        str(job.get("uploaded_identity_input_sha256") or "").strip().lower()
+    )
+    expected_source_sha256 = (
+        str(job.get("uploaded_identity_source_sha256") or "").strip().lower()
+    )
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_input_sha256):
+        raise RuntimeError("Uploaded identity input lacks its submission-time digest.")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_source_sha256):
+        raise RuntimeError("Uploaded identity source lacks its submission-time digest.")
+    if not input_path.is_file() or file_sha256(input_path) != expected_input_sha256:
+        raise RuntimeError(
+            "Uploaded identity input is missing or changed after submission."
+        )
+    if not source_path.is_file() or file_sha256(source_path) != expected_source_sha256:
+        raise RuntimeError(
+            "Uploaded identity source is missing or changed after submission."
+        )
+    front = {
+        "role": "front",
+        "input_filename": "input.png",
+        "source_filename": "input_identity_source.png",
+        "input_path": input_path,
+        "source_path": source_path,
+        "input_sha256": expected_input_sha256,
+        "source_sha256": expected_source_sha256,
+    }
+    return {
+        "input_path": input_path,
+        "source_path": source_path,
+        "input_sha256": expected_input_sha256,
+        "source_sha256": expected_source_sha256,
+        "view_mode": "single_view",
+        "view_roles": ["front"],
+        "views": {"front": front},
+    }
+
+
+def aggregate_identity_palette_signatures(
+    signatures: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Create an equal-view consensus without letting a large crop dominate."""
+
+    if len(signatures) == 1:
+        return dict(next(iter(signatures.values())))
+    unavailable = [
+        role for role, signature in signatures.items() if not signature.get("available")
+    ]
+    if unavailable:
+        return {
+            "available": False,
+            "reason": "identity_view_palette_signature_unavailable",
+            "unavailable_roles": unavailable,
+            "source_view_roles": list(signatures),
+            "aggregation": "equal_view_mean_v1",
+        }
+    count = float(len(signatures))
+    fractions = {
+        category: round(
+            sum(
+                float(signature["fractions"].get(category, 0.0))
+                for signature in signatures.values()
+            )
+            / count,
+            6,
+        )
+        for category in IDENTITY_PALETTE_CATEGORIES
+    }
+    dominant = [
+        category
+        for category in IDENTITY_PALETTE_CATEGORIES
+        if fractions[category] >= 0.10
+    ]
+    if not dominant:
+        dominant = sorted(
+            IDENTITY_PALETTE_CATEGORIES,
+            key=lambda category: fractions[category],
+            reverse=True,
+        )[:2]
+
+    def mean_field(name: str) -> float:
+        return round(
+            sum(float(signature.get(name, 0.0)) for signature in signatures.values())
+            / count,
+            6,
+        )
+
+    return {
+        "available": True,
+        "mask_method": "multi_view_equal_weight_consensus",
+        "aggregation": "equal_view_mean_v1",
+        "source_view_roles": list(signatures),
+        "sample_count": sum(
+            int(signature.get("sample_count", 0)) for signature in signatures.values()
+        ),
+        "fractions": fractions,
+        "dominant": dominant,
+        "achromatic_fraction": mean_field("achromatic_fraction"),
+        "chromatic_fraction": mean_field("chromatic_fraction"),
+        "warm_fraction": mean_field("warm_fraction"),
+        "warm_saturation_mean": mean_field("warm_saturation_mean"),
+        "warm_saturation_p90": mean_field("warm_saturation_p90"),
+        "saturated_warm_fraction": mean_field("saturated_warm_fraction"),
+        "red_or_pink_body_fraction": mean_field("red_or_pink_body_fraction"),
+        "red_or_pink_body_share": mean_field("red_or_pink_body_share"),
+        "red_or_pink_localized_to_head": all(
+            bool(signature.get("red_or_pink_localized_to_head", False))
+            or float(signature["fractions"].get("red_or_pink", 0.0)) <= 0.025
+            for signature in signatures.values()
+        ),
+        "green_or_cyan_body_fraction": mean_field("green_or_cyan_body_fraction"),
+        "green_or_cyan_body_share": mean_field("green_or_cyan_body_share"),
+        "green_or_cyan_localized_to_head": all(
+            bool(signature.get("green_or_cyan_localized_to_head", False))
+            or (
+                float(signature["fractions"].get("green", 0.0))
+                + float(signature["fractions"].get("blue_or_cyan", 0.0))
+                <= 0.025
+            )
+            for signature in signatures.values()
+        ),
+    }
+
+
+def canonical_upper_body_palette_reference(
+    view_upper_body_palettes: dict[str, dict[str, Any]],
+    consensus_upper_body_palette: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Use the front view for a front/three-quarter canonical's local value balance."""
+
+    front = view_upper_body_palettes.get("front")
+    if isinstance(front, dict) and front.get("available"):
+        selected = dict(front)
+        selected["canonical_reference_role"] = "front"
+        selected["canonical_reference_policy"] = (
+            CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY
+        )
+        return selected
+    if consensus_upper_body_palette is None:
+        return None
+    selected = dict(consensus_upper_body_palette)
+    selected["canonical_reference_role"] = "consensus_fallback"
+    selected["canonical_reference_policy"] = (
+        CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY
+    )
+    return selected
+
+
+def audit_uploaded_identity_view_set(
+    upload_integrity: dict[str, Any],
+) -> dict[str, Any]:
+    """Fail closed on malformed, duplicate, or grossly contradictory view sets."""
+
+    views = upload_integrity.get("views")
+    if not isinstance(views, dict) or set(views) not in (
+        {"front"},
+        set(UPLOADED_IDENTITY_VIEW_ROLES),
+    ):
+        raise RuntimeError("Uploaded identity view integrity set is invalid.")
+    roles = [role for role in UPLOADED_IDENTITY_VIEW_ROLES if role in views]
+    if roles == ["front"]:
+        return {
+            "policy": UPLOADED_IDENTITY_VIEW_POLICY,
+            "view_mode": "single_view",
+            "roles": roles,
+            "view_count": 1,
+            "acceptable": True,
+            "fail_closed": True,
+            "issues": [],
+            "duplicate_pairs": [],
+            "view_angle_comparisons": {},
+            "view_angle_diversity_required": False,
+            "pairwise_palette_observations": {},
+            "palettes": {},
+            "upper_body_palettes": {},
+            "same_pet_submission_contract_required": False,
+            "biometric_same_subject_guarantee": False,
+        }
+    palettes = {
+        role: identity_palette_signature(Path(views[role]["source_path"]))
+        for role in roles
+    }
+    upper_body_palettes = {
+        role: identity_palette_signature(
+            Path(views[role]["source_path"]),
+            exclude_bottom_fraction=BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION,
+        )
+        for role in roles
+    }
+    issues: list[str] = []
+    unavailable = [
+        role
+        for role in roles
+        if not palettes[role].get("available")
+        or not upper_body_palettes[role].get("available")
+    ]
+    issues.extend(f"{role}_palette_signature_unavailable" for role in unavailable)
+    duplicate_pairs: list[list[str]] = []
+    for first_index, first_role in enumerate(roles):
+        for second_role in roles[first_index + 1 :]:
+            if (
+                views[first_role]["source_sha256"]
+                == views[second_role]["source_sha256"]
+                or views[first_role]["input_sha256"]
+                == views[second_role]["input_sha256"]
+            ):
+                duplicate_pairs.append([first_role, second_role])
+                issues.append(f"duplicate_identity_views_{first_role}_{second_role}")
+    view_similarity_signatures = {
+        role: pose_similarity_signature(Path(views[role]["input_path"]))
+        for role in roles
+    }
+    unavailable_similarity_roles = [
+        role
+        for role, signature in view_similarity_signatures.items()
+        if not signature.get("available")
+    ]
+    issues.extend(
+        f"{role}_view_angle_signature_unavailable"
+        for role in unavailable_similarity_roles
+    )
+    view_angle_comparisons: dict[str, Any] = {}
+    if not unavailable_similarity_roles:
+        for first_index, first_role in enumerate(roles):
+            for second_role in roles[first_index + 1 :]:
+                comparison = compare_pose_signatures(
+                    view_similarity_signatures[first_role],
+                    view_similarity_signatures[second_role],
+                )
+                near_duplicate = bool(
+                    comparison.get("sha256_equal")
+                    or (
+                        float(comparison.get("silhouette_iou", 0.0))
+                        >= QWEN_POSE_HARD_DUPLICATE_IOU
+                        and int(comparison.get("dhash_distance", 64))
+                        <= QWEN_POSE_HARD_DUPLICATE_DHASH
+                    )
+                )
+                comparison["near_duplicate"] = near_duplicate
+                comparison["iou_threshold"] = QWEN_POSE_HARD_DUPLICATE_IOU
+                comparison["dhash_threshold"] = QWEN_POSE_HARD_DUPLICATE_DHASH
+                view_angle_comparisons[f"{first_role}_{second_role}"] = comparison
+                if near_duplicate:
+                    issues.append(
+                        f"near_duplicate_identity_views_{first_role}_{second_role}"
+                    )
+    pairwise: dict[str, Any] = {}
+    if not unavailable:
+        for side_role in roles[1:]:
+            front_palette = palettes["front"]
+            side_palette = palettes[side_role]
+            achromatic_delta = abs(
+                float(front_palette["achromatic_fraction"])
+                - float(side_palette["achromatic_fraction"])
+            )
+            warm_delta = abs(
+                float(front_palette["warm_fraction"])
+                - float(side_palette["warm_fraction"])
+            )
+            gross_palette_conflict = achromatic_delta > 0.55 and warm_delta > 0.35
+            if gross_palette_conflict:
+                issues.append(f"gross_palette_conflict_front_{side_role}")
+            pairwise[f"front_{side_role}"] = {
+                "achromatic_fraction_delta": round(achromatic_delta, 6),
+                "warm_fraction_delta": round(warm_delta, 6),
+                "gross_palette_conflict": gross_palette_conflict,
+            }
+    audit = {
+        "policy": UPLOADED_IDENTITY_VIEW_POLICY,
+        "view_mode": upload_integrity.get("view_mode"),
+        "roles": roles,
+        "view_count": len(roles),
+        "acceptable": not issues,
+        "fail_closed": True,
+        "issues": list(dict.fromkeys(issues)),
+        "duplicate_pairs": duplicate_pairs,
+        "view_angle_comparisons": view_angle_comparisons,
+        "view_angle_diversity_required": True,
+        "pairwise_palette_observations": pairwise,
+        "palettes": palettes,
+        "upper_body_palettes": upper_body_palettes,
+        "same_pet_submission_contract_required": len(roles) == 3,
+        "biometric_same_subject_guarantee": False,
+    }
+    return audit
+
+
+def prepare_uploaded_subject_qwen_references(
+    job_id: str,
+    actions: list[str],
+) -> dict[str, str]:
+    """Create a Qwen full-body canonical and normalized action keyframes."""
     raise_if_cancelled(job_id)
     with JOBS_LOCK:
         job = dict(JOBS[job_id])
     job_dir = OUTPUT_ROOT / job_id
-    poses: list[str] = list(job.get("poses_en") or job["poses"])
-    effective_prompt = str(job.get("prompt_en") or job["prompt"])
-    width, height = RESOLUTIONS[job["resolution"]]
-    transparent_gif = job.get("output_format", "mp4") == "transparent_gif"
-    skip_video = bool(job.get("skip_video", False))
-    request_kind = str(job.get("request_kind") or "video").strip().lower()
+    upload_integrity = verify_uploaded_identity_submission(job, job_dir)
+    identity_view_audit = audit_uploaded_identity_view_set(upload_integrity)
+    write_json_atomic(
+        job_dir / "workflows" / "uploaded_identity_view_set_audit.json",
+        identity_view_audit,
+    )
+    update_job(
+        job_id,
+        uploaded_identity_view_audit=identity_view_audit,
+        uploaded_identity_view_verdict=(
+            "passed" if identity_view_audit["acceptable"] else "failed"
+        ),
+    )
+    if not identity_view_audit["acceptable"]:
+        update_job(
+            job_id,
+            reference_generation_status="failed",
+            reference_generation_completed=False,
+        )
+        raise RuntimeError(
+            "Uploaded identity view set failed validation: "
+            + ", ".join(identity_view_audit["issues"])
+        )
+
+    image_profile = IMAGE_PROFILES[SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE]
+    user_loras, user_lora_mode, lora_source = merge_image_profile_loras(
+        image_profile,
+        [],
+        requested_mode="replace",
+    )
+    first_lora = user_loras[0] if user_loras else None
+    comfy_relative_dir = Path("local_video_api") / job_id
+    comfy_input_dir = COMFY_INPUT / comfy_relative_dir
+    comfy_input_dir.mkdir(parents=True, exist_ok=True)
+    # The upload first produces a normalized, matted Qwen full-body canonical.
+    # Eating keeps the canonical as Image 1/sampler and geometry as Image 2.
+    # Grooming keeps the canonical as Image 1 and supplies the appearance-free
+    # one-gray/open-channel geometry as Image 2. Recovery retries may promote
+    # that same geometry to the sampler, but it never gains appearance authority.
+    # SCAIL receives only normalized transparent Qwen action keyframes, never
+    # the raw upload.
+    effective_subject_config = job.get("effective_subject_config")
+    if not isinstance(effective_subject_config, dict):
+        raise RuntimeError(
+            "Uploaded Qwen job lacks its queue-time effective subject config; "
+            "submit the upload again instead of reading a mutable live Profile."
+        )
+    if "profile_fur_constraints" not in effective_subject_config:
+        raise RuntimeError(
+            "Persisted subject profile lacks its frozen fur constraints; "
+            "refusing to re-read a mutable live profile."
+        )
+    profile = {
+        "id": effective_subject_config.get("profile_id"),
+        "fur_constraints": json.loads(
+            json.dumps(effective_subject_config.get("profile_fur_constraints") or {})
+        ),
+    }
+    upload_validation = effective_subject_config.get("upload_validation")
+    if (
+        not isinstance(upload_validation, dict)
+        or upload_validation.get("policy") != QWEN_FULL_BODY_FIRST_FRAME_PIPELINE
+        or upload_validation.get("expected_surface_gate_actions") != actions
+    ):
+        raise RuntimeError(
+            "Uploaded Qwen job lacks its complete queue-time per-action "
+            "surface validation contract."
+        )
+    for action in actions:
+        require_uploaded_fur_surface_gate(
+            effective_subject_config["actions"][action],
+            action,
+        )
+    pose_reference_inputs: dict[str, str] = {}
+    pose_reference_source_paths: dict[str, str] = {}
+    pose_reference_source_sha256s: dict[str, str] = {}
+    pose_reference_input_sha256s: dict[str, str] = {}
+    pose_reference_policies: dict[str, str] = {}
+    pose_reference_guide_styles: dict[str, str] = {}
+    pose_reference_metadata: dict[str, Any] = {}
+    for action in actions:
+        action_config = effective_subject_config["actions"][action]
+        source_reference = Path(action_config["driving_animation"])
+        if not source_reference.is_file():
+            raise FileNotFoundError(
+                f"Frozen {action} Main_case driving animation is missing: "
+                f"{source_reference}"
+            )
+        source_digest = file_sha256(source_reference)
+        expected_source_digest = str(
+            action_config.get("driving_animation_sha256") or ""
+        ).strip()
+        if expected_source_digest and source_digest != expected_source_digest:
+            raise RuntimeError(
+                f"Frozen {action} Main_case driving animation digest changed."
+            )
+        pose_guide = comfy_input_dir / f"{action}_qwen_pose_guide.png"
+        if action == "eating":
+            guide_metadata = prepare_eating_qwen_geometry_guide(
+                job_id,
+                source_reference,
+                pose_guide,
+                frames=int(effective_subject_config["frames"]),
+                fps=float(effective_subject_config["fps"]),
+            )
+            pose_reference_policies[action] = (
+                "main_case_eating_driver_geometry_image2_guide_v4"
+            )
+            pose_reference_guide_styles[action] = (
+                "texture_free_low_frequency_main_case_geometry_with_explicit_"
+                "muzzle_overlap_on_pure_green"
+            )
+            pose_reference_metadata[action] = {
+                "policy": "main_case_eating_driver_geometry_image2_guide_v4",
+                "generator_policy": guide_metadata.get("policy"),
+                "generator_method": guide_metadata.get("method"),
+                "image_role": "image2_action_geometry_guide",
+                "identity_role": "image1_qwen_full_body_canonical",
+                "palette_audit_role": "qwen_full_body_canonical",
+                "source_rgb_preserved": False,
+                "driver_silhouette_used": True,
+                "reference_space_motion": False,
+                "main_case_driver_used": True,
+                "source_sha256": source_digest,
+                "guide_sha256": guide_metadata.get("guide_sha256"),
+                "generator_metadata": guide_metadata,
+            }
+        elif action == "grooming":
+            guide_metadata = prepare_grooming_qwen_geometry_guide(
+                job_id,
+                source_reference,
+                pose_guide,
+                frames=int(effective_subject_config["frames"]),
+                fps=float(effective_subject_config["fps"]),
+            )
+            private_pose_gate = guide_metadata.get("private_pose_gate")
+            if (
+                not isinstance(private_pose_gate, dict)
+                or private_pose_gate.get("exposed_to_qwen") is not False
+                or not private_pose_gate.get("guide_sha256")
+            ):
+                raise RuntimeError(
+                    "Grooming geometry preparation lacks its isolated private pose gate."
+                )
+            private_completion_mask = guide_metadata.get("private_completion_mask")
+            if (
+                not isinstance(private_completion_mask, dict)
+                or private_completion_mask.get("exposed_to_qwen") is not False
+                or private_completion_mask.get("loaded_as_qwen_image") is not False
+                or not private_completion_mask.get("sha256")
+            ):
+                raise RuntimeError(
+                    "Grooming geometry preparation lacks its private completion mask."
+                )
+            pose_reference_policies[action] = GROOMING_QWEN_POSE_REFERENCE_POLICY
+            pose_reference_guide_styles[action] = GROOMING_QWEN_GUIDE_STYLE
+            pose_reference_metadata[action] = {
+                "policy": GROOMING_QWEN_POSE_REFERENCE_POLICY,
+                "generator_policy": guide_metadata.get("policy"),
+                "source_rgb_preserved": False,
+                "image_role": "image2_action_geometry_guide",
+                "identity_role": "image1_qwen_full_body_canonical",
+                "palette_audit_role": "qwen_full_body_canonical",
+                "driver_silhouette_used": True,
+                "main_case_driver_used": True,
+                "source_sha256": source_digest,
+                "guide_sha256": guide_metadata.get("guide_sha256"),
+                "qwen_guide_internal_luma_variation": False,
+                "qwen_guide_internal_luma_variation_role": "none",
+                "qwen_guide_appearance_bearing_internal_luma_variation": False,
+                "qwen_guide_synthetic_foreleg_semantic": False,
+                "qwen_guide_synthetic_foreleg_semantic_method": None,
+                "qwen_guide_structural_negative_space": True,
+                "qwen_guide_structural_negative_space_method": (
+                    GROOMING_QWEN_NEGATIVE_SPACE_METHOD
+                ),
+                "qwen_guide_closed_foreleg_capsule_exposed": False,
+                "qwen_guide_internal_green_separator_exposed": True,
+                "qwen_guide_raised_foreleg_validation_role": (
+                    "public_open_curve_geometry_plus_private_cv"
+                ),
+                "qwen_foreleg_repair_enabled": True,
+                "qwen_foreleg_repair_mode": (
+                    "attempt3_local_if_identity_safe_then_attempt4_5_"
+                    "seed_bound_pose_transfer_then_pose_safe_identity_refine"
+                ),
+                "qwen_foreleg_repair_retained_for_legacy_jobs_only": True,
+                "qwen_foreleg_repair_policy": (
+                    GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
+                ),
+                "qwen_foreleg_repair_attempt": (GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT),
+                "qwen_foreleg_repair_denoise": (GROOMING_QWEN_FORELEG_REPAIR_DENOISE),
+                "qwen_foreleg_repair_source": (
+                    "best_prior_identity_palette_safe_normalized_candidate"
+                ),
+                "qwen_foreleg_repair_mask_dilation_px": (
+                    GROOMING_QWEN_FORELEG_REPAIR_MASK_DILATION_PX
+                ),
+                "qwen_foreleg_repair_anatomy_policy": (
+                    GROOMING_QWEN_FORELEG_REPAIR_ANATOMY_POLICY
+                ),
+                "qwen_foreleg_repair_seed_source": (
+                    "identity_safe_candidate_unchanged_before_masked_sampling"
+                ),
+                "qwen_foreleg_repair_expanded_context_full_denoise_mask": True,
+                "qwen_foreleg_repair_identity_or_geometry_seed_inserted": False,
+                "qwen_foreleg_repair_noise_mask_expansion_px": (
+                    GROOMING_QWEN_FORELEG_REPAIR_NOISE_MASK_EXPANSION_PX
+                ),
+                "qwen_foreleg_repair_noise_mask_feather_sigma_px": (
+                    GROOMING_QWEN_FORELEG_REPAIR_NOISE_MASK_FEATHER_SIGMA_PX
+                ),
+                "qwen_foreleg_repair_style_policy": (
+                    "disabled_for_canonical_masked_completion"
+                ),
+                "qwen_foreleg_repair_style_lora": None,
+                "qwen_foreleg_repair_style_strength": 0.0,
+                "qwen_foreleg_repair_style_scope": "none",
+                "qwen_foreleg_repair_composite_gate_policy": None,
+                "qwen_foreleg_repair_composite_recovery_enabled": False,
+                "qwen_foreleg_repair_composite_edge_density_ratio_min": None,
+                "qwen_foreleg_repair_composite_planted_paw_gradient_p90_max": None,
+                "qwen_foreleg_repair_composite_raised_paw_gradient_p90_max": None,
+                "canonical_completion_edge_evidence_policy": (
+                    GROOMING_CANONICAL_COMPLETION_EDGE_EVIDENCE_POLICY
+                ),
+                "canonical_completion_edge_density_ratio_min": (
+                    GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN
+                ),
+                "canonical_completion_independent_fur_surface_required": True,
+                "canonical_direct_structural_edge_evidence": {
+                    "policy": (
+                        GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_EVIDENCE_POLICY
+                    ),
+                    "maximum_attempt": (
+                        GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+                    ),
+                    "raw_edge_density_ratio_min": (
+                        GROOMING_CANONICAL_DIRECT_EDGE_DENSITY_RATIO_MIN
+                    ),
+                    "structural_edge_density_min": (
+                        GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_DENSITY_MIN
+                    ),
+                    "chamfer_coverage_min": (
+                        GROOMING_CANONICAL_DIRECT_CHAMFER_COVERAGE_MIN
+                    ),
+                    "chamfer_mean_distance_max": (
+                        GROOMING_CANONICAL_DIRECT_CHAMFER_MEAN_DISTANCE_MAX
+                    ),
+                    "chamfer_p90_distance_max": (
+                        GROOMING_CANONICAL_DIRECT_CHAMFER_P90_DISTANCE_MAX
+                    ),
+                    "offguide_organic_paw_evidence": {
+                        "structural_edge_density_min": (
+                            GROOMING_CANONICAL_DIRECT_OFFGUIDE_STRUCTURAL_EDGE_DENSITY_MIN
+                        ),
+                        "chamfer_coverage_min": (
+                            GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_COVERAGE_MIN
+                        ),
+                        "chamfer_mean_distance_max": (
+                            GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_MEAN_DISTANCE_MAX
+                        ),
+                        "chamfer_p90_distance_max": (
+                            GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_P90_DISTANCE_MAX
+                        ),
+                        "paw_lab_delta_max": (
+                            GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_LAB_DELTA_MAX
+                        ),
+                        "paw_histogram_max": (
+                            GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_HISTOGRAM_MAX
+                        ),
+                        "paw_texture_ratio_range": [
+                            GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_TEXTURE_RATIO_MIN,
+                            GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_TEXTURE_RATIO_MAX,
+                        ],
+                        "fail_closed": True,
+                    },
+                    "aligned_organic_paw_evidence": {
+                        "raw_pose_gate_must_pass_without_issue": True,
+                        "strict_guide_alignment_required": True,
+                        "structural_edge_density_min": (
+                            GROOMING_CANONICAL_DIRECT_ALIGNED_STRUCTURAL_EDGE_DENSITY_MIN
+                        ),
+                        "paw_lab_delta_max": (
+                            GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_LAB_DELTA_MAX
+                        ),
+                        "paw_histogram_max": (
+                            GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_HISTOGRAM_MAX
+                        ),
+                        "paw_texture_ratio_range": [
+                            GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MIN,
+                            GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MAX,
+                        ],
+                        "fail_closed": True,
+                    },
+                    "achromatic_palette_normalization": {
+                        "policy": (
+                            GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_PALETTE_POLICY
+                        ),
+                        "operation": "foreground_lab_l_histogram_match_only",
+                        "achromatic_fraction_min": (
+                            GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_ACHROMATIC_MIN
+                        ),
+                        "input_balance_l1_max": (
+                            GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_BALANCE_L1_MAX
+                        ),
+                        "source_alpha_geometry_must_remain_exact": True,
+                        "source_ab_roundtrip_delta_max": 2,
+                        "new_hue_or_marking_drift_allowed": False,
+                        "pose_and_identity_revalidation_required": True,
+                        "independent_fur_surface_gate_still_required": True,
+                        "fail_closed": True,
+                    },
+                    "identity_palette_gate_still_required": True,
+                    "independent_fur_surface_gate_still_required": True,
+                    "global_pose_threshold_changed": False,
+                    "fail_closed": True,
+                },
+                "canonical_direct_surface_nonexpansion": {
+                    "policy": (GROOMING_CANONICAL_DIRECT_SURFACE_NONEXPANSION_POLICY),
+                    "maximum_attempt": (
+                        GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+                    ),
+                    "only_recoverable_issue": "brush_texture_coherence",
+                    "requires_strict_pose_recovery": True,
+                    "requires_identity_palette_pass": True,
+                    "requires_digest_bound_transparent_canonical": True,
+                    "coherent_fraction_max": (
+                        GROOMING_CANONICAL_DIRECT_SURFACE_COHERENT_FRACTION_MAX
+                    ),
+                    "coherent_fraction_delta_max": (
+                        GROOMING_CANONICAL_DIRECT_SURFACE_COHERENT_FRACTION_DELTA_MAX
+                    ),
+                    "coherence_mean_max": (
+                        GROOMING_CANONICAL_DIRECT_SURFACE_COHERENCE_MEAN_MAX
+                    ),
+                    "coherence_mean_delta_max": (
+                        GROOMING_CANONICAL_DIRECT_SURFACE_COHERENCE_MEAN_DELTA_MAX
+                    ),
+                    "orientation_max": (
+                        GROOMING_CANONICAL_DIRECT_SURFACE_ORIENTATION_MAX
+                    ),
+                    "orientation_delta_max": (
+                        GROOMING_CANONICAL_DIRECT_SURFACE_ORIENTATION_DELTA_MAX
+                    ),
+                    "hough_radial_delta_max": (
+                        GROOMING_CANONICAL_DIRECT_SURFACE_HOUGH_RADIAL_DELTA_MAX
+                    ),
+                    "canonical_long_energy_max": (
+                        GROOMING_CANONICAL_DIRECT_SURFACE_CANONICAL_LONG_ENERGY_MAX
+                    ),
+                    "independent_final_video_fur_audit_still_required": True,
+                    "global_surface_thresholds_changed": False,
+                    "fail_closed": True,
+                },
+                "canonical_full_pose_recovery_enabled": True,
+                "canonical_full_pose_rescue_policy": (
+                    GROOMING_CANONICAL_FULL_POSE_RESCUE_POLICY
+                ),
+                "canonical_full_pose_rescue_attempt": (
+                    GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
+                ),
+                "canonical_full_pose_identity_refine_policy": (
+                    GROOMING_CANONICAL_FULL_POSE_REFINE_POLICY
+                ),
+                "canonical_full_pose_identity_refine_attempt": (
+                    GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT
+                ),
+                "canonical_full_pose_refine_source_policy": (
+                    GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY
+                ),
+                "canonical_full_pose_refine_image3": (
+                    "digest_bound_lowpass_action_geometry_corroboration_only"
+                ),
+                "canonical_full_pose_refine_uploaded_front_exposed": False,
+                "canonical_full_pose_refine_identity_source": (
+                    "approved_canonical_three_view_consensus_only"
+                ),
+                "canonical_pose_transfer_seed_lowpass_sigma_px": (
+                    GROOMING_CANONICAL_POSE_TRANSFER_LOWPASS_SIGMA_PX
+                ),
+                "canonical_pose_transfer_source_alpha_geometry_preserved": True,
+                "canonical_pose_transfer_source_rgb_exposed": False,
+                "canonical_pose_transfer_source_chroma_exposed": False,
+                "canonical_pose_transfer_source_raw_luma_exposed": False,
+                "canonical_pose_transfer_seed_policy": (
+                    GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY
+                ),
+                "canonical_pose_transfer_seed_bound_matte_policy": (
+                    GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY
+                ),
+                "canonical_pose_transfer_seed_bound_alpha_provenance": (
+                    GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE
+                ),
+                "canonical_pose_transfer_rejected_candidate_used_as_sampler": True,
+                "canonical_pose_transfer_rejected_candidate_scope": (
+                    "attempt4_identity_palette_only_after_seed_bound_matte_pose_"
+                    "quality_and_independent_surface_pass"
+                ),
+                "canonical_full_pose_recovery_attempt_budget": (
+                    GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT
+                ),
+                "canonical_full_pose_recovery_style_lora": None,
+                "canonical_full_pose_recovery_global_thresholds_changed": False,
+                "qwen_foreleg_repair_global_edge_density_min": (
+                    GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN
+                ),
+                "qwen_foreleg_repair_global_pose_threshold_changed": False,
+                "qwen_foreleg_repair_synthetic_capsule_exposed": False,
+                "qwen_foreleg_repair_open_channel_anatomy_image3": True,
+                "qwen_foreleg_repair_private_cv_luma_image3": False,
+                "main_case_appearance_exposed_to_qwen": False,
+                "private_pose_gate_role": "cv_validation_only",
+                "private_pose_gate_exposed_to_qwen": False,
+                "private_pose_gate_neutral_copy_exposed_on_repair_attempt": False,
+                "public_open_channel_copy_exposed_on_repair_attempt": True,
+                "public_open_channel_copy_role": (
+                    "attempt3_local_completion_geometry_only"
+                ),
+                "private_pose_gate_guide_path": private_pose_gate.get("guide_path"),
+                "private_pose_gate_guide_sha256": private_pose_gate.get("guide_sha256"),
+                "private_completion_mask_path": private_completion_mask.get("path"),
+                "private_completion_mask_sha256": private_completion_mask.get("sha256"),
+                "private_completion_mask_policy": (
+                    GROOMING_PRIVATE_COMPLETION_MASK_POLICY
+                ),
+                "private_completion_mask_exposed_to_qwen": False,
+                "generator_metadata": guide_metadata,
+            }
+        else:
+            raise ValueError(f"Unsupported subject replacement action: {action}")
+        pose_reference_inputs[action] = (
+            comfy_relative_dir / pose_guide.name
+        ).as_posix()
+        pose_reference_input_sha256s[action] = file_sha256(pose_guide)
+        pose_reference_source_paths[action] = str(source_reference)
+        pose_reference_source_sha256s[action] = source_digest
+
+    qwen_reference_prompt_en = str(image_profile["default_prompt_en"])
+    if upload_integrity["view_mode"] == "front_left_right":
+        qwen_reference_prompt_en = (
+            qwen_reference_prompt_en + " " + QWEN_MULTI_VIEW_CANONICAL_PROMPT
+        )
+    profile_fur_lock, profile_fur_negative = subject_profile_fur_guard(profile)
+    update_job(
+        job_id,
+        reference_pipeline=QWEN_FULL_BODY_FIRST_FRAME_PIPELINE,
+        reference_pipeline_version=QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
+        reference_generation_status="running",
+        reference_image_profile=image_profile["id"],
+        reference_image_profile_revision=image_profile.get("revision"),
+        reference_image_profile_label=image_profile["label"],
+        reference_image_profile_source_job_id=image_profile.get("source_job_id"),
+        seed=int(image_profile["seed"]),
+        qwen_reference_prompt_en=qwen_reference_prompt_en,
+        canonical_prompt_source="uploaded_identity_qwen_full_body",
+        canonical_identity_view_mode=upload_integrity["view_mode"],
+        canonical_identity_view_roles=upload_integrity["view_roles"],
+        canonical_identity_view_count=len(upload_integrity["view_roles"]),
+        canonical_identity_view_policy=UPLOADED_IDENTITY_VIEW_POLICY,
+        canonical_identity_view_node_inputs=(
+            ["image1", "image2", "image3"]
+            if upload_integrity["view_mode"] == "front_left_right"
+            else ["image1"]
+        ),
+        canonical_identity_view_prompt_applied=(
+            upload_integrity["view_mode"] == "front_left_right"
+        ),
+        main_case_raw_identity_chain=False,
+        bypass_generated_canonical=False,
+        generated_canonical_bypassed=False,
+        qwen_reference_generation_for_subject_replacement=True,
+        direct_scail_uploaded_identity_reference=False,
+        user_prompt_excluded_from_reference=True,
+        subject_profile_fur_lock=profile_fur_lock,
+        subject_profile_fur_negative=profile_fur_negative,
+        subject_profile_appearance_role="action_geometry_only",
+        subject_profile_identity_terms_applied=False,
+        uploaded_identity_appearance_authority=True,
+        qwen_reference_poses=[
+            subject_replacement_pose_prompt(action) for action in actions
+        ],
+        pose_reference_inputs=pose_reference_inputs,
+        pose_reference_source_paths=pose_reference_source_paths,
+        pose_reference_source_sha256s=pose_reference_source_sha256s,
+        pose_reference_input_sha256s=pose_reference_input_sha256s,
+        pose_reference_metadata=pose_reference_metadata,
+        reference_pose_source="per_action_main_case_driver_geometry",
+        pose_reference_policy=pose_reference_policies,
+        pose_reference_guide_style="per_action_main_case_driver_geometry_v2",
+        pose_reference_guide_styles=pose_reference_guide_styles,
+        pose_reference_role="per_action_geometry_input_role",
+        pose_identity_input_policy=POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+        pose_identity_input_policy_scope=(
+            "eating_and_grooming_canonical_image1_geometry_image2"
+        ),
+        pose_identity_input_policies={
+            action: POSE_IDENTITY_INPUT_POLICY_CANONICAL for action in actions
+        },
+        pose_identity_input_roles={
+            action: "image1_qwen_full_body_canonical" for action in actions
+        },
+        pose_identity_geometry_roles={
+            action: "image2_main_case_driver_geometry_guide" for action in actions
+        },
+        eating_pose_lora_policy=("canonical_identity_plus_main_case_geometry_v1"),
+        eating_identity_refine_enabled=True,
+        eating_identity_refine_active=False,
+        eating_identity_refine_policy=(EATING_CANONICAL_IDENTITY_REFINE_POLICY),
+        eating_identity_refine_attempt=(EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT),
+        eating_identity_refine_steps=EATING_CANONICAL_IDENTITY_REFINE_STEPS,
+        eating_identity_refine_denoise=(EATING_CANONICAL_IDENTITY_REFINE_DENOISE),
+        eating_identity_refine_style_lora=None,
+        eating_identity_refine_global_thresholds_changed=False,
+        grooming_pose_lora_policy=(
+            "canonical_identity_open_channel_seed_bound_pose_safe_refine_v11"
+        ),
+        canonical_action_identity_palette_policy=(
+            CANONICAL_ACTION_IDENTITY_PALETTE_POLICY
+        ),
+        canonical_action_achromatic_balance_l1_max=(
+            CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX
+        ),
+        grooming_foreleg_repair_active=False,
+        grooming_foreleg_repair_policy=(GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY),
+        grooming_foreleg_repair_attempt=(GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT),
+        grooming_foreleg_repair_edit_mask_sha256=None,
+        grooming_foreleg_repair_anatomy_sha256=None,
+        grooming_foreleg_repair_noise_mask_sha256=None,
+        grooming_foreleg_repair_style_policy=(
+            "disabled_for_canonical_masked_completion"
+        ),
+        grooming_foreleg_repair_style_lora=None,
+        grooming_foreleg_repair_style_strength=0.0,
+        grooming_foreleg_repair_style_scope="none",
+        grooming_foreleg_repair_composite_gate_policy=None,
+        grooming_foreleg_repair_composite_recovery_enabled=False,
+        grooming_foreleg_repair_composite_edge_density_ratio_min=None,
+        grooming_foreleg_repair_composite_planted_paw_gradient_p90_max=None,
+        grooming_foreleg_repair_composite_raised_paw_gradient_p90_max=None,
+        grooming_canonical_completion_edge_evidence_policy=(
+            GROOMING_CANONICAL_COMPLETION_EDGE_EVIDENCE_POLICY
+        ),
+        grooming_canonical_completion_edge_density_ratio_min=(
+            GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN
+        ),
+        grooming_canonical_completion_independent_fur_surface_required=True,
+        grooming_canonical_direct_structural_edge_evidence_policy=(
+            GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_EVIDENCE_POLICY
+        ),
+        grooming_canonical_direct_edge_density_ratio_min=(
+            GROOMING_CANONICAL_DIRECT_EDGE_DENSITY_RATIO_MIN
+        ),
+        grooming_canonical_direct_structural_edge_density_min=(
+            GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_DENSITY_MIN
+        ),
+        grooming_canonical_direct_chamfer_coverage_min=(
+            GROOMING_CANONICAL_DIRECT_CHAMFER_COVERAGE_MIN
+        ),
+        grooming_canonical_direct_chamfer_mean_distance_max=(
+            GROOMING_CANONICAL_DIRECT_CHAMFER_MEAN_DISTANCE_MAX
+        ),
+        grooming_canonical_direct_chamfer_p90_distance_max=(
+            GROOMING_CANONICAL_DIRECT_CHAMFER_P90_DISTANCE_MAX
+        ),
+        grooming_canonical_direct_organic_paw_palette_normalization_policy=(
+            GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_PALETTE_POLICY
+        ),
+        grooming_canonical_direct_offguide_paw_lab_delta_max=(
+            GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_LAB_DELTA_MAX
+        ),
+        grooming_canonical_direct_offguide_paw_histogram_max=(
+            GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_HISTOGRAM_MAX
+        ),
+        grooming_canonical_direct_offguide_paw_texture_ratio_max=(
+            GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_TEXTURE_RATIO_MAX
+        ),
+        grooming_canonical_direct_offguide_achromatic_balance_l1_max=(
+            GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_BALANCE_L1_MAX
+        ),
+        grooming_canonical_direct_aligned_structural_edge_density_min=(
+            GROOMING_CANONICAL_DIRECT_ALIGNED_STRUCTURAL_EDGE_DENSITY_MIN
+        ),
+        grooming_canonical_direct_aligned_paw_lab_delta_max=(
+            GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_LAB_DELTA_MAX
+        ),
+        grooming_canonical_direct_aligned_paw_histogram_max=(
+            GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_HISTOGRAM_MAX
+        ),
+        grooming_canonical_direct_aligned_paw_texture_ratio_range=[
+            GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MIN,
+            GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MAX,
+        ],
+        grooming_canonical_direct_palette_normalization_operation=(
+            "foreground_lab_l_histogram_match_only"
+        ),
+        grooming_canonical_direct_palette_normalization_alpha_exact=True,
+        grooming_canonical_direct_palette_normalization_ab_delta_max=2,
+        grooming_canonical_direct_palette_normalization_revalidation_required=True,
+        grooming_achromatic_palette_normalization=None,
+        grooming_canonical_direct_edge_evidence_max_attempt=(
+            GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+        ),
+        grooming_canonical_direct_identity_palette_required=True,
+        grooming_canonical_direct_independent_fur_surface_required=True,
+        grooming_canonical_direct_global_thresholds_changed=False,
+        grooming_canonical_direct_surface_nonexpansion_policy=(
+            GROOMING_CANONICAL_DIRECT_SURFACE_NONEXPANSION_POLICY
+        ),
+        grooming_canonical_direct_surface_only_recoverable_issue=(
+            "brush_texture_coherence"
+        ),
+        grooming_canonical_direct_surface_coherent_fraction_max=(
+            GROOMING_CANONICAL_DIRECT_SURFACE_COHERENT_FRACTION_MAX
+        ),
+        grooming_canonical_direct_surface_coherent_fraction_delta_max=(
+            GROOMING_CANONICAL_DIRECT_SURFACE_COHERENT_FRACTION_DELTA_MAX
+        ),
+        grooming_canonical_direct_surface_requires_pose_and_identity=True,
+        grooming_canonical_direct_surface_requires_canonical_digest=True,
+        grooming_canonical_direct_surface_final_video_audit_required=True,
+        grooming_canonical_direct_surface_global_thresholds_changed=False,
+        grooming_full_pose_recovery_enabled=True,
+        grooming_full_pose_recovery_active=False,
+        grooming_full_pose_rescue_policy=(GROOMING_CANONICAL_FULL_POSE_RESCUE_POLICY),
+        grooming_full_pose_rescue_attempt=(GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT),
+        grooming_full_pose_identity_refine_policy=(
+            GROOMING_CANONICAL_FULL_POSE_REFINE_POLICY
+        ),
+        grooming_full_pose_identity_refine_attempt=(
+            GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT
+        ),
+        grooming_full_pose_recovery_attempt_budget=(
+            GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT
+        ),
+        grooming_full_pose_recovery_style_lora=None,
+        grooming_full_pose_recovery_global_thresholds_changed=False,
+        grooming_pose_transfer_seed_sha256=None,
+        grooming_pose_transfer_action_reference_sha256=None,
+        grooming_pose_transfer_seed_policy=(
+            GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY
+        ),
+        grooming_pose_transfer_seed_bound_matte_policy=(
+            GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY
+        ),
+        grooming_pose_transfer_seed_bound_alpha_provenance=(
+            GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE
+        ),
+        grooming_pose_safe_identity_refine_source_policy=(
+            GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY
+        ),
+        grooming_pose_safe_identity_refine_structural_edge_density_min=(
+            GROOMING_CANONICAL_POSE_SAFE_STRUCTURAL_EDGE_DENSITY_MIN
+        ),
+        grooming_pose_safe_identity_refine_allowed_palette_issues=sorted(
+            GROOMING_CANONICAL_POSE_SAFE_IDENTITY_ONLY_ISSUES
+        ),
+        grooming_pose_safe_identity_refine_probe=None,
+        grooming_pose_transfer_rejected_candidate_used_as_sampler=False,
+        grooming_foreleg_repair_global_edge_density_min=(
+            GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN
+        ),
+        grooming_foreleg_repair_global_pose_threshold_changed=False,
+        grooming_pose_gate_composite_recovery=None,
+        pose_identity_palette_reference_roles={
+            action: "qwen_full_body_canonical" for action in actions
+        },
+        image_profile_lora_source=lora_source,
+        image_profile_suppresses_builtin_style=True,
+        lock_retry_lora_strengths=bool(
+            image_profile.get("lock_retry_lora_strengths", False)
+        ),
+        # Photography LoRAs can inflate a close-up source into a long-haired
+        # character. Start at the conservative pose cap and allow progressively
+        # lower-strength retries; palette and identity gates still fail closed.
+        lock_canonical_retry_lora_strengths=False,
+        lock_pose_retry_lora_strengths=False,
+        pose_reference_denoise=QWEN_SUBJECT_REPLACEMENT_POSE_DENOISE,
+        pose_reference_denoise_step=(QWEN_SUBJECT_REPLACEMENT_POSE_DENOISE_STEP),
+        identity_palette_guard=bool(image_profile.get("identity_palette_guard", False)),
+        identity_palette_policy=image_profile.get("identity_palette_policy"),
+        user_loras=user_loras,
+        requested_user_loras=user_loras,
+        uploaded_user_loras=[],
+        image_profile_user_loras=[
+            dict(item) for item in image_profile.get("user_loras", [])
+        ],
+        user_lora=(first_lora["model_name"] if first_lora else None),
+        user_lora_original_filename=(
+            first_lora.get("original_filename") if first_lora else None
+        ),
+        user_lora_strength=(first_lora["strength"] if first_lora else None),
+        user_lora_mode=user_lora_mode,
+        user_lora_count=len(user_loras),
+        active_user_lora_count=sum(
+            float(item["strength"]) != 0.0 for item in user_loras
+        ),
+        qwen_steps=int(image_profile["qwen_steps"]),
+        qwen_cfg=float(image_profile["qwen_cfg"]),
+        qwen_denoise=float(image_profile["qwen_denoise"]),
+        canonical_user_lora_total_cap=(
+            QWEN_SUBJECT_REPLACEMENT_CANONICAL_LORA_TOTAL_CAP
+        ),
+        canonical_user_lora_per_lora_cap=(
+            QWEN_SUBJECT_REPLACEMENT_CANONICAL_LORA_TOTAL_CAP
+        ),
+        pose_user_lora_first_total_cap=(QWEN_SUBJECT_REPLACEMENT_POSE_LORA_TOTAL_CAP),
+        pose_user_lora_first_per_lora_cap=(
+            QWEN_SUBJECT_REPLACEMENT_POSE_LORA_TOTAL_CAP
+        ),
+    )
+
+    # Use the existing, fully validated Qwen-only branch with the parent job id.
+    # This preserves queue cancellation and keeps every output in one task directory.
+    run_job(job_id, force_qwen_reference=True)
+    raise_if_cancelled(job_id)
+
+    refreshed = get_job(job_id)
+    canonical_bypassed = bool(
+        refreshed.get("generated_canonical_bypassed")
+        or refreshed.get("bypass_generated_canonical")
+    )
+    if canonical_bypassed:
+        raise RuntimeError(
+            "Uploaded subject reference generation bypassed the required Qwen "
+            "full-body canonical."
+        )
+    canonical_reference: Path | None = None
+    action_references: dict[str, str] = {}
+    for output in refreshed.get("outputs", []):
+        filename = output.get("filename")
+        if not isinstance(filename, str):
+            continue
+        candidate = job_dir / filename
+        if output.get("type") == "cartoon_reference" and candidate.is_file():
+            canonical_reference = candidate
+        action = output.get("action")
+        if (
+            output.get("type") == "transparent_keyframe"
+            and action in actions
+            and candidate.is_file()
+        ):
+            action_references[str(action)] = str(candidate)
+
+    missing_actions = [action for action in actions if action not in action_references]
+    if canonical_reference is None:
+        raise RuntimeError(
+            "Qwen reference generation did not produce a canonical image."
+        )
+    if missing_actions:
+        raise RuntimeError(
+            "Qwen reference generation did not produce transparent action references: "
+            + ", ".join(missing_actions)
+        )
+    canonical_public_reference = Path(
+        str(refreshed.get("canonical_public_reference_path") or "")
+    )
+    canonical_public_reference_sha256 = (
+        str(refreshed.get("canonical_public_reference_sha256") or "").strip().lower()
+    )
+    if (
+        canonical_public_reference != canonical_reference
+        or not re.fullmatch(
+            r"[0-9a-f]{64}",
+            canonical_public_reference_sha256,
+        )
+        or not canonical_public_reference.is_file()
+        or file_sha256(canonical_public_reference) != canonical_public_reference_sha256
+    ):
+        raise RuntimeError(
+            "Qwen transparent full-body canonical provenance changed after generation."
+        )
+    canonical_qwen_image1 = Path(str(refreshed.get("canonical_qwen_image1_path") or ""))
+    canonical_qwen_image1_comfy = Path(
+        str(refreshed.get("canonical_qwen_image1_comfy_path") or "")
+    )
+    canonical_qwen_image1_sha256 = (
+        str(refreshed.get("canonical_qwen_image1_sha256") or "").strip().lower()
+    )
+    canonical_qwen_image1_comfy_sha256 = (
+        str(refreshed.get("canonical_qwen_image1_comfy_sha256") or "").strip().lower()
+    )
+    expected_canonical_qwen_image1 = job_dir / "cartoon_reference.png"
+    expected_canonical_qwen_image1_comfy = comfy_input_dir / "cartoon_reference.png"
+    if (
+        canonical_qwen_image1 != expected_canonical_qwen_image1
+        or canonical_qwen_image1_comfy != expected_canonical_qwen_image1_comfy
+        or not re.fullmatch(r"[0-9a-f]{64}", canonical_qwen_image1_sha256)
+        or canonical_qwen_image1_sha256 != canonical_qwen_image1_comfy_sha256
+        or not canonical_qwen_image1.is_file()
+        or not canonical_qwen_image1_comfy.is_file()
+        or file_sha256(canonical_qwen_image1) != canonical_qwen_image1_sha256
+        or file_sha256(canonical_qwen_image1_comfy) != canonical_qwen_image1_sha256
+    ):
+        raise RuntimeError(
+            "Qwen full-body Image 1 provenance changed between its job and "
+            "ComfyUI copies."
+        )
+    with Image.open(canonical_qwen_image1) as loaded_image1:
+        if loaded_image1.size != (
+            TRANSPARENT_GIF_SIZE,
+            TRANSPARENT_GIF_SIZE,
+        ):
+            raise RuntimeError(
+                "Qwen full-body action Image 1 was not normalized to 512x512."
+            )
+    with Image.open(canonical_reference) as loaded_canonical:
+        if loaded_canonical.size != (TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE):
+            raise RuntimeError(
+                "Qwen full-body canonical was not normalized to 512x512."
+            )
+        if loaded_canonical.mode not in {"LA", "PA", "RGBA"}:
+            raise RuntimeError(
+                "Qwen full-body canonical is opaque after normalization."
+            )
+        canonical_alpha = loaded_canonical.convert("RGBA").getchannel("A")
+        canonical_alpha_minimum, canonical_alpha_maximum = canonical_alpha.getextrema()
+        if canonical_alpha_minimum == 255 or canonical_alpha_maximum == 0:
+            raise RuntimeError(
+                "Qwen full-body canonical lacks a usable alpha subject after "
+                "normalization."
+            )
+    for action, reference in action_references.items():
+        with Image.open(reference) as loaded:
+            if loaded.size != (TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE):
+                raise RuntimeError(
+                    f"Qwen {action} reference was not normalized to 512x512."
+                )
+            if loaded.mode not in {"LA", "PA", "RGBA"}:
+                raise RuntimeError(
+                    f"Qwen {action} reference is opaque; refusing to send it to SCAIL."
+                )
+            alpha = loaded.convert("RGBA").getchannel("A")
+            alpha_minimum, alpha_maximum = alpha.getextrema()
+            if alpha_minimum == 255 or alpha_maximum == 0:
+                raise RuntimeError(
+                    f"Qwen {action} reference lacks a usable alpha subject; "
+                    "refusing to send it to SCAIL."
+                )
+
+    upload_validation = effective_subject_config.get("upload_validation")
+    expected_surface_gate_actions = (
+        list(upload_validation.get("expected_surface_gate_actions") or [])
+        if isinstance(upload_validation, dict)
+        else []
+    )
+    if expected_surface_gate_actions != actions:
+        raise RuntimeError(
+            "Uploaded Qwen references lost their complete per-action fur surface "
+            "gate contract."
+        )
+    for action in actions:
+        require_uploaded_fur_surface_gate(
+            effective_subject_config["actions"][action],
+            action,
+        )
+    gated_surface_actions = list(actions)
+    fur_surface_quality_by_action: dict[str, Any] = {}
+    selected_surface_metrics = refreshed.get("fur_surface_gate_selected_metrics")
+    if not isinstance(selected_surface_metrics, dict):
+        raise RuntimeError(
+            "Qwen references lack selected fur surface metrics; refusing "
+            "to enter SCAIL."
+        )
+    for action in gated_surface_actions:
+        reference = action_references[action]
+        selected_surface = selected_surface_metrics.get(action)
+        if (
+            not isinstance(selected_surface, dict)
+            or selected_surface.get("acceptable") is not True
+            or selected_surface.get("status") != "passed"
+        ):
+            raise RuntimeError(
+                f"Qwen {action} reference lacks a passed fur surface verdict; "
+                "refusing to enter SCAIL."
+            )
+        selected_gate = selected_surface.get("gate")
+        reference_path = Path(reference)
+        reference_digest = file_sha256(reference_path)
+        selected_candidate_path = Path(
+            str(selected_surface.get("selected_candidate_path") or "")
+        )
+        selected_candidate_digest = str(
+            selected_surface.get("selected_candidate_sha256") or ""
+        ).strip()
+        if (
+            not isinstance(selected_gate, dict)
+            or selected_gate.get("policy") != FUR_SURFACE_GATE_POLICY
+            or selected_gate.get("gate_version") != FUR_SURFACE_GATE_VERSION
+            or selected_gate.get("threshold_version") != FUR_SURFACE_THRESHOLD_VERSION
+            or not selected_candidate_path.is_file()
+            or not selected_candidate_digest
+            or selected_gate.get("candidate_sha256") != selected_candidate_digest
+            or file_sha256(selected_candidate_path) != selected_candidate_digest
+            or selected_candidate_digest != reference_digest
+        ):
+            raise RuntimeError(
+                f"Qwen {action} fur surface selected provenance changed; "
+                "refusing to enter SCAIL."
+            )
+        defensive_surface = evaluate_main_case_fur_surface_candidate(
+            reference_path,
+            action=action,
+            alpha_provenance=str(selected_gate.get("alpha_provenance") or ""),
+            effective_subject_config=effective_subject_config,
+        )
+        if defensive_surface.get("acceptable") is not True:
+            update_job(
+                job_id,
+                fur_surface_gate_final_quality={
+                    "scope": "qwen_action_reference_pre_scail",
+                    "status": "failed",
+                    "policy": FUR_SURFACE_GATE_POLICY,
+                    "gate_version": FUR_SURFACE_GATE_VERSION,
+                    "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+                    "failure": {
+                        "action": action,
+                        "reference_path": str(reference_path),
+                        "reference_sha256": reference_digest,
+                        "selected_candidate_path": str(selected_candidate_path),
+                        "selected_candidate_sha256": selected_candidate_digest,
+                        "defensive_surface": defensive_surface,
+                        "blocks_scail": True,
+                    },
+                    "final_video_frame_audit": False,
+                },
+            )
+            raise RuntimeError(
+                f"Qwen {action} reference failed final fur surface quality "
+                "before SCAIL: "
+                + ", ".join(str(issue) for issue in defensive_surface.get("issues", []))
+            )
+        defensive_surface["selected_attempt"] = selected_surface.get("selected_attempt")
+        defensive_surface["source_candidate_sha256"] = selected_candidate_digest
+        defensive_surface["normalized_candidate_sha256"] = reference_digest
+        defensive_surface["persisted_reference_path"] = str(reference_path)
+        defensive_surface["persisted_reference_sha256"] = reference_digest
+        defensive_surface["byte_identical_to_selected_candidate"] = True
+        defensive_surface["pre_scail_revalidated"] = True
+        fur_surface_quality_by_action[action] = defensive_surface
+
+    fur_silhouette_quality_by_action: dict[str, Any] = {}
+    for action, reference in action_references.items():
+        action_config = effective_subject_config["actions"][action]
+        fur_gate = action_config.get("fur_silhouette_gate")
+        if not isinstance(fur_gate, dict) or not fur_gate.get("enabled"):
+            continue
+        fur_reference = Path(str(fur_gate.get("reference") or ""))
+        fur_quality = eating_fur_silhouette_quality(
+            Path(reference),
+            fur_reference,
+        )
+        fur_silhouette_quality_by_action[action] = fur_quality
+        if not fur_quality["acceptable"]:
+            raise RuntimeError(
+                f"Qwen {action} reference failed the frozen profile fur "
+                "silhouette standard: " + ", ".join(fur_quality["issues"])
+            )
+
+    effective_subject_config = json.loads(json.dumps(effective_subject_config))
+    for action, reference in action_references.items():
+        action_config = effective_subject_config["actions"][action]
+        action_config.setdefault("profile_reference", action_config.get("reference"))
+        action_config.setdefault(
+            "profile_reference_sha256", action_config.get("reference_sha256")
+        )
+        action_config["reference"] = reference
+        action_config["reference_sha256"] = file_sha256(Path(reference))
+        action_config["reference_kind"] = "qwen_generated_upload"
+
+    update_job(
+        job_id,
+        subject_source="qwen_generated_upload",
+        effective_subject_source="qwen_generated_upload",
+        subject_reference_paths=action_references,
+        qwen_subject_reference_paths=action_references,
+        qwen_reference_actions=list(actions),
+        qwen_reference_generated_actions=list(action_references),
+        canonical_reference_path=(
+            str(canonical_reference) if canonical_reference is not None else None
+        ),
+        canonical_reference_sha256=canonical_public_reference_sha256,
+        canonical_public_reference_role="normalized_transparent_full_body_reference",
+        canonical_reference_generated=True,
+        canonical_reference_used=True,
+        canonical_reference_normalized=True,
+        canonical_reference_transparent=True,
+        qwen_action_keyframes_normalized=True,
+        qwen_action_keyframes_transparent=True,
+        qwen_action_reference_normalization_policy=(
+            QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+        ),
+        qwen_action_reference_byte_preserved=True,
+        qwen_action_keyframe_sha256s={
+            action: file_sha256(Path(reference))
+            for action, reference in action_references.items()
+        },
+        reference_normalization_status="completed",
+        uploaded_identity_anchor_path=str(upload_integrity["source_path"]),
+        uploaded_identity_anchor_paths={
+            role: str(view["source_path"])
+            for role, view in upload_integrity["views"].items()
+        },
+        uploaded_identity_anchor_sha256s={
+            role: view["source_sha256"]
+            for role, view in upload_integrity["views"].items()
+        },
+        uploaded_identity_view_mode=upload_integrity["view_mode"],
+        uploaded_identity_view_roles=upload_integrity["view_roles"],
+        uploaded_identity_view_count=len(upload_integrity["view_roles"]),
+        uploaded_identity_view_verdict="passed",
+        subject_fur_silhouette_quality=fur_silhouette_quality_by_action,
+        subject_fur_surface_quality=fur_surface_quality_by_action,
+        fur_surface_gate_status={
+            action: "passed" for action in fur_surface_quality_by_action
+        },
+        surface_texture_gate_status=("passed"),
+        fur_surface_gate_final_quality={
+            "scope": "qwen_action_reference_pre_scail",
+            "status": "passed",
+            "policy": FUR_SURFACE_GATE_POLICY,
+            "gate_version": FUR_SURFACE_GATE_VERSION,
+            "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+            "actions": fur_surface_quality_by_action,
+            "pre_scail_revalidated": True,
+            "final_video_frame_audit": False,
+        },
+        reference_generation_status="completed",
+        reference_generation_completed=True,
+        effective_subject_config=effective_subject_config,
+        stage="subject_references_ready",
+        progress=35,
+    )
+    return action_references
+
+
+def prepare_uploaded_subject_scail_references(
+    job_id: str,
+    actions: list[str],
+) -> dict[str, str]:
+    """Reject the retired upload-to-SCAIL route."""
+
+    raise RuntimeError(
+        "Direct uploaded-image SCAIL references are retired. Submit the "
+        "upload again so Qwen can generate the full-body canonical and action "
+        "keyframes first."
+    )
+
+    # Historical implementation retained below only to keep old serialized
+    # jobs diagnosable during the migration window.  It is unreachable and its
+    # submission digests remain immutable even under offline forensic use.
+    raise_if_cancelled(job_id)
+    with JOBS_LOCK:
+        job = dict(JOBS[job_id])
+    job_dir = OUTPUT_ROOT / job_id
+    input_path = job_dir / "input.png"
+    identity_source_path = job_dir / "input_identity_source.png"
+    expected_input_sha256 = (
+        str(job.get("uploaded_identity_input_sha256") or "").strip().lower()
+    )
+    expected_source_sha256 = (
+        str(job.get("uploaded_identity_source_sha256") or "").strip().lower()
+    )
+    if len(expected_input_sha256) != 64:
+        raise RuntimeError("Uploaded identity input lacks its submission-time digest.")
+    if len(expected_source_sha256) != 64:
+        raise RuntimeError("Uploaded identity source lacks its submission-time digest.")
+    if not input_path.is_file() or file_sha256(input_path) != expected_input_sha256:
+        raise RuntimeError(
+            "Uploaded identity input is missing or changed after submission."
+        )
+    if (
+        not identity_source_path.is_file()
+        or file_sha256(identity_source_path) != expected_source_sha256
+    ):
+        raise RuntimeError(
+            "Uploaded identity source is missing or changed after submission."
+        )
+    effective_subject_config = job.get("effective_subject_config")
+    if not isinstance(effective_subject_config, dict):
+        raise RuntimeError(
+            "Uploaded identity reference stage lacks its frozen subject config."
+        )
+    if effective_subject_config.get("profile_id") != "sleek_tabby_cat_v1":
+        raise RuntimeError(
+            "Deterministic uploaded identity references require the sleek-tabby "
+            "profile."
+        )
+    eating_driver = Path(str(SCAIL_ACTION_CONFIG["eating"]["driving_template"]))
+    if "eating" in actions:
+        eating_action_config = effective_subject_config["actions"]["eating"]
+        eating_driver = Path(eating_action_config["driving_animation"])
+        expected_eating_sha = str(
+            eating_action_config.get("driving_animation_sha256") or ""
+        ).strip()
+        if (
+            not eating_driver.is_file()
+            or not expected_eating_sha
+            or file_sha256(eating_driver) != expected_eating_sha
+        ):
+            raise RuntimeError(
+                "Frozen Main_case eating driver is missing or its digest changed."
+            )
+    reference_dir = job_dir / "uploaded_identity_scail_references"
+    update_job(
+        job_id,
+        stage="preparing_uploaded_identity_references",
+        progress=4,
+        reference_generation_status="running",
+    )
+    references, manifest = build_uploaded_identity_scail_references(
+        input_path,
+        actions=actions,
+        eating_driver_path=eating_driver,
+        output_dir=reference_dir,
+        rembg_session=get_rembg_session(),
+    )
+    missing_actions = [action for action in actions if action not in references]
+    unexpected_actions = [action for action in references if action not in actions]
+    if missing_actions:
+        raise RuntimeError(
+            "Deterministic uploaded identity references are missing actions: "
+            + ", ".join(missing_actions)
+        )
+    if unexpected_actions:
+        raise RuntimeError(
+            "Deterministic uploaded identity references contain unexpected actions: "
+            + ", ".join(unexpected_actions)
+        )
+    identity_manifest = manifest.get("identity")
+    action_manifest = manifest.get("actions")
+    if (
+        manifest.get("profile_or_default_cat_pixels_used") is not False
+        or not isinstance(identity_manifest, dict)
+        or identity_manifest.get("profile_or_default_cat_pixels_used") is not False
+        or identity_manifest.get("identity_rgb_provenance")
+        != "normalized_upload_only_rembg_alpha_only"
+        or identity_manifest.get("upload_sha256") != expected_input_sha256
+        or not isinstance(action_manifest, dict)
+    ):
+        raise RuntimeError(
+            "Uploaded identity reference provenance is incomplete or unsafe."
+        )
+    effective_subject_config = json.loads(json.dumps(effective_subject_config))
+    reference_sha256s: dict[str, str] = {}
+    for action, reference_text in references.items():
+        reference_path = Path(reference_text)
+        if reference_path.resolve().parent != reference_dir.resolve():
+            raise RuntimeError(
+                f"Uploaded {action} reference escaped its frozen job directory."
+            )
+        with Image.open(reference_path) as loaded:
+            if "A" not in loaded.getbands():
+                raise RuntimeError(
+                    f"Uploaded {action} SCAIL reference has no alpha channel."
+                )
+            alpha_minimum, alpha_maximum = (
+                loaded.convert("RGBA").getchannel("A").getextrema()
+            )
+            if alpha_minimum == 255 or alpha_maximum == 0:
+                raise RuntimeError(
+                    f"Uploaded {action} SCAIL reference has no usable alpha."
+                )
+        reference_digest = file_sha256(reference_path)
+        action_provenance = action_manifest.get(action)
+        if (
+            not isinstance(action_provenance, dict)
+            or action_provenance.get("profile_or_default_cat_pixels_used") is not False
+            or action_provenance.get("reference_sha256") != reference_digest
+        ):
+            raise RuntimeError(
+                f"Uploaded {action} reference provenance failed validation."
+            )
+        reference_sha256s[action] = reference_digest
+        action_config = effective_subject_config["actions"][action]
+        action_config.setdefault("profile_reference", action_config.get("reference"))
+        action_config.setdefault(
+            "profile_reference_sha256", action_config.get("reference_sha256")
+        )
+        action_config["reference"] = str(reference_path)
+        action_config["reference_sha256"] = reference_digest
+        action_config["reference_kind"] = "uploaded_identity_direct_scail"
+        public_reference = job_dir / f"{action}_uploaded_identity_reference_input.png"
+        shutil.copy2(reference_path, public_reference)
+        append_output(
+            job_id,
+            {
+                "type": "uploaded_identity_reference_input",
+                "action": action,
+                "action_label": SUBJECT_REPLACEMENT_ACTION_LABELS[action],
+                "filename": public_reference.name,
+                "sha256": reference_digest,
+                "role": (
+                    "uploaded_identity_plus_main_case_bowl_prop"
+                    if action == "eating"
+                    else "uploaded_identity_only"
+                ),
+                "transparent": True,
+                "primary": False,
+            },
+        )
+    identity_cutout = reference_dir / "uploaded_identity_cutout.png"
+    if not identity_cutout.is_file() or file_sha256(
+        identity_cutout
+    ) != identity_manifest.get("cutout_sha256"):
+        raise RuntimeError("Uploaded identity cutout provenance failed validation.")
+    public_identity_cutout = job_dir / "uploaded_identity_cutout.png"
+    shutil.copy2(identity_cutout, public_identity_cutout)
+    append_output(
+        job_id,
+        {
+            "type": "uploaded_identity_cutout",
+            "filename": public_identity_cutout.name,
+            "sha256": file_sha256(public_identity_cutout),
+            "role": "identity_only_rgb_from_upload_rembg_alpha_only",
+            "transparent": True,
+            "primary": False,
+        },
+    )
+    manifest_path = Path(str(manifest["manifest_path"]))
+    if (
+        not manifest_path.is_file()
+        or manifest_path.resolve().parent != reference_dir.resolve()
+        or file_sha256(manifest_path) != manifest.get("manifest_sha256")
+    ):
+        raise RuntimeError("Uploaded identity reference manifest digest changed.")
+    update_job(
+        job_id,
+        subject_source="uploaded_identity_direct_scail",
+        effective_subject_source="uploaded_identity_direct_scail",
+        subject_reference_paths=dict(references),
+        qwen_subject_reference_paths={},
+        reference_pipeline=UPLOADED_IDENTITY_SCAIL_REFERENCE_POLICY,
+        reference_pipeline_version=UPLOADED_IDENTITY_SCAIL_REFERENCE_VERSION,
+        reference_generation_status="completed",
+        reference_generation_completed=True,
+        # Submission digests are immutable queue-time evidence.  This retired
+        # direct builder may only preserve them after the checks above; it must
+        # never re-baseline changed files into trusted job state.
+        uploaded_identity_input_sha256=expected_input_sha256,
+        uploaded_identity_source_sha256=expected_source_sha256,
+        uploaded_identity_cutout_sha256=file_sha256(identity_cutout),
+        uploaded_identity_reference_sha256s=reference_sha256s,
+        uploaded_identity_reference_manifest=str(manifest_path),
+        uploaded_identity_reference_manifest_sha256=file_sha256(manifest_path),
+        uploaded_identity_reference_provenance=manifest,
+        profile_or_default_cat_pixels_used=False,
+        qwen_reference_actions=[],
+        qwen_reference_generated_actions=[],
+        canonical_reference_generated=False,
+        canonical_reference_used=False,
+        effective_subject_config=effective_subject_config,
+        stage="subject_references_ready",
+        progress=12,
+    )
+    return references
+
+
+def uses_frozen_profile_scail_reference(
+    effective_subject_config: dict[str, Any],
+    action: str,
+) -> bool:
+    return (
+        action == "eating"
+        and effective_subject_config.get("profile_id") == "sleek_tabby_cat_v1"
+    )
+
+
+def partition_subject_reference_actions(
+    effective_subject_config: dict[str, Any],
+    actions: list[str],
+    *,
+    uploaded_identity: bool = False,
+) -> tuple[list[str], list[str]]:
+    if uploaded_identity:
+        return [], list(actions)
+    frozen_actions = [
+        action
+        for action in actions
+        if uses_frozen_profile_scail_reference(
+            effective_subject_config,
+            action,
+        )
+    ]
+    qwen_actions = [action for action in actions if action not in frozen_actions]
+    return frozen_actions, qwen_actions
+
+
+def select_scail_subject_reference(
+    job: dict[str, Any],
+    profile: dict[str, Any] | None,
+    generated_reference_paths: dict[str, str] | None,
+    action: str,
+) -> tuple[Path, str]:
+    """Choose a frozen action reference without importing unsafe fur geometry."""
+    if generated_reference_paths is not None:
+        generated_reference = str(generated_reference_paths.get(action) or "").strip()
+        if not generated_reference:
+            raise RuntimeError(
+                f"Uploaded identity stage did not produce the required {action} reference."
+            )
+        direct_upload = job.get("subject_source") == "uploaded_identity_direct_scail"
+        return (
+            Path(generated_reference),
+            (
+                (
+                    "uploaded_identity_with_main_case_bowl_direct_scail_v1"
+                    if action == "eating"
+                    else "uploaded_identity_direct_scail_v1"
+                )
+                if direct_upload
+                else (
+                    "qwen_action_identity_with_bowl_mapped_red"
+                    if action == "eating"
+                    else "qwen_action_specific_identity"
+                )
+            ),
+        )
+
+    effective_subject_config = job.get("effective_subject_config")
+    if isinstance(
+        effective_subject_config, dict
+    ) and uses_frozen_profile_scail_reference(
+        effective_subject_config,
+        action,
+    ):
+        action_config = effective_subject_config["actions"][action]
+        reference_text = str(action_config.get("profile_reference") or "").strip()
+        expected_sha256 = str(
+            action_config.get("profile_reference_sha256") or ""
+        ).strip()
+        if not reference_text:
+            if action_config.get("reference_kind") == "qwen_generated_upload":
+                raise RuntimeError(
+                    "Frozen sleek eating profile reference is missing; "
+                    "refusing to reuse the Qwen eating keyframe."
+                )
+            reference_text = str(action_config.get("reference") or "").strip()
+            expected_sha256 = str(action_config.get("reference_sha256") or "").strip()
+        if not reference_text or not expected_sha256:
+            raise RuntimeError(
+                "Frozen sleek eating profile reference metadata is incomplete."
+            )
+        reference_path = Path(reference_text)
+        if not reference_path.is_file():
+            raise FileNotFoundError(
+                f"Frozen sleek eating profile reference is missing: {reference_path}"
+            )
+        if file_sha256(reference_path) != expected_sha256:
+            raise RuntimeError("Frozen sleek eating profile reference digest changed.")
+        return reference_path, SCAIL_FROZEN_SLEEK_EATING_POLICY
+
+    if isinstance(effective_subject_config, dict):
+        reference_path = Path(effective_subject_config["actions"][action]["reference"])
+    elif profile is not None:
+        reference_path = Path(profile["action_references"][action])
+    else:
+        raise ValueError(f"No subject reference is available for {action}")
+    return (
+        reference_path,
+        (
+            "subject_profile_action_identity_with_bowl_mapped_red"
+            if action == "eating"
+            else "subject_profile_action_reference"
+        ),
+    )
+
+
+def uses_profile_standard_direct(
+    job: dict[str, Any],
+    effective_subject_config: dict[str, Any],
+) -> bool:
+    """Return true only for an explicit no-upload profile request."""
+
+    direct = effective_subject_config.get("standard_direct")
+    return bool(
+        isinstance(direct, dict)
+        and direct.get("enabled") is True
+        and job.get("subject_source") == "profile"
+        and job.get("requested_subject_source") in {None, "profile"}
+        and not job.get("uploaded_identity_input_sha256")
+        and not job.get("uploaded_identity_source_sha256")
+    )
+
+
+def validate_standard_direct_runtime_video(
+    path: Path,
+    *,
+    expected_frames: int,
+    expected_fps: float,
+) -> dict[str, Any]:
+    """Decode the frozen runtime and enforce the public 512-square contract."""
+
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        raise RuntimeError(f"Could not open frozen standard runtime: {path}")
+    decoded = 0
+    try:
+        observed_fps = float(capture.get(cv2.CAP_PROP_FPS))
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            if frame.shape[:2] != (512, 512):
+                raise RuntimeError(
+                    "Frozen standard runtime frame size changed: "
+                    f"{frame.shape[1]}x{frame.shape[0]}"
+                )
+            decoded += 1
+    finally:
+        capture.release()
+    if decoded != expected_frames:
+        raise RuntimeError(
+            f"Frozen standard runtime has {decoded} frames, expected {expected_frames}."
+        )
+    if abs(observed_fps - expected_fps) > 0.01:
+        raise RuntimeError(
+            f"Frozen standard runtime is {observed_fps:.6f} fps, "
+            f"expected {expected_fps:.6f}."
+        )
+    return {
+        "width": 512,
+        "height": 512,
+        "frames": decoded,
+        "fps": observed_fps,
+        "duration_seconds": decoded / observed_fps,
+        "sha256": file_sha256(path),
+    }
+
+
+def write_standard_direct_preview_assets(
+    action_standard: dict[str, Any],
+    job_dir: Path,
+    action: str,
+) -> dict[str, Path]:
+    """Copy the frozen selected (frame 40) standard preview/reference/mask."""
+
+    selected = action_standard.get("selected_reference")
+    if not isinstance(selected, dict):
+        raise RuntimeError(f"Frozen {action} selected standard assets are missing")
+    frame_index = int(selected["selected_frame_index"])
+    guide = job_dir / f"{action}_main_case_standard_selected_frame{frame_index:03d}.png"
+    cutout = job_dir / (
+        f"{action}_main_case_standard_selected_reference_frame{frame_index:03d}.png"
+    )
+    mask = job_dir / (
+        f"{action}_main_case_standard_selected_identity_mask_frame{frame_index:03d}.png"
+    )
+    for kind, target in (
+        ("preview", guide),
+        ("cutout", cutout),
+        ("identity_mask", mask),
+    ):
+        source = Path(str(selected[kind]))
+        expected = str(selected[f"{kind}_sha256"])
+        if not source.is_file() or file_sha256(source) != expected:
+            raise RuntimeError(
+                f"Frozen standard_direct {action} {kind} digest changed."
+            )
+        shutil.copy2(source, target)
+        if file_sha256(target) != expected:
+            raise RuntimeError(f"Copied standard_direct {action} {kind} is corrupt.")
+    return {"guide": guide, "cutout": cutout, "mask": mask}
+
+
+def run_profile_standard_direct_job(job_id: str) -> None:
+    """Publish the approved Main_case standard without Qwen/SCAIL/GPU redraw."""
+
+    raise_if_cancelled(job_id)
+    with JOBS_LOCK:
+        job = dict(JOBS[job_id])
+    job_dir = OUTPUT_ROOT / job_id
+    actions = list(job["actions"])
+    effective = job.get("effective_subject_config")
+    if not isinstance(effective, dict) or not uses_profile_standard_direct(
+        job, effective
+    ):
+        raise RuntimeError("Profile standard-direct eligibility was not proven.")
+    if (job_dir / "input.png").exists() or (
+        job_dir / "input_identity_source.png"
+    ).exists():
+        raise RuntimeError(
+            "Profile standard-direct found uploaded identity files; refusing bypass."
+        )
+    direct = effective["standard_direct"]
+    verify_profile_standard_direct_assets(direct, actions)
+    update_job(
+        job_id,
+        status="running",
+        stage="verifying_profile_standard_direct",
+        progress=2,
+        started_at=utc_now(),
+        error=None,
+        standard_direct_policy=direct["policy"],
+        reference_pipeline=direct["policy"],
+        standard_direct_revision=direct["revision"],
+        standard_direct_role=direct["role"],
+        effective_subject_source="profile_standard_direct",
+        gpu_required=False,
+        gpu_submitted=False,
+        gpu_bypass_reason=direct["gpu_bypass_reason"],
+        qwen_used=False,
+        scail_used=False,
+    )
+    results: list[dict[str, Any]] = []
+    total_actions = len(actions)
+    for index, action in enumerate(actions, start=1):
+        raise_if_cancelled(job_id)
+        action_label = SUBJECT_REPLACEMENT_ACTION_LABELS[action]
+        standard = direct["actions"][action]
+        runtime_path = Path(standard["runtime"])
+        source_path = Path(standard["source"])
+        progress_base = 4 + (index - 1) * 94 / total_actions
+        update_job(
+            job_id,
+            stage="copying_profile_standard_direct",
+            progress=progress_base,
+            current_action=action,
+            current_action_label=action_label,
+            current_action_index=index,
+        )
+        runtime_contract = validate_standard_direct_runtime_video(
+            runtime_path,
+            expected_frames=int(effective["frames"]),
+            expected_fps=float(effective["fps"]),
+        )
+        if runtime_contract["sha256"] != standard["runtime_sha256"]:
+            raise RuntimeError(
+                f"Frozen standard_direct {action} runtime digest changed."
+            )
+        video_target = job_dir / f"{action}_subject_replacement.mp4"
+        gif_target = (
+            job_dir / f"{action}_subject_replacement_transparent_512.gif"
+            if job.get("output_format") == "transparent_gif"
+            else None
+        )
+        update_job(
+            job_id,
+            stage="matting_profile_standard_direct_outputs",
+            progress=progress_base + 18 / total_actions,
+        )
+        matte_metrics = build_standard_direct_outputs(
+            runtime_path,
+            video_target,
+            gif_target,
+            ffmpeg_bin=FFMPEG_BIN,
+            size=512,
+            source_fps=int(effective["fps"]),
+            source_frame_count=int(effective["frames"]),
+            gif_fps=TRANSPARENT_GIF_FPS,
+            gif_frame_count=TRANSPARENT_GIF_FRAMES,
+        )
+        output_contract = validate_standard_direct_runtime_video(
+            video_target,
+            expected_frames=int(effective["frames"]),
+            expected_fps=float(effective["fps"]),
+        )
+
+        previews = write_standard_direct_preview_assets(standard, job_dir, action)
+        preview_outputs = (
+            (
+                "standard_direct_reference",
+                previews["cutout"],
+                "main_case_selected_standard_identity_and_action",
+            ),
+            (
+                "standard_direct_selected_frame",
+                previews["guide"],
+                "main_case_selected_standard_frame",
+            ),
+            (
+                "standard_direct_mask",
+                previews["mask"],
+                "main_case_selected_standard_identity_mask",
+            ),
+        )
+        for output_type, path, role in preview_outputs:
+            append_output(
+                job_id,
+                {
+                    "type": output_type,
+                    "action": action,
+                    "action_label": action_label,
+                    "filename": path.name,
+                    "width": 512,
+                    "height": 512,
+                    "sha256": file_sha256(path),
+                    "role": role,
+                    "primary": False,
+                },
+            )
+
+        provenance = {
+            "policy": direct["policy"],
+            "revision": direct["revision"],
+            "role": direct["role"],
+            "profile_id": effective["profile_id"],
+            "profile_sha256": effective["profile_sha256"],
+            "action": action,
+            "source": str(source_path),
+            "source_sha256": standard["source_sha256"],
+            "runtime": str(runtime_path),
+            "runtime_sha256": standard["runtime_sha256"],
+            "output_sha256": file_sha256(video_target),
+            "runtime_contract": runtime_contract,
+            "output_contract": output_contract,
+            "matte": matte_metrics,
+            "foreground_rgb_redrawn": False,
+            "spatial_transform_applied": False,
+            "output_background": "white",
+            "validated_run_id": standard.get("validated_run_id"),
+            "deterministic": True,
+            "gpu_required": False,
+            "gpu_submitted": False,
+            "gpu_bypass_reason": direct["gpu_bypass_reason"],
+            "qwen_used": False,
+            "scail_used": False,
+        }
+        provenance_path = job_dir / f"{action}_standard_direct_provenance.json"
+        write_json_atomic(provenance_path, provenance)
+        append_output(
+            job_id,
+            {
+                "type": "standard_direct_provenance",
+                "action": action,
+                "action_label": action_label,
+                "filename": provenance_path.name,
+                "sha256": file_sha256(provenance_path),
+                "primary": False,
+            },
+        )
+        video_output = {
+            "type": "subject_replacement_video",
+            "action": action,
+            "action_label": action_label,
+            "filename": video_target.name,
+            "width": 512,
+            "height": 512,
+            "frames": int(effective["frames"]),
+            "fps": float(effective["fps"]),
+            "duration_seconds": int(effective["frames"]) / float(effective["fps"]),
+            "video_engine": "deterministic-main-case-standard-direct",
+            "driving_template": runtime_path.name,
+            "sha256": file_sha256(video_target),
+            "source_runtime_sha256": standard["runtime_sha256"],
+            "background": "white",
+            "matte_policy": matte_metrics["policy"],
+            "foreground_rgb_redrawn": False,
+            "spatial_transform_applied": False,
+            "primary": job.get("output_format") != "transparent_gif",
+        }
+        if job.get("output_format") != "transparent_gif":
+            append_output(job_id, video_output)
+
+        transparent_metrics: dict[str, Any] | None = None
+        if job.get("output_format") == "transparent_gif":
+            update_job(
+                job_id,
+                stage="publishing_profile_standard_transparency",
+                progress=progress_base + 60 / total_actions,
+            )
+            if gif_target is None or not gif_target.is_file():
+                raise RuntimeError(
+                    f"Standard-direct {action} transparent GIF was not produced."
+                )
+            transparent_metrics = matte_metrics
+            metrics_path = job_dir / f"{action}_transparent_metrics.json"
+            write_json_atomic(metrics_path, transparent_metrics)
+            append_output(job_id, video_output)
+            append_output(
+                job_id,
+                {
+                    "type": "transparent_gif",
+                    "action": action,
+                    "action_label": action_label,
+                    "filename": gif_target.name,
+                    "width": TRANSPARENT_GIF_SIZE,
+                    "height": TRANSPARENT_GIF_SIZE,
+                    "frames": TRANSPARENT_GIF_FRAMES,
+                    "fps": TRANSPARENT_GIF_FPS,
+                    "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                    "transparent": True,
+                    "video_engine": "deterministic-main-case-standard-direct",
+                    "driving_template": runtime_path.name,
+                    "sha256": file_sha256(gif_target),
+                    "source_runtime_sha256": standard["runtime_sha256"],
+                    "matte_policy": matte_metrics["policy"],
+                    "foreground_rgb_redrawn": False,
+                    "spatial_transform_applied": False,
+                    "primary": True,
+                },
+            )
+        results.append(
+            {
+                "action": action,
+                "action_label": action_label,
+                "policy": direct["policy"],
+                "revision": direct["revision"],
+                "source": str(source_path),
+                "source_sha256": standard["source_sha256"],
+                "runtime": str(runtime_path),
+                "runtime_sha256": standard["runtime_sha256"],
+                "output_sha256": file_sha256(video_target),
+                "matte_policy": matte_metrics["policy"],
+                "foreground_rgb_redrawn": False,
+                "spatial_transform_applied": False,
+                "video": video_target.name,
+                "transparent_gif": (
+                    f"{action}_subject_replacement_transparent_512.gif"
+                    if transparent_metrics is not None
+                    else None
+                ),
+                "transparent_metrics": transparent_metrics,
+                "gpu_required": False,
+                "gpu_submitted": False,
+            }
+        )
+        update_job(
+            job_id,
+            progress=progress_base + 94 / total_actions,
+            subject_replacement_results=results,
+        )
+    update_job(
+        job_id,
+        status="completed",
+        stage="completed",
+        progress=100,
+        current_action=None,
+        current_action_label=None,
+        current_action_index=None,
+        subject_replacement_results=results,
+        finished_at=utc_now(),
+    )
+
+
+def revalidate_uploaded_qwen_references_before_scail(
+    job_id: str,
+    job: dict[str, Any],
+    effective_subject_config: dict[str, Any],
+    actions: list[str],
+) -> None:
+    """Re-prove persisted Qwen references before any SCAIL preparation or GPU call."""
+
+    job_dir = OUTPUT_ROOT / job_id
+    verify_uploaded_identity_submission(job, job_dir)
+    if (
+        job.get("subject_source") != "qwen_generated_upload"
+        or job.get("reference_generation_completed") is not True
+        or job.get("reference_generation_status") != "completed"
+        or job.get("reference_normalization_status") != "completed"
+        or job.get("canonical_reference_generated") is not True
+        or job.get("canonical_reference_used") is not True
+        or job.get("canonical_reference_normalized") is not True
+        or job.get("canonical_reference_transparent") is not True
+        or job.get("qwen_action_keyframes_normalized") is not True
+        or job.get("qwen_action_keyframes_transparent") is not True
+        or job.get("qwen_action_reference_normalization_policy")
+        != QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+        or job.get("qwen_action_reference_byte_preserved") is not True
+        or job.get("surface_texture_gate_status") != "passed"
+    ):
+        raise RuntimeError(
+            "Persisted uploaded Qwen reference stage is incomplete; refusing "
+            "to enter SCAIL."
+        )
+
+    canonical_reference = Path(str(job.get("canonical_reference_path") or ""))
+    canonical_reference_sha256 = (
+        str(job.get("canonical_reference_sha256") or "").strip().lower()
+    )
+    canonical_public_path = Path(str(job.get("canonical_public_reference_path") or ""))
+    canonical_public_sha256 = (
+        str(job.get("canonical_public_reference_sha256") or "").strip().lower()
+    )
+    canonical_qwen_image1 = Path(str(job.get("canonical_qwen_image1_path") or ""))
+    canonical_qwen_image1_comfy = Path(
+        str(job.get("canonical_qwen_image1_comfy_path") or "")
+    )
+    canonical_qwen_image1_sha256 = (
+        str(job.get("canonical_qwen_image1_sha256") or "").strip().lower()
+    )
+    canonical_qwen_image1_comfy_sha256 = (
+        str(job.get("canonical_qwen_image1_comfy_sha256") or "").strip().lower()
+    )
+    if (
+        canonical_reference != job_dir / "cartoon_reference_transparent.png"
+        or canonical_public_path != canonical_reference
+        or not re.fullmatch(r"[0-9a-f]{64}", canonical_reference_sha256)
+        or canonical_public_sha256 != canonical_reference_sha256
+        or not canonical_reference.is_file()
+        or file_sha256(canonical_reference) != canonical_reference_sha256
+        or canonical_qwen_image1 != job_dir / "cartoon_reference.png"
+        or canonical_qwen_image1_comfy
+        != COMFY_INPUT / "local_video_api" / job_id / "cartoon_reference.png"
+        or not re.fullmatch(r"[0-9a-f]{64}", canonical_qwen_image1_sha256)
+        or canonical_qwen_image1_comfy_sha256 != canonical_qwen_image1_sha256
+        or not canonical_qwen_image1.is_file()
+        or not canonical_qwen_image1_comfy.is_file()
+        or file_sha256(canonical_qwen_image1) != canonical_qwen_image1_sha256
+        or file_sha256(canonical_qwen_image1_comfy) != canonical_qwen_image1_sha256
+    ):
+        raise RuntimeError(
+            "Persisted Qwen full-body canonical provenance changed before SCAIL."
+        )
+    with Image.open(canonical_reference) as loaded_canonical:
+        canonical_alpha = loaded_canonical.convert("RGBA").getchannel("A")
+        canonical_alpha_minimum, canonical_alpha_maximum = canonical_alpha.getextrema()
+        if (
+            loaded_canonical.size != (TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE)
+            or "A" not in loaded_canonical.getbands()
+            or canonical_alpha_minimum == 255
+            or canonical_alpha_maximum == 0
+        ):
+            raise RuntimeError(
+                "Persisted Qwen full-body canonical is not a usable 512x512 "
+                "transparent reference."
+            )
+
+    reference_paths = job.get("subject_reference_paths")
+    qwen_reference_sha256s = job.get("qwen_action_keyframe_sha256s")
+    fur_surface_status = job.get("fur_surface_gate_status")
+    selected_surface_metrics = job.get("fur_surface_gate_selected_metrics")
+    stored_surface_quality = job.get("subject_fur_surface_quality")
+    final_surface_quality = job.get("fur_surface_gate_final_quality")
+    if (
+        not isinstance(reference_paths, dict)
+        or not isinstance(qwen_reference_sha256s, dict)
+        or not isinstance(fur_surface_status, dict)
+        or not isinstance(selected_surface_metrics, dict)
+        or not isinstance(stored_surface_quality, dict)
+        or not isinstance(final_surface_quality, dict)
+        or final_surface_quality.get("status") != "passed"
+        or list(job.get("qwen_reference_generated_actions") or []) != actions
+    ):
+        raise RuntimeError(
+            "Persisted uploaded Qwen per-action quality provenance is incomplete."
+        )
+
+    fresh_surface_quality: dict[str, Any] = {}
+    for action in actions:
+        require_uploaded_fur_surface_gate(
+            effective_subject_config["actions"][action],
+            action,
+        )
+        reference_path = Path(str(reference_paths.get(action) or ""))
+        reference_digest = (
+            file_sha256(reference_path) if reference_path.is_file() else ""
+        )
+        action_config = effective_subject_config["actions"][action]
+        expected_reference_digest = (
+            str(action_config.get("reference_sha256") or "").strip().lower()
+        )
+        persisted_qwen_digest = (
+            str(qwen_reference_sha256s.get(action) or "").strip().lower()
+        )
+        if (
+            action_config.get("reference_kind") != "qwen_generated_upload"
+            or Path(str(action_config.get("reference") or "")) != reference_path
+            or not re.fullmatch(r"[0-9a-f]{64}", reference_digest)
+            or expected_reference_digest != reference_digest
+            or persisted_qwen_digest != reference_digest
+            or fur_surface_status.get(action) != "passed"
+        ):
+            raise RuntimeError(
+                f"Persisted Qwen {action} reference changed before SCAIL."
+            )
+        with Image.open(reference_path) as loaded_reference:
+            alpha = loaded_reference.convert("RGBA").getchannel("A")
+            alpha_minimum, alpha_maximum = alpha.getextrema()
+            if (
+                loaded_reference.size != (TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE)
+                or "A" not in loaded_reference.getbands()
+                or alpha_minimum == 255
+                or alpha_maximum == 0
+            ):
+                raise RuntimeError(
+                    f"Persisted Qwen {action} reference is not a usable "
+                    "512x512 transparent cutout."
+                )
+
+        selected_surface = selected_surface_metrics.get(action)
+        selected_gate = (
+            selected_surface.get("gate") if isinstance(selected_surface, dict) else None
+        )
+        selected_candidate = Path(
+            str(
+                selected_surface.get("selected_candidate_path")
+                if isinstance(selected_surface, dict)
+                else ""
+            )
+        )
+        selected_candidate_sha256 = (
+            str(
+                selected_surface.get("selected_candidate_sha256")
+                if isinstance(selected_surface, dict)
+                else ""
+            )
+            .strip()
+            .lower()
+        )
+        stored_surface = stored_surface_quality.get(action)
+        if (
+            not isinstance(selected_surface, dict)
+            or selected_surface.get("acceptable") is not True
+            or selected_surface.get("status") != "passed"
+            or not isinstance(selected_gate, dict)
+            or selected_gate.get("policy") != FUR_SURFACE_GATE_POLICY
+            or selected_gate.get("gate_version") != FUR_SURFACE_GATE_VERSION
+            or selected_gate.get("threshold_version") != FUR_SURFACE_THRESHOLD_VERSION
+            or selected_gate.get("action") != action
+            or not selected_candidate.is_file()
+            or not re.fullmatch(r"[0-9a-f]{64}", selected_candidate_sha256)
+            or selected_gate.get("candidate_sha256") != selected_candidate_sha256
+            or file_sha256(selected_candidate) != selected_candidate_sha256
+            or selected_candidate_sha256 != reference_digest
+            or not isinstance(stored_surface, dict)
+            or stored_surface.get("acceptable") is not True
+            or stored_surface.get("pre_scail_revalidated") is not True
+            or stored_surface.get("normalized_candidate_sha256") != reference_digest
+        ):
+            raise RuntimeError(
+                f"Persisted Qwen {action} fur surface provenance changed before SCAIL."
+            )
+        fresh_surface = evaluate_main_case_fur_surface_candidate(
+            reference_path,
+            action=action,
+            alpha_provenance=str(selected_gate.get("alpha_provenance") or ""),
+            effective_subject_config=effective_subject_config,
+        )
+        if fresh_surface.get("acceptable") is not True:
+            raise RuntimeError(
+                f"Persisted Qwen {action} reference failed fresh fur surface "
+                "validation before SCAIL: "
+                + ", ".join(str(issue) for issue in fresh_surface.get("issues", []))
+            )
+        fresh_surface["selected_attempt"] = selected_surface.get("selected_attempt")
+        fresh_surface["source_candidate_sha256"] = selected_candidate_sha256
+        fresh_surface["normalized_candidate_sha256"] = reference_digest
+        fresh_surface["persisted_reference_path"] = str(reference_path)
+        fresh_surface["persisted_reference_sha256"] = reference_digest
+        fresh_surface["byte_identical_to_selected_candidate"] = True
+        fresh_surface["pre_scail_revalidated"] = True
+        fresh_surface_quality[action] = fresh_surface
+
+    update_job(
+        job_id,
+        subject_fur_surface_quality=fresh_surface_quality,
+        qwen_reference_pre_scail_revalidated=True,
+        qwen_reference_pre_scail_revalidated_at=utc_now(),
+        qwen_reference_pre_scail_sha256s={
+            action: qwen_reference_sha256s[action] for action in actions
+        },
+    )
+
+
+def run_subject_replacement_job(job_id: str) -> None:
+    raise_if_cancelled(job_id)
+    with JOBS_LOCK:
+        job = dict(JOBS[job_id])
+    job_dir = OUTPUT_ROOT / job_id
+    actions = list(job["actions"])
+    initial_subject_source = str(job.get("subject_source") or "")
+    if initial_subject_source in {
+        "upload_pending_scail_reference",
+        "uploaded_identity_direct_scail",
+    }:
+        raise RuntimeError(
+            "This upload job was queued under the retired direct-SCAIL policy "
+            "and cannot be resumed safely. Submit the upload again so Qwen can "
+            "generate the required full-body canonical and action keyframes."
+        )
+    uploaded_job = initial_subject_source in {
+        "upload",
+        "upload_pending_qwen",
+        "qwen_generated_upload",
+    }
+    effective_subject_config = job.get("effective_subject_config")
+    profile: dict[str, Any] | None = None
+    if not isinstance(effective_subject_config, dict):
+        if uploaded_job:
+            raise RuntimeError(
+                "Uploaded identity job lacks its queue-time effective subject "
+                "config. Submit the upload again instead of reading a mutable "
+                "live Profile."
+            )
+        profile = load_subject_profile(job.get("subject_profile"))
+        effective_subject_config = resolve_effective_subject_config(
+            profile,
+            actions,
+            seed=job.get("seed"),
+            scail_steps=job.get("scail_steps"),
+            pose_strength=job.get("pose_strength"),
+        )
+    if uses_profile_standard_direct(job, effective_subject_config):
+        run_profile_standard_direct_job(job_id)
+        return
+    expected_pose_policies = {
+        str(action): str(policy)
+        for action, policy in dict(job.get("expected_pose_policies") or {}).items()
+        if str(action) in actions and str(policy).strip()
+    }
+    if uploaded_job:
+        frozen_upload_validation = effective_subject_config.get("upload_validation")
+        if (
+            not isinstance(frozen_upload_validation, dict)
+            or frozen_upload_validation.get("policy")
+            != QWEN_FULL_BODY_FIRST_FRAME_PIPELINE
+            or frozen_upload_validation.get("qwen_full_body_required") is not True
+            or frozen_upload_validation.get("qwen_action_keyframes_required")
+            is not True
+            or frozen_upload_validation.get(
+                "normalized_transparent_references_required"
+            )
+            is not True
+            or frozen_upload_validation.get("expected_surface_gate_actions") != actions
+            or frozen_upload_validation.get("expected_pose_policies")
+            != expected_pose_policies
+        ):
+            raise RuntimeError(
+                "Uploaded identity job lacks its frozen Qwen full-body and "
+                "action-keyframe validation policy."
+            )
+        for action in actions:
+            require_uploaded_fur_surface_gate(
+                effective_subject_config["actions"][action],
+                action,
+            )
+    frozen_actions, upload_reference_actions = partition_subject_reference_actions(
+        effective_subject_config,
+        actions,
+        uploaded_identity=uploaded_job,
+    )
+    if initial_subject_source in {
+        "upload",
+        "upload_pending_qwen",
+    }:
+        if not upload_reference_actions:
+            raise RuntimeError(
+                "Uploaded subject identity has no action reference work; "
+                "refusing to fall back to the default profile."
+            )
+        prepare_uploaded_subject_qwen_references(
+            job_id,
+            upload_reference_actions,
+        )
+        job = get_job(job_id)
+        effective_subject_config = job.get("effective_subject_config")
+        if not isinstance(effective_subject_config, dict):
+            raise RuntimeError(
+                "Uploaded identity reference stage lost the effective subject config."
+            )
+    if uploaded_job:
+        refreshed_upload_validation = effective_subject_config.get("upload_validation")
+        if (
+            not isinstance(refreshed_upload_validation, dict)
+            or refreshed_upload_validation.get("expected_surface_gate_actions")
+            != actions
+        ):
+            raise RuntimeError(
+                "Uploaded identity reference stage lost its complete per-action "
+                "fur surface contract."
+            )
+        for action in actions:
+            require_uploaded_fur_surface_gate(
+                effective_subject_config["actions"][action],
+                action,
+            )
+
+    generated_reference_paths: dict[str, str] | None = None
+    if job.get("subject_source") == "qwen_generated_upload":
+        raw_generated_paths = job.get("subject_reference_paths")
+        if not isinstance(raw_generated_paths, dict):
+            raise RuntimeError("Persisted uploaded identity references are invalid.")
+        generated_reference_paths = {
+            str(reference_action): str(reference_path)
+            for reference_action, reference_path in raw_generated_paths.items()
+            if str(reference_path).strip()
+        }
+        revalidate_uploaded_qwen_references_before_scail(
+            job_id,
+            job,
+            effective_subject_config,
+            actions,
+        )
+        job = get_job(job_id)
+        refreshed_effective_subject_config = job.get("effective_subject_config")
+        if not isinstance(refreshed_effective_subject_config, dict):
+            raise RuntimeError(
+                "Pre-SCAIL Qwen reference validation lost the effective subject config."
+            )
+        effective_subject_config = refreshed_effective_subject_config
+
+    selected_references = {
+        action: select_scail_subject_reference(
+            job,
+            profile,
+            generated_reference_paths,
+            action,
+        )
+        for action in actions
+    }
+    effective_reference_paths = {
+        action: str(selected_references[action][0]) for action in actions
+    }
+    selected_reference_policies = {
+        action: selected_references[action][1] for action in actions
+    }
+    uploaded_reference_policies = {
+        "qwen_action_identity_with_bowl_mapped_red",
+        "qwen_action_specific_identity",
+    }
+    uploaded_applied_actions = [
+        action
+        for action, policy in selected_reference_policies.items()
+        if policy in uploaded_reference_policies
+    ]
+    if uploaded_job:
+        missing_uploaded_actions = [
+            action for action in actions if action not in uploaded_applied_actions
+        ]
+        if missing_uploaded_actions:
+            raise RuntimeError(
+                "Uploaded subject identity was not applied to every requested "
+                "action; refusing to run SCAIL with the default profile: "
+                + ", ".join(missing_uploaded_actions)
+            )
+    if frozen_actions and uploaded_applied_actions:
+        effective_reference_pipeline = SCAIL_MIXED_REFERENCE_PIPELINE
+    elif frozen_actions:
+        effective_reference_pipeline = SCAIL_FROZEN_EATING_PIPELINE
+    else:
+        effective_reference_pipeline = str(
+            job.get("reference_pipeline") or QWEN_FULL_BODY_FIRST_FRAME_PIPELINE
+        )
+    job = update_job(
+        job_id,
+        subject_reference_paths=effective_reference_paths,
+        qwen_subject_reference_paths=(
+            generated_reference_paths or {}
+            if job.get("subject_source") == "qwen_generated_upload"
+            else {}
+        ),
+        scail_reference_policy=selected_reference_policies,
+        reference_pipeline=effective_reference_pipeline,
+        qwen_reference_generated_actions=(
+            list((generated_reference_paths or {}).keys())
+            if job.get("subject_source") == "qwen_generated_upload"
+            else []
+        ),
+        qwen_reference_applied_actions=(
+            uploaded_applied_actions
+            if job.get("subject_source") == "qwen_generated_upload"
+            else []
+        ),
+        qwen_reference_bypassed_actions=list(frozen_actions),
+        uploaded_identity_applied_actions=(
+            uploaded_applied_actions if uploaded_job else []
+        ),
+        uploaded_identity_excluded_actions=[],
+        uploaded_identity_reference_actions=(
+            list((generated_reference_paths or {}).keys())
+            if job.get("subject_source") == "qwen_generated_upload"
+            else []
+        ),
+        effective_subject_source=(
+            str(job.get("subject_source")) if uploaded_job else "profile"
+        ),
+    )
+    require_subject_replacement_assets(
+        profile or {"action_references": effective_reference_paths},
+        actions,
+        reference_paths=effective_reference_paths,
+        effective_config=effective_subject_config,
+        expected_pose_policies=expected_pose_policies,
+    )
+    total_actions = len(actions)
+    results: list[dict[str, Any]] = []
+    final_video_fur_surface_by_action: dict[str, Any] = {}
+    scail_reference_policies = dict(job.get("scail_reference_policy") or {})
+    scail_scene_prop_policies = dict(job.get("scail_scene_prop_policy") or {})
+    reference_generation_chain = bool(job.get("reference_generation_completed"))
+    progress_base = 38.0 if reference_generation_chain else 3.0
+    progress_total = 59.0 if reference_generation_chain else 94.0
+
+    update_job(
+        job_id,
+        status="running",
+        stage="waiting_for_gpu",
+        progress=36 if reference_generation_chain else 1,
+        started_at=job.get("started_at") or utc_now(),
+        error=None,
+        current_action=None,
+    )
+    wait_comfy_idle(timeout=21600, job_id=job_id)
+    raise_if_cancelled(job_id)
+    free_comfy_models()
+
+    for index, action in enumerate(actions, start=1):
+        raise_if_cancelled(job_id)
+        action_config = effective_subject_config["actions"][action]
+        driving_animation_path = Path(action_config["driving_animation"])
+        expected_driving_sha256 = str(
+            action_config.get("driving_animation_sha256") or ""
+        ).strip()
+        if (
+            expected_driving_sha256
+            and file_sha256(driving_animation_path) != expected_driving_sha256
+        ):
+            raise RuntimeError(f"Frozen {action} driving animation digest changed.")
+        if (
+            action == "eating"
+            and float(action_config["pose_strength"]) > SCAIL_EATING_POSE_STRENGTH_MAX
+        ):
+            raise RuntimeError(
+                "Persisted eating pose_strength exceeds the safe fur-silhouette "
+                f"limit {SCAIL_EATING_POSE_STRENGTH_MAX:.2f}."
+            )
+        action_label = SUBJECT_REPLACEMENT_ACTION_LABELS[action]
+        action_start = progress_base + (index - 1) * progress_total / total_actions
+        action_span = progress_total / total_actions
+        reference_path, reference_policy = selected_references[action]
+        if not reference_path.is_file():
+            raise FileNotFoundError(
+                f"SCAIL {action} reference is missing: {reference_path}"
+            )
+        run_id = available_scail_run_id(job_id, action)
+        experiment_dir = SCAIL_EXPERIMENT_ROOT / run_id
+        prepare_log = job_dir / f"{action}_prepare.log"
+        update_job(
+            job_id,
+            stage="preparing_subject_replacement",
+            progress=action_start,
+            current_action=action,
+            current_action_label=action_label,
+            current_action_index=index,
+        )
+        command = [
+            str(SCAIL_PYTHON),
+            str(SCAIL_RUNNER),
+            "--source",
+            str(action_config["driving_animation"]),
+            "--reference",
+            str(reference_path),
+            "--action",
+            action,
+            "--width",
+            "512",
+            "--height",
+            "512",
+            "--frames",
+            str(effective_subject_config["frames"]),
+            "--fps",
+            str(effective_subject_config["fps"]),
+            "--steps",
+            str(effective_subject_config["steps"]),
+            "--seed",
+            str(action_config["effective_seed"]),
+            "--pose-strength",
+            str(action_config["pose_strength"]),
+            "--run-id",
+            run_id,
+            "--prepare-only",
+        ]
+        # Subject-replacement identity, fur, action, camera, and prop rules are
+        # profile-locked. User prose is retained in task metadata but is never
+        # appended after the protected SCAIL prompt, where terms such as
+        # "fluffy" can otherwise override the close-lying fur standard.
+        prompt_suffix = str(job.get("prompt_en") or job.get("prompt") or "").strip()
+        if prompt_suffix:
+            update_job(
+                job_id,
+                user_prompt_excluded_from_scail=True,
+                scail_prompt_source="protected_action_profile",
+            )
+        if job.get("subject_source") == "qwen_generated_upload":
+            # The queue wait above can last hours, and earlier actions can also
+            # keep later references waiting.  Re-prove the immutable upload,
+            # canonical, per-action digest, alpha, and fur-surface contract at
+            # the last possible point before this SCAIL process reads it.
+            just_in_time_job = get_job(job_id)
+            just_in_time_config = just_in_time_job.get("effective_subject_config")
+            if not isinstance(just_in_time_config, dict):
+                raise RuntimeError(
+                    "Pre-SCAIL Qwen reference validation lost the effective "
+                    "subject config."
+                )
+            revalidate_uploaded_qwen_references_before_scail(
+                job_id,
+                just_in_time_job,
+                just_in_time_config,
+                actions,
+            )
+            just_in_time_reference = Path(
+                str(just_in_time_config["actions"][action].get("reference") or "")
+            )
+            if just_in_time_reference != reference_path:
+                raise RuntimeError(
+                    f"Persisted Qwen {action} reference selection changed before SCAIL."
+                )
+        run_cancelable_process(
+            job_id,
+            command,
+            log_path=prepare_log,
+            stage_name=f"{action} SCAIL input preparation",
+            timeout=900,
+        )
+        workflow_path = experiment_dir / "workflow_api.json"
+        manifest_path = experiment_dir / "manifest.json"
+        workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_input_files = manifest.get("input_files")
+        if not isinstance(manifest_input_files, dict):
+            raise RuntimeError(f"SCAIL {action} input manifest is incomplete")
+        pose_identity_mask_video_path = Path(
+            str(manifest_input_files.get("pose_mask_video") or "")
+        )
+        reference_identity_mask_path = Path(
+            str(manifest_input_files.get("reference_mask") or "")
+        )
+        for mask_role, mask_path in (
+            ("pose_mask_video", pose_identity_mask_video_path),
+            ("reference_mask", reference_identity_mask_path),
+        ):
+            if not mask_path.is_file():
+                raise FileNotFoundError(
+                    f"SCAIL {action} {mask_role} is missing: {mask_path}"
+                )
+        pose_identity_mask_video_sha256 = file_sha256(pose_identity_mask_video_path)
+        reference_identity_mask_sha256 = file_sha256(reference_identity_mask_path)
+        manifest["input_files_sha256"] = {
+            "pose_mask_video": pose_identity_mask_video_sha256,
+            "reference_mask": reference_identity_mask_sha256,
+        }
+        manifest["reference_policy"] = reference_policy
+        manifest["reference_source_path"] = str(reference_path)
+        expected_pose_policy = expected_pose_policies.get(action)
+        require_expected_scail_pose_policy(
+            manifest,
+            action,
+            expected_pose_policy,
+        )
+        pose_metadata = manifest.get("pose_metadata")
+        final_video_comparison_scope = select_final_video_fur_surface_comparison_scope(
+            action=action,
+            action_config=action_config,
+            output_format=job.get("output_format"),
+            reference_policy=reference_policy,
+            pose_metadata=(pose_metadata if isinstance(pose_metadata, dict) else None),
+        )
+        write_workflow(job_dir, f"scail_{action}.json", workflow)
+        write_json_atomic(job_dir / f"{action}_prepare_manifest.json", manifest)
+
+        normalized_reference = experiment_dir / "reference_normalized.png"
+        reference_target = job_dir / f"{action}_subject_reference.png"
+        shutil.copy2(normalized_reference, reference_target)
+        append_output(
+            job_id,
+            {
+                "type": "subject_reference",
+                "action": action,
+                "action_label": action_label,
+                "filename": reference_target.name,
+                "width": 512,
+                "height": 512,
+                "transparent": True,
+                "sha256": file_sha256(reference_target),
+                "role": (
+                    "qwen_action_keyframe_reference"
+                    if job.get("subject_source") == "qwen_generated_upload"
+                    else (
+                        "legacy_direct_uploaded_identity_reference"
+                        if job.get("subject_source") == "uploaded_identity_direct_scail"
+                        else "profile_action_reference"
+                    )
+                ),
+                "primary": False,
+            },
+        )
+        prepared_visuals = (
+            (
+                "reference_mask.png",
+                f"{action}_reference_identity_mask.png",
+                "reference_identity_mask",
+                "identity_and_prop_mapping",
+            ),
+            (
+                "pose_first_frame.png",
+                f"{action}_main_case_geometry_guide.png",
+                "main_case_geometry_guide",
+                "motion_pose_prop_camera_only",
+            ),
+            (
+                "pose_mask_first_frame.png",
+                f"{action}_main_case_geometry_mask.png",
+                "main_case_geometry_mask",
+                "driver_identity_and_prop_mapping",
+            ),
+        )
+        for source_name, target_name, output_type, role in prepared_visuals:
+            visual_source = experiment_dir / source_name
+            if not visual_source.is_file():
+                raise FileNotFoundError(
+                    f"SCAIL {action} prepared visual is missing: {visual_source}"
+                )
+            visual_target = job_dir / target_name
+            shutil.copy2(visual_source, visual_target)
+            append_output(
+                job_id,
+                {
+                    "type": output_type,
+                    "action": action,
+                    "action_label": action_label,
+                    "filename": visual_target.name,
+                    "width": 512,
+                    "height": 512,
+                    "sha256": file_sha256(visual_target),
+                    "role": role,
+                    "primary": False,
+                },
+            )
+        scail_reference_policies[action] = reference_policy
+        scail_scene_prop_policies[action] = (
+            "cat_blue_bowl_red_scail_object_mapping"
+            if action == "eating"
+            else "no_scene_prop"
+        )
+        update_job(
+            job_id,
+            scail_reference_policy=dict(scail_reference_policies),
+            scail_scene_prop_policy=dict(scail_scene_prop_policies),
+        )
+
+        update_job(
+            job_id,
+            stage="generating_subject_replacement",
+            progress=action_start + action_span * 0.18,
+        )
+        entry = queue_and_wait(
+            workflow,
+            f"SCAIL subject replacement {action} for {job_id}",
+            timeout=7200,
+            job_id=job_id,
+        )
+        generated_video = first_output(
+            entry,
+            {".mp4"},
+            f"SCAIL {action} subject replacement",
+        )
+        video_target = job_dir / f"{action}_subject_replacement.mp4"
+        shutil.copy2(generated_video, video_target)
+        final_video_fur_surface: dict[str, Any] | None = None
+        fur_surface_config = action_config.get("fur_surface_gate")
+        if isinstance(fur_surface_config, dict) and fur_surface_config.get("enabled"):
+            update_job(
+                job_id,
+                stage="auditing_final_video_fur_surface",
+                progress=action_start + action_span * 0.76,
+            )
+            selected_surface_metrics = job.get("fur_surface_gate_selected_metrics")
+            validated_action_reference_gate = (
+                selected_surface_metrics.get(action)
+                if isinstance(selected_surface_metrics, dict)
+                else None
+            )
+            final_video_fur_surface = evaluate_final_video_fur_surface(
+                video_target,
+                action=action,
+                effective_subject_config=effective_subject_config,
+                comparison_scope=final_video_comparison_scope,
+                validated_action_reference_path=(
+                    reference_path
+                    if final_video_comparison_scope
+                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                    else None
+                ),
+                validated_action_reference_sha256=(
+                    str(action_config.get("reference_sha256") or "")
+                    if final_video_comparison_scope
+                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                    else None
+                ),
+                validated_action_reference_gate=(
+                    validated_action_reference_gate
+                    if final_video_comparison_scope
+                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                    else None
+                ),
+                reference_policy=reference_policy,
+                pose_identity_mask_video_path=(
+                    pose_identity_mask_video_path
+                    if final_video_comparison_scope
+                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                    else None
+                ),
+                pose_identity_mask_video_sha256=(
+                    pose_identity_mask_video_sha256
+                    if final_video_comparison_scope
+                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                    else None
+                ),
+                reference_identity_mask_path=(
+                    reference_identity_mask_path
+                    if final_video_comparison_scope
+                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                    else None
+                ),
+                reference_identity_mask_sha256=(
+                    reference_identity_mask_sha256
+                    if final_video_comparison_scope
+                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                    else None
+                ),
+                grooming_pose_gate_composite_recovery=(
+                    job.get("grooming_pose_gate_composite_recovery")
+                    if (
+                        action == "grooming"
+                        and final_video_comparison_scope
+                        == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                    )
+                    else None
+                ),
+            )
+            final_video_fur_surface_by_action[action] = final_video_fur_surface
+            audit_target = job_dir / f"{action}_final_video_fur_surface.json"
+            write_json_atomic(audit_target, final_video_fur_surface)
+            update_job(
+                job_id,
+                final_video_fur_surface_status={
+                    audit_action: (
+                        "passed" if audit.get("passed") is True else "failed"
+                    )
+                    for audit_action, audit in (
+                        final_video_fur_surface_by_action.items()
+                    )
+                },
+                final_video_fur_surface_quality=dict(final_video_fur_surface_by_action),
+                fur_surface_gate_final_quality={
+                    "scope": "candidate_reference_and_final_video",
+                    "status": (
+                        "passed"
+                        if all(
+                            audit.get("passed") is True
+                            for audit in final_video_fur_surface_by_action.values()
+                        )
+                        else "failed"
+                    ),
+                    "policy": FUR_SURFACE_GATE_POLICY,
+                    "gate_version": FUR_SURFACE_GATE_VERSION,
+                    "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+                    "final_video_policy": FINAL_VIDEO_FUR_AUDIT_POLICY,
+                    "final_video_version": FINAL_VIDEO_FUR_AUDIT_VERSION,
+                    "actions": dict(final_video_fur_surface_by_action),
+                    "final_video_frame_audit": True,
+                },
+            )
+            if final_video_fur_surface.get("passed") is not True:
+                failed_frames = final_video_fur_surface.get("failed_frame_indices")
+                failed_issues = sorted(
+                    {
+                        str(issue)
+                        for frame in final_video_fur_surface.get("frames", [])
+                        if isinstance(frame, dict)
+                        for issue in (
+                            frame.get("decision", {}).get(
+                                "blocking_issues_action_reference_scope"
+                            )
+                            or frame.get("decision", {}).get(
+                                "blocking_issues",
+                                [],
+                            )
+                            if isinstance(frame.get("decision"), dict)
+                            else []
+                        )
+                    }
+                )
+                detail = (
+                    f"frames={failed_frames}; issues={failed_issues}"
+                    if isinstance(failed_frames, list)
+                    else str(final_video_fur_surface.get("error") or "unknown")
+                )
+                raise RuntimeError(
+                    f"{action}_final_video_fur_surface_gate_failed: {detail}"
+                )
+            append_output(
+                job_id,
+                {
+                    "type": "final_video_fur_surface_audit",
+                    "action": action,
+                    "action_label": action_label,
+                    "filename": audit_target.name,
+                    "primary": False,
+                },
+            )
+        video_output = {
+            "type": "subject_replacement_video",
+            "action": action,
+            "action_label": action_label,
+            "filename": video_target.name,
+            "width": 512,
+            "height": 512,
+            "frames": int(effective_subject_config["frames"]),
+            "fps": float(effective_subject_config["fps"]),
+            "duration_seconds": float(effective_subject_config["frames"])
+            / float(effective_subject_config["fps"]),
+            "video_engine": "scail2-14b-fp8",
+            "driving_template": Path(action_config["driving_animation"]).name,
+            "final_video_fur_surface_audit": (
+                f"{action}_final_video_fur_surface.json"
+                if final_video_fur_surface is not None
+                else None
+            ),
+            "primary": job.get("output_format") != "transparent_gif",
+        }
+        if job.get("output_format") != "transparent_gif":
+            append_output(job_id, video_output)
+
+        transparent_metrics: dict[str, Any] | None = None
+        if job.get("output_format") == "transparent_gif":
+            raise_if_cancelled(job_id)
+            update_job(
+                job_id,
+                stage="extracting_transparent_animation",
+                progress=action_start + action_span * 0.82,
+            )
+            guidance_path = Path(manifest["input_files"]["pose_mask_video"])
+            gif_target = job_dir / f"{action}_subject_replacement_transparent_512.gif"
+            transparent_log = job_dir / f"{action}_transparent.log"
+            run_cancelable_process(
+                job_id,
+                [
+                    str(SCAIL_PYTHON),
+                    str(SCAIL_TRANSPARENT_RUNNER),
+                    str(generated_video),
+                    str(guidance_path),
+                    str(gif_target),
+                    "--white-mp4-target",
+                    str(video_target),
+                ],
+                log_path=transparent_log,
+                stage_name=f"{action} transparent GIF extraction",
+                timeout=1800,
+            )
+            transparent_metrics = logged_json(transparent_log)
+            fur_contour_quality: dict[str, Any] | None = None
+            fur_gate = action_config.get("fur_silhouette_gate")
+            if isinstance(fur_gate, dict) and fur_gate.get("enabled"):
+                pose_metadata = manifest.get("pose_metadata")
+                full_driver_pose = isinstance(
+                    pose_metadata, dict
+                ) and uses_full_driver_eating_pose(pose_metadata.get("policy"))
+                absolute_upload_gate = (
+                    fur_gate.get("policy") == UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY
+                )
+                if absolute_upload_gate:
+                    if action == "eating" and not full_driver_pose:
+                        raise RuntimeError(
+                            "eating_fur_contour_gate_failed: full-driver pose "
+                            "policy changed"
+                        )
+                    fur_contour_quality = evaluate_animation_fur_quality(
+                        gif_target,
+                    )
+                    fur_contour_quality["reference_policy"] = reference_policy
+                    fur_contour_quality["gate_policy"] = (
+                        UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY
+                    )
+                elif action == "eating" and full_driver_pose:
+                    fur_contour_quality = evaluate_animation_fur_quality(
+                        gif_target,
+                    )
+                    fur_contour_quality["reference_policy"] = reference_policy
+                elif action == "eating":
+                    baseline_config = action_config.get("fur_contour_baseline")
+                    if not isinstance(baseline_config, dict):
+                        raise RuntimeError(
+                            "eating_fur_contour_gate_failed: frozen baseline is missing"
+                        )
+                    baseline_path = Path(str(baseline_config.get("path") or ""))
+                    if not baseline_path.is_file():
+                        raise FileNotFoundError(
+                            "Frozen eating fur-contour baseline is missing: "
+                            f"{baseline_path}"
+                        )
+                    expected_baseline_sha = str(
+                        baseline_config.get("sha256") or ""
+                    ).strip()
+                    if (
+                        expected_baseline_sha
+                        and file_sha256(baseline_path) != expected_baseline_sha
+                    ):
+                        raise RuntimeError(
+                            "eating_fur_contour_gate_failed: "
+                            "frozen baseline digest changed"
+                        )
+                    fur_contour_quality = compare_fur_contours(
+                        gif_target,
+                        baseline_path,
+                    )
+                transparent_metrics["fur_contour"] = fur_contour_quality
+            write_json_atomic(
+                job_dir / f"{action}_transparent_metrics.json",
+                transparent_metrics,
+            )
+            if (
+                fur_contour_quality is not None
+                and not fur_contour_quality["acceptable"]
+            ):
+                update_job(
+                    job_id,
+                    fur_contour_gate_status="failed",
+                    fur_contour_gate_action=action,
+                    fur_contour_gate_quality=fur_contour_quality,
+                )
+                raise RuntimeError(
+                    "eating_fur_contour_gate_failed: "
+                    + ", ".join(fur_contour_quality["issues"])
+                )
+            if fur_contour_quality is not None:
+                update_job(
+                    job_id,
+                    fur_contour_gate_status="passed",
+                    fur_contour_gate_action=action,
+                    fur_contour_gate_quality=fur_contour_quality,
+                )
+            append_output(job_id, video_output)
+            append_output(
+                job_id,
+                {
+                    "type": "transparent_gif",
+                    "action": action,
+                    "action_label": action_label,
+                    "filename": gif_target.name,
+                    "width": TRANSPARENT_GIF_SIZE,
+                    "height": TRANSPARENT_GIF_SIZE,
+                    "frames": TRANSPARENT_GIF_FRAMES,
+                    "fps": TRANSPARENT_GIF_FPS,
+                    "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                    "transparent": True,
+                    "video_engine": "scail2-14b-fp8",
+                    "driving_template": Path(action_config["driving_animation"]).name,
+                    "primary": True,
+                },
+            )
+        results.append(
+            {
+                "action": action,
+                "action_label": action_label,
+                "reference": str(reference_path),
+                "reference_sha256": file_sha256(reference_path),
+                "driving_template": str(action_config["driving_animation"]),
+                "effective_seed": int(action_config["effective_seed"]),
+                "effective_pose_strength": float(action_config["pose_strength"]),
+                "video": video_target.name,
+                "transparent_gif": (
+                    f"{action}_subject_replacement_transparent_512.gif"
+                    if transparent_metrics is not None
+                    else None
+                ),
+                "transparent_metrics": transparent_metrics,
+                "final_video_fur_surface": final_video_fur_surface,
+            }
+        )
+        update_job(
+            job_id,
+            progress=action_start + action_span,
+            subject_replacement_results=results,
+        )
+
+    raise_if_cancelled(job_id)
+    free_comfy_models()
+    update_job(
+        job_id,
+        status="completed",
+        stage="completed",
+        progress=100,
+        current_action=None,
+        current_action_label=None,
+        current_action_index=None,
+        subject_replacement_results=results,
+        finished_at=utc_now(),
+    )
+
+
+def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
+    raise_if_cancelled(job_id)
+    with JOBS_LOCK:
+        job = dict(JOBS[job_id])
+    if job.get("generation_mode") == "subject_replacement" and not force_qwen_reference:
+        run_subject_replacement_job(job_id)
+        return
+    job_dir = OUTPUT_ROOT / job_id
+    poses: list[str] = list(
+        job.get("qwen_reference_poses")
+        if force_qwen_reference
+        else (job.get("poses_en") or job["poses"])
+    )
+    effective_prompt = str(
+        job.get("qwen_reference_prompt_en")
+        if force_qwen_reference
+        else (job.get("prompt_en") or job["prompt"])
+    )
+    profile_fur_lock = str(job.get("subject_profile_fur_lock") or "").strip()
+    profile_fur_negative = str(job.get("subject_profile_fur_negative") or "").strip()
+    width, height = (
+        (TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE)
+        if force_qwen_reference
+        else RESOLUTIONS[job["resolution"]]
+    )
+    transparent_gif = (
+        True
+        if force_qwen_reference
+        else job.get("output_format", "mp4") == "transparent_gif"
+    )
+    skip_video = True if force_qwen_reference else bool(job.get("skip_video", False))
+    request_kind = (
+        "video"
+        if force_qwen_reference
+        else str(job.get("request_kind") or "video").strip().lower()
+    )
     image_request = request_kind == "image"
     suppress_builtin_style = bool(
         job.get("image_profile_lora_source")
@@ -3942,14 +16294,50 @@ def run_job(job_id: str) -> None:
     comfy_relative_dir = Path("local_video_api") / job_id
     comfy_input_dir = COMFY_INPUT / comfy_relative_dir
     comfy_input_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(job_dir / "input.png", comfy_input_dir / "input.png")
+    upload_integrity = (
+        verify_uploaded_identity_submission(job, job_dir)
+        if force_qwen_reference
+        else None
+    )
+    canonical_identity_reference_input_names: list[str] = []
+    comfy_identity_views: dict[str, dict[str, Any]] = {}
+    if upload_integrity is not None:
+        for role in upload_integrity["view_roles"]:
+            view = upload_integrity["views"][role]
+            comfy_view_path = comfy_input_dir / view["input_filename"]
+            shutil.copy2(view["input_path"], comfy_view_path)
+            if file_sha256(comfy_view_path) != view["input_sha256"]:
+                raise RuntimeError(
+                    f"Uploaded identity {role} ComfyUI copy failed its "
+                    "submission-time digest check."
+                )
+            comfy_identity_views[role] = {
+                "path": str(comfy_view_path),
+                "sha256": view["input_sha256"],
+                "qwen_input": f"image{len(comfy_identity_views) + 1}",
+            }
+            if role != "front":
+                canonical_identity_reference_input_names.append(
+                    (comfy_relative_dir / view["input_filename"]).as_posix()
+                )
+        source_input_path = upload_integrity["input_path"]
+    else:
+        source_input_path = job_dir / "input.png"
+        shutil.copy2(source_input_path, comfy_input_dir / "input.png")
+    if upload_integrity is not None:
+        update_job(
+            job_id,
+            uploaded_identity_comfy_views=comfy_identity_views,
+            uploaded_identity_comfy_view_count=len(comfy_identity_views),
+            uploaded_identity_comfy_copy_verified=True,
+        )
 
     update_job(
         job_id,
         status="running",
         stage="waiting_for_gpu",
         progress=1,
-        started_at=utc_now(),
+        started_at=job.get("started_at") or utc_now(),
         error=None,
     )
     raise_if_cancelled(job_id)
@@ -3966,7 +16354,12 @@ def run_job(job_id: str) -> None:
         cfg=qwen_cfg,
         denoise=qwen_denoise,
         user_loras=canonical_user_loras,
-        lock_strengths=bool(job.get("lock_retry_lora_strengths", False)),
+        lock_strengths=bool(
+            job.get(
+                "lock_canonical_retry_lora_strengths",
+                job.get("lock_retry_lora_strengths", False),
+            )
+        ),
     )
     pose_profiles = qwen_pose_profiles(
         user_lora=(user_loras[0]["model_name"] if user_loras else None),
@@ -3978,21 +16371,116 @@ def run_job(job_id: str) -> None:
         user_loras=user_loras,
         first_total_cap=job.get("pose_user_lora_first_total_cap"),
         first_per_lora_cap=job.get("pose_user_lora_first_per_lora_cap"),
-        lock_strengths=bool(job.get("lock_retry_lora_strengths", False)),
+        lock_strengths=bool(
+            job.get(
+                "lock_pose_retry_lora_strengths",
+                job.get("lock_retry_lora_strengths", False),
+            )
+        ),
+    )
+    initial_pose_policy_default = str(
+        job.get("pose_identity_input_policy") or POSE_IDENTITY_INPUT_POLICY_CANONICAL
+    ).strip()
+    initial_pose_policy_overrides = job.get("pose_identity_input_policies")
+    if not isinstance(initial_pose_policy_overrides, dict):
+        initial_pose_policy_overrides = {}
+    initial_pose_policies = [
+        str(
+            initial_pose_policy_overrides.get(
+                action_key(pose),
+                initial_pose_policy_default,
+            )
+        ).strip()
+        for pose in poses
+    ]
+    canonical_action_lora_lock = bool(
+        force_qwen_reference
+        and initial_pose_policies
+        and all(
+            policy == POSE_IDENTITY_INPUT_POLICY_CANONICAL
+            for policy in initial_pose_policies
+        )
+    )
+    grooming_masked_style_policy = bool(
+        force_qwen_reference
+        and POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
+        in initial_pose_policies
+    )
+    initial_pose_user_loras_disabled = bool(
+        force_qwen_reference
+        and initial_pose_policies
+        and all(
+            policy
+            in {
+                POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+                POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+                POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
+            }
+            for policy in initial_pose_policies
+        )
+    )
+    initial_effective_pose_user_loras = (
+        [] if initial_pose_user_loras_disabled else pose_profiles[0]["user_loras"]
+    )
+    initial_effective_pose_lora_scale = (
+        0.0
+        if initial_pose_user_loras_disabled
+        else pose_profiles[0]["user_lora_strength_scale"]
     )
     update_job(
         job_id,
         requested_user_loras=user_loras,
-        effective_canonical_user_loras=recovery_profiles[0]["user_loras"],
-        canonical_user_lora_strength_scale=canonical_lora_scale,
+        effective_canonical_user_loras=(
+            []
+            if (
+                force_qwen_reference
+                and job.get("main_case_raw_identity_chain")
+                and job.get("bypass_generated_canonical")
+            )
+            else recovery_profiles[0]["user_loras"]
+        ),
+        canonical_user_lora_strength_scale=(
+            None
+            if (
+                force_qwen_reference
+                and job.get("main_case_raw_identity_chain")
+                and job.get("bypass_generated_canonical")
+            )
+            else canonical_lora_scale
+        ),
         initial_pose_user_loras=pose_profiles[0]["user_loras"],
         initial_pose_user_lora_strength_scale=pose_profiles[0][
             "user_lora_strength_scale"
         ],
-        effective_pose_user_loras=pose_profiles[0]["user_loras"],
-        pose_user_lora_strength_scale=pose_profiles[0]["user_lora_strength_scale"],
-        effective_pose_user_loras_scope="initial_profile_only; use effective_pose_lora_attempts for selected per-pose settings",
+        effective_pose_user_loras=initial_effective_pose_user_loras,
+        pose_user_lora_strength_scale=initial_effective_pose_lora_scale,
+        effective_pose_user_loras_scope=(
+            "grooming_attempts_1_2_lightning_only; attempt_3_masked_pet3d; "
+            "use effective_pose_lora_attempts for selected per-pose settings"
+            if grooming_masked_style_policy
+            else (
+                "canonical_action_lightning_only; use effective_pose_lora_attempts "
+                "for selected per-pose settings"
+                if canonical_action_lora_lock
+                else (
+                    "geometry_first_action_user_loras_disabled; use "
+                    "effective_pose_lora_attempts for selected per-pose settings"
+                    if initial_pose_user_loras_disabled
+                    else "initial_profile_only; use effective_pose_lora_attempts for selected per-pose settings"
+                )
+            )
+        ),
         pose_lora_policy={
+            "canonical_action_override": (
+                "qwen_lightning_only_after_canonical_identity_style_lock_v1"
+                if canonical_action_lora_lock
+                else None
+            ),
+            "grooming_repair_override": (
+                "qwen_lightning_plus_masked_pet3d_surface_prior_v1"
+                if grooming_masked_style_policy
+                else None
+            ),
             "attempts": [
                 {
                     "profile": profile["name"],
@@ -4001,21 +16489,273 @@ def run_job(job_id: str) -> None:
                     "strength_scale": profile["user_lora_strength_scale"],
                 }
                 for profile in pose_profiles
-            ]
+            ],
         },
         effective_pose_lora_attempts=[],
         pose_similarity_warning_count=0,
         pose_identity_palette_warning_count=0,
     )
     qwen_input_name = (comfy_relative_dir / "input.png").as_posix()
+    uploaded_qwen_input_name = qwen_input_name
+    pose_identity_input_policy = str(
+        job.get("pose_identity_input_policy") or POSE_IDENTITY_INPUT_POLICY_CANONICAL
+    ).strip()
+    configured_pose_identity_input_policies = job.get("pose_identity_input_policies")
+    if configured_pose_identity_input_policies is None:
+        configured_pose_identity_input_policies = {}
+    if not isinstance(configured_pose_identity_input_policies, dict):
+        raise RuntimeError("Persisted per-action pose identity policies are invalid.")
+    if pose_identity_input_policy not in {
+        POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+        POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,
+        POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+        POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
+    }:
+        raise RuntimeError(
+            "Persisted pose identity input policy is unsupported: "
+            f"{pose_identity_input_policy}"
+        )
+    if (
+        pose_identity_input_policy
+        in {
+            POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,
+            POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+            POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
+        }
+        and not force_qwen_reference
+    ):
+        raise RuntimeError(
+            "The selected secondary-image pose identity policy is reserved for "
+            "the frozen subject-replacement reference pipeline."
+        )
+    geometry_first_configured = (
+        pose_identity_input_policy == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
+    )
+    grooming_geometry_canonical_configured = (
+        pose_identity_input_policy
+        == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
+    )
+    if geometry_first_configured and any(
+        action_key(pose) not in {"eating", "grooming"} for pose in poses
+    ):
+        raise RuntimeError(
+            "Main_case geometry-first identity supports only eating and grooming."
+        )
+    for (
+        configured_action,
+        configured_policy,
+    ) in configured_pose_identity_input_policies.items():
+        normalized_configured_policy = str(configured_policy).strip()
+        if normalized_configured_policy not in {
+            POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+            POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,
+            POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+            POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
+        }:
+            raise RuntimeError(
+                "Persisted pose identity input policy is unsupported for "
+                f"{configured_action!r}: {configured_policy!r}"
+            )
+        if (
+            normalized_configured_policy
+            in {
+                POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,
+                POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+                POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
+            }
+            and not force_qwen_reference
+        ):
+            raise RuntimeError(
+                "The selected per-action secondary-image identity policy is "
+                "reserved for the frozen subject-replacement reference pipeline."
+            )
+        if (
+            normalized_configured_policy
+            == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
+        ):
+            geometry_first_configured = True
+            if action_key(str(configured_action)) not in {"eating", "grooming"}:
+                raise RuntimeError(
+                    "Main_case geometry-first identity is unsupported for "
+                    f"action; refusing configured action {configured_action!r}."
+                )
+        if (
+            normalized_configured_policy
+            == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
+        ):
+            grooming_geometry_canonical_configured = True
+            if action_key(str(configured_action)) != "grooming":
+                raise RuntimeError(
+                    "Canonical-identity geometry-first policy is supported only "
+                    f"for grooming; refusing configured action {configured_action!r}."
+                )
+    main_case_raw_identity_chain = bool(job.get("main_case_raw_identity_chain"))
+    bypass_generated_canonical = bool(
+        force_qwen_reference
+        and main_case_raw_identity_chain
+        and job.get("bypass_generated_canonical")
+    )
+    if geometry_first_configured and not bypass_generated_canonical:
+        raise RuntimeError(
+            "Main_case geometry-first policy requires the original uploaded "
+            "identity chain and generated-canonical bypass."
+        )
+    if geometry_first_configured:
+        if not QWEN_STYLE_LORA:
+            raise RuntimeError(
+                "Main_case geometry-first uploaded identity requires the dedicated "
+                "QWEN_STYLE_LORA recovery model."
+            )
+        if "pet3d" not in Path(QWEN_STYLE_LORA).name.casefold():
+            raise RuntimeError(
+                "Main_case geometry-first uploaded identity requires a dedicated pet3d "
+                "QWEN_STYLE_LORA recovery model."
+            )
+        if QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH <= 0.0:
+            raise RuntimeError(
+                "Main_case geometry-first uploaded identity requires a positive pet3d "
+                "recovery strength."
+            )
+    if grooming_geometry_canonical_configured:
+        if not QWEN_STYLE_LORA:
+            raise RuntimeError(
+                "Canonical-identity grooming repair requires the dedicated "
+                "QWEN_STYLE_LORA surface model."
+            )
+        if "pet3d" not in Path(QWEN_STYLE_LORA).name.casefold():
+            raise RuntimeError(
+                "Canonical-identity grooming repair requires a dedicated pet3d "
+                "QWEN_STYLE_LORA surface model."
+            )
+        if GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH <= 0.0:
+            raise RuntimeError(
+                "Canonical-identity grooming repair requires a positive masked "
+                "Pet3D surface-prior strength."
+            )
+    if bypass_generated_canonical:
+        unsupported_bypass_actions = [
+            action_key(pose)
+            for pose in poses
+            if str(
+                configured_pose_identity_input_policies.get(
+                    action_key(pose),
+                    pose_identity_input_policy,
+                )
+            ).strip()
+            != POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
+        ]
+        if unsupported_bypass_actions:
+            raise RuntimeError(
+                "Generated canonical bypass requires every action to use the "
+                "Main_case Image 1 plus uploaded Image 2 policy: "
+                + ", ".join(unsupported_bypass_actions)
+            )
+        expected_uploaded_identity_sha256 = str(
+            job.get("uploaded_identity_input_sha256") or ""
+        ).strip()
+        uploaded_identity_path = job_dir / "input.png"
+        comfy_uploaded_identity_path = comfy_input_dir / "input.png"
+        if not expected_uploaded_identity_sha256:
+            raise RuntimeError(
+                "Main_case uploaded identity input lacks its persisted digest."
+            )
+        if (
+            not uploaded_identity_path.is_file()
+            or file_sha256(uploaded_identity_path) != expected_uploaded_identity_sha256
+            or not comfy_uploaded_identity_path.is_file()
+            or file_sha256(comfy_uploaded_identity_path)
+            != expected_uploaded_identity_sha256
+        ):
+            raise RuntimeError(
+                "Main_case uploaded identity input is missing or its digest changed."
+            )
     identity_palette_guard = bool(job.get("identity_palette_guard", False))
     identity_source_path = job_dir / "input_identity_source.png"
-    if not identity_source_path.is_file():
+    if force_qwen_reference:
+        if upload_integrity is None:
+            raise RuntimeError("Uploaded identity integrity state is unavailable.")
+        identity_source_path = upload_integrity["source_path"]
+    elif not identity_source_path.is_file():
         identity_source_path = job_dir / "input.png"
+    if bypass_generated_canonical:
+        expected_identity_source_sha256 = str(
+            job.get("uploaded_identity_source_sha256") or ""
+        ).strip()
+        if not expected_identity_source_sha256:
+            raise RuntimeError(
+                "Main_case uploaded identity source lacks its persisted digest."
+            )
+        if (
+            not identity_source_path.is_file()
+            or file_sha256(identity_source_path) != expected_identity_source_sha256
+        ):
+            raise RuntimeError(
+                "Main_case uploaded identity source is missing or its digest changed."
+            )
+    source_identity_view_palettes: dict[str, dict[str, Any]] = {}
+    source_identity_view_upper_body_palettes: dict[str, dict[str, Any]] = {}
+    if identity_palette_guard:
+        identity_views = (
+            upload_integrity["views"]
+            if upload_integrity is not None
+            else {
+                "front": {
+                    "source_path": identity_source_path,
+                }
+            }
+        )
+        cached_view_audit = job.get("uploaded_identity_view_audit")
+        cached_palettes = (
+            cached_view_audit.get("palettes")
+            if isinstance(cached_view_audit, dict)
+            and cached_view_audit.get("acceptable") is True
+            else None
+        )
+        cached_upper_body_palettes = (
+            cached_view_audit.get("upper_body_palettes")
+            if isinstance(cached_view_audit, dict)
+            and cached_view_audit.get("acceptable") is True
+            else None
+        )
+        if (
+            isinstance(cached_palettes, dict)
+            and isinstance(cached_upper_body_palettes, dict)
+            and set(cached_palettes) == set(identity_views)
+            and set(cached_upper_body_palettes) == set(identity_views)
+        ):
+            source_identity_view_palettes = {
+                role: dict(cached_palettes[role]) for role in identity_views
+            }
+            source_identity_view_upper_body_palettes = {
+                role: dict(cached_upper_body_palettes[role]) for role in identity_views
+            }
+        else:
+            source_identity_view_palettes = {
+                role: identity_palette_signature(Path(view["source_path"]))
+                for role, view in identity_views.items()
+            }
+            source_identity_view_upper_body_palettes = {
+                role: identity_palette_signature(
+                    Path(view["source_path"]),
+                    exclude_bottom_fraction=(
+                        BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
+                    ),
+                )
+                for role, view in identity_views.items()
+            }
     source_identity_palette = (
-        identity_palette_signature(identity_source_path)
-        if identity_palette_guard
+        aggregate_identity_palette_signatures(source_identity_view_palettes)
+        if source_identity_view_palettes
         else None
+    )
+    source_identity_upper_body_palette = (
+        aggregate_identity_palette_signatures(source_identity_view_upper_body_palettes)
+        if source_identity_view_upper_body_palettes
+        else None
+    )
+    canonical_source_upper_body_palette = canonical_upper_body_palette_reference(
+        source_identity_view_upper_body_palettes,
+        source_identity_upper_body_palette,
     )
     source_palette_prompt = (
         identity_palette_prompt(source_identity_palette)
@@ -4031,10 +16771,24 @@ def run_job(job_id: str) -> None:
         update_job(
             job_id,
             source_identity_palette=source_identity_palette,
+            source_identity_upper_body_palette=(source_identity_upper_body_palette),
+            source_identity_view_palettes=source_identity_view_palettes,
+            source_identity_view_upper_body_palettes=(
+                source_identity_view_upper_body_palettes
+            ),
+            canonical_source_upper_body_palette=(canonical_source_upper_body_palette),
+            canonical_upper_body_palette_reference_policy=(
+                CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY
+            ),
+            source_identity_palette_aggregation=(
+                "equal_view_mean_v1"
+                if len(source_identity_view_palettes) > 1
+                else "single_front_view"
+            ),
             identity_palette_prompt=source_palette_prompt,
         )
     canonical_similarity_reference: Path | None = None
-    if transparent_gif:
+    if transparent_gif and not bypass_generated_canonical:
         update_job(
             job_id,
             stage="generating_cartoon_reference",
@@ -4045,6 +16799,8 @@ def run_job(job_id: str) -> None:
         cartoon_negative_prompt = (
             QWEN_NEGATIVE + ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
         )
+        if profile_fur_negative:
+            cartoon_negative_prompt += ", " + profile_fur_negative
         if source_palette_negative:
             cartoon_negative_prompt += ", " + source_palette_negative
         cartoon_attempts: list[dict[str, Any]] = []
@@ -4073,7 +16829,13 @@ def run_job(job_id: str) -> None:
             cartoon_reference_prompt = build_cartoon_reference_prompt(
                 prompt_source,
                 palette_lock=palette_lock,
+                fur_lock=profile_fur_lock,
             )
+            if (
+                canonical_identity_reference_input_names
+                and QWEN_MULTI_VIEW_CANONICAL_PROMPT not in cartoon_reference_prompt
+            ):
+                cartoon_reference_prompt += "\n\n" + QWEN_MULTI_VIEW_CANONICAL_PROMPT
             cartoon_prefix = (
                 f"local_video_api/{job_id}/qwen_cartoon_reference_attempt_{attempt:02d}"
             )
@@ -4091,6 +16853,9 @@ def run_job(job_id: str) -> None:
                 cfg=profile["cfg"],
                 denoise=profile["denoise"],
                 suppress_builtin_style=suppress_builtin_style,
+                additional_reference_input_names=(
+                    canonical_identity_reference_input_names
+                ),
             )
             cartoon_workflows.append(cartoon_workflow)
             write_workflow(
@@ -4117,12 +16882,79 @@ def run_job(job_id: str) -> None:
                     format="PNG",
                     optimize=True,
                 )
-            candidate_identity_palette = (
+            raw_candidate_identity_palette = (
                 identity_palette_signature(attempt_reference)
                 if source_identity_palette is not None
                 else None
             )
-            palette_quality = (
+            raw_candidate_upper_body_identity_palette = (
+                identity_palette_signature(
+                    attempt_reference,
+                    exclude_bottom_fraction=(
+                        BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
+                    ),
+                )
+                if canonical_source_upper_body_palette is not None
+                else None
+            )
+            attempt_cutout = (
+                job_dir / f"cartoon_reference_cutout_attempt_{attempt:02d}.png"
+            )
+            try:
+                chroma_metrics = evaluate_chroma_cutout(
+                    attempt_reference,
+                    attempt_cutout,
+                    validate_canonical_interior=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - image requests may return the saved raw image
+                if not image_request:
+                    raise
+                chroma_metrics = {
+                    "acceptable": False,
+                    "issues": ["background_removal_exception"],
+                    "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                }
+            if chroma_metrics.get("acceptable") and attempt_cutout.is_file():
+                try:
+                    chroma_metrics["identity_chroma_spill_cleanup"] = (
+                        neutralize_uploaded_identity_chroma_spill(
+                            attempt_cutout,
+                            source_identity_palette,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - retry candidate fail closed
+                    chroma_metrics = {
+                        **chroma_metrics,
+                        "acceptable": False,
+                        "issues": list(
+                            dict.fromkeys(
+                                [
+                                    *[
+                                        str(issue)
+                                        for issue in chroma_metrics.get(
+                                            "issues",
+                                            [],
+                                        )
+                                    ],
+                                    "identity_chroma_spill_cleanup_failed",
+                                ]
+                            )
+                        ),
+                        "identity_chroma_spill_cleanup": {
+                            "policy": UPLOADED_IDENTITY_CHROMA_SPILL_POLICY,
+                            "applied": False,
+                            "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                        },
+                    }
+            palette_input_path = (
+                attempt_cutout if attempt_cutout.is_file() else attempt_reference
+            )
+            candidate_identity_palette = (
+                identity_palette_signature(palette_input_path)
+                if source_identity_palette is not None
+                else None
+            )
+            primary_palette_quality = (
                 identity_palette_quality(
                     source_identity_palette,
                     candidate_identity_palette,
@@ -4133,30 +16965,57 @@ def run_job(job_id: str) -> None:
                 )
                 else None
             )
-            attempt_cutout = (
-                job_dir / f"cartoon_reference_cutout_attempt_{attempt:02d}.png"
-            )
-            try:
-                chroma_metrics = evaluate_chroma_cutout(
-                    attempt_reference, attempt_cutout
+            candidate_upper_body_identity_palette = (
+                identity_palette_signature(
+                    palette_input_path,
+                    exclude_bottom_fraction=(
+                        BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
+                    ),
                 )
-            except Exception as exc:  # noqa: BLE001 - image requests may return the saved raw image
-                if not image_request:
-                    raise
-                chroma_metrics = {
-                    "acceptable": False,
-                    "issues": ["background_removal_exception"],
-                    "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
-                }
+                if canonical_source_upper_body_palette is not None
+                else None
+            )
+            upper_body_palette_quality = (
+                identity_palette_quality(
+                    canonical_source_upper_body_palette,
+                    candidate_upper_body_identity_palette,
+                )
+                if (
+                    canonical_source_upper_body_palette is not None
+                    and candidate_upper_body_identity_palette is not None
+                )
+                else None
+            )
+            palette_quality = canonical_identity_palette_quality(
+                primary_palette_quality,
+                upper_body_palette_quality,
+            )
             cartoon_quality = (
                 pose_cutout_quality(attempt_cutout, "canonical character")
                 if chroma_metrics["acceptable"]
                 else None
             )
+            canonical_quality_blocking_issues = (
+                semantic_quality_blocking_issues(cartoon_quality)
+                if cartoon_quality is not None
+                else []
+            )
+            if cartoon_quality is not None:
+                cartoon_quality = {
+                    **cartoon_quality,
+                    "blocking_issues": canonical_quality_blocking_issues,
+                    "acceptable_after_normalization": not (
+                        canonical_quality_blocking_issues
+                    ),
+                    "framing_recovery_required": bool(
+                        cartoon_quality.get("issues")
+                        and not canonical_quality_blocking_issues
+                    ),
+                }
             attempt_acceptable = bool(
                 chroma_metrics["acceptable"]
                 and cartoon_quality
-                and cartoon_quality["acceptable"]
+                and cartoon_quality["acceptable_after_normalization"]
                 and (palette_quality is None or palette_quality["acceptable"])
             )
             record = {
@@ -4183,7 +17042,15 @@ def run_job(job_id: str) -> None:
                 "chroma": chroma_metrics,
                 "quality": cartoon_quality,
                 "identity_palette": palette_quality,
+                "identity_palette_input": palette_input_path.name,
+                "raw_candidate_identity_palette": (raw_candidate_identity_palette),
+                "raw_candidate_upper_body_identity_palette": (
+                    raw_candidate_upper_body_identity_palette
+                ),
                 "candidate_identity_palette": candidate_identity_palette,
+                "candidate_upper_body_identity_palette": (
+                    candidate_upper_body_identity_palette
+                ),
             }
             cartoon_attempts.append(record)
             if attempt_acceptable:
@@ -4353,6 +17220,65 @@ def run_job(job_id: str) -> None:
                     job_id,
                 )
             else:
+                chroma_metrics["identity_chroma_spill_cleanup"] = (
+                    neutralize_uploaded_identity_chroma_spill(
+                        fallback_cutout,
+                        source_identity_palette,
+                    )
+                )
+                fallback_candidate_palette = (
+                    identity_palette_signature(fallback_cutout)
+                    if source_identity_palette is not None
+                    else None
+                )
+                fallback_upper_body_candidate_palette = (
+                    identity_palette_signature(
+                        fallback_cutout,
+                        exclude_bottom_fraction=(
+                            BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
+                        ),
+                    )
+                    if canonical_source_upper_body_palette is not None
+                    else None
+                )
+                fallback_primary_quality = (
+                    identity_palette_quality(
+                        source_identity_palette,
+                        fallback_candidate_palette,
+                    )
+                    if (
+                        source_identity_palette is not None
+                        and fallback_candidate_palette is not None
+                    )
+                    else None
+                )
+                fallback_upper_quality = (
+                    identity_palette_quality(
+                        canonical_source_upper_body_palette,
+                        fallback_upper_body_candidate_palette,
+                    )
+                    if (
+                        canonical_source_upper_body_palette is not None
+                        and fallback_upper_body_candidate_palette is not None
+                    )
+                    else None
+                )
+                fallback_palette_quality = canonical_identity_palette_quality(
+                    fallback_primary_quality,
+                    fallback_upper_quality,
+                )
+                if (
+                    fallback_palette_quality is not None
+                    and fallback_palette_quality.get("acceptable") is not True
+                ):
+                    raise RuntimeError(
+                        "Canonical identity palette remained invalid after "
+                        "semantic matte and identity-aware chroma cleanup: "
+                        + ", ".join(
+                            str(issue)
+                            for issue in fallback_palette_quality.get("issues", [])
+                        )
+                    )
                 with Image.open(fallback_green) as recovered_image:
                     cartoon_size = recovered_image.size
                 selected_cartoon = {
@@ -4363,9 +17289,17 @@ def run_job(job_id: str) -> None:
                     "cutout": fallback_cutout.name,
                     "settings": fallback_record["settings"],
                     "chroma": chroma_metrics,
-                    "identity_palette": fallback_record.get("identity_palette"),
-                    "candidate_identity_palette": fallback_record.get(
-                        "candidate_identity_palette"
+                    "identity_palette": fallback_palette_quality,
+                    "identity_palette_input": fallback_cutout.name,
+                    "raw_candidate_identity_palette": fallback_record.get(
+                        "raw_candidate_identity_palette"
+                    ),
+                    "raw_candidate_upper_body_identity_palette": fallback_record.get(
+                        "raw_candidate_upper_body_identity_palette"
+                    ),
+                    "candidate_identity_palette": fallback_candidate_palette,
+                    "candidate_upper_body_identity_palette": (
+                        fallback_upper_body_candidate_palette
                     ),
                     "raw_path": fallback_green,
                     "cutout_path": fallback_cutout,
@@ -4385,8 +17319,22 @@ def run_job(job_id: str) -> None:
                         "settings": selected_cartoon["settings"],
                         "chroma": selected_cartoon["chroma"],
                         "identity_palette": selected_cartoon.get("identity_palette"),
+                        "identity_palette_input": selected_cartoon.get(
+                            "identity_palette_input"
+                        ),
+                        "raw_candidate_identity_palette": selected_cartoon.get(
+                            "raw_candidate_identity_palette"
+                        ),
+                        "raw_candidate_upper_body_identity_palette": (
+                            selected_cartoon.get(
+                                "raw_candidate_upper_body_identity_palette"
+                            )
+                        ),
                         "candidate_identity_palette": selected_cartoon.get(
                             "candidate_identity_palette"
+                        ),
+                        "candidate_upper_body_identity_palette": selected_cartoon.get(
+                            "candidate_upper_body_identity_palette"
                         ),
                     }
                 )
@@ -4411,12 +17359,13 @@ def run_job(job_id: str) -> None:
                 prepare_landscape_keyframe(
                     selected_cartoon["cutout_path"],
                     cartoon_reference,
-                    tuple(selected_cartoon["size"]),
+                    (width, height),
                     background_rgb=(0, 255, 0),
                 )
                 normalized_chroma = evaluate_chroma_cutout(
                     cartoon_reference,
                     cartoon_transparent,
+                    validate_canonical_interior=True,
                 )
                 if not normalized_chroma["acceptable"]:
                     raise RuntimeError(
@@ -4470,16 +17419,47 @@ def run_job(job_id: str) -> None:
             selected_cartoon["workflow"],
         )
         write_json_atomic(
-            job_dir / "workflows" / "qwen_cartoon_reference_quality.json",
+            job_dir / "workflows" / "uploaded_identity_anchor_quality.json",
             {
                 "selected_attempt": selected_cartoon["attempt"],
                 "selected_profile": selected_cartoon["profile"],
                 "selected_source_chroma": selected_cartoon["chroma"],
                 "selected_normalized_chroma": normalized_chroma,
                 "source_identity_palette": source_identity_palette,
+                "source_identity_upper_body_palette": (
+                    source_identity_upper_body_palette
+                ),
+                "canonical_source_upper_body_palette": (
+                    canonical_source_upper_body_palette
+                ),
+                "canonical_upper_body_palette_reference_policy": (
+                    CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY
+                ),
+                "source_identity_view_palettes": source_identity_view_palettes,
+                "source_identity_view_upper_body_palettes": (
+                    source_identity_view_upper_body_palettes
+                ),
+                "source_identity_palette_aggregation": (
+                    "equal_view_mean_v1"
+                    if len(source_identity_view_palettes) > 1
+                    else "single_front_view"
+                ),
+                "canonical_identity_reference_inputs": (comfy_identity_views),
                 "selected_identity_palette": selected_cartoon.get("identity_palette"),
+                "selected_identity_palette_input": selected_cartoon.get(
+                    "identity_palette_input"
+                ),
+                "selected_raw_candidate_identity_palette": selected_cartoon.get(
+                    "raw_candidate_identity_palette"
+                ),
+                "selected_raw_candidate_upper_body_identity_palette": (
+                    selected_cartoon.get("raw_candidate_upper_body_identity_palette")
+                ),
                 "selected_candidate_identity_palette": selected_cartoon.get(
                     "candidate_identity_palette"
+                ),
+                "selected_candidate_upper_body_identity_palette": selected_cartoon.get(
+                    "candidate_upper_body_identity_palette"
                 ),
                 "transparent": cartoon_is_transparent,
                 "background_removal_failed": selected_cartoon.get(
@@ -4505,6 +17485,9 @@ def run_job(job_id: str) -> None:
             effective_canonical_identity_palette=selected_cartoon.get(
                 "identity_palette"
             ),
+            canonical_identity_palette_input=selected_cartoon.get(
+                "identity_palette_input"
+            ),
             canonical_identity_palette_verdict=canonical_palette_audit[
                 "identity_palette_verdict"
             ],
@@ -4514,8 +17497,16 @@ def run_job(job_id: str) -> None:
             {
                 "type": "cartoon_reference",
                 "filename": cartoon_output.name,
-                "width": selected_cartoon["size"][0],
-                "height": selected_cartoon["size"][1],
+                "width": (
+                    TRANSPARENT_GIF_SIZE
+                    if cartoon_is_transparent
+                    else selected_cartoon["size"][0]
+                ),
+                "height": (
+                    TRANSPARENT_GIF_SIZE
+                    if cartoon_is_transparent
+                    else selected_cartoon["size"][1]
+                ),
                 "transparent": cartoon_is_transparent,
                 "background_removal_failed": selected_cartoon.get(
                     "background_removal_failed", False
@@ -4536,13 +17527,103 @@ def run_job(job_id: str) -> None:
         )
         comfy_cartoon_reference = comfy_input_dir / cartoon_reference.name
         shutil.copy2(cartoon_reference, comfy_cartoon_reference)
+        canonical_qwen_image1_sha256 = file_sha256(cartoon_reference)
+        if file_sha256(comfy_cartoon_reference) != canonical_qwen_image1_sha256:
+            raise RuntimeError(
+                "Qwen full-body canonical ComfyUI Image 1 copy failed its digest check."
+            )
+        update_job(
+            job_id,
+            canonical_qwen_image1_path=str(cartoon_reference),
+            canonical_qwen_image1_sha256=canonical_qwen_image1_sha256,
+            canonical_qwen_image1_comfy_path=str(comfy_cartoon_reference),
+            canonical_qwen_image1_comfy_sha256=canonical_qwen_image1_sha256,
+            canonical_qwen_image1_role=("normalized_green_full_body_image1_and_latent"),
+            canonical_public_reference_path=str(cartoon_output),
+            canonical_public_reference_sha256=file_sha256(cartoon_output),
+            canonical_public_reference_role=(
+                "normalized_transparent_full_body_reference"
+                if cartoon_is_transparent
+                else "opaque_full_body_reference"
+            ),
+        )
         qwen_input_name = (comfy_relative_dir / cartoon_reference.name).as_posix()
         canonical_similarity_reference = cartoon_reference
+    elif transparent_gif:
+        canonical_similarity_reference = identity_source_path
+        source_self_quality = (
+            canonical_identity_palette_quality(
+                identity_palette_quality(
+                    source_identity_palette,
+                    source_identity_palette,
+                ),
+                identity_palette_quality(
+                    source_identity_upper_body_palette,
+                    source_identity_upper_body_palette,
+                ),
+            )
+            if (
+                source_identity_palette is not None
+                and source_identity_upper_body_palette is not None
+            )
+            else None
+        )
+        canonical_palette_audit = identity_palette_audit(
+            identity_palette_guard,
+            source_self_quality,
+        )
+        write_json_atomic(
+            job_dir / "workflows" / "qwen_cartoon_reference_quality.json",
+            {
+                "bypassed": True,
+                "reason": "main_case_driver_image1_original_upload_image2",
+                "identity_source": str(identity_source_path),
+                "identity_source_sha256": file_sha256(identity_source_path),
+                "source_identity_palette": source_identity_palette,
+                "source_identity_upper_body_palette": (
+                    source_identity_upper_body_palette
+                ),
+                "canonical_source_upper_body_palette": (
+                    canonical_source_upper_body_palette
+                ),
+                "canonical_upper_body_palette_reference_policy": (
+                    CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY
+                ),
+                "identity_palette": source_self_quality,
+            },
+        )
+        update_job(
+            job_id,
+            recovered=False,
+            recovery_active=False,
+            recovery_attempt=None,
+            generated_canonical_bypassed=True,
+            cartoon_reference_profile=None,
+            effective_canonical_user_loras=[],
+            canonical_user_lora_strength_scale=None,
+            effective_canonical_settings={
+                "bypassed": True,
+                "identity_input": uploaded_qwen_input_name,
+            },
+            effective_canonical_identity_palette=None,
+            canonical_identity_palette_verdict="bypassed",
+            uploaded_identity_palette_quality=source_self_quality,
+            uploaded_identity_palette_verdict=canonical_palette_audit[
+                "identity_palette_verdict"
+            ],
+        )
 
     keyframes: list[Path] = []
     keyframe_transparency: list[bool] = []
     accepted_pose_similarity_references: list[dict[str, Any]] = []
     effective_pose_lora_attempts: list[dict[str, Any]] = []
+    grooming_pose_gate_attempt_audits: list[dict[str, Any]] = []
+    grooming_pose_gate_selected_metrics: dict[str, dict[str, Any]] = {}
+    fur_surface_gate_attempt_audits: list[dict[str, Any]] = []
+    fur_surface_gate_selected_metrics: dict[str, dict[str, Any]] = {}
+    fur_surface_gate_status_by_action: dict[str, str] = {}
+    pose_effective_lora_policies: dict[str, str] = {}
+    fur_surface_gate_short_circuit: dict[str, Any] | None = None
     for index, pose in enumerate(poses, start=1):
         raise_if_cancelled(job_id)
         update_job(
@@ -4556,10 +17637,209 @@ def run_job(job_id: str) -> None:
             current_pose_index=index,
             current_pose=pose,
         )
+        pose_reference_input_name = None
+        configured_pose_references = job.get("pose_reference_inputs")
+        if isinstance(configured_pose_references, dict):
+            configured_reference = configured_pose_references.get(action_key(pose))
+            if isinstance(configured_reference, str) and configured_reference.strip():
+                pose_reference_input_name = configured_reference.strip()
+        effective_pose_identity_input_policy = str(
+            configured_pose_identity_input_policies.get(
+                action_key(pose),
+                pose_identity_input_policy,
+            )
+        ).strip()
+        if (
+            effective_pose_identity_input_policy
+            == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
+            and action_key(pose) not in {"eating", "grooming"}
+        ):
+            raise RuntimeError(
+                "Main_case geometry-first identity supports only eating and grooming; "
+                f"refusing pose {pose!r}."
+            )
+        if (
+            effective_pose_identity_input_policy
+            == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
+            and action_key(pose) != "grooming"
+        ):
+            raise RuntimeError(
+                "Canonical-identity geometry-first input supports only grooming; "
+                f"refusing pose {pose!r}."
+            )
+        require_eating_mouth_contact = bool(
+            force_qwen_reference and action_key(pose) == "eating"
+        )
+        pose_qwen_input_name = qwen_input_name
+        pose_qwen_secondary_input_name = pose_reference_input_name
+        pose_identity_input_name = qwen_input_name
+        pose_geometry_input_name = pose_reference_input_name
+        if force_qwen_reference and pose_reference_input_name is not None:
+            pose_reference_input_sha256s = job.get("pose_reference_input_sha256s")
+            expected_pose_reference_sha = (
+                pose_reference_input_sha256s.get(action_key(pose))
+                if isinstance(pose_reference_input_sha256s, dict)
+                else None
+            )
+            pose_reference_path = COMFY_INPUT / pose_reference_input_name
+            if not expected_pose_reference_sha:
+                raise RuntimeError(
+                    f"Frozen action guide lacks its persisted digest for pose {pose!r}."
+                )
+            if not pose_reference_path.is_file() or file_sha256(
+                pose_reference_path
+            ) != str(expected_pose_reference_sha):
+                raise RuntimeError(
+                    "Frozen action guide is missing or its digest changed for "
+                    f"pose {pose!r}."
+                )
+        qwen_guided_identity_policy = effective_pose_identity_input_policy in {
+            POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+            POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+            POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
+        }
+        grooming_pose_gate_required = bool(
+            force_qwen_reference
+            and action_key(pose) == "grooming"
+            and qwen_guided_identity_policy
+        )
+        pose_effective_subject_config = job.get("effective_subject_config")
+        pose_action_config = (
+            pose_effective_subject_config.get("actions", {}).get(action_key(pose))
+            if isinstance(pose_effective_subject_config, dict)
+            else None
+        )
+        pose_fur_surface_gate = (
+            pose_action_config.get("fur_surface_gate")
+            if isinstance(pose_action_config, dict)
+            else None
+        )
+        fur_surface_gate_required = bool(
+            force_qwen_reference
+            and action_key(pose) in {"eating", "grooming"}
+            and qwen_guided_identity_policy
+            and isinstance(pose_effective_subject_config, dict)
+            and pose_effective_subject_config.get("profile_id") == "sleek_tabby_cat_v1"
+            and isinstance(pose_fur_surface_gate, dict)
+            and pose_fur_surface_gate.get("enabled") is True
+        )
+        fur_surface_rejection_streak = 0
+        if fur_surface_gate_required:
+            assert isinstance(pose_effective_subject_config, dict)
+            # Reject mutable/missing profile inputs before spending a Qwen or
+            # SCAIL GPU call. Candidate evaluation repeats this verification.
+            resolve_main_case_fur_surface_baseline(
+                pose_effective_subject_config,
+                action_key(pose),
+            )
+            fur_surface_gate_status_by_action[action_key(pose)] = "running"
+            update_job(
+                job_id,
+                fur_surface_gate_policy=FUR_SURFACE_GATE_POLICY,
+                fur_surface_gate_version=FUR_SURFACE_GATE_VERSION,
+                fur_surface_gate_threshold_version=(FUR_SURFACE_THRESHOLD_VERSION),
+                fur_surface_gate_thresholds=fur_surface_thresholds_payload(),
+                fur_surface_gate_scope=("sleek_tabby_main_case_guided_qwen_candidates"),
+                fur_surface_gate_reliable_inputs=[
+                    "alpha_cutout",
+                    "rembg_alpha_cutout",
+                ],
+                fur_surface_gate_fail_closed=True,
+                fur_surface_gate_max_consecutive_rejections=(
+                    FUR_SURFACE_GATE_MAX_REJECTIONS
+                ),
+                fur_surface_gate_retry_policy=(FUR_SURFACE_GATE_RETRY_POLICY),
+                fur_surface_gate_preserves_configured_eating_bowl_recovery=(True),
+                fur_surface_gate_configured_eating_bowl_recovery_attempts=(
+                    QWEN_BOWL_POSE_EXTRA_ATTEMPTS
+                ),
+                fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
+                fur_surface_gate_final_quality={
+                    "scope": "qwen_action_reference_pre_scail",
+                    "status": "running",
+                    "actions": dict(fur_surface_gate_selected_metrics),
+                    "final_video_frame_audit": False,
+                },
+            )
+        grooming_pose_gate_guide_path: Path | None = None
+        grooming_pose_gate_metadata_path: Path | None = None
+        grooming_completion_mask_path: Path | None = None
+        if grooming_pose_gate_required:
+            if pose_reference_input_name is None:
+                raise RuntimeError(
+                    "Main_case grooming pose gate requires its frozen geometry guide."
+                )
+            qwen_grooming_guide_path = COMFY_INPUT / pose_reference_input_name
+            (
+                grooming_pose_gate_guide_path,
+                grooming_pose_gate_metadata_path,
+                grooming_completion_mask_path,
+            ) = resolve_main_case_grooming_pose_gate_metadata(
+                job,
+                qwen_grooming_guide_path,
+            )
+            update_job(
+                job_id,
+                grooming_pose_gate_policy=GROOMING_POSE_GATE_POLICY,
+                grooming_pose_gate_version=GROOMING_POSE_GATE_VERSION,
+                grooming_pose_gate_scope=("main_case_guided_grooming_qwen_candidates"),
+                grooming_pose_gate_fail_closed=True,
+                grooming_pose_gate_input="rembg_alpha_cutout",
+                grooming_pose_gate_geometry_input=(
+                    "public_open_channel_generation_plus_private_cv_gate_and_"
+                    "non_qwen_completion_mask"
+                ),
+                grooming_pose_gate_status="running",
+            )
+        if (
+            effective_pose_identity_input_policy
+            == POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD
+        ):
+            if pose_reference_input_name is None:
+                raise RuntimeError(
+                    "Direct uploaded-photo action identity requires the frozen "
+                    f"profile Image 2 for pose {pose!r}."
+                )
+            pose_qwen_input_name = uploaded_qwen_input_name
+            pose_identity_input_name = uploaded_qwen_input_name
+        elif (
+            effective_pose_identity_input_policy
+            == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
+        ):
+            if pose_reference_input_name is None:
+                raise RuntimeError(
+                    "Main_case geometry-first uploaded identity requires the frozen "
+                    f"driver-derived geometry guide for pose {pose!r}."
+                )
+            if not QWEN_STYLE_LORA:
+                raise RuntimeError(
+                    "Main_case geometry-first uploaded identity requires the dedicated "
+                    "QWEN_STYLE_LORA; refusing to fall back to photography models."
+                )
+            pose_qwen_input_name = pose_reference_input_name
+            pose_qwen_secondary_input_name = uploaded_qwen_input_name
+            pose_identity_input_name = pose_qwen_secondary_input_name
+            pose_geometry_input_name = pose_reference_input_name
+        elif (
+            effective_pose_identity_input_policy
+            == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
+        ):
+            if pose_reference_input_name is None:
+                raise RuntimeError(
+                    "Canonical-identity grooming geometry-first input requires "
+                    "its frozen driver-derived guide."
+                )
+            pose_qwen_input_name = pose_reference_input_name
+            pose_qwen_secondary_input_name = qwen_input_name
+            pose_identity_input_name = qwen_input_name
+            pose_geometry_input_name = pose_reference_input_name
         prompt = build_qwen_prompt(
             "" if transparent_gif else effective_prompt,
             pose,
             transparent_gif=transparent_gif,
+            pose_reference_available=pose_reference_input_name is not None,
+            profile_fur_lock=profile_fur_lock,
+            pose_identity_input_policy=effective_pose_identity_input_policy,
         )
         negative_prompt = QWEN_NEGATIVE
         if transparent_gif:
@@ -4567,6 +17847,8 @@ def run_job(job_id: str) -> None:
             negative_prompt += ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
             if source_palette_negative:
                 negative_prompt += ", " + source_palette_negative
+            if profile_fur_negative:
+                negative_prompt += ", " + profile_fur_negative
             if action_key(pose) == "running":
                 negative_prompt += (
                     ", seated pose, sitting, crouched sitting, airborne leap, flying pose, extreme foreshortening, hidden hind leg, shortened hind leg, "
@@ -4575,29 +17857,79 @@ def run_job(job_id: str) -> None:
             elif action_key(pose) == "eating":
                 negative_prompt += (
                     ", food held in paw, paw holding kibble, raised front paw, paw-to-mouth gesture, "
-                    "humanlike eating, anthropomorphic hand gesture, kibble outside bowl, kibble above bowl rim, "
-                    "kibble at mouth, open mouth holding food"
+                    "humanlike eating, anthropomorphic hand gesture, kibble outside bowl, "
+                    "open mouth holding food, empty bowl, sniffing bowl, looking at bowl, "
+                    "watching food, nose above kibble, muzzle hovering above bowl, visible air gap, "
+                    "green gap between mouth and food, fully unobstructed nose"
+                )
+            elif action_key(pose) == "grooming":
+                negative_prompt += (
+                    ", neutral seated pose, both front paws planted, missing raised foreleg, "
+                    "hidden raised foreleg, viewer-right raised foreleg, mirrored grooming pose, "
+                    "detached rigid prop, strap, zipper, cord, pen, pencil, stick, pendant, black hanging object, "
+                    "microphone, flashlight, battery, lipstick, bottle, capsule, handle, "
+                    "green internal mark, gray guide material, sleeve, hoodie, hood, jacket, "
+                    "sweater, shirt, cuff, fabric fold, garment seam"
                 )
         keyframe = job_dir / f"pose_{index:02d}_keyframe.png"
         if transparent_gif:
             bowl_action = action_uses_bowl(pose)
+            pose_fur_reference_path: Path | None = None
+            effective_subject_config = job.get("effective_subject_config")
+            if action_key(pose) == "eating" and isinstance(
+                effective_subject_config, dict
+            ):
+                action_config = effective_subject_config.get("actions", {}).get(
+                    "eating"
+                )
+                fur_gate = (
+                    action_config.get("fur_silhouette_gate")
+                    if isinstance(action_config, dict)
+                    else None
+                )
+                if isinstance(fur_gate, dict) and fur_gate.get("enabled"):
+                    pose_fur_reference_path = Path(str(fur_gate.get("reference") or ""))
+                    if not pose_fur_reference_path.is_file():
+                        raise FileNotFoundError(
+                            "Frozen eating fur-silhouette reference is missing: "
+                            f"{pose_fur_reference_path}"
+                        )
+                    expected_fur_reference_sha = str(
+                        fur_gate.get("reference_sha256") or ""
+                    ).strip()
+                    if (
+                        expected_fur_reference_sha
+                        and file_sha256(pose_fur_reference_path)
+                        != expected_fur_reference_sha
+                    ):
+                        raise RuntimeError(
+                            "Frozen eating fur-silhouette reference digest changed."
+                        )
             pose_palette_bottom_exclusion = (
                 BOWL_IDENTITY_PALETTE_BOTTOM_EXCLUSION if bowl_action else 0.0
             )
+            pose_palette_reference_path = (
+                identity_source_path
+                if (
+                    effective_pose_identity_input_policy
+                    in {
+                        POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,
+                        POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+                    }
+                )
+                else canonical_similarity_reference
+            )
             pose_reference_identity_palette = (
                 identity_palette_signature(
-                    canonical_similarity_reference,
+                    pose_palette_reference_path,
                     exclude_bottom_fraction=pose_palette_bottom_exclusion,
                 )
-                if (
-                    identity_palette_guard
-                    and canonical_similarity_reference is not None
-                )
+                if (identity_palette_guard and pose_palette_reference_path is not None)
                 else None
             )
             pose_reference_upper_body_identity_palette = (
                 identity_palette_signature(
-                    canonical_similarity_reference,
+                    pose_palette_reference_path,
                     exclude_bottom_fraction=(
                         BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
                     ),
@@ -4605,19 +17937,19 @@ def run_job(job_id: str) -> None:
                 if (
                     bowl_action
                     and identity_palette_guard
-                    and canonical_similarity_reference is not None
+                    and pose_palette_reference_path is not None
                 )
                 else None
             )
             pose_identity_palette_prompt_signature = (
                 identity_palette_signature(
-                    canonical_similarity_reference,
+                    pose_palette_reference_path,
                     exclude_bottom_fraction=0.0,
                 )
                 if (
                     bowl_action
                     and identity_palette_guard
-                    and canonical_similarity_reference is not None
+                    and pose_palette_reference_path is not None
                 )
                 else pose_reference_identity_palette
             )
@@ -4625,7 +17957,97 @@ def run_job(job_id: str) -> None:
             best_attempt: dict[str, Any] | None = None
             best_raw_attempt: dict[str, Any] | None = None
             best_semantic_source: dict[str, Any] | None = None
-            best_semantic_penalty: float | None = None
+            grooming_foreleg_repair_source: dict[str, Any] | None = None
+            grooming_full_pose_refine_source: dict[str, Any] | None = None
+            eating_identity_refine_source: dict[str, Any] | None = None
+            canonical_action_reference = bool(
+                effective_pose_identity_input_policy
+                == POSE_IDENTITY_INPUT_POLICY_CANONICAL
+                and pose_reference_input_name is not None
+            )
+            canonical_grooming_completion_capable = bool(
+                canonical_action_reference and action_key(pose) == "grooming"
+            )
+            active_pose_profiles = canonical_grooming_generation_profiles(
+                pose,
+                active_pose_profiles,
+                enabled=canonical_grooming_completion_capable,
+            )
+            grooming_geometry_canonical_reference = bool(
+                effective_pose_identity_input_policy
+                == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
+                and pose_reference_input_name is not None
+            )
+            geometry_first_action_reference = bool(
+                effective_pose_identity_input_policy
+                in {
+                    POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+                    POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
+                }
+            )
+            if canonical_action_reference:
+                pose_effective_lora_policy = (
+                    "qwen_lightning_only_after_canonical_identity_style_lock_v1"
+                )
+                pose_effective_user_loras: list[dict[str, Any]] = []
+                pose_effective_lora_scale = 0.0
+                pose_effective_lora_scope = (
+                    "canonical_action_lightning_only; use "
+                    "effective_pose_lora_attempts for selected per-pose settings"
+                )
+            elif grooming_geometry_canonical_reference:
+                pose_effective_lora_policy = (
+                    "geometry_first_user_loras_disabled_masked_pet3d_repair_v1"
+                )
+                pose_effective_user_loras = []
+                pose_effective_lora_scale = 0.0
+                pose_effective_lora_scope = (
+                    "grooming_attempts_1_2_lightning_only; attempt_3 adds the "
+                    "low_strength_pet3d_surface_prior_under_the_sampler_noise_mask"
+                )
+            elif geometry_first_action_reference:
+                pose_effective_lora_policy = "geometry_first_user_loras_disabled_v1"
+                pose_effective_user_loras = []
+                pose_effective_lora_scale = 0.0
+                pose_effective_lora_scope = (
+                    "geometry_first_action_user_loras_disabled; use "
+                    "effective_pose_lora_attempts for selected per-pose settings"
+                )
+            else:
+                pose_effective_lora_policy = "profile_user_loras_enabled_v1"
+                pose_effective_user_loras = active_pose_profiles[0]["user_loras"]
+                pose_effective_lora_scale = active_pose_profiles[0][
+                    "user_lora_strength_scale"
+                ]
+                pose_effective_lora_scope = (
+                    "initial_profile_only; use effective_pose_lora_attempts "
+                    "for selected per-pose settings"
+                )
+            pose_effective_lora_policies[action_key(pose)] = pose_effective_lora_policy
+            update_job(
+                job_id,
+                pose_effective_lora_policy=pose_effective_lora_policy,
+                pose_effective_lora_policies=dict(pose_effective_lora_policies),
+                effective_pose_user_loras=pose_effective_user_loras,
+                pose_user_lora_strength_scale=pose_effective_lora_scale,
+                effective_pose_user_loras_scope=pose_effective_lora_scope,
+            )
+            if canonical_action_reference or grooming_geometry_canonical_reference:
+                update_job(
+                    job_id,
+                    pose_photography_lora_policy=(
+                        "disabled_after_canonical_identity_style_lock_v1"
+                    ),
+                    pose_builtin_style_lora_policy=(
+                        "masked_pet3d_on_grooming_foreleg_repair_attempt_only_v1"
+                        if grooming_geometry_canonical_reference
+                        else "disabled_after_canonical_identity_style_lock_v1"
+                    ),
+                    pose_candidate_normalization_policy=(
+                        QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+                    ),
+                    pose_candidate_matte_policy=(QWEN_ACTION_CANDIDATE_MATTE_POLICY),
+                )
             for attempt, profile in enumerate(active_pose_profiles, start=1):
                 raise_if_cancelled(job_id)
                 if attempt > 1:
@@ -4645,27 +18067,877 @@ def run_job(job_id: str) -> None:
                     pose,
                     transparent_gif=True,
                     quality_retry=profile["quality_retry"],
+                    pose_reference_available=pose_reference_input_name is not None,
+                    profile_fur_lock=profile_fur_lock,
+                    pose_identity_input_policy=(effective_pose_identity_input_policy),
                 )
                 if pose_identity_palette_prompt_signature is not None:
                     attempt_prompt += "\n\n" + identity_palette_prompt(
                         pose_identity_palette_prompt_signature,
                         retry=attempt > 1,
                     )
+                main_case_geometry_first = (
+                    effective_pose_identity_input_policy
+                    == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
+                )
+                grooming_geometry_canonical = (
+                    effective_pose_identity_input_policy
+                    == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
+                )
+                legacy_grooming_foreleg_repair_active = bool(
+                    grooming_geometry_canonical
+                    and attempt == GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
+                    and isinstance(grooming_foreleg_repair_source, dict)
+                )
+                canonical_grooming_completion_active = bool(
+                    canonical_grooming_completion_capable
+                    and attempt == GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
+                    and isinstance(grooming_foreleg_repair_source, dict)
+                )
+                canonical_grooming_full_pose_rescue_active = bool(
+                    canonical_grooming_completion_capable
+                    and attempt == GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
+                )
+                canonical_grooming_full_pose_refine_active = bool(
+                    canonical_grooming_completion_capable
+                    and attempt == GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT
+                )
+                canonical_grooming_full_pose_recovery_active = bool(
+                    canonical_grooming_full_pose_rescue_active
+                    or canonical_grooming_full_pose_refine_active
+                )
+                canonical_eating_identity_refine_active = bool(
+                    canonical_action_reference
+                    and action_key(pose) == "eating"
+                    and attempt == EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
+                    and isinstance(eating_identity_refine_source, dict)
+                )
+                grooming_foreleg_repair_active = bool(
+                    legacy_grooming_foreleg_repair_active
+                    or canonical_grooming_completion_active
+                )
+                attempt_primary_input_name = pose_qwen_input_name
+                attempt_secondary_input_name = pose_qwen_secondary_input_name
+                attempt_tertiary_input_name: str | None = None
+                attempt_additional_reference_input_names: list[str] | None = None
+                attempt_noise_mask_input_name: str | None = None
+                grooming_foreleg_repair_audit: dict[str, Any] | None = None
+                grooming_full_pose_recovery_audit: dict[str, Any] | None = None
+                eating_identity_refine_audit: dict[str, Any] | None = None
+                pose_transfer_seed_path: Path | None = None
+                if grooming_foreleg_repair_active:
+                    assert isinstance(grooming_foreleg_repair_source, dict)
+                    repair_source_palette_quality = grooming_foreleg_repair_source.get(
+                        "identity_palette_quality"
+                    )
+                    if (
+                        not isinstance(repair_source_palette_quality, dict)
+                        or repair_source_palette_quality.get("available") is not True
+                        or repair_source_palette_quality.get("acceptable") is not True
+                    ):
+                        raise RuntimeError(
+                            "Grooming foreleg repair source lost its required "
+                            "identity-palette-safe verdict."
+                        )
+                    repair_source_path = Path(
+                        str(grooming_foreleg_repair_source["cutout_path"])
+                    )
+                    if not repair_source_path.is_file():
+                        raise RuntimeError(
+                            "Grooming foreleg repair source disappeared before retry."
+                        )
+                    expected_repair_source_sha256 = str(
+                        grooming_foreleg_repair_source["cutout_sha256"]
+                    )
+                    if file_sha256(repair_source_path) != expected_repair_source_sha256:
+                        raise RuntimeError(
+                            "Grooming foreleg repair source digest changed."
+                        )
+                    if (
+                        grooming_pose_gate_guide_path is None
+                        or not grooming_pose_gate_guide_path.is_file()
+                    ):
+                        raise RuntimeError(
+                            "Grooming foreleg repair anatomy guide is unavailable."
+                        )
+                    repair_input_path = (
+                        comfy_input_dir / "grooming_foreleg_repair_source.png"
+                    )
+                    if canonical_grooming_completion_active:
+                        if (
+                            grooming_completion_mask_path is None
+                            or not grooming_completion_mask_path.is_file()
+                        ):
+                            raise RuntimeError(
+                                "Canonical grooming completion mask is unavailable."
+                            )
+                        repair_canvas_audit = (
+                            prepare_canonical_grooming_foreleg_completion_canvas(
+                                repair_source_path,
+                                grooming_completion_mask_path,
+                                cartoon_transparent,
+                                repair_input_path,
+                            )
+                        )
+                    else:
+                        repair_canvas_audit = prepare_grooming_foreleg_repair_canvas(
+                            repair_source_path,
+                            qwen_grooming_guide_path,
+                            cartoon_transparent,
+                            repair_input_path,
+                        )
+                    repair_input_sha256 = file_sha256(repair_input_path)
+                    repair_noise_mask_path = Path(
+                        str(repair_canvas_audit["noise_mask_target_path"])
+                    )
+                    if not repair_noise_mask_path.is_file():
+                        raise RuntimeError(
+                            "Grooming foreleg repair noise mask is unavailable."
+                        )
+                    repair_anatomy_path = (
+                        comfy_input_dir / "grooming_foreleg_repair_anatomy_guide.png"
+                    )
+                    repair_anatomy_audit = (
+                        prepare_grooming_foreleg_repair_anatomy_guide(
+                            (
+                                qwen_grooming_guide_path
+                                if canonical_grooming_completion_active
+                                else grooming_pose_gate_guide_path
+                            ),
+                            repair_anatomy_path,
+                        )
+                    )
+                    attempt_primary_input_name = (
+                        comfy_relative_dir / repair_input_path.name
+                    ).as_posix()
+                    attempt_tertiary_input_name = (
+                        comfy_relative_dir / repair_anatomy_path.name
+                    ).as_posix()
+                    attempt_noise_mask_input_name = (
+                        comfy_relative_dir / repair_noise_mask_path.name
+                    ).as_posix()
+                    if canonical_grooming_completion_active:
+                        attempt_secondary_input_name = qwen_input_name
+                    if not attempt_secondary_input_name:
+                        raise RuntimeError(
+                            "Grooming foreleg repair canonical Image 2 is unavailable."
+                        )
+                    attempt_additional_reference_input_names = [
+                        attempt_secondary_input_name,
+                        attempt_tertiary_input_name,
+                    ]
+                    active_repair_policy = (
+                        GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
+                        if canonical_grooming_completion_active
+                        else GROOMING_QWEN_FORELEG_REPAIR_POLICY
+                    )
+                    active_repair_style_policy = (
+                        "disabled_for_canonical_masked_completion"
+                        if canonical_grooming_completion_active
+                        else GROOMING_QWEN_FORELEG_REPAIR_STYLE_POLICY
+                    )
+                    active_repair_style_lora = (
+                        None
+                        if canonical_grooming_completion_active
+                        else QWEN_STYLE_LORA
+                    )
+                    active_repair_style_strength = (
+                        0.0
+                        if canonical_grooming_completion_active
+                        else GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH
+                    )
+                    active_composite_gate_policy = (
+                        None
+                        if canonical_grooming_completion_active
+                        else GROOMING_QWEN_FORELEG_REPAIR_COMPOSITE_GATE_POLICY
+                    )
+                    attempt_prompt = (
+                        build_canonical_grooming_foreleg_completion_prompt(
+                            pose,
+                            source_attempt=int(
+                                grooming_foreleg_repair_source["attempt"]
+                            ),
+                            profile_fur_lock=profile_fur_lock,
+                        )
+                        if canonical_grooming_completion_active
+                        else build_grooming_foreleg_repair_prompt(
+                            pose,
+                            source_attempt=int(
+                                grooming_foreleg_repair_source["attempt"]
+                            ),
+                            profile_fur_lock=profile_fur_lock,
+                        )
+                    )
+                    if pose_identity_palette_prompt_signature is not None:
+                        attempt_prompt += "\n\n" + identity_palette_prompt(
+                            pose_identity_palette_prompt_signature,
+                            retry=True,
+                        )
+                    grooming_foreleg_repair_audit = {
+                        "policy": active_repair_policy,
+                        "production_canonical_masked_completion": (
+                            canonical_grooming_completion_active
+                        ),
+                        "source_attempt": int(
+                            grooming_foreleg_repair_source["attempt"]
+                        ),
+                        "source_path": str(repair_source_path),
+                        "source_sha256": expected_repair_source_sha256,
+                        "source_gate_issues": list(
+                            grooming_foreleg_repair_source["gate_issues"]
+                        ),
+                        "source_fur_surface_issues": list(
+                            grooming_foreleg_repair_source["fur_surface_issues"]
+                        ),
+                        "source_identity_palette_available": True,
+                        "source_identity_palette_acceptable": True,
+                        "source_identity_palette_issues": list(
+                            repair_source_palette_quality.get("issues", [])
+                        ),
+                        "source_identity_palette_penalty": float(
+                            repair_source_palette_quality.get("penalty", 0.0)
+                        ),
+                        "comfy_input_path": str(repair_input_path),
+                        "comfy_input_sha256": repair_input_sha256,
+                        "foreleg_seed": (
+                            None
+                            if canonical_grooming_completion_active
+                            else repair_canvas_audit
+                        ),
+                        "completion_canvas": (
+                            repair_canvas_audit
+                            if canonical_grooming_completion_active
+                            else None
+                        ),
+                        "anatomy_guide": repair_anatomy_audit,
+                        "image1_role": (
+                            "identity_safe_candidate_unchanged_masked_sampler"
+                            if canonical_grooming_completion_active
+                            else "band_limited_canonical_foreleg_seeded_candidate_sampler"
+                        ),
+                        "image2_role": (
+                            "approved_canonical_identity_appearance_authority"
+                        ),
+                        "image3_role": (
+                            "single_tone_open_channel_grooming_geometry_only"
+                        ),
+                        "synthetic_capsule_geometry_exposed_on_repair_attempt": (False),
+                        "open_channel_geometry_exposed_on_repair_attempt": True,
+                        "private_cv_luma_exposed_on_repair_attempt": False,
+                        "sampler_noise_mask_role": (
+                            "expanded_context_full_denoise_muzzle_shoulder_chest_foreleg"
+                        ),
+                        "sampler_noise_mask_input_name": (
+                            attempt_noise_mask_input_name
+                        ),
+                        "sampler_noise_mask_sha256": repair_canvas_audit[
+                            "noise_mask_target_sha256"
+                        ],
+                        "localized_style_policy": (active_repair_style_policy),
+                        "localized_style_lora": active_repair_style_lora,
+                        "localized_style_strength": (active_repair_style_strength),
+                        "localized_style_scope": (
+                            "none; canonical Image 2 is the only style authority"
+                            if canonical_grooming_completion_active
+                            else (
+                                "sampler_noise_mask_only; image2_remains_identity_"
+                                "palette_marking_and_coat_length_authority"
+                            )
+                        ),
+                        "composite_gate_policy": active_composite_gate_policy,
+                        "composite_recovery_enabled": (
+                            not canonical_grooming_completion_active
+                        ),
+                        "composite_edge_density_ratio_min": (
+                            None
+                            if canonical_grooming_completion_active
+                            else GROOMING_QWEN_FORELEG_REPAIR_EDGE_DENSITY_RATIO_MIN
+                        ),
+                        "composite_planted_paw_gradient_p90_max": (
+                            None
+                            if canonical_grooming_completion_active
+                            else GROOMING_QWEN_FORELEG_REPAIR_PLANTED_PAW_GRADIENT_P90_MAX
+                        ),
+                        "composite_raised_paw_gradient_p90_max": (
+                            None
+                            if canonical_grooming_completion_active
+                            else GROOMING_QWEN_FORELEG_REPAIR_RAISED_PAW_GRADIENT_P90_MAX
+                        ),
+                        "canonical_completion_edge_evidence_policy": (
+                            GROOMING_CANONICAL_COMPLETION_EDGE_EVIDENCE_POLICY
+                            if canonical_grooming_completion_active
+                            else None
+                        ),
+                        "canonical_completion_edge_density_ratio_min": (
+                            GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN
+                            if canonical_grooming_completion_active
+                            else None
+                        ),
+                        "canonical_completion_independent_fur_surface_required": (
+                            canonical_grooming_completion_active
+                        ),
+                        "global_pose_threshold_changed": False,
+                        "main_case_rgb_appearance_exposed_on_repair_attempt": False,
+                    }
+                    update_job(
+                        job_id,
+                        grooming_foreleg_repair_active=True,
+                        grooming_foreleg_repair_policy=(active_repair_policy),
+                        grooming_foreleg_repair_source_attempt=(
+                            grooming_foreleg_repair_audit["source_attempt"]
+                        ),
+                        grooming_foreleg_repair_source_sha256=(
+                            expected_repair_source_sha256
+                        ),
+                        grooming_foreleg_repair_input_sha256=(repair_input_sha256),
+                        grooming_foreleg_repair_edit_mask_sha256=(
+                            repair_canvas_audit["edit_mask_sha256"]
+                        ),
+                        grooming_foreleg_repair_anatomy_sha256=(
+                            repair_anatomy_audit["target_sha256"]
+                        ),
+                        grooming_foreleg_repair_noise_mask_sha256=(
+                            repair_canvas_audit["noise_mask_target_sha256"]
+                        ),
+                        grooming_foreleg_repair_style_policy=(
+                            active_repair_style_policy
+                        ),
+                        grooming_foreleg_repair_style_lora=(active_repair_style_lora),
+                        grooming_foreleg_repair_style_strength=(
+                            active_repair_style_strength
+                        ),
+                        grooming_foreleg_repair_style_scope=(
+                            "none"
+                            if canonical_grooming_completion_active
+                            else "sampler_noise_mask_only"
+                        ),
+                        grooming_foreleg_repair_composite_gate_policy=(
+                            active_composite_gate_policy
+                        ),
+                        grooming_foreleg_repair_composite_recovery_enabled=(
+                            not canonical_grooming_completion_active
+                        ),
+                        grooming_foreleg_repair_composite_edge_density_ratio_min=(
+                            None
+                            if canonical_grooming_completion_active
+                            else GROOMING_QWEN_FORELEG_REPAIR_EDGE_DENSITY_RATIO_MIN
+                        ),
+                        grooming_foreleg_repair_composite_planted_paw_gradient_p90_max=(
+                            None
+                            if canonical_grooming_completion_active
+                            else GROOMING_QWEN_FORELEG_REPAIR_PLANTED_PAW_GRADIENT_P90_MAX
+                        ),
+                        grooming_foreleg_repair_composite_raised_paw_gradient_p90_max=(
+                            None
+                            if canonical_grooming_completion_active
+                            else GROOMING_QWEN_FORELEG_REPAIR_RAISED_PAW_GRADIENT_P90_MAX
+                        ),
+                        grooming_canonical_completion_edge_evidence_policy=(
+                            GROOMING_CANONICAL_COMPLETION_EDGE_EVIDENCE_POLICY
+                            if canonical_grooming_completion_active
+                            else None
+                        ),
+                        grooming_canonical_completion_edge_density_ratio_min=(
+                            GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN
+                            if canonical_grooming_completion_active
+                            else None
+                        ),
+                        grooming_canonical_completion_independent_fur_surface_required=(
+                            canonical_grooming_completion_active
+                        ),
+                        grooming_foreleg_repair_global_edge_density_min=(
+                            GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN
+                        ),
+                        grooming_foreleg_repair_global_pose_threshold_changed=False,
+                    )
+                if canonical_grooming_full_pose_recovery_active:
+                    if (
+                        grooming_pose_gate_guide_path is None
+                        or not grooming_pose_gate_guide_path.is_file()
+                    ):
+                        raise RuntimeError(
+                            "Canonical grooming pose-transfer validation guide is "
+                            "unavailable."
+                        )
+                    canonical_recovery_reference_path = COMFY_INPUT / qwen_input_name
+                    if not canonical_recovery_reference_path.is_file():
+                        raise RuntimeError(
+                            "Canonical grooming pose-transfer identity reference "
+                            "is unavailable."
+                        )
+                    action_reference_text = (
+                        str(pose_action_config.get("reference") or "").strip()
+                        if isinstance(pose_action_config, dict)
+                        else ""
+                    )
+                    expected_action_reference_sha256 = (
+                        str(pose_action_config.get("reference_sha256") or "").strip()
+                        if isinstance(pose_action_config, dict)
+                        else ""
+                    )
+                    action_reference_path = (
+                        Path(action_reference_text)
+                        if action_reference_text
+                        else Path()
+                    )
+                    if (
+                        not action_reference_text
+                        or not expected_action_reference_sha256
+                        or not action_reference_path.is_file()
+                        or file_sha256(action_reference_path)
+                        != expected_action_reference_sha256
+                    ):
+                        raise RuntimeError(
+                            "Canonical grooming pose-transfer action reference is "
+                            "missing or its digest changed."
+                        )
+                    pose_transfer_seed_path = (
+                        comfy_input_dir / "grooming_canonical_pose_transfer_seed.png"
+                    )
+                    pose_transfer_seed_audit = (
+                        prepare_canonical_grooming_pose_transfer_seed(
+                            action_reference_path,
+                            canonical_recovery_reference_path,
+                            pose_transfer_seed_path,
+                        )
+                    )
+                    pose_transfer_seed_input_name = (
+                        comfy_relative_dir / pose_transfer_seed_path.name
+                    ).as_posix()
+                    attempt_primary_input_name = pose_transfer_seed_input_name
+                    attempt_secondary_input_name = qwen_input_name
+                    attempt_tertiary_input_name = None
+                    attempt_additional_reference_input_names = [
+                        attempt_secondary_input_name,
+                    ]
+                    attempt_noise_mask_input_name = None
+                    attempt_prompt = build_canonical_grooming_pose_transfer_prompt(
+                        pose,
+                        profile_fur_lock=profile_fur_lock,
+                    )
+                    recovery_mode = "canonical_palette_action_pose_transfer"
+                    recovery_policy = GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY
+                    recovery_source: dict[str, Any] = {
+                        "action_reference_path": str(action_reference_path),
+                        "action_reference_sha256": (
+                            expected_action_reference_sha256
+                        ),
+                        "pose_transfer_seed": pose_transfer_seed_audit,
+                    }
+                    recovery_fallback = bool(
+                        canonical_grooming_full_pose_refine_active
+                    )
+                    pose_safe_candidate_used_as_sampler = False
+                    recovery_source_sha256 = expected_action_reference_sha256
+                    if (
+                        canonical_grooming_full_pose_refine_active
+                        and isinstance(grooming_full_pose_refine_source, dict)
+                    ):
+                        refine_source_path = Path(
+                            str(grooming_full_pose_refine_source.get("cutout_path") or "")
+                        )
+                        expected_refine_source_sha256 = str(
+                            grooming_full_pose_refine_source.get("cutout_sha256") or ""
+                        )
+                        refine_eligibility = grooming_full_pose_refine_source.get(
+                            "eligibility"
+                        )
+                        expected_eligibility_sha256 = str(
+                            grooming_full_pose_refine_source.get("eligibility_sha256")
+                            or ""
+                        )
+                        source_matte = grooming_full_pose_refine_source.get(
+                            "seed_bound_matte"
+                        )
+                        if (
+                            int(grooming_full_pose_refine_source.get("attempt") or 0)
+                            != GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
+                            or not refine_source_path.is_file()
+                            or not expected_refine_source_sha256
+                            or file_sha256(refine_source_path)
+                            != expected_refine_source_sha256
+                            or not isinstance(refine_eligibility, dict)
+                            or refine_eligibility.get("policy")
+                            != GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY
+                            or refine_eligibility.get("eligible") is not True
+                            or not expected_eligibility_sha256
+                            or json_value_sha256(refine_eligibility)
+                            != expected_eligibility_sha256
+                            or not isinstance(source_matte, dict)
+                            or source_matte.get("policy")
+                            != GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY
+                            or source_matte.get("pose_transfer_seed_sha256")
+                            != pose_transfer_seed_audit["target_sha256"]
+                        ):
+                            raise RuntimeError(
+                                "Canonical grooming pose-safe identity-refine source "
+                                "lost its digest-bound gate provenance."
+                            )
+                        refine_canvas_path = (
+                            comfy_input_dir
+                            / "grooming_full_pose_identity_refine_source.png"
+                        )
+                        refine_canvas_audit = (
+                            prepare_canonical_grooming_full_pose_refine_canvas(
+                                refine_source_path,
+                                refine_canvas_path,
+                            )
+                        )
+                        attempt_primary_input_name = (
+                            comfy_relative_dir / refine_canvas_path.name
+                        ).as_posix()
+                        attempt_tertiary_input_name = pose_transfer_seed_input_name
+                        attempt_additional_reference_input_names = [
+                            attempt_secondary_input_name,
+                            attempt_tertiary_input_name,
+                        ]
+                        attempt_prompt = (
+                            build_canonical_grooming_full_pose_identity_refine_prompt(
+                                pose,
+                                source_attempt=int(
+                                    grooming_full_pose_refine_source["attempt"]
+                                ),
+                                profile_fur_lock=profile_fur_lock,
+                            )
+                        )
+                        recovery_mode = "pose_safe_identity_refine"
+                        recovery_policy = GROOMING_CANONICAL_FULL_POSE_REFINE_POLICY
+                        recovery_source = {
+                            **grooming_full_pose_refine_source,
+                            "refine_canvas": refine_canvas_audit,
+                            "pose_transfer_seed": pose_transfer_seed_audit,
+                        }
+                        recovery_fallback = False
+                        pose_safe_candidate_used_as_sampler = True
+                        recovery_source_sha256 = expected_refine_source_sha256
+                    if pose_identity_palette_prompt_signature is not None:
+                        attempt_prompt += "\n\n" + identity_palette_prompt(
+                            pose_identity_palette_prompt_signature,
+                            retry=True,
+                        )
+                    grooming_full_pose_recovery_audit = {
+                        "policy": recovery_policy,
+                        "mode": recovery_mode,
+                        "attempt": attempt,
+                        "fallback_to_fresh_full_pose_rescue": recovery_fallback,
+                        "image1_role": (
+                            "seed_bound_pose_and_surface_approved_candidate_"
+                            "sampler_no_identity_authority"
+                            if pose_safe_candidate_used_as_sampler
+                            else "canonical_palette_conditioned_lowpass_action_"
+                            "anatomy_sampler"
+                        ),
+                        "image2_role": (
+                            "approved_canonical_sole_identity_appearance_authority"
+                        ),
+                        "image3_role": (
+                            "digest_bound_lowpass_action_geometry_corroboration_only"
+                            if pose_safe_candidate_used_as_sampler
+                            else None
+                        ),
+                        "anatomy_seed": pose_transfer_seed_audit,
+                        "source": recovery_source,
+                        "sampler_noise_mask": None,
+                        "full_frame_sampling": True,
+                        "qwen_lightning_only": True,
+                        "style_lora": None,
+                        "main_case_rgb_appearance_exposed": (
+                            pose_safe_candidate_used_as_sampler
+                        ),
+                        "main_case_raw_luma_exposed": (
+                            pose_safe_candidate_used_as_sampler
+                        ),
+                        "main_case_low_frequency_action_geometry_exposed": True,
+                        "uploaded_front_identity_reference_exposed": False,
+                        "uploaded_identity_views_consumed_via_canonical_only": True,
+                        "public_open_channel_geometry_exposed": False,
+                        "rejected_qwen_candidate_used_as_sampler": (
+                            pose_safe_candidate_used_as_sampler
+                        ),
+                        "candidate_rejection_scope": (
+                            "identity_palette_only_after_pose_quality_and_surface_pass"
+                            if pose_safe_candidate_used_as_sampler
+                            else None
+                        ),
+                        "seed_bound_matte_required": True,
+                        "pose_safe_source_policy": (
+                            GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY
+                        ),
+                        "identity_gate_unchanged": True,
+                        "pose_gate_unchanged": True,
+                        "fur_surface_gate_unchanged": True,
+                        "global_pose_threshold_changed": False,
+                    }
+                    update_job(
+                        job_id,
+                        grooming_full_pose_recovery_active=True,
+                        grooming_full_pose_recovery_attempt=attempt,
+                        grooming_full_pose_recovery_mode=recovery_mode,
+                        grooming_full_pose_recovery_policy=recovery_policy,
+                        grooming_full_pose_recovery_fallback=(recovery_fallback),
+                        grooming_full_pose_recovery_anatomy_sha256=(
+                            pose_transfer_seed_audit["target_sha256"]
+                        ),
+                        grooming_full_pose_recovery_source_sha256=(
+                            recovery_source_sha256
+                        ),
+                        grooming_pose_transfer_seed_sha256=(
+                            pose_transfer_seed_audit["target_sha256"]
+                        ),
+                        grooming_pose_transfer_action_reference_sha256=(
+                            expected_action_reference_sha256
+                        ),
+                        grooming_pose_transfer_rejected_candidate_used_as_sampler=(
+                            pose_safe_candidate_used_as_sampler
+                        ),
+                        grooming_pose_safe_identity_refine_source_sha256=(
+                            recovery_source_sha256
+                            if pose_safe_candidate_used_as_sampler
+                            else None
+                        ),
+                    )
+                if canonical_eating_identity_refine_active:
+                    assert isinstance(eating_identity_refine_source, dict)
+                    refine_source_path = Path(
+                        str(eating_identity_refine_source["cutout_path"])
+                    )
+                    expected_refine_source_sha256 = str(
+                        eating_identity_refine_source["cutout_sha256"]
+                    )
+                    if not refine_source_path.is_file():
+                        raise RuntimeError(
+                            "Canonical eating identity-refine source disappeared."
+                        )
+                    if file_sha256(refine_source_path) != expected_refine_source_sha256:
+                        raise RuntimeError(
+                            "Canonical eating identity-refine source digest changed."
+                        )
+                    if not attempt_secondary_input_name:
+                        raise RuntimeError(
+                            "Canonical eating identity refine lacks its action guide."
+                        )
+                    eating_refine_canvas_path = (
+                        comfy_input_dir / "eating_identity_refine_source.png"
+                    )
+                    eating_refine_canvas_audit = (
+                        prepare_canonical_eating_identity_refine_canvas(
+                            refine_source_path,
+                            eating_refine_canvas_path,
+                        )
+                    )
+                    attempt_primary_input_name = (
+                        comfy_relative_dir / eating_refine_canvas_path.name
+                    ).as_posix()
+                    attempt_secondary_input_name = qwen_input_name
+                    attempt_tertiary_input_name = uploaded_qwen_input_name
+                    if not attempt_tertiary_input_name:
+                        raise RuntimeError(
+                            "Canonical eating identity refine lacks uploaded front identity."
+                        )
+                    attempt_additional_reference_input_names = [
+                        attempt_secondary_input_name,
+                        attempt_tertiary_input_name,
+                    ]
+                    attempt_noise_mask_input_name = None
+                    attempt_prompt = build_canonical_eating_identity_refine_prompt(
+                        pose,
+                        source_attempt=int(eating_identity_refine_source["attempt"]),
+                        profile_fur_lock=profile_fur_lock,
+                    )
+                    if pose_identity_palette_prompt_signature is not None:
+                        attempt_prompt += "\n\n" + identity_palette_prompt(
+                            pose_identity_palette_prompt_signature,
+                            retry=True,
+                        )
+                    eating_identity_refine_audit = {
+                        "policy": EATING_CANONICAL_IDENTITY_REFINE_POLICY,
+                        "attempt": attempt,
+                        "source_attempt": int(eating_identity_refine_source["attempt"]),
+                        "source_path": str(refine_source_path),
+                        "source_sha256": expected_refine_source_sha256,
+                        "source_pose_quality": (
+                            eating_identity_refine_source["pose_quality"]
+                        ),
+                        "source_identity_palette": (
+                            eating_identity_refine_source["identity_palette_quality"]
+                        ),
+                        "refine_canvas": eating_refine_canvas_audit,
+                        "image1_role": (
+                            "approved_eating_pose_and_bowl_sampler_no_identity_authority"
+                        ),
+                        "image2_role": (
+                            "approved_canonical_sole_pet_identity_appearance_authority"
+                        ),
+                        "image3_role": (
+                            "uploaded_front_real_identity_palette_corroboration"
+                        ),
+                        "sampler_noise_mask": None,
+                        "full_frame_sampling": True,
+                        "qwen_lightning_only": True,
+                        "style_lora": None,
+                        "identity_gate_unchanged": True,
+                        "eating_pose_gate_unchanged": True,
+                        "fur_surface_gate_unchanged": True,
+                    }
+                    update_job(
+                        job_id,
+                        eating_identity_refine_active=True,
+                        eating_identity_refine_policy=(
+                            EATING_CANONICAL_IDENTITY_REFINE_POLICY
+                        ),
+                        eating_identity_refine_attempt=attempt,
+                        eating_identity_refine_source_attempt=(
+                            eating_identity_refine_source["attempt"]
+                        ),
+                        eating_identity_refine_source_sha256=(
+                            expected_refine_source_sha256
+                        ),
+                        eating_identity_refine_canvas_sha256=(
+                            eating_refine_canvas_audit["target_sha256"]
+                        ),
+                    )
+                pose_user_loras_disabled = bool(
+                    main_case_geometry_first
+                    or grooming_geometry_canonical
+                    or canonical_action_reference
+                )
+                effective_pose_denoise = float(profile["denoise"])
+                if pose_reference_input_name is not None:
+                    configured_pose_denoise = job.get("pose_reference_denoise")
+                    if configured_pose_denoise is not None:
+                        configured_pose_denoise_step = float(
+                            job.get("pose_reference_denoise_step") or 0.0
+                        )
+                        effective_pose_denoise = max(
+                            0.1,
+                            min(
+                                1.0,
+                                float(configured_pose_denoise)
+                                + configured_pose_denoise_step * (attempt - 1),
+                            ),
+                        )
+                if main_case_geometry_first:
+                    effective_pose_denoise = (
+                        QWEN_EATING_GEOMETRY_FIRST_DENOISE_HIGH
+                        if attempt in {1, 3}
+                        else QWEN_EATING_GEOMETRY_FIRST_DENOISE_LOW
+                    )
+                elif grooming_geometry_canonical:
+                    effective_pose_denoise = (
+                        QWEN_GROOMING_CANONICAL_GEOMETRY_DENOISE_BY_ATTEMPT[
+                            min(
+                                attempt - 1,
+                                len(QWEN_GROOMING_CANONICAL_GEOMETRY_DENOISE_BY_ATTEMPT)
+                                - 1,
+                            )
+                        ]
+                    )
+                if grooming_foreleg_repair_active:
+                    effective_pose_denoise = GROOMING_QWEN_FORELEG_REPAIR_DENOISE
+                elif canonical_grooming_full_pose_recovery_active:
+                    effective_pose_denoise = (
+                        GROOMING_CANONICAL_FULL_POSE_REFINE_DENOISE
+                        if isinstance(grooming_full_pose_recovery_audit, dict)
+                        and grooming_full_pose_recovery_audit.get("mode")
+                        == "pose_safe_identity_refine"
+                        else GROOMING_CANONICAL_FULL_POSE_RESCUE_DENOISE
+                    )
+                elif canonical_eating_identity_refine_active:
+                    effective_pose_denoise = EATING_CANONICAL_IDENTITY_REFINE_DENOISE
+                effective_pose_user_lora = (
+                    None if pose_user_loras_disabled else profile["user_lora"]
+                )
+                effective_pose_user_lora_strength = (
+                    0.0 if pose_user_loras_disabled else profile["user_lora_strength"]
+                )
+                effective_pose_user_lora_mode = (
+                    "stack" if pose_user_loras_disabled else profile["user_lora_mode"]
+                )
+                effective_pose_user_loras = (
+                    [] if pose_user_loras_disabled else profile["user_loras"]
+                )
+                geometry_style_recovery = bool(
+                    main_case_geometry_first
+                    and action_key(pose) == "eating"
+                    and attempt >= 3
+                    and QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH > 0.0
+                )
+                grooming_local_style_recovery = bool(
+                    legacy_grooming_foreleg_repair_active
+                    and GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH > 0.0
+                )
+                builtin_style_recovery = bool(
+                    geometry_style_recovery or grooming_local_style_recovery
+                )
+                effective_pose_steps = (
+                    max(8, int(profile["steps"]))
+                    if (
+                        geometry_first_action_reference
+                        and action_key(pose) == "grooming"
+                    )
+                    else int(profile["steps"])
+                )
+                if grooming_foreleg_repair_active:
+                    effective_pose_steps = max(
+                        GROOMING_QWEN_FORELEG_REPAIR_STEPS,
+                        effective_pose_steps,
+                    )
+                if canonical_grooming_full_pose_recovery_active:
+                    effective_pose_steps = max(
+                        GROOMING_CANONICAL_FULL_POSE_RESCUE_STEPS,
+                        effective_pose_steps,
+                    )
+                if canonical_eating_identity_refine_active:
+                    effective_pose_steps = max(
+                        EATING_CANONICAL_IDENTITY_REFINE_STEPS,
+                        effective_pose_steps,
+                    )
+                effective_suppress_builtin_style = (
+                    False
+                    if grooming_local_style_recovery
+                    else (
+                        True
+                        if (canonical_action_reference or grooming_geometry_canonical)
+                        else (
+                            not geometry_style_recovery
+                            if main_case_geometry_first
+                            else suppress_builtin_style
+                        )
+                    )
+                )
+                effective_builtin_style_strength = (
+                    GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH
+                    if grooming_local_style_recovery
+                    else (
+                        QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH
+                        if geometry_style_recovery
+                        else QWEN_POSE_STYLE_LORA_STRENGTH
+                    )
+                )
                 workflow = qwen_workflow(
-                    qwen_input_name,
+                    attempt_primary_input_name,
                     attempt_prompt,
                     negative_prompt,
                     attempt_seed,
                     prefix,
-                    user_lora=profile["user_lora"],
-                    user_lora_strength=profile["user_lora_strength"],
-                    user_lora_mode=profile["user_lora_mode"],
-                    user_loras=profile["user_loras"],
-                    steps=profile["steps"],
+                    user_lora=effective_pose_user_lora,
+                    user_lora_strength=effective_pose_user_lora_strength,
+                    user_lora_mode=effective_pose_user_lora_mode,
+                    user_loras=effective_pose_user_loras,
+                    steps=effective_pose_steps,
                     cfg=profile["cfg"],
-                    denoise=profile["denoise"],
-                    builtin_style_strength=QWEN_POSE_STYLE_LORA_STRENGTH,
-                    suppress_builtin_style=suppress_builtin_style,
+                    denoise=effective_pose_denoise,
+                    builtin_style_strength=effective_builtin_style_strength,
+                    suppress_builtin_style=effective_suppress_builtin_style,
+                    pose_reference_input_name=(
+                        None
+                        if attempt_additional_reference_input_names is not None
+                        else attempt_secondary_input_name
+                    ),
+                    additional_reference_input_names=(
+                        attempt_additional_reference_input_names
+                    ),
+                    noise_mask_input_name=attempt_noise_mask_input_name,
                 )
                 write_workflow(
                     job_dir,
@@ -4741,23 +19013,833 @@ def run_job(job_id: str) -> None:
                 attempt_cutout = (
                     job_dir / f"pose_{index:02d}_qwen_cutout_attempt_{attempt:02d}.png"
                 )
-                try:
-                    chroma_metrics = evaluate_chroma_cutout(
-                        attempt_keyframe,
+                semantic_green_attempt = (
+                    job_dir
+                    / f"pose_{index:02d}_semantic_green_attempt_{attempt:02d}.png"
+                )
+                semantic_cutout_attempt = (
+                    job_dir
+                    / f"pose_{index:02d}_semantic_cutout_attempt_{attempt:02d}.png"
+                )
+                semantic_raw_attempt = (
+                    job_dir / f"pose_{index:02d}_semantic_raw_attempt_{attempt:02d}.png"
+                )
+                chroma_metrics, attempt_cutout = normalize_qwen_action_candidate(
+                    attempt_keyframe,
+                    attempt_cutout,
+                    semantic_green_attempt,
+                    semantic_cutout_attempt,
+                    semantic_raw_attempt,
+                    pose=pose,
+                    allow_semantic_matte=bool(
+                        canonical_action_reference and not grooming_pose_gate_required
+                    ),
+                )
+                if chroma_metrics.get("normalized_after_qwen"):
+                    semantic_palette = evaluate_pose_identity_palette(
                         attempt_cutout,
+                        primary_reference=pose_reference_identity_palette,
+                        upper_body_reference=(
+                            pose_reference_upper_body_identity_palette
+                        ),
+                        bottom_exclusion=pose_palette_bottom_exclusion,
+                        bowl_action=bowl_action,
                     )
-                except Exception as exc:  # noqa: BLE001 - image requests may return raw output
-                    if not image_request:
-                        raise
+                    candidate_identity_palette = semantic_palette["candidate"]
+                    candidate_upper_body_identity_palette = semantic_palette[
+                        "upper_body_candidate"
+                    ]
+                    palette_quality = semantic_palette["quality"]
+                grooming_pose_gate_metrics: dict[str, Any] | None = None
+                if grooming_pose_gate_required:
+                    if (
+                        grooming_pose_gate_guide_path is None
+                        or grooming_pose_gate_metadata_path is None
+                    ):
+                        raise RuntimeError(
+                            "Main_case grooming pose gate inputs were not resolved."
+                        )
+                    direct_chroma_metrics = chroma_metrics
+                    grooming_gate_green = (
+                        job_dir
+                        / f"pose_{index:02d}_grooming_gate_green_attempt_{attempt:02d}.png"
+                    )
+                    grooming_gate_cutout = (
+                        job_dir
+                        / f"pose_{index:02d}_grooming_gate_cutout_attempt_{attempt:02d}.png"
+                    )
+                    grooming_gate_semantic = (
+                        job_dir
+                        / f"pose_{index:02d}_grooming_gate_semantic_attempt_{attempt:02d}.png"
+                    )
+                    grooming_gate_reference = (
+                        job_dir
+                        / f"pose_{index:02d}_qwen_reference_attempt_{attempt:02d}.png"
+                    )
+                    chroma_metrics, grooming_pose_gate_metrics = (
+                        evaluate_main_case_grooming_pose_candidate(
+                            attempt_keyframe,
+                            pose=pose,
+                            green_target=grooming_gate_green,
+                            cutout_target=grooming_gate_cutout,
+                            semantic_target=grooming_gate_semantic,
+                            normalized_cutout_target=grooming_gate_reference,
+                            geometry_guide=grooming_pose_gate_guide_path,
+                            geometry_metadata=grooming_pose_gate_metadata_path,
+                            pose_transfer_seed=(
+                                pose_transfer_seed_path
+                                if canonical_grooming_full_pose_recovery_active
+                                else None
+                            ),
+                        )
+                    )
+                    if (
+                        canonical_action_reference
+                        and attempt
+                        <= GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+                    ):
+                        grooming_pose_gate_metrics = apply_canonical_grooming_direct_structural_edge_evidence_gate(
+                            grooming_pose_gate_metrics,
+                            attempt=attempt,
+                            canonical_action_reference=(canonical_action_reference),
+                            canonical_completion_active=(
+                                canonical_grooming_completion_active
+                            ),
+                            canonical_full_pose_recovery_active=(
+                                canonical_grooming_full_pose_recovery_active
+                            ),
+                        )
+                    if canonical_grooming_completion_active:
+                        grooming_pose_gate_metrics = (
+                            apply_canonical_grooming_completion_edge_evidence_gate(
+                                grooming_pose_gate_metrics,
+                                grooming_foreleg_repair_audit,
+                            )
+                        )
                     chroma_metrics = {
-                        "acceptable": False,
-                        "issues": ["background_removal_exception"],
-                        "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                        **chroma_metrics,
+                        "direct_chroma": direct_chroma_metrics,
+                        "semantic_recovery_attempted": True,
+                        "semantic_recovery_acceptable": bool(
+                            chroma_metrics.get("acceptable")
+                        ),
+                        "normalized_after_qwen": bool(chroma_metrics.get("acceptable")),
+                        "matte_policy": QWEN_ACTION_CANDIDATE_MATTE_POLICY,
+                        "normalization_policy": (
+                            QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+                        ),
+                        "grooming_pose_gate_alpha_input": (
+                            grooming_gate_reference.name
+                        ),
                     }
+                    attempt_cutout = (
+                        grooming_gate_reference
+                        if chroma_metrics.get("acceptable")
+                        else grooming_gate_cutout
+                    )
+                    if chroma_metrics.get("acceptable"):
+                        semantic_palette = evaluate_pose_identity_palette(
+                            attempt_cutout,
+                            primary_reference=pose_reference_identity_palette,
+                            upper_body_reference=(
+                                pose_reference_upper_body_identity_palette
+                            ),
+                            bottom_exclusion=pose_palette_bottom_exclusion,
+                            bowl_action=bowl_action,
+                        )
+                        candidate_identity_palette = semantic_palette["candidate"]
+                        candidate_upper_body_identity_palette = semantic_palette[
+                            "upper_body_candidate"
+                        ]
+                        palette_quality = semantic_palette["quality"]
+                    palette_normalization_eligibility = (
+                        canonical_grooming_palette_normalization_eligibility(
+                            canonical_action_identity_palette_quality(
+                                palette_quality
+                            ),
+                            grooming_pose_gate_metrics,
+                            attempt=attempt,
+                        )
+                    )
+                    palette_normalization_audit: dict[str, Any] = {
+                        "eligibility": palette_normalization_eligibility,
+                        "applied": False,
+                        "fail_closed": True,
+                    }
+                    if (
+                        canonical_action_reference
+                        and palette_normalization_eligibility.get("eligible") is True
+                        and chroma_metrics.get("acceptable") is True
+                        and attempt_cutout.is_file()
+                    ):
+                        palette_normalized_reference = (
+                            job_dir
+                            / f"pose_{index:02d}_grooming_palette_normalized_"
+                            f"attempt_{attempt:02d}.png"
+                        )
+                        try:
+                            canonical_reference_path = COMFY_INPUT / qwen_input_name
+                            normalization = (
+                                prepare_canonical_grooming_achromatic_palette_normalization(
+                                    attempt_cutout,
+                                    canonical_reference_path,
+                                    palette_normalized_reference,
+                                )
+                            )
+                            normalized_pose_gate = evaluate_grooming_pose(
+                                palette_normalized_reference,
+                                grooming_pose_gate_guide_path,
+                                geometry_metadata=(
+                                    grooming_pose_gate_metadata_path
+                                ),
+                            )
+                            normalized_pose_gate = json.loads(
+                                json.dumps(
+                                    normalized_pose_gate,
+                                    ensure_ascii=False,
+                                    allow_nan=False,
+                                )
+                            )
+                            normalized_pose_gate = apply_canonical_grooming_direct_structural_edge_evidence_gate(
+                                normalized_pose_gate,
+                                attempt=attempt,
+                                canonical_action_reference=True,
+                                canonical_completion_active=(
+                                    canonical_grooming_completion_active
+                                ),
+                                canonical_full_pose_recovery_active=(
+                                    canonical_grooming_full_pose_recovery_active
+                                ),
+                            )
+                            normalized_palette = evaluate_pose_identity_palette(
+                                palette_normalized_reference,
+                                primary_reference=(
+                                    pose_reference_identity_palette
+                                ),
+                                upper_body_reference=(
+                                    pose_reference_upper_body_identity_palette
+                                ),
+                                bottom_exclusion=(pose_palette_bottom_exclusion),
+                                bowl_action=False,
+                            )
+                            normalized_palette_quality = (
+                                canonical_action_identity_palette_quality(
+                                    normalized_palette["quality"]
+                                )
+                            )
+                            revalidation_passed = bool(
+                                normalized_pose_gate.get("acceptable") is True
+                                and isinstance(
+                                    normalized_palette_quality,
+                                    dict,
+                                )
+                                and normalized_palette_quality.get("acceptable")
+                                is True
+                            )
+                            palette_normalization_audit.update(
+                                normalization=normalization,
+                                revalidated_pose_gate=normalized_pose_gate,
+                                revalidated_identity_palette=(
+                                    normalized_palette_quality
+                                ),
+                                revalidation_passed=revalidation_passed,
+                                applied=revalidation_passed,
+                            )
+                            if revalidation_passed:
+                                attempt_cutout = palette_normalized_reference
+                                grooming_gate_reference = (
+                                    palette_normalized_reference
+                                )
+                                grooming_pose_gate_metrics = normalized_pose_gate
+                                candidate_identity_palette = normalized_palette[
+                                    "candidate"
+                                ]
+                                candidate_upper_body_identity_palette = (
+                                    normalized_palette["upper_body_candidate"]
+                                )
+                                palette_quality = normalized_palette["quality"]
+                                chroma_metrics[
+                                    "pre_palette_final_reference_normalization"
+                                ] = chroma_metrics.get(
+                                    "final_reference_normalization"
+                                )
+                                chroma_metrics["final_reference_normalization"] = {
+                                    "policy": (
+                                        GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_PALETTE_POLICY
+                                    ),
+                                    "source_path": normalization["source_path"],
+                                    "source_sha256": normalization[
+                                        "source_sha256"
+                                    ],
+                                    "output_path": normalization["target_path"],
+                                    "output_sha256": normalization[
+                                        "target_sha256"
+                                    ],
+                                    "output_mode": "RGBA",
+                                    "output_size": [512, 512],
+                                    "alpha_geometry_preserved_exactly": True,
+                                }
+                                chroma_metrics["final_reference_sha256"] = (
+                                    file_sha256(attempt_cutout)
+                                )
+                                chroma_metrics[
+                                    "grooming_pose_gate_alpha_input"
+                                ] = attempt_cutout.name
+                        except Exception as exc:  # noqa: BLE001 - retry fail closed
+                            palette_normalization_audit.update(
+                                applied=False,
+                                revalidation_passed=False,
+                                error=f"{type(exc).__name__}: {str(exc)[:1000]}",
+                            )
+                    chroma_metrics[
+                        "grooming_achromatic_palette_normalization"
+                    ] = palette_normalization_audit
+                    update_job(
+                        job_id,
+                        grooming_achromatic_palette_normalization=(
+                            palette_normalization_audit
+                        ),
+                    )
+                    gate_audit = {
+                        "pose_index": index,
+                        "pose": pose,
+                        "action": action_key(pose),
+                        "attempt": attempt,
+                        "seed": attempt_seed,
+                        "source": attempt_keyframe.name,
+                        "alpha_cutout": attempt_cutout.name,
+                        "geometry_guide": str(grooming_pose_gate_guide_path),
+                        "geometry_metadata": str(grooming_pose_gate_metadata_path),
+                        "chroma": chroma_metrics,
+                        "gate": grooming_pose_gate_metrics,
+                        "result": (
+                            "passed"
+                            if grooming_pose_gate_metrics.get("acceptable")
+                            else "rejected"
+                        ),
+                    }
+                    grooming_pose_gate_attempt_audits.append(gate_audit)
+                    write_json_atomic(
+                        job_dir
+                        / "workflows"
+                        / f"qwen_pose_{index:02d}_grooming_pose_gate.json",
+                        {
+                            "policy": GROOMING_POSE_GATE_POLICY,
+                            "version": GROOMING_POSE_GATE_VERSION,
+                            "fail_closed": True,
+                            "attempts": [
+                                item
+                                for item in grooming_pose_gate_attempt_audits
+                                if item["pose_index"] == index
+                            ],
+                        },
+                    )
+                    update_job(
+                        job_id,
+                        grooming_pose_gate_status=(
+                            "candidate_passed"
+                            if grooming_pose_gate_metrics.get("acceptable")
+                            else (
+                                "failed"
+                                if attempt == len(active_pose_profiles)
+                                else "retrying"
+                            )
+                        ),
+                        grooming_pose_gate_attempts=(grooming_pose_gate_attempt_audits),
+                    )
+                if (
+                    canonical_action_reference
+                    and chroma_metrics.get("acceptable")
+                    and attempt_cutout.is_file()
+                ):
+                    try:
+                        chroma_metrics["identity_chroma_spill_cleanup"] = (
+                            neutralize_uploaded_identity_chroma_spill(
+                                attempt_cutout,
+                                source_identity_palette,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001 - retry fail closed
+                        chroma_metrics = {
+                            **chroma_metrics,
+                            "acceptable": False,
+                            "issues": list(
+                                dict.fromkeys(
+                                    [
+                                        *[
+                                            str(issue)
+                                            for issue in chroma_metrics.get(
+                                                "issues",
+                                                [],
+                                            )
+                                        ],
+                                        "identity_chroma_spill_cleanup_failed",
+                                    ]
+                                )
+                            ),
+                            "identity_chroma_spill_cleanup": {
+                                "policy": UPLOADED_IDENTITY_CHROMA_SPILL_POLICY,
+                                "applied": False,
+                                "error": (f"{type(exc).__name__}: {str(exc)[:1000]}"),
+                            },
+                        }
+                    if chroma_metrics.get("acceptable"):
+                        cleaned_palette = evaluate_pose_identity_palette(
+                            attempt_cutout,
+                            primary_reference=pose_reference_identity_palette,
+                            upper_body_reference=(
+                                pose_reference_upper_body_identity_palette
+                            ),
+                            bottom_exclusion=pose_palette_bottom_exclusion,
+                            bowl_action=bowl_action,
+                        )
+                        candidate_identity_palette = cleaned_palette["candidate"]
+                        candidate_upper_body_identity_palette = cleaned_palette[
+                            "upper_body_candidate"
+                        ]
+                        palette_quality = cleaned_palette["quality"]
+                if canonical_action_reference:
+                    palette_quality = canonical_action_identity_palette_quality(
+                        palette_quality
+                    )
+                pre_surface_pose_quality: dict[str, Any] | None = None
+                if (
+                    canonical_action_reference
+                    and chroma_metrics.get("acceptable")
+                    and attempt_cutout.is_file()
+                ):
+                    pre_surface_pose_quality = pose_cutout_quality(
+                        attempt_cutout,
+                        pose,
+                        require_eating_mouth_contact=(require_eating_mouth_contact),
+                    )
+                grooming_pose_safe_refine_surface_gate: dict[str, Any] | None = None
+                grooming_pose_safe_refine_eligibility: dict[str, Any] | None = None
+                if (
+                    canonical_grooming_completion_capable
+                    and attempt == GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
+                ):
+                    seed_bound_matte = chroma_metrics.get("seed_bound_matte")
+                    palette_issue_set = (
+                        {
+                            str(issue)
+                            for issue in palette_quality.get("issues", [])
+                            if str(issue).strip()
+                        }
+                        if isinstance(palette_quality, dict)
+                        else set()
+                    )
+                    pose_safe_surface_probe_ready = bool(
+                        fur_surface_gate_required
+                        and isinstance(pose_effective_subject_config, dict)
+                        and chroma_metrics.get("acceptable") is True
+                        and chroma_metrics.get("method")
+                        == GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE
+                        and isinstance(seed_bound_matte, dict)
+                        and seed_bound_matte.get("policy")
+                        == GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY
+                        and attempt_cutout.is_file()
+                        and isinstance(grooming_pose_gate_metrics, dict)
+                        and grooming_pose_gate_metrics.get("acceptable") is True
+                        and isinstance(pre_surface_pose_quality, dict)
+                        and pre_surface_pose_quality.get("acceptable") is True
+                        and isinstance(palette_quality, dict)
+                        and palette_quality.get("available") is True
+                        and palette_quality.get("acceptable") is not True
+                        and bool(palette_issue_set)
+                        and not (
+                            palette_issue_set
+                            - GROOMING_CANONICAL_POSE_SAFE_IDENTITY_ONLY_ISSUES
+                        )
+                    )
+                    if pose_safe_surface_probe_ready:
+                        grooming_pose_safe_refine_surface_gate = (
+                            evaluate_main_case_fur_surface_candidate(
+                                attempt_cutout,
+                                action="grooming",
+                                alpha_provenance=(
+                                    GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE
+                                ),
+                                effective_subject_config=(
+                                    pose_effective_subject_config
+                                ),
+                            )
+                        )
+                    grooming_pose_safe_refine_eligibility = (
+                        canonical_grooming_pose_safe_identity_refine_eligibility(
+                            attempt=attempt,
+                            seed_bound_matte=(
+                                seed_bound_matte
+                                if isinstance(seed_bound_matte, dict)
+                                else None
+                            ),
+                            pose_gate=grooming_pose_gate_metrics,
+                            pose_quality=pre_surface_pose_quality,
+                            identity_palette_quality=palette_quality,
+                            fur_surface_gate=(
+                                grooming_pose_safe_refine_surface_gate
+                            ),
+                        )
+                    )
+                    chroma_metrics["pose_safe_identity_refine_eligibility"] = (
+                        grooming_pose_safe_refine_eligibility
+                    )
+                    update_job(
+                        job_id,
+                        grooming_pose_safe_identity_refine_probe={
+                            "attempt": attempt,
+                            "eligibility": grooming_pose_safe_refine_eligibility,
+                            "independent_fur_surface_gate": (
+                                grooming_pose_safe_refine_surface_gate
+                            ),
+                        },
+                    )
+                    if grooming_pose_safe_refine_eligibility.get("eligible") is True:
+                        eligibility_sha256 = json_value_sha256(
+                            grooming_pose_safe_refine_eligibility
+                        )
+                        assert isinstance(seed_bound_matte, dict)
+                        grooming_full_pose_refine_source = {
+                            "attempt": attempt,
+                            "cutout_path": str(attempt_cutout),
+                            "cutout_sha256": file_sha256(attempt_cutout),
+                            "keyframe_path": str(attempt_keyframe),
+                            "keyframe_sha256": file_sha256(attempt_keyframe),
+                            "pose_quality": pre_surface_pose_quality,
+                            "grooming_pose_gate": grooming_pose_gate_metrics,
+                            "identity_palette_quality": palette_quality,
+                            "identity_palette_acceptable": False,
+                            "independent_fur_surface_gate": (
+                                grooming_pose_safe_refine_surface_gate
+                            ),
+                            "seed_bound_matte": seed_bound_matte,
+                            "eligibility": grooming_pose_safe_refine_eligibility,
+                            "eligibility_sha256": eligibility_sha256,
+                            "selection_key": [attempt],
+                            "source_role": (
+                                "digest_bound_seed_matte_pose_surface_approved_"
+                                "identity_drift_candidate_for_attempt5_repaint"
+                            ),
+                        }
+                        update_job(
+                            job_id,
+                            grooming_full_pose_refine_candidate=(
+                                grooming_full_pose_refine_source
+                            ),
+                        )
+                if (
+                    canonical_action_reference
+                    and action_key(pose) == "eating"
+                    and attempt < EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
+                    and chroma_metrics.get("acceptable")
+                    and attempt_cutout.is_file()
+                    and isinstance(pre_surface_pose_quality, dict)
+                    and pre_surface_pose_quality.get("acceptable") is True
+                    and isinstance(palette_quality, dict)
+                    and palette_quality.get("available") is True
+                    and palette_quality.get("acceptable") is not True
+                ):
+                    eating_refine_selection_key = (
+                        float(palette_quality.get("penalty", 0.0)),
+                        float(pre_surface_pose_quality.get("penalty", 0.0)),
+                        -attempt,
+                    )
+                    if (
+                        eating_identity_refine_source is None
+                        or eating_refine_selection_key
+                        < tuple(eating_identity_refine_source["selection_key"])
+                    ):
+                        eating_identity_refine_source = {
+                            "attempt": attempt,
+                            "cutout_path": str(attempt_cutout),
+                            "cutout_sha256": file_sha256(attempt_cutout),
+                            "keyframe_path": str(attempt_keyframe),
+                            "keyframe_sha256": file_sha256(attempt_keyframe),
+                            "pose_quality": pre_surface_pose_quality,
+                            "identity_palette_quality": palette_quality,
+                            "selection_key": list(eating_refine_selection_key),
+                            "source_role": (
+                                "approved_eating_pose_and_bowl_for_identity_refine"
+                            ),
+                        }
+                        update_job(
+                            job_id,
+                            eating_identity_refine_candidate=(
+                                eating_identity_refine_source
+                            ),
+                        )
+                fur_surface_gate_metrics: dict[str, Any] | None = None
+                fur_surface_short_circuit_due = False
+                fur_surface_retry_decision: dict[str, Any] | None = None
+                if fur_surface_gate_required:
+                    assert isinstance(pose_effective_subject_config, dict)
+                    alpha_provenance = str(chroma_metrics.get("method") or "").strip()
+                    surface_candidate_ready = bool(
+                        chroma_metrics.get("acceptable")
+                        and attempt_cutout.is_file()
+                        and (
+                            not canonical_action_reference
+                            or (
+                                isinstance(pre_surface_pose_quality, dict)
+                                and pre_surface_pose_quality.get("acceptable") is True
+                                and (
+                                    not isinstance(palette_quality, dict)
+                                    or palette_quality.get("acceptable") is True
+                                )
+                                and (
+                                    not grooming_pose_gate_required
+                                    or (
+                                        isinstance(
+                                            grooming_pose_gate_metrics,
+                                            dict,
+                                        )
+                                        and grooming_pose_gate_metrics.get("acceptable")
+                                        is True
+                                    )
+                                )
+                            )
+                        )
+                    )
+                    if surface_candidate_ready:
+                        fur_surface_gate_metrics = (
+                            evaluate_main_case_fur_surface_candidate(
+                                attempt_cutout,
+                                action=action_key(pose),
+                                alpha_provenance=alpha_provenance,
+                                effective_subject_config=(
+                                    pose_effective_subject_config
+                                ),
+                            )
+                        )
+                        if (
+                            action_key(pose) == "grooming"
+                            and canonical_action_reference
+                            and attempt
+                            <= GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+                            and fur_surface_gate_metrics.get("acceptable") is not True
+                            and isinstance(grooming_pose_gate_metrics, dict)
+                            and isinstance(palette_quality, dict)
+                        ):
+                            fur_surface_gate_metrics = apply_canonical_grooming_direct_surface_nonexpansion_gate(
+                                fur_surface_gate_metrics,
+                                pose_gate=grooming_pose_gate_metrics,
+                                identity_palette_quality=palette_quality,
+                                attempt=attempt,
+                                canonical_reference_path=cartoon_output,
+                                canonical_reference_sha256=(
+                                    file_sha256(cartoon_output)
+                                ),
+                            )
+                    else:
+                        surface_gate_config = (
+                            pose_effective_subject_config.get("actions", {})
+                            .get(action_key(pose), {})
+                            .get("fur_surface_gate", {})
+                        )
+                        baseline_config = (
+                            surface_gate_config.get("baseline")
+                            if isinstance(surface_gate_config, dict)
+                            else None
+                        )
+                        fur_surface_gate_metrics = fur_surface_gate_failure(
+                            action_key(pose),
+                            (
+                                "fur_surface_gate_not_evaluated_upstream_gate_failed"
+                                if chroma_metrics.get("acceptable")
+                                else "fur_surface_reliable_alpha_cutout_unavailable"
+                            ),
+                            baseline=(
+                                baseline_config
+                                if isinstance(baseline_config, dict)
+                                else None
+                            ),
+                            candidate=attempt_cutout,
+                            alpha_provenance=alpha_provenance or None,
+                        )
+                    if (
+                        fur_surface_gate_metrics.get("evaluated") is True
+                        and fur_surface_gate_metrics.get("acceptable") is not True
+                    ):
+                        fur_surface_rejection_streak += 1
+                    elif fur_surface_gate_metrics.get("acceptable") is True:
+                        fur_surface_rejection_streak = 0
+                    else:
+                        # Missing alpha is already rejected by the chroma path,
+                        # but it is not evidence of three consecutive fur defects.
+                        fur_surface_rejection_streak = 0
+                    fur_surface_retry_decision = resolve_fur_surface_retry_decision(
+                        action=action_key(pose),
+                        rejection_streak=fur_surface_rejection_streak,
+                        attempt=attempt,
+                        active_profiles=active_pose_profiles,
+                    )
+                    fur_surface_short_circuit_due = bool(
+                        fur_surface_retry_decision["short_circuit_due"]
+                    )
+                    surface_audit = {
+                        "pose_index": index,
+                        "pose": pose,
+                        "action": action_key(pose),
+                        "attempt": attempt,
+                        "seed": attempt_seed,
+                        "source": attempt_keyframe.name,
+                        "alpha_cutout": (
+                            attempt_cutout.name if attempt_cutout.is_file() else None
+                        ),
+                        "alpha_provenance": alpha_provenance or None,
+                        "gate": fur_surface_gate_metrics,
+                        "consecutive_rejections": (fur_surface_rejection_streak),
+                        "retry_decision": fur_surface_retry_decision,
+                        "result": (
+                            "passed"
+                            if fur_surface_gate_metrics.get("acceptable") is True
+                            else (
+                                "rejected"
+                                if fur_surface_gate_metrics.get("evaluated") is True
+                                else "blocked_upstream"
+                            )
+                        ),
+                    }
+                    fur_surface_gate_attempt_audits.append(surface_audit)
+                    fur_surface_gate_status_by_action[action_key(pose)] = (
+                        "candidate_passed"
+                        if fur_surface_gate_metrics.get("acceptable") is True
+                        else (
+                            ("failed" if fur_surface_short_circuit_due else "retrying")
+                            if fur_surface_gate_metrics.get("evaluated") is True
+                            else "blocked_upstream"
+                        )
+                    )
+                    write_json_atomic(
+                        job_dir
+                        / "workflows"
+                        / f"qwen_pose_{index:02d}_fur_surface_gate.json",
+                        {
+                            "policy": FUR_SURFACE_GATE_POLICY,
+                            "gate_version": FUR_SURFACE_GATE_VERSION,
+                            "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
+                            "thresholds": fur_surface_thresholds_payload(),
+                            "fail_closed": True,
+                            "max_consecutive_rejections": (
+                                FUR_SURFACE_GATE_MAX_REJECTIONS
+                            ),
+                            "retry_policy": FUR_SURFACE_GATE_RETRY_POLICY,
+                            "preserves_configured_eating_bowl_recovery": True,
+                            "configured_eating_bowl_recovery_attempts": (
+                                QWEN_BOWL_POSE_EXTRA_ATTEMPTS
+                            ),
+                            "short_circuit": fur_surface_gate_short_circuit,
+                            "attempts": [
+                                item
+                                for item in fur_surface_gate_attempt_audits
+                                if item["pose_index"] == index
+                            ],
+                        },
+                    )
+                    update_job(
+                        job_id,
+                        fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
+                        fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+                    )
+                if (
+                    legacy_grooming_foreleg_repair_active
+                    and grooming_pose_gate_required
+                    and isinstance(grooming_pose_gate_metrics, dict)
+                ):
+                    grooming_pose_gate_metrics = (
+                        apply_masked_pet3d_grooming_composite_gate(
+                            grooming_pose_gate_metrics,
+                            fur_surface_gate_metrics,
+                            grooming_foreleg_repair_audit,
+                        )
+                    )
+                    current_gate_audit = next(
+                        (
+                            item
+                            for item in reversed(grooming_pose_gate_attempt_audits)
+                            if item.get("pose_index") == index
+                            and item.get("attempt") == attempt
+                        ),
+                        None,
+                    )
+                    if isinstance(current_gate_audit, dict):
+                        current_gate_audit["gate"] = grooming_pose_gate_metrics
+                        composite_recovery = grooming_pose_gate_metrics.get(
+                            "composite_recovery"
+                        )
+                        current_gate_audit["result"] = (
+                            "passed_composite"
+                            if (
+                                isinstance(composite_recovery, dict)
+                                and composite_recovery.get("accepted") is True
+                            )
+                            else (
+                                "passed"
+                                if grooming_pose_gate_metrics.get("acceptable") is True
+                                else "rejected"
+                            )
+                        )
+                    write_json_atomic(
+                        job_dir
+                        / "workflows"
+                        / f"qwen_pose_{index:02d}_grooming_pose_gate.json",
+                        {
+                            "policy": GROOMING_POSE_GATE_POLICY,
+                            "version": GROOMING_POSE_GATE_VERSION,
+                            "composite_recovery_policy": (
+                                GROOMING_QWEN_FORELEG_REPAIR_COMPOSITE_GATE_POLICY
+                            ),
+                            "fail_closed": True,
+                            "attempts": [
+                                item
+                                for item in grooming_pose_gate_attempt_audits
+                                if item["pose_index"] == index
+                            ],
+                        },
+                    )
+                    update_job(
+                        job_id,
+                        grooming_pose_gate_status=(
+                            "candidate_passed"
+                            if grooming_pose_gate_metrics.get("acceptable") is True
+                            else (
+                                "failed"
+                                if attempt == len(active_pose_profiles)
+                                else "retrying"
+                            )
+                        ),
+                        grooming_pose_gate_attempts=(grooming_pose_gate_attempt_audits),
+                        grooming_pose_gate_composite_recovery=(
+                            grooming_pose_gate_metrics.get("composite_recovery")
+                        ),
+                    )
                 record = {
                     "attempt": attempt,
                     "profile": profile["name"],
                     "seed": attempt_seed,
+                    "identity_input_policy": (effective_pose_identity_input_policy),
+                    "image1_input_name": attempt_primary_input_name,
+                    "image2_input_name": attempt_secondary_input_name,
+                    "image3_input_name": attempt_tertiary_input_name,
+                    "sampler_latent_input_name": attempt_primary_input_name,
+                    "sampler_noise_mask_input_name": (attempt_noise_mask_input_name),
+                    "identity_input_name": pose_identity_input_name,
+                    "geometry_input_name": (
+                        attempt_tertiary_input_name
+                        if canonical_eating_identity_refine_active
+                        else (
+                            (attempt_tertiary_input_name or attempt_primary_input_name)
+                            if canonical_grooming_full_pose_recovery_active
+                            else (
+                                attempt_tertiary_input_name
+                                if grooming_foreleg_repair_active
+                                else pose_geometry_input_name
+                            )
+                        )
+                    ),
+                    "grooming_foreleg_repair": (grooming_foreleg_repair_audit),
+                    "grooming_full_pose_recovery": (grooming_full_pose_recovery_audit),
+                    "eating_identity_refine": eating_identity_refine_audit,
                     "keyframe": attempt_keyframe.name,
                     "cutout": attempt_cutout.name
                     if chroma_metrics["acceptable"]
@@ -4770,23 +19852,373 @@ def run_job(job_id: str) -> None:
                     "candidate_upper_body_identity_palette": (
                         candidate_upper_body_identity_palette
                     ),
+                    "grooming_pose_gate": grooming_pose_gate_metrics,
+                    "fur_surface_gate": fur_surface_gate_metrics,
                     "combined_penalty": None,
                     "settings": {
-                        "steps": profile["steps"],
+                        "steps": effective_pose_steps,
                         "cfg": profile["cfg"],
-                        "denoise": profile["denoise"],
-                        "user_lora": profile["user_lora"],
-                        "user_lora_strength": profile["user_lora_strength"],
-                        "user_loras": profile["user_loras"],
-                        "user_lora_strength_scale": profile["user_lora_strength_scale"],
-                        "user_lora_mode": profile["user_lora_mode"],
+                        "denoise": effective_pose_denoise,
+                        "user_lora": effective_pose_user_lora,
+                        "user_lora_strength": effective_pose_user_lora_strength,
+                        "user_loras": effective_pose_user_loras,
+                        "user_lora_strength_scale": (
+                            0.0
+                            if pose_user_loras_disabled
+                            else profile["user_lora_strength_scale"]
+                        ),
+                        "user_lora_mode": effective_pose_user_lora_mode,
                         "use_user_prompt": profile["use_user_prompt"],
                         "quality_retry": profile["quality_retry"],
-                        "total_strength_cap": profile["total_strength_cap"],
-                        "per_lora_strength_cap": profile["per_lora_strength_cap"],
+                        "total_strength_cap": (
+                            0.0
+                            if pose_user_loras_disabled
+                            else profile["total_strength_cap"]
+                        ),
+                        "per_lora_strength_cap": (
+                            0.0
+                            if pose_user_loras_disabled
+                            else profile["per_lora_strength_cap"]
+                        ),
+                        "builtin_style_lora": (
+                            QWEN_STYLE_LORA if builtin_style_recovery else None
+                        ),
+                        "builtin_style_strength": (
+                            effective_builtin_style_strength
+                            if builtin_style_recovery
+                            else None
+                        ),
+                        "builtin_style_scope": (
+                            "sampler_noise_mask_only"
+                            if grooming_local_style_recovery
+                            else ("full_sampler" if geometry_style_recovery else None)
+                        ),
+                        "suppress_builtin_style": (effective_suppress_builtin_style),
+                        "identity_input_policy": (effective_pose_identity_input_policy),
+                        "image1_input_name": attempt_primary_input_name,
+                        "image2_input_name": attempt_secondary_input_name,
+                        "image3_input_name": attempt_tertiary_input_name,
+                        "sampler_latent_input_name": (attempt_primary_input_name),
+                        "sampler_noise_mask_input_name": (
+                            attempt_noise_mask_input_name
+                        ),
+                        "identity_input_name": pose_identity_input_name,
+                        "geometry_input_name": (
+                            attempt_tertiary_input_name
+                            if canonical_eating_identity_refine_active
+                            else (
+                                (
+                                    attempt_tertiary_input_name
+                                    or attempt_primary_input_name
+                                )
+                                if canonical_grooming_full_pose_recovery_active
+                                else (
+                                    attempt_tertiary_input_name
+                                    if grooming_foreleg_repair_active
+                                    else pose_geometry_input_name
+                                )
+                            )
+                        ),
+                        "grooming_foreleg_repair_policy": (
+                            grooming_foreleg_repair_audit.get("policy")
+                            if isinstance(grooming_foreleg_repair_audit, dict)
+                            else None
+                        ),
+                        "grooming_full_pose_recovery_policy": (
+                            grooming_full_pose_recovery_audit.get("policy")
+                            if isinstance(
+                                grooming_full_pose_recovery_audit,
+                                dict,
+                            )
+                            else None
+                        ),
+                        "eating_identity_refine_policy": (
+                            eating_identity_refine_audit.get("policy")
+                            if isinstance(
+                                eating_identity_refine_audit,
+                                dict,
+                            )
+                            else None
+                        ),
                     },
                     "workflow": workflow,
                 }
+                grooming_candidate_rejected = bool(
+                    grooming_pose_gate_required
+                    and (
+                        not isinstance(grooming_pose_gate_metrics, dict)
+                        or not grooming_pose_gate_metrics.get("acceptable")
+                    )
+                )
+                fur_surface_candidate_rejected = bool(
+                    fur_surface_gate_required
+                    and isinstance(fur_surface_gate_metrics, dict)
+                    and fur_surface_gate_metrics.get("evaluated") is True
+                    and fur_surface_gate_metrics.get("acceptable") is not True
+                )
+                if grooming_candidate_rejected or fur_surface_candidate_rejected:
+                    if chroma_metrics.get("acceptable") and attempt_cutout.is_file():
+                        gate_quality = pre_surface_pose_quality or pose_cutout_quality(
+                            attempt_cutout,
+                            pose,
+                            require_eating_mouth_contact=(require_eating_mouth_contact),
+                        )
+                        gate_similarity_path = attempt_cutout
+                    else:
+                        gate_quality = {
+                            "available": False,
+                            "acceptable": False,
+                            "issues": ["grooming_pose_gate_alpha_cutout_unavailable"],
+                            "penalty": 1000.0,
+                        }
+                        gate_similarity_path = attempt_keyframe
+                    gate_similarity = pose_similarity_quality(
+                        gate_similarity_path,
+                        pose=pose,
+                        canonical_path=canonical_similarity_reference,
+                        previous_poses=accepted_pose_similarity_references,
+                    )
+                    record.update(
+                        {
+                            "quality": gate_quality,
+                            "similarity": gate_similarity,
+                            "transparent": bool(chroma_metrics.get("acceptable")),
+                            "background_removal_failed": not bool(
+                                chroma_metrics.get("acceptable")
+                            ),
+                            "background_removal_failure_reason": (
+                                None
+                                if chroma_metrics.get("acceptable")
+                                else "candidate_gate_alpha_recovery_failed"
+                            ),
+                            "combined_penalty": round(
+                                float(gate_quality.get("penalty", 0.0))
+                                + float(gate_similarity.get("penalty", 0.0))
+                                + float(
+                                    grooming_pose_gate_metrics.get(
+                                        "penalty",
+                                        1000.0,
+                                    )
+                                    if isinstance(
+                                        grooming_pose_gate_metrics,
+                                        dict,
+                                    )
+                                    else (
+                                        1000.0 if grooming_pose_gate_required else 0.0
+                                    )
+                                )
+                                + (
+                                    float(palette_quality.get("penalty", 0.0))
+                                    if isinstance(palette_quality, dict)
+                                    else 0.0
+                                )
+                                + (
+                                    float(
+                                        fur_surface_gate_metrics.get(
+                                            "penalty",
+                                            1000.0,
+                                        )
+                                    )
+                                    if isinstance(
+                                        fur_surface_gate_metrics,
+                                        dict,
+                                    )
+                                    and fur_surface_gate_metrics.get("evaluated")
+                                    is True
+                                    else 0.0
+                                ),
+                                6,
+                            ),
+                        }
+                    )
+                    if (
+                        (
+                            grooming_geometry_canonical
+                            or canonical_grooming_completion_capable
+                        )
+                        and attempt < GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
+                        and chroma_metrics.get("acceptable")
+                        and attempt_cutout.is_file()
+                        and isinstance(palette_quality, dict)
+                        and palette_quality.get("available") is True
+                        and palette_quality.get("acceptable") is True
+                    ):
+                        repair_gate_issues = [
+                            str(issue)
+                            for issue in (
+                                grooming_pose_gate_metrics.get("issues", [])
+                                if isinstance(
+                                    grooming_pose_gate_metrics,
+                                    dict,
+                                )
+                                else []
+                            )
+                        ]
+                        repair_fur_surface_issues = [
+                            str(issue)
+                            for issue in (
+                                fur_surface_gate_metrics.get("issues", [])
+                                if isinstance(
+                                    fur_surface_gate_metrics,
+                                    dict,
+                                )
+                                else []
+                            )
+                        ]
+                        repair_selection_key = (
+                            len(repair_gate_issues),
+                            len(repair_fur_surface_issues),
+                            float(gate_quality.get("penalty", 0.0)),
+                            float(
+                                palette_quality.get("penalty", 0.0)
+                                if isinstance(palette_quality, dict)
+                                else 0.0
+                            ),
+                        )
+                        if (
+                            grooming_foreleg_repair_source is None
+                            or repair_selection_key
+                            < tuple(grooming_foreleg_repair_source["selection_key"])
+                        ):
+                            grooming_foreleg_repair_source = {
+                                "attempt": attempt,
+                                "cutout_path": str(attempt_cutout),
+                                "cutout_sha256": file_sha256(attempt_cutout),
+                                "keyframe_path": str(attempt_keyframe),
+                                "keyframe_sha256": file_sha256(attempt_keyframe),
+                                "gate_issues": repair_gate_issues,
+                                "fur_surface_issues": (repair_fur_surface_issues),
+                                "identity_palette_quality": palette_quality,
+                                "selection_key": list(repair_selection_key),
+                            }
+                            update_job(
+                                job_id,
+                                grooming_foreleg_repair_candidate={
+                                    "policy": (
+                                        GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
+                                        if canonical_grooming_completion_capable
+                                        else GROOMING_QWEN_FORELEG_REPAIR_POLICY
+                                    ),
+                                    **grooming_foreleg_repair_source,
+                                },
+                            )
+                    attempts.append(
+                        {
+                            key: value
+                            for key, value in record.items()
+                            if key != "workflow"
+                        }
+                    )
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_keyframe",
+                            "pose_index": index,
+                            "attempt": attempt,
+                            "reason": (
+                                "fur_surface_gate_failed"
+                                if fur_surface_candidate_rejected
+                                else "grooming_pose_gate_failed"
+                            ),
+                            "strategy": (
+                                "main_case_fur_surface_retry"
+                                if fur_surface_candidate_rejected
+                                else "main_case_grooming_pose_retry"
+                            ),
+                            "profile": profile["name"],
+                            "result": "rejected",
+                            "chroma": chroma_metrics,
+                            "quality": gate_quality,
+                            "similarity": gate_similarity,
+                            "identity_palette": palette_quality,
+                            "grooming_pose_gate": grooming_pose_gate_metrics,
+                            "fur_surface_gate": fur_surface_gate_metrics,
+                        },
+                    )
+                    LOGGER.warning(
+                        "%s pose %s attempt %s failed Main_case candidate gate: grooming=%s fur_surface=%s",
+                        job_id,
+                        index,
+                        attempt,
+                        (
+                            grooming_pose_gate_metrics.get("issues")
+                            if isinstance(grooming_pose_gate_metrics, dict)
+                            else ["grooming_pose_gate_result_unavailable"]
+                        ),
+                        (
+                            fur_surface_gate_metrics.get("issues")
+                            if isinstance(fur_surface_gate_metrics, dict)
+                            else None
+                        ),
+                    )
+                    if fur_surface_short_circuit_due:
+                        assert isinstance(fur_surface_retry_decision, dict)
+                        fur_surface_gate_short_circuit = {
+                            "action": action_key(pose),
+                            "pose_index": index,
+                            "attempt": attempt,
+                            "reason": "consecutive_fur_surface_rejections",
+                            "rejections": fur_surface_rejection_streak,
+                            "attempt_budget": len(active_pose_profiles),
+                            "retry_decision": fur_surface_retry_decision,
+                            "eating_fourth_attempt_skipped": bool(
+                                action_key(pose) == "eating"
+                                and len(active_pose_profiles) > attempt
+                            ),
+                            "blocks_scail": True,
+                        }
+                        fur_surface_gate_status_by_action[action_key(pose)] = "failed"
+                        update_job(
+                            job_id,
+                            fur_surface_gate_status=dict(
+                                fur_surface_gate_status_by_action
+                            ),
+                            fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+                            fur_surface_gate_short_circuit=(
+                                fur_surface_gate_short_circuit
+                            ),
+                            fur_surface_gate_final_quality={
+                                "scope": "qwen_action_reference_pre_scail",
+                                "status": "failed",
+                                "actions": dict(fur_surface_gate_selected_metrics),
+                                "failure": fur_surface_gate_short_circuit,
+                                "final_video_frame_audit": False,
+                            },
+                        )
+                        write_json_atomic(
+                            job_dir
+                            / "workflows"
+                            / f"qwen_pose_{index:02d}_fur_surface_gate.json",
+                            {
+                                "policy": FUR_SURFACE_GATE_POLICY,
+                                "gate_version": FUR_SURFACE_GATE_VERSION,
+                                "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
+                                "thresholds": (fur_surface_thresholds_payload()),
+                                "fail_closed": True,
+                                "max_consecutive_rejections": (
+                                    FUR_SURFACE_GATE_MAX_REJECTIONS
+                                ),
+                                "retry_policy": (FUR_SURFACE_GATE_RETRY_POLICY),
+                                "preserves_configured_eating_bowl_recovery": (True),
+                                "configured_eating_bowl_recovery_attempts": (
+                                    QWEN_BOWL_POSE_EXTRA_ATTEMPTS
+                                ),
+                                "short_circuit": (fur_surface_gate_short_circuit),
+                                "attempts": [
+                                    item
+                                    for item in fur_surface_gate_attempt_audits
+                                    if item["pose_index"] == index
+                                ],
+                            },
+                        )
+                        raise RuntimeError(
+                            "Main_case fur surface gate rejected "
+                            f"{fur_surface_rejection_streak} consecutive "
+                            f"{action_key(pose)} Qwen candidates after attempt "
+                            f"{attempt} of {len(active_pose_profiles)}; "
+                            "blocking SCAIL."
+                        )
+                    continue
                 if not chroma_metrics["acceptable"]:
                     raw_similarity = pose_similarity_quality(
                         attempt_keyframe,
@@ -4825,15 +20257,19 @@ def run_job(job_id: str) -> None:
                             if key != "workflow"
                         }
                     )
-                    if semantic_recovery_candidate_eligible(record):
-                        semantic_penalty = 100.0 + float(raw_similarity["penalty"])
-                        if (
-                            best_semantic_source is None
-                            or best_semantic_penalty is None
-                            or semantic_penalty < best_semantic_penalty
-                        ):
+                    if semantic_recovery_candidate_eligible(
+                        record
+                    ) and not chroma_metrics.get(
+                        "semantic_recovery_attempted",
+                        False,
+                    ):
+                        # The first subject-replacement seed is the profile's
+                        # empirically validated action seed. Preserve it as the
+                        # primary semantic fallback; later seeds remain available
+                        # as diagnostics instead of replacing it based on a raw
+                        # background-contaminated similarity score.
+                        if best_semantic_source is None:
                             best_semantic_source = record
-                            best_semantic_penalty = semantic_penalty
                     if (
                         image_request
                         and raw_similarity["acceptable"]
@@ -4892,15 +20328,28 @@ def run_job(job_id: str) -> None:
                         chroma_metrics["issues"],
                     )
                     continue
-                quality = pose_cutout_quality(attempt_cutout, pose)
+                quality = pre_surface_pose_quality or pose_cutout_quality(
+                    attempt_cutout,
+                    pose,
+                    require_eating_mouth_contact=(require_eating_mouth_contact),
+                )
                 similarity = pose_similarity_quality(
                     attempt_cutout,
                     pose=pose,
                     canonical_path=canonical_similarity_reference,
                     previous_poses=accepted_pose_similarity_references,
                 )
+                fur_silhouette_quality = (
+                    eating_fur_silhouette_quality(
+                        attempt_cutout,
+                        pose_fur_reference_path,
+                    )
+                    if pose_fur_reference_path is not None
+                    else None
+                )
                 record["quality"] = quality
                 record["similarity"] = similarity
+                record["fur_silhouette"] = fur_silhouette_quality
                 record["combined_penalty"] = round(
                     float(quality["penalty"])
                     + float(similarity["penalty"])
@@ -4908,6 +20357,16 @@ def run_job(job_id: str) -> None:
                         float(palette_quality["penalty"])
                         if palette_quality is not None
                         else 0.0
+                    )
+                    + (
+                        float(fur_silhouette_quality["penalty"])
+                        if fur_silhouette_quality is not None
+                        else 0.0
+                    )
+                    + (
+                        float(fur_surface_gate_metrics.get("penalty", 1000.0))
+                        if isinstance(fur_surface_gate_metrics, dict)
+                        else (1000.0 if fur_surface_gate_required else 0.0)
                     ),
                     6,
                 )
@@ -4941,15 +20400,54 @@ def run_job(job_id: str) -> None:
                 attempts.append(
                     {key: value for key, value in record.items() if key != "workflow"}
                 )
-                if (palette_quality is None or palette_quality["acceptable"]) and (
-                    best_attempt is None
-                    or record["combined_penalty"] < best_attempt["combined_penalty"]
+                if (
+                    (palette_quality is None or palette_quality["acceptable"])
+                    and (
+                        fur_silhouette_quality is None
+                        or fur_silhouette_quality["acceptable"]
+                    )
+                    and (
+                        not fur_surface_gate_required
+                        or (
+                            isinstance(fur_surface_gate_metrics, dict)
+                            and fur_surface_gate_metrics.get("acceptable") is True
+                        )
+                    )
+                    and (
+                        not grooming_pose_gate_required
+                        or (
+                            isinstance(grooming_pose_gate_metrics, dict)
+                            and grooming_pose_gate_metrics.get("acceptable")
+                        )
+                    )
+                    and (
+                        best_attempt is None
+                        or record["combined_penalty"] < best_attempt["combined_penalty"]
+                    )
                 ):
                     best_attempt = record
                 candidate_acceptable = bool(
                     quality["acceptable"]
                     and similarity["acceptable"]
                     and (palette_quality is None or palette_quality["acceptable"])
+                    and (
+                        fur_silhouette_quality is None
+                        or fur_silhouette_quality["acceptable"]
+                    )
+                    and (
+                        not fur_surface_gate_required
+                        or (
+                            isinstance(fur_surface_gate_metrics, dict)
+                            and fur_surface_gate_metrics.get("acceptable") is True
+                        )
+                    )
+                    and (
+                        not grooming_pose_gate_required
+                        or (
+                            isinstance(grooming_pose_gate_metrics, dict)
+                            and grooming_pose_gate_metrics.get("acceptable")
+                        )
+                    )
                 )
                 if candidate_acceptable:
                     best_attempt = record
@@ -4968,13 +20466,33 @@ def run_job(job_id: str) -> None:
                                 "quality": quality,
                                 "similarity": similarity,
                                 "identity_palette": palette_quality,
+                                "fur_silhouette": fur_silhouette_quality,
+                                "fur_surface_gate": fur_surface_gate_metrics,
+                                "grooming_pose_gate": grooming_pose_gate_metrics,
                             },
                         )
                     break
                 if palette_quality is not None and not palette_quality["acceptable"]:
                     rejection_reason = "pose_identity_palette_drift"
+                elif (
+                    fur_silhouette_quality is not None
+                    and not fur_silhouette_quality["acceptable"]
+                ):
+                    rejection_reason = "fur_silhouette_expansion"
                 elif not quality["acceptable"]:
                     rejection_reason = "subject_quality_invalid"
+                elif grooming_pose_gate_required and (
+                    not isinstance(grooming_pose_gate_metrics, dict)
+                    or not grooming_pose_gate_metrics.get("acceptable")
+                ):
+                    rejection_reason = "grooming_pose_gate_failed"
+                elif (
+                    fur_surface_gate_required
+                    and isinstance(fur_surface_gate_metrics, dict)
+                    and fur_surface_gate_metrics.get("evaluated") is True
+                    and fur_surface_gate_metrics.get("acceptable") is not True
+                ):
+                    rejection_reason = "fur_surface_gate_failed"
                 else:
                     rejection_reason = "pose_too_similar"
                 append_recovery_event(
@@ -4991,16 +20509,29 @@ def run_job(job_id: str) -> None:
                         "quality": quality,
                         "similarity": similarity,
                         "identity_palette": palette_quality,
+                        "fur_silhouette": fur_silhouette_quality,
+                        "fur_surface_gate": fur_surface_gate_metrics,
+                        "grooming_pose_gate": grooming_pose_gate_metrics,
                     },
                 )
                 LOGGER.warning(
-                    "%s pose %s attempt %s failed pose checks: quality=%s similarity=%s identity_palette=%s",
+                    "%s pose %s attempt %s failed pose checks: quality=%s similarity=%s identity_palette=%s fur_silhouette=%s fur_surface=%s",
                     job_id,
                     index,
                     attempt,
                     quality["issues"],
                     similarity["issues"],
                     palette_quality["issues"] if palette_quality else None,
+                    (
+                        fur_silhouette_quality["issues"]
+                        if fur_silhouette_quality
+                        else None
+                    ),
+                    (
+                        fur_surface_gate_metrics.get("issues")
+                        if isinstance(fur_surface_gate_metrics, dict)
+                        else None
+                    ),
                 )
             if best_attempt is not None and (
                 not best_attempt["quality"]["acceptable"]
@@ -5009,8 +20540,49 @@ def run_job(job_id: str) -> None:
                     isinstance(best_attempt.get("identity_palette"), dict)
                     and not best_attempt["identity_palette"]["acceptable"]
                 )
+                or (
+                    fur_surface_gate_required
+                    and (
+                        not isinstance(
+                            best_attempt.get("fur_surface_gate"),
+                            dict,
+                        )
+                        or best_attempt["fur_surface_gate"].get("acceptable")
+                        is not True
+                    )
+                )
+                or (
+                    grooming_pose_gate_required
+                    and (
+                        not isinstance(
+                            best_attempt.get("grooming_pose_gate"),
+                            dict,
+                        )
+                        or not best_attempt["grooming_pose_gate"].get("acceptable")
+                    )
+                )
             ):
                 if (
+                    fur_surface_gate_required
+                    and isinstance(
+                        best_attempt.get("fur_surface_gate"),
+                        dict,
+                    )
+                    and best_attempt["fur_surface_gate"].get("evaluated") is True
+                    and best_attempt["fur_surface_gate"].get("acceptable") is not True
+                ):
+                    rejection_reason = "all_keyframe_fur_surface_gate_attempts_rejected"
+                elif grooming_pose_gate_required and (
+                    not isinstance(
+                        best_attempt.get("grooming_pose_gate"),
+                        dict,
+                    )
+                    or not best_attempt["grooming_pose_gate"].get("acceptable")
+                ):
+                    rejection_reason = (
+                        "all_keyframe_grooming_pose_gate_attempts_rejected"
+                    )
+                elif (
                     isinstance(best_attempt.get("identity_palette"), dict)
                     and not best_attempt["identity_palette"]["acceptable"]
                 ):
@@ -5073,6 +20645,145 @@ def run_job(job_id: str) -> None:
                 )
             if best_attempt is None:
                 if best_semantic_source is None:
+                    evaluated_surface_attempts = [
+                        metrics
+                        for attempt_record in attempts
+                        for metrics in [attempt_record.get("fur_surface_gate")]
+                        if isinstance(metrics, dict)
+                        and metrics.get("evaluated") is True
+                    ]
+                    all_evaluated_surface_attempts_rejected = bool(
+                        evaluated_surface_attempts
+                    ) and all(
+                        metrics.get("acceptable") is not True
+                        for metrics in evaluated_surface_attempts
+                    )
+                    if (
+                        fur_surface_gate_required
+                        and all_evaluated_surface_attempts_rejected
+                    ):
+                        fur_surface_gate_status_by_action[action_key(pose)] = "failed"
+                        update_job(
+                            job_id,
+                            fur_surface_gate_status=dict(
+                                fur_surface_gate_status_by_action
+                            ),
+                            fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+                            fur_surface_gate_final_quality={
+                                "scope": "qwen_action_reference_pre_scail",
+                                "status": "failed",
+                                "actions": dict(fur_surface_gate_selected_metrics),
+                                "failure": {
+                                    "action": action_key(pose),
+                                    "reason": "all_surface_candidates_rejected",
+                                    "blocks_scail": True,
+                                },
+                                "final_video_frame_audit": False,
+                            },
+                        )
+                        raise RuntimeError(
+                            "Main_case fur surface gate did not approve any "
+                            f"{action_key(pose)} Qwen candidate after "
+                            f"{len(active_pose_profiles)} attempts: "
+                            + pose_attempt_failure_summary(attempts)
+                        )
+                    if fur_surface_gate_required:
+                        passed_surface_attempts = [
+                            metrics
+                            for metrics in evaluated_surface_attempts
+                            if metrics.get("acceptable") is True
+                        ]
+                        surface_terminal_reason = (
+                            "no_selectable_candidate_after_surface_gate"
+                            if passed_surface_attempts
+                            else "no_candidate_reached_surface_gate"
+                        )
+                        fur_surface_gate_status_by_action[action_key(pose)] = (
+                            "passed_no_selectable_keyframe"
+                            if passed_surface_attempts
+                            else "not_evaluated_upstream_gate_failed"
+                        )
+                        update_job(
+                            job_id,
+                            fur_surface_gate_status=dict(
+                                fur_surface_gate_status_by_action
+                            ),
+                            fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+                            fur_surface_gate_final_quality={
+                                "scope": "qwen_action_reference_pre_scail",
+                                "status": "failed",
+                                "actions": dict(fur_surface_gate_selected_metrics),
+                                "failure": {
+                                    "action": action_key(pose),
+                                    "reason": surface_terminal_reason,
+                                    "surface_candidates_evaluated": len(
+                                        evaluated_surface_attempts
+                                    ),
+                                    "surface_candidates_passed": len(
+                                        passed_surface_attempts
+                                    ),
+                                    "blocks_scail": True,
+                                },
+                                "final_video_frame_audit": False,
+                            },
+                        )
+                    if grooming_pose_gate_required:
+                        evaluated_grooming_attempts = [
+                            metrics
+                            for attempt_record in attempts
+                            for metrics in [attempt_record.get("grooming_pose_gate")]
+                            if isinstance(metrics, dict) and "acceptable" in metrics
+                        ]
+                        all_grooming_attempts_rejected = bool(
+                            evaluated_grooming_attempts
+                        ) and all(
+                            metrics.get("acceptable") is not True
+                            for metrics in evaluated_grooming_attempts
+                        )
+                        passed_grooming_attempts = [
+                            metrics
+                            for metrics in evaluated_grooming_attempts
+                            if metrics.get("acceptable") is True
+                        ]
+                        update_job(
+                            job_id,
+                            grooming_pose_gate_status=(
+                                "failed"
+                                if all_grooming_attempts_rejected
+                                else (
+                                    "passed_no_selectable_keyframe"
+                                    if passed_grooming_attempts
+                                    else "not_evaluated_upstream_gate_failed"
+                                )
+                            ),
+                            grooming_pose_gate_selected_metrics=(
+                                grooming_pose_gate_selected_metrics
+                            ),
+                            grooming_pose_gate_attempts=(
+                                grooming_pose_gate_attempt_audits
+                            ),
+                        )
+                        if all_grooming_attempts_rejected:
+                            raise RuntimeError(
+                                "Main_case grooming pose gate rejected every Qwen "
+                                f"candidate after {len(active_pose_profiles)} attempts: "
+                                + pose_attempt_failure_summary(attempts)
+                            )
+                        evaluated_palette_attempts = [
+                            metrics
+                            for attempt_record in attempts
+                            for metrics in [attempt_record.get("identity_palette")]
+                            if isinstance(metrics, dict) and "acceptable" in metrics
+                        ]
+                        if evaluated_palette_attempts and all(
+                            metrics.get("acceptable") is not True
+                            for metrics in evaluated_palette_attempts
+                        ):
+                            raise RuntimeError(
+                                "Grooming Qwen identity palette gate rejected every "
+                                f"candidate after {len(active_pose_profiles)} attempts: "
+                                + pose_attempt_failure_summary(attempts)
+                            )
                     raise RuntimeError(
                         f"Pose {index} remained invalid after "
                         f"{len(active_pose_profiles)} attempts: "
@@ -5099,78 +20810,288 @@ def run_job(job_id: str) -> None:
                     fallback_semantic,
                     pose=pose,
                 )
-                quality = pose_cutout_quality(fallback_cutout, pose)
+                quality = pose_cutout_quality(
+                    fallback_cutout,
+                    pose,
+                    require_eating_mouth_contact=(require_eating_mouth_contact),
+                )
                 similarity = pose_similarity_quality(
                     fallback_cutout,
                     pose=pose,
                     canonical_path=canonical_similarity_reference,
                     previous_poses=accepted_pose_similarity_references,
                 )
-                semantic_candidate_palette = (
-                    identity_palette_signature(
-                        fallback_green,
-                        exclude_bottom_fraction=pose_palette_bottom_exclusion,
-                    )
-                    if pose_reference_identity_palette is not None
-                    else None
+                semantic_palette = evaluate_pose_identity_palette(
+                    fallback_cutout,
+                    primary_reference=pose_reference_identity_palette,
+                    upper_body_reference=pose_reference_upper_body_identity_palette,
+                    bottom_exclusion=pose_palette_bottom_exclusion,
+                    bowl_action=bowl_action,
                 )
-                semantic_primary_palette_quality = (
-                    identity_palette_quality(
-                        pose_reference_identity_palette,
-                        semantic_candidate_palette,
-                    )
-                    if (
-                        pose_reference_identity_palette is not None
-                        and semantic_candidate_palette is not None
-                    )
-                    else None
+                semantic_candidate_palette = semantic_palette["candidate"]
+                semantic_upper_body_candidate_palette = semantic_palette[
+                    "upper_body_candidate"
+                ]
+                semantic_palette_quality = semantic_palette["quality"]
+                semantic_color_recovery: dict[str, Any] | None = None
+                warm_cast_issues = {
+                    "achromatic_source_recolored_with_warm_fur",
+                    "new_dominant_warm_brown_or_orange",
+                    "new_dominant_yellow_or_gold",
+                    "new_dominant_red_or_pink",
+                }
+                palette_issues = set(
+                    semantic_palette_quality.get("issues", [])
+                    if isinstance(semantic_palette_quality, dict)
+                    else []
                 )
-                semantic_upper_body_candidate_palette = (
-                    identity_palette_signature(
-                        fallback_green,
-                        exclude_bottom_fraction=(
-                            BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
-                        ),
+                source_upper_is_achromatic = bool(
+                    isinstance(pose_reference_upper_body_identity_palette, dict)
+                    and float(
+                        pose_reference_upper_body_identity_palette.get(
+                            "achromatic_fraction",
+                            0.0,
+                        )
                     )
-                    if pose_reference_upper_body_identity_palette is not None
-                    else None
-                )
-                semantic_upper_body_palette_quality = (
-                    identity_palette_quality(
-                        pose_reference_upper_body_identity_palette,
-                        semantic_upper_body_candidate_palette,
+                    >= 0.85
+                    and float(
+                        pose_reference_upper_body_identity_palette.get(
+                            "warm_fraction",
+                            1.0,
+                        )
                     )
-                    if (
-                        pose_reference_upper_body_identity_palette is not None
-                        and semantic_upper_body_candidate_palette is not None
-                    )
-                    else None
-                )
-                semantic_palette_quality = (
-                    bowl_aware_identity_palette_quality(
-                        semantic_primary_palette_quality,
-                        semantic_upper_body_palette_quality,
-                    )
-                    if semantic_primary_palette_quality is not None and bowl_action
-                    else semantic_primary_palette_quality
+                    <= 0.12
                 )
                 if (
-                    not quality["acceptable"]
-                    or not similarity["acceptable"]
-                    or (
-                        semantic_palette_quality is not None
-                        and not semantic_palette_quality["acceptable"]
-                    )
+                    palette_issues
+                    and palette_issues.issubset(warm_cast_issues)
+                    and source_upper_is_achromatic
+                    and canonical_similarity_reference is not None
                 ):
-                    if (
-                        semantic_palette_quality is not None
-                        and not semantic_palette_quality["acceptable"]
-                    ):
-                        semantic_rejection_reason = "semantic_identity_palette_invalid"
-                    elif not quality["acceptable"]:
-                        semantic_rejection_reason = "semantic_subject_quality_invalid"
-                    else:
-                        semantic_rejection_reason = "semantic_pose_similarity_invalid"
+                    corrected_cutout = (
+                        job_dir
+                        / f"pose_{index:02d}_semantic_cutout_color_corrected.png"
+                    )
+                    corrected_green = (
+                        job_dir / f"pose_{index:02d}_semantic_green_color_corrected.png"
+                    )
+                    semantic_color_recovery = neutralize_achromatic_warm_cast(
+                        canonical_similarity_reference,
+                        fallback_cutout,
+                        corrected_cutout,
+                        green_target=corrected_green,
+                    )
+                    if semantic_color_recovery.get("applied"):
+                        corrected_validation_cutout = (
+                            job_dir
+                            / f"pose_{index:02d}_semantic_color_chroma_validation.png"
+                        )
+                        corrected_chroma = evaluate_chroma_cutout(
+                            corrected_green,
+                            corrected_validation_cutout,
+                        )
+                        corrected_quality = pose_cutout_quality(
+                            corrected_cutout,
+                            pose,
+                            require_eating_mouth_contact=(require_eating_mouth_contact),
+                        )
+                        corrected_similarity = pose_similarity_quality(
+                            corrected_cutout,
+                            pose=pose,
+                            canonical_path=canonical_similarity_reference,
+                            previous_poses=accepted_pose_similarity_references,
+                        )
+                        semantic_palette = evaluate_pose_identity_palette(
+                            corrected_cutout,
+                            primary_reference=pose_reference_identity_palette,
+                            upper_body_reference=(
+                                pose_reference_upper_body_identity_palette
+                            ),
+                            bottom_exclusion=pose_palette_bottom_exclusion,
+                            bowl_action=bowl_action,
+                        )
+                        semantic_candidate_palette = semantic_palette["candidate"]
+                        semantic_upper_body_candidate_palette = semantic_palette[
+                            "upper_body_candidate"
+                        ]
+                        semantic_palette_quality = semantic_palette["quality"]
+                        semantic_color_recovery.update(
+                            {
+                                "before_identity_palette_issues": sorted(
+                                    palette_issues
+                                ),
+                                "after_identity_palette_issues": (
+                                    list(semantic_palette_quality.get("issues", []))
+                                    if isinstance(
+                                        semantic_palette_quality,
+                                        dict,
+                                    )
+                                    else []
+                                ),
+                                "post_chroma_acceptable": bool(
+                                    corrected_chroma.get("acceptable")
+                                ),
+                                "post_quality_acceptable": bool(
+                                    corrected_quality.get("acceptable")
+                                ),
+                                "post_similarity_acceptable": bool(
+                                    corrected_similarity.get("acceptable")
+                                ),
+                            }
+                        )
+                        fallback_cutout = corrected_cutout
+                        fallback_green = corrected_green
+                        chroma_metrics = {
+                            **corrected_chroma,
+                            "method": "rembg_then_lab_warm_cast_recovery",
+                            "semantic_cutout": fallback_semantic.name,
+                            "color_recovery": semantic_color_recovery,
+                        }
+                        quality = corrected_quality
+                        similarity = corrected_similarity
+                fallback_reference = (
+                    job_dir / f"pose_{index:02d}_qwen_reference_semantic_final.png"
+                )
+                chroma_metrics, fallback_cutout = (
+                    finalize_qwen_action_reference_candidate(
+                        chroma_metrics,
+                        fallback_cutout,
+                        fallback_reference,
+                    )
+                )
+                if chroma_metrics.get("acceptable") is not True:
+                    raise RuntimeError(
+                        "Semantic fallback final 512 RGBA normalization failed: "
+                        + str(
+                            chroma_metrics.get(
+                                "final_reference_normalization_error",
+                                "unknown normalization error",
+                            )
+                        )
+                    )
+                chroma_metrics["identity_chroma_spill_cleanup"] = (
+                    neutralize_uploaded_identity_chroma_spill(
+                        fallback_cutout,
+                        source_identity_palette,
+                    )
+                )
+                quality = pose_cutout_quality(
+                    fallback_cutout,
+                    pose,
+                    require_eating_mouth_contact=(require_eating_mouth_contact),
+                )
+                similarity = pose_similarity_quality(
+                    fallback_cutout,
+                    pose=pose,
+                    canonical_path=canonical_similarity_reference,
+                    previous_poses=accepted_pose_similarity_references,
+                )
+                semantic_palette = evaluate_pose_identity_palette(
+                    fallback_cutout,
+                    primary_reference=pose_reference_identity_palette,
+                    upper_body_reference=(pose_reference_upper_body_identity_palette),
+                    bottom_exclusion=pose_palette_bottom_exclusion,
+                    bowl_action=bowl_action,
+                )
+                semantic_candidate_palette = semantic_palette["candidate"]
+                semantic_upper_body_candidate_palette = semantic_palette[
+                    "upper_body_candidate"
+                ]
+                semantic_palette_quality = semantic_palette["quality"]
+                semantic_fur_silhouette_quality = (
+                    eating_fur_silhouette_quality(
+                        fallback_cutout,
+                        pose_fur_reference_path,
+                    )
+                    if pose_fur_reference_path is not None
+                    else None
+                )
+                semantic_fur_surface_quality: dict[str, Any] | None = None
+                if fur_surface_gate_required:
+                    assert isinstance(pose_effective_subject_config, dict)
+                    semantic_fur_surface_quality = (
+                        evaluate_main_case_fur_surface_candidate(
+                            fallback_cutout,
+                            action=action_key(pose),
+                            alpha_provenance=str(chroma_metrics.get("method") or ""),
+                            effective_subject_config=(pose_effective_subject_config),
+                        )
+                    )
+                    semantic_attempt = len(attempts) + 1
+                    fur_surface_gate_attempt_audits.append(
+                        {
+                            "pose_index": index,
+                            "pose": pose,
+                            "action": action_key(pose),
+                            "attempt": semantic_attempt,
+                            "seed": fallback_record["seed"],
+                            "source": fallback_source.name,
+                            "alpha_cutout": fallback_cutout.name,
+                            "alpha_provenance": str(chroma_metrics.get("method") or ""),
+                            "semantic_recovery": True,
+                            "gate": semantic_fur_surface_quality,
+                            "consecutive_rejections": (
+                                fur_surface_rejection_streak
+                                + (
+                                    1
+                                    if semantic_fur_surface_quality.get("acceptable")
+                                    is not True
+                                    else 0
+                                )
+                            ),
+                            "result": (
+                                "passed"
+                                if semantic_fur_surface_quality.get("acceptable")
+                                is True
+                                else "rejected"
+                            ),
+                        }
+                    )
+                    fur_surface_gate_status_by_action[action_key(pose)] = (
+                        "candidate_passed"
+                        if semantic_fur_surface_quality.get("acceptable") is True
+                        else "failed"
+                    )
+                    write_json_atomic(
+                        job_dir
+                        / "workflows"
+                        / f"qwen_pose_{index:02d}_fur_surface_gate.json",
+                        {
+                            "policy": FUR_SURFACE_GATE_POLICY,
+                            "gate_version": FUR_SURFACE_GATE_VERSION,
+                            "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
+                            "thresholds": fur_surface_thresholds_payload(),
+                            "fail_closed": True,
+                            "max_consecutive_rejections": (
+                                FUR_SURFACE_GATE_MAX_REJECTIONS
+                            ),
+                            "retry_policy": FUR_SURFACE_GATE_RETRY_POLICY,
+                            "preserves_configured_eating_bowl_recovery": True,
+                            "configured_eating_bowl_recovery_attempts": (
+                                QWEN_BOWL_POSE_EXTRA_ATTEMPTS
+                            ),
+                            "short_circuit": fur_surface_gate_short_circuit,
+                            "attempts": [
+                                item
+                                for item in fur_surface_gate_attempt_audits
+                                if item["pose_index"] == index
+                            ],
+                        },
+                    )
+                    update_job(
+                        job_id,
+                        fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
+                        fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+                    )
+                semantic_rejection_reason = semantic_recovery_gate_failure(
+                    chroma_metrics,
+                    quality,
+                    similarity,
+                    semantic_palette_quality,
+                    semantic_fur_silhouette_quality,
+                    semantic_fur_surface_quality,
+                )
+                if semantic_rejection_reason is not None:
                     append_recovery_event(
                         job_id,
                         {
@@ -5185,12 +21106,35 @@ def run_job(job_id: str) -> None:
                             "quality": quality,
                             "similarity": similarity,
                             "identity_palette": semantic_palette_quality,
+                            "fur_silhouette": (semantic_fur_silhouette_quality),
+                            "fur_surface_gate": (semantic_fur_surface_quality),
+                            "color_recovery": semantic_color_recovery,
                         },
                     )
-                    issues = list(quality["issues"])
+                    issues = list(chroma_metrics.get("issues", []))
+                    issues.extend(quality["issues"])
                     issues.extend(similarity["issues"])
                     if semantic_palette_quality is not None:
                         issues.extend(semantic_palette_quality["issues"])
+                    if semantic_fur_silhouette_quality is not None:
+                        issues.extend(semantic_fur_silhouette_quality["issues"])
+                    if semantic_fur_surface_quality is not None:
+                        issues.extend(semantic_fur_surface_quality["issues"])
+                    if fur_surface_gate_required:
+                        update_job(
+                            job_id,
+                            fur_surface_gate_final_quality={
+                                "scope": "qwen_action_reference_pre_scail",
+                                "status": "failed",
+                                "actions": dict(fur_surface_gate_selected_metrics),
+                                "failure": {
+                                    "action": action_key(pose),
+                                    "reason": semantic_rejection_reason,
+                                    "blocks_scail": True,
+                                },
+                                "final_video_frame_audit": False,
+                            },
+                        )
                     raise RuntimeError(
                         f"Pose {index} semantic recovery failed quality checks: "
                         + ", ".join(issues)
@@ -5205,6 +21149,9 @@ def run_job(job_id: str) -> None:
                     "quality": quality,
                     "similarity": similarity,
                     "identity_palette": semantic_palette_quality,
+                    "fur_silhouette": semantic_fur_silhouette_quality,
+                    "fur_surface_gate": semantic_fur_surface_quality,
+                    "color_recovery": semantic_color_recovery,
                     "candidate_identity_palette": semantic_candidate_palette,
                     "candidate_upper_body_identity_palette": (
                         semantic_upper_body_candidate_palette
@@ -5216,6 +21163,24 @@ def run_job(job_id: str) -> None:
                             float(semantic_palette_quality["penalty"])
                             if semantic_palette_quality is not None
                             else 0.0
+                        )
+                        + (
+                            float(semantic_fur_silhouette_quality["penalty"])
+                            if semantic_fur_silhouette_quality is not None
+                            else 0.0
+                        )
+                        + (
+                            float(
+                                semantic_fur_surface_quality.get(
+                                    "penalty",
+                                    1000.0,
+                                )
+                            )
+                            if isinstance(
+                                semantic_fur_surface_quality,
+                                dict,
+                            )
+                            else (1000.0 if fur_surface_gate_required else 0.0)
                         ),
                         6,
                     ),
@@ -5245,6 +21210,9 @@ def run_job(job_id: str) -> None:
                         "quality": quality,
                         "similarity": similarity,
                         "identity_palette": semantic_palette_quality,
+                        "fur_silhouette": semantic_fur_silhouette_quality,
+                        "fur_surface_gate": semantic_fur_surface_quality,
+                        "color_recovery": semantic_color_recovery,
                     },
                 )
             shutil.copy2(job_dir / best_attempt["keyframe"], keyframe)
@@ -5255,6 +21223,84 @@ def run_job(job_id: str) -> None:
                 selected_keyframe = keyframe_cutout
             else:
                 selected_keyframe = keyframe
+            if fur_surface_gate_required:
+                selected_surface = best_attempt.get("fur_surface_gate")
+                if (
+                    not isinstance(selected_surface, dict)
+                    or selected_surface.get("acceptable") is not True
+                    or selected_surface.get("status") != "passed"
+                ):
+                    fur_surface_gate_status_by_action[action_key(pose)] = "failed"
+                    update_job(
+                        job_id,
+                        fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
+                        fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+                    )
+                    raise RuntimeError(
+                        "Main_case fur surface gate selected an invalid "
+                        f"{action_key(pose)} candidate."
+                    )
+                selected_digest = file_sha256(selected_keyframe)
+                selected_gate_metadata = selected_surface.get("gate")
+                if (
+                    not isinstance(selected_gate_metadata, dict)
+                    or selected_gate_metadata.get("policy") != FUR_SURFACE_GATE_POLICY
+                    or selected_gate_metadata.get("gate_version")
+                    != FUR_SURFACE_GATE_VERSION
+                    or selected_gate_metadata.get("threshold_version")
+                    != FUR_SURFACE_THRESHOLD_VERSION
+                    or selected_gate_metadata.get("action") != action_key(pose)
+                    or selected_gate_metadata.get("candidate_sha256") != selected_digest
+                ):
+                    raise RuntimeError(
+                        "Main_case fur surface selected-candidate provenance changed."
+                    )
+                selected_surface = json.loads(json.dumps(selected_surface))
+                selected_surface["selected_candidate_path"] = str(selected_keyframe)
+                selected_surface["selected_candidate_sha256"] = selected_digest
+                selected_surface["selected_attempt"] = best_attempt["attempt"]
+                best_attempt["fur_surface_gate"] = selected_surface
+                fur_surface_gate_selected_metrics[action_key(pose)] = selected_surface
+                fur_surface_gate_status_by_action[action_key(pose)] = "passed"
+                update_job(
+                    job_id,
+                    fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
+                    fur_surface_gate_attempts=fur_surface_gate_attempt_audits,
+                    fur_surface_gate_selected_metrics=(
+                        fur_surface_gate_selected_metrics
+                    ),
+                    fur_surface_gate_final_quality={
+                        "scope": "qwen_action_reference_pre_scail",
+                        "status": "running",
+                        "policy": FUR_SURFACE_GATE_POLICY,
+                        "gate_version": FUR_SURFACE_GATE_VERSION,
+                        "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
+                        "actions": dict(fur_surface_gate_selected_metrics),
+                        "final_video_frame_audit": False,
+                    },
+                )
+            if grooming_pose_gate_required:
+                selected_gate = best_attempt.get("grooming_pose_gate")
+                if not isinstance(selected_gate, dict) or not selected_gate.get(
+                    "acceptable"
+                ):
+                    update_job(
+                        job_id,
+                        grooming_pose_gate_status="failed",
+                        grooming_pose_gate_attempts=(grooming_pose_gate_attempt_audits),
+                    )
+                    raise RuntimeError(
+                        "Main_case grooming pose gate selected an invalid candidate."
+                    )
+                grooming_pose_gate_selected_metrics[action_key(pose)] = selected_gate
+                update_job(
+                    job_id,
+                    grooming_pose_gate_status="passed",
+                    grooming_pose_gate_attempts=(grooming_pose_gate_attempt_audits),
+                    grooming_pose_gate_selected_metrics=(
+                        grooming_pose_gate_selected_metrics
+                    ),
+                )
             write_workflow(
                 job_dir, f"qwen_pose_{index:02d}.json", best_attempt["workflow"]
             )
@@ -5263,10 +21309,44 @@ def run_job(job_id: str) -> None:
                 {
                     "selected_attempt": best_attempt["attempt"],
                     "selected_profile": best_attempt["profile"],
+                    "identity_input_policy": (effective_pose_identity_input_policy),
+                    "image1_input_name": best_attempt["image1_input_name"],
+                    "image2_input_name": best_attempt["image2_input_name"],
+                    "image3_input_name": best_attempt.get("image3_input_name"),
+                    "sampler_latent_input_name": best_attempt[
+                        "sampler_latent_input_name"
+                    ],
+                    "identity_input_name": best_attempt["identity_input_name"],
+                    "geometry_input_name": best_attempt["geometry_input_name"],
+                    "grooming_foreleg_repair": best_attempt.get(
+                        "grooming_foreleg_repair"
+                    ),
+                    "palette_reference_role": (
+                        "uploaded_identity_source"
+                        if (
+                            effective_pose_identity_input_policy
+                            in {
+                                POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,
+                                POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+                            }
+                        )
+                        else "approved_canonical_character"
+                    ),
                     "selected_chroma": best_attempt["chroma"],
                     "selected_quality": best_attempt["quality"],
                     "selected_similarity": best_attempt["similarity"],
                     "selected_identity_palette": best_attempt.get("identity_palette"),
+                    "selected_fur_silhouette": best_attempt.get("fur_silhouette"),
+                    "fur_surface_gate_policy": FUR_SURFACE_GATE_POLICY,
+                    "fur_surface_gate_version": FUR_SURFACE_GATE_VERSION,
+                    "fur_surface_threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
+                    "selected_fur_surface_gate": best_attempt.get("fur_surface_gate"),
+                    "grooming_pose_gate_policy": GROOMING_POSE_GATE_POLICY,
+                    "grooming_pose_gate_version": GROOMING_POSE_GATE_VERSION,
+                    "selected_grooming_pose_gate": best_attempt.get(
+                        "grooming_pose_gate"
+                    ),
+                    "selected_color_recovery": best_attempt.get("color_recovery"),
                     "reference_identity_palette": pose_reference_identity_palette,
                     "prompt_reference_identity_palette": (
                         pose_identity_palette_prompt_signature
@@ -5305,6 +21385,18 @@ def run_job(job_id: str) -> None:
                     "pose": pose,
                     "attempt": best_attempt["attempt"],
                     "profile": best_attempt["profile"],
+                    "identity_input_policy": (effective_pose_identity_input_policy),
+                    "image1_input_name": best_attempt["image1_input_name"],
+                    "image2_input_name": best_attempt["image2_input_name"],
+                    "image3_input_name": best_attempt.get("image3_input_name"),
+                    "sampler_latent_input_name": best_attempt[
+                        "sampler_latent_input_name"
+                    ],
+                    "identity_input_name": best_attempt["identity_input_name"],
+                    "geometry_input_name": best_attempt["geometry_input_name"],
+                    "grooming_foreleg_repair": best_attempt.get(
+                        "grooming_foreleg_repair"
+                    ),
                     "user_loras": best_attempt["settings"]["user_loras"],
                     "user_lora_strength_scale": best_attempt["settings"][
                         "user_lora_strength_scale"
@@ -5322,6 +21414,9 @@ def run_job(job_id: str) -> None:
                     ],
                     "similarity": best_attempt["similarity"],
                     "identity_palette": best_attempt.get("identity_palette"),
+                    "fur_silhouette": best_attempt.get("fur_silhouette"),
+                    "fur_surface_gate": best_attempt.get("fur_surface_gate"),
+                    "grooming_pose_gate": best_attempt.get("grooming_pose_gate"),
                 }
             )
             if keyframe_is_transparent and best_attempt["attempt"] > 1:
@@ -5349,7 +21444,7 @@ def run_job(job_id: str) -> None:
         else:
             prefix = f"local_video_api/{job_id}/qwen_pose_{index:02d}"
             workflow = qwen_workflow(
-                qwen_input_name,
+                pose_qwen_input_name,
                 prompt,
                 negative_prompt,
                 base_seed + pose_seed_offset(pose, index),
@@ -5363,6 +21458,7 @@ def run_job(job_id: str) -> None:
                 denoise=pose_profiles[0]["denoise"],
                 builtin_style_strength=QWEN_POSE_STYLE_LORA_STRENGTH,
                 suppress_builtin_style=suppress_builtin_style,
+                pose_reference_input_name=pose_qwen_secondary_input_name,
             )
             write_workflow(job_dir, f"qwen_pose_{index:02d}.json", workflow)
             entry = queue_and_wait(
@@ -5390,9 +21486,42 @@ def run_job(job_id: str) -> None:
                 },
             )
 
+    if fur_surface_gate_status_by_action:
+        expected_surface_actions = list(fur_surface_gate_status_by_action)
+        missing_surface_actions = [
+            action
+            for action in expected_surface_actions
+            if fur_surface_gate_status_by_action.get(action) != "passed"
+            or action not in fur_surface_gate_selected_metrics
+        ]
+        if missing_surface_actions:
+            raise RuntimeError(
+                "Main_case fur surface final quality is incomplete before "
+                "SCAIL: " + ", ".join(missing_surface_actions)
+            )
+        update_job(
+            job_id,
+            fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
+            fur_surface_gate_attempts=fur_surface_gate_attempt_audits,
+            fur_surface_gate_selected_metrics=(fur_surface_gate_selected_metrics),
+            fur_surface_gate_final_quality={
+                "scope": "qwen_action_reference_pre_scail",
+                "status": "passed",
+                "policy": FUR_SURFACE_GATE_POLICY,
+                "gate_version": FUR_SURFACE_GATE_VERSION,
+                "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+                "actions": dict(fur_surface_gate_selected_metrics),
+                "final_video_frame_audit": False,
+            },
+        )
+
     if skip_video:
         raise_if_cancelled(job_id)
-        update_job(job_id, stage="finalizing_keyframes", progress=92)
+        update_job(
+            job_id,
+            stage="finalizing_keyframes",
+            progress=35 if force_qwen_reference else 92,
+        )
         if transparent_gif:
             for index, (pose, keyframe, keyframe_is_transparent) in enumerate(
                 zip(poses, keyframes, keyframe_transparency, strict=True),
@@ -5414,6 +21543,7 @@ def run_job(job_id: str) -> None:
                             width,
                             height,
                             transparent=True,
+                            preserve_gated_alpha=force_qwen_reference,
                         )
                     except Exception as exc:  # noqa: BLE001 - image mode returns its saved raw image
                         if not image_request:
@@ -5464,6 +21594,18 @@ def run_job(job_id: str) -> None:
         raise_if_cancelled(job_id)
         free_comfy_models()
         raise_if_cancelled(job_id)
+        if force_qwen_reference:
+            update_job(
+                job_id,
+                status="running",
+                stage="subject_references_ready",
+                progress=35,
+                current_pose_index=None,
+                current_pose=None,
+                recovery_active=False,
+                recovery_attempt=None,
+            )
+            return
         update_job(
             job_id,
             status="completed",
@@ -5745,6 +21887,14 @@ def worker_loop() -> None:
                 )
         except Exception as exc:  # noqa: BLE001 - worker must persist all failures
             LOGGER.error("Job %s failed: %s\n%s", job_id, exc, traceback.format_exc())
+            with JOBS_LOCK:
+                failed_job = dict(JOBS.get(job_id) or {})
+            reference_failure: dict[str, Any] = {}
+            if failed_job.get("reference_generation_status") == "running":
+                reference_failure = {
+                    "reference_generation_status": "failed",
+                    "reference_generation_completed": False,
+                }
             update_job(
                 job_id,
                 status="failed",
@@ -5757,6 +21907,7 @@ def worker_loop() -> None:
                 current_pose_index=None,
                 current_pose=None,
                 finished_at=utc_now(),
+                **reference_failure,
             )
             try:
                 wait_comfy_idle(timeout=120)
@@ -5789,6 +21940,11 @@ def restore_jobs() -> None:
                 )
                 write_json_atomic(path, job)
             elif job.get("status") == "running":
+                if job.get("reference_generation_status") == "running":
+                    job.update(
+                        reference_generation_status="failed",
+                        reference_generation_completed=False,
+                    )
                 job.update(
                     status="failed",
                     stage="failed",
@@ -5815,11 +21971,12 @@ def restore_jobs() -> None:
 
 
 app = FastAPI(
-    title="Local Multi-Pose Video API",
+    title="Local Pet Subject-Replacement API",
     version=API_VERSION,
     description=(
-        "Upload one image and a prompt to generate multiple local-model 5-second pose videos, "
-        "including an optional 512x512 transparent GIF output mode."
+        "Generate local-model pet subject-replacement videos from the eating and grooming "
+        "driving templates. The legacy Qwen-to-Wan keyframe workflow remains available only "
+        "when generation_mode=keyframe_video is requested explicitly."
     ),
     docs_url=f"{API_PREFIX}/docs",
     redoc_url=None,
@@ -5894,6 +22051,411 @@ def health() -> dict[str, Any]:
     ffmpeg_ok = Path(FFMPEG_BIN).is_file()
     translator_missing = prompt_translator_missing_paths()
     translator_ok = not PROMPT_TRANSLATION_ENABLED or not translator_missing
+    subject_profile_items: list[dict[str, Any]] = []
+    subject_replacement_missing: list[str] = []
+    default_effective_subject_config: dict[str, Any] | None = None
+    standard_direct_health: dict[str, Any] = {
+        "enabled": False,
+        "status": "unavailable",
+        "policy": PROFILE_STANDARD_DIRECT_POLICY,
+        "gpu_required": False,
+        "gpu_submitted": False,
+        "gpu_bypass_reason": PROFILE_STANDARD_DIRECT_GPU_REASON,
+        "upload_identity_excluded": True,
+        "actions": {},
+    }
+    upload_validation_health: dict[str, Any] = {
+        "enabled": True,
+        "status": "unavailable",
+        "policy": QWEN_FULL_BODY_FIRST_FRAME_PIPELINE,
+        "version": QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
+        "requires_standard_direct_assets": True,
+        "qwen_full_body_required": True,
+        "qwen_action_keyframes_required": True,
+        "normalized_transparent_references_required": True,
+        "identity_upload_view_counts": [1, 3],
+        "three_view_roles": list(UPLOADED_IDENTITY_VIEW_ROLES),
+        "three_view_policy": UPLOADED_IDENTITY_VIEW_POLICY,
+        "three_view_qwen_node_inputs": ["image1", "image2", "image3"],
+        "three_view_canonical_supported": True,
+        "three_view_action_stage_raw_views_used": False,
+        "uploaded_identity_appearance_authority": True,
+        "subject_profile_appearance_role": "action_geometry_only",
+        "canonical_palette_input": "final_alpha_cutout",
+        "canonical_upper_body_palette_reference_policy": (
+            CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY
+        ),
+        "canonical_raw_palette_retained_for_audit": True,
+        "canonical_chroma_despill": (
+            "alpha_boundary_plus_source_palette_guarded_interior_v1"
+        ),
+        "canonical_chroma_spill_policy": (UPLOADED_IDENTITY_CHROMA_SPILL_POLICY),
+        "canonical_chroma_spill_preserves_paired_eye_accents": True,
+        "canonical_interior_hole_gate": True,
+        "surface_texture_gate_required_before_scail": True,
+        "surface_candidate_comparison_mode": (
+            UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
+        ),
+        "expected_surface_gate_actions": list(SUBJECT_REPLACEMENT_ACTIONS),
+    }
+    fur_surface_gate_health: dict[str, Any] = {
+        "enabled": True,
+        "policy": FUR_SURFACE_GATE_POLICY,
+        "gate_version": FUR_SURFACE_GATE_VERSION,
+        "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+        "thresholds": fur_surface_thresholds_payload(),
+        "radial_long_line_evidence_policy": (
+            "hough_radial_fraction_and_radial_line_density_v1"
+        ),
+        "radial_ratio_alone_can_reject": False,
+        "scope": "qwen_action_references_and_all_final_scail_videos",
+        "qwen_reference_candidate_gate": True,
+        "direct_upload_reference_candidate_gate": False,
+        "direct_upload_reference_reason": (
+            "the raw upload never enters SCAIL; Qwen action references and "
+            "final SCAIL video frames remain fail-closed"
+        ),
+        "reliable_inputs": ["alpha_cutout", "rembg_alpha_cutout"],
+        "fail_closed": True,
+        "max_consecutive_rejections": FUR_SURFACE_GATE_MAX_REJECTIONS,
+        "retry_policy": FUR_SURFACE_GATE_RETRY_POLICY,
+        "preserves_configured_eating_bowl_recovery": True,
+        "configured_eating_bowl_recovery_attempts": (QWEN_BOWL_POSE_EXTRA_ATTEMPTS),
+        "configured_eating_bowl_recovery_profile_prefix": (
+            f"{QWEN_BOWL_POSE_RETRY_NAME}_"
+        ),
+        "blocks_scail_on_exhaustion": True,
+        "final_video_frame_audit": True,
+        "final_video_policy": FINAL_VIDEO_FUR_AUDIT_POLICY,
+        "final_video_version": FINAL_VIDEO_FUR_AUDIT_VERSION,
+        "final_video_sample_count": FINAL_VIDEO_FUR_SAMPLE_COUNT,
+        "final_video_profile_full_scope": FINAL_VIDEO_PROFILE_FULL_SCOPE,
+        "final_video_uploaded_qwen_action_scope": (
+            FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+        ),
+        "final_video_uploaded_qwen_actions": sorted(
+            FINAL_VIDEO_VALIDATED_ACTION_REFERENCE_POLICIES
+        ),
+        "final_video_uploaded_qwen_reference_policies": dict(
+            FINAL_VIDEO_VALIDATED_ACTION_REFERENCE_POLICIES
+        ),
+        "final_video_uploaded_eating_scope": (
+            FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+        ),
+        "final_video_uploaded_grooming_scope": (
+            FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+        ),
+        "final_video_profile_and_qwen_reference_sha_required": True,
+        "final_video_profile_pixels_used_for_uploaded_identity_appearance_validation": False,
+        "final_video_uploaded_qwen_action_reference_is_appearance_authority": True,
+        "final_video_scail_identity_mask_sha_required": True,
+        "final_video_eating_prop_alignment_minimum_overlap": (
+            FINAL_VIDEO_EATING_PROP_ALIGNMENT_MIN
+        ),
+        "final_video_non_radial_absolute_observations_nonblocking_only_for_uploaded_qwen_transparent_actions": True,
+        "final_video_geometry_relative_nonblocking_only_for_uploaded_qwen_transparent_actions": True,
+        "final_video_unmasked_contour_relative_required": True,
+        "final_video_prop_excluded_texture_relative_required": True,
+        "final_video_radial_fraction_requires_threshold_backed_load_expansion_or_energy_backstop": True,
+        "final_video_radial_load_proxy": (
+            "fine_radial_brush_fraction_x_fine_gradient_p90"
+        ),
+        "final_video_radial_energy_backstop_reuses_existing_thresholds": True,
+        "final_video_absolute_radial_issue_remains_blocking": True,
+        "final_video_eating_initial_radial_loop_endpoint_corroboration": True,
+        "final_video_eating_initial_radial_requires_single_initial_blocking_sample": True,
+        "final_video_eating_initial_radial_requires_clean_terminal_and_all_interior_samples": True,
+        "final_video_eating_initial_radial_requires_hash_bound_radial_long_lines_reference_observation": True,
+        "final_video_eating_initial_radial_boundary_minimum_samples": (
+            FINAL_VIDEO_EATING_RADIAL_BOUNDARY_MIN_SAMPLES
+        ),
+        "final_video_eating_initial_radial_boundary_load_energy_spread_ratio_max": (
+            FINAL_VIDEO_EATING_RADIAL_BOUNDARY_LOAD_ENERGY_SPREAD_MAX
+        ),
+        "final_video_eating_initial_radial_boundary_component_spread_ratio_max": (
+            FINAL_VIDEO_EATING_RADIAL_BOUNDARY_COMPONENT_SPREAD_MAX
+        ),
+        "final_video_eating_initial_radial_preserves_absolute_radial_fail_closed": True,
+        "final_video_eating_initial_radial_bounded_reference_corroboration": True,
+        "final_video_eating_initial_radial_bounded_reference_ratio_margin": (
+            FINAL_VIDEO_EATING_RADIAL_BOUNDED_REFERENCE_RATIO_MARGIN
+        ),
+        "final_video_eating_initial_radial_bounded_reference_load_delta_multiplier": (
+            FINAL_VIDEO_EATING_RADIAL_BOUNDED_REFERENCE_LOAD_DELTA_MULTIPLIER
+        ),
+        "final_video_eating_initial_radial_bounded_reference_preserves_absolute_radial_fail_closed": True,
+        "final_video_coherent_brush_requires_gradient_weighted_load_or_long_line_energy_backstop": True,
+        "final_video_coherent_brush_load_proxy": (
+            "structure_tensor_coherent_fraction_x_coarse_gradient_p90"
+        ),
+        "final_video_coherent_brush_load_only_temporal_min_samples": (
+            FINAL_VIDEO_COHERENT_BRUSH_TEMPORAL_MIN_SAMPLES
+        ),
+        "final_video_coherent_brush_load_only_single_sample_is_observation": True,
+        "final_video_coherent_brush_long_line_energy_backstop_remains_single_sample_blocking": True,
+        "final_video_absolute_coherent_brush_issue_alone_is_observation": True,
+        "final_video_long_fur_requires_contour_corroboration_or_strong_expansion": True,
+        "final_video_long_fur_texture_only_absolute_and_dual_surface_evidence_is_observation": True,
+        "final_video_eating_isolated_strong_long_fur_temporal_corroboration": True,
+        "final_video_eating_isolated_long_fur_requires_single_interior_blocking_sample": True,
+        "final_video_eating_isolated_long_fur_records_blocking_frame_unmasked_corroboration": True,
+        "final_video_eating_isolated_long_fur_requires_adjacent_prop_excluded_observation": True,
+        "final_video_eating_isolated_long_fur_allows_one_initial_radial_companion_for_later_validation": True,
+        "final_video_eating_isolated_long_fur_minimum_samples": (
+            FINAL_VIDEO_EATING_ISOLATED_LONG_FUR_MIN_SAMPLES
+        ),
+        "final_video_eating_isolated_long_fur_reuses_original_neighbor_ratio_and_delta_thresholds": True,
+        "final_video_eating_isolated_long_fur_strong_ceiling_uses_one_existing_texture_delta_margin": True,
+        "final_video_eating_isolated_long_fur_preserves_absolute_contour_radial_coherent_and_unknown_fail_closed": True,
+        "final_video_eating_loop_boundary_decode_anchor_corroboration": True,
+        "final_video_eating_boundary_anchor_requires_clean_first_and_last_sample": True,
+        "final_video_eating_boundary_anchor_requires_contiguous_interior_samples": True,
+        "final_video_eating_boundary_anchor_minimum_samples": (
+            FINAL_VIDEO_EATING_BOUNDARY_ANCHOR_MIN_SAMPLES
+        ),
+        "final_video_eating_boundary_anchor_minimum_blocking_samples": (
+            FINAL_VIDEO_EATING_BOUNDARY_ANCHOR_MIN_BLOCKING_SAMPLES
+        ),
+        "final_video_eating_boundary_anchor_spread_ratio_max": (
+            FINAL_VIDEO_EATING_BOUNDARY_ANCHOR_SPREAD_MAX
+        ),
+        "final_video_eating_boundary_anchor_preserves_original_ratio_delta_and_absolute_limits": True,
+        "final_video_grooming_masked_pet3d_low_signal_reference_texture_floor": True,
+        "final_video_grooming_masked_pet3d_sparse_coarse_low_signal_reference_texture_floor": True,
+        "final_video_sparse_coarse_low_signal_minimum_samples": (
+            FINAL_VIDEO_SPARSE_COARSE_LOW_SIGNAL_MIN_SAMPLES
+        ),
+        "final_video_sparse_coarse_low_signal_minimum_blocking_samples": (
+            FINAL_VIDEO_SPARSE_COARSE_LOW_SIGNAL_MIN_BLOCKING_SAMPLES
+        ),
+        "final_video_sparse_coarse_low_signal_maximum_blocking_fraction": (
+            FINAL_VIDEO_SPARSE_COARSE_LOW_SIGNAL_MAX_BLOCKING_FRACTION
+        ),
+        "final_video_sparse_coarse_low_signal_requires_all_sample_long_line_observation": True,
+        "final_video_sparse_coarse_low_signal_coarse_ceiling_uses_one_existing_texture_delta_margin": True,
+        "final_video_sparse_coarse_low_signal_preserves_absolute_contour_radial_coherent_and_unknown_fail_closed": True,
+        "final_video_grooming_direct_qwen_sparse_coarse_temporal_floor": True,
+        "final_video_direct_qwen_sparse_coarse_minimum_samples": (
+            FINAL_VIDEO_DIRECT_QWEN_SPARSE_COARSE_MIN_SAMPLES
+        ),
+        "final_video_direct_qwen_sparse_coarse_minimum_blocking_samples": (
+            FINAL_VIDEO_DIRECT_QWEN_SPARSE_COARSE_MIN_BLOCKING_SAMPLES
+        ),
+        "final_video_direct_qwen_sparse_coarse_maximum_blocking_fraction": (
+            FINAL_VIDEO_DIRECT_QWEN_SPARSE_COARSE_MAX_BLOCKING_FRACTION
+        ),
+        "final_video_direct_qwen_sparse_coarse_temporal_spread_ratio_max": (
+            FINAL_VIDEO_DIRECT_QWEN_SPARSE_COARSE_TEMPORAL_SPREAD_MAX
+        ),
+        "final_video_direct_qwen_sparse_coarse_requires_non_low_signal_reference": True,
+        "final_video_direct_qwen_sparse_coarse_requires_blocking_dual_surface_coarse_long_pair": True,
+        "final_video_direct_qwen_sparse_coarse_coarse_ceiling_uses_reference_ratio_plus_one_texture_delta": True,
+        "final_video_direct_qwen_sparse_coarse_long_ceiling_reuses_existing_strong_limits": True,
+        "final_video_direct_qwen_sparse_coarse_preserves_absolute_contour_radial_coherent_and_unknown_fail_closed": True,
+        "final_video_low_signal_reference_requires_verified_composite_recovery": True,
+        "final_video_low_signal_reference_requires_all_samples": True,
+        "final_video_low_signal_reference_requires_coarse_blocking_all_samples": True,
+        "final_video_low_signal_reference_minimum_long_blocking_fraction": (
+            FINAL_VIDEO_LOW_SIGNAL_REFERENCE_MIN_LONG_BLOCKING_FRACTION
+        ),
+        "final_video_low_signal_reference_allows_remaining_long_observations": True,
+        "final_video_low_signal_reference_minimum_samples": (
+            FINAL_VIDEO_LOW_SIGNAL_REFERENCE_MIN_SAMPLES
+        ),
+        "final_video_low_signal_reference_temporal_spread_ratio_max": (
+            FINAL_VIDEO_LOW_SIGNAL_REFERENCE_TEMPORAL_SPREAD_MAX
+        ),
+        "final_video_low_signal_reference_reuses_coherence_gradient_p90_min": True,
+        "final_video_low_signal_reference_preserves_absolute_contour_radial_and_unknown_fail_closed": True,
+        "final_video_derived_texture_reference_hash_and_alpha_contract_required": True,
+        "final_video_derived_texture_baseline_absolute_observations_nonblocking": True,
+        "final_video_unmasked_action_reference_baseline_must_pass_current_absolute_contract": True,
+        "final_video_malformed_evaluator_contract_fails_closed": True,
+        "final_video_unknown_relative_issue_fails_closed": True,
+        "final_video_post_animation_contour_gate_required_for_uploaded_eating_v2": True,
+        "final_video_grooming_no_prop_identity_mask_required_for_v2": True,
+        "status": "unavailable",
+        "baselines": {},
+    }
+    try:
+        default_subject_profile = load_subject_profile(DEFAULT_SUBJECT_PROFILE)
+        default_effective_subject_config = resolve_effective_subject_config(
+            default_subject_profile,
+            list(SUBJECT_REPLACEMENT_ACTIONS),
+            seed=None,
+            scail_steps=None,
+            pose_strength=None,
+        )
+        raw_standard_direct = default_effective_subject_config.get("standard_direct")
+        if isinstance(raw_standard_direct, dict):
+            try:
+                verify_profile_standard_direct_assets(
+                    raw_standard_direct,
+                    list(SUBJECT_REPLACEMENT_ACTIONS),
+                )
+                standard_direct_health = {
+                    "enabled": True,
+                    "status": "ready",
+                    "policy": raw_standard_direct["policy"],
+                    "role": raw_standard_direct["role"],
+                    "revision": raw_standard_direct["revision"],
+                    "deterministic": True,
+                    "gpu_required": False,
+                    "gpu_submitted": False,
+                    "gpu_bypass_reason": raw_standard_direct["gpu_bypass_reason"],
+                    "upload_identity_excluded": True,
+                    "outputs": {
+                        "mp4": {
+                            "background": "white",
+                            "frames": default_effective_subject_config["frames"],
+                            "fps": default_effective_subject_config["fps"],
+                            "matte_policy": (
+                                "shared_per_frame_chroma_matte_no_spatial_transform_v1"
+                            ),
+                        },
+                        "transparent_gif": {
+                            "frames": TRANSPARENT_GIF_FRAMES,
+                            "fps": TRANSPARENT_GIF_FPS,
+                            "matte_policy": (
+                                "shared_per_frame_chroma_matte_no_spatial_transform_v1"
+                            ),
+                        },
+                    },
+                    "actions": json.loads(json.dumps(raw_standard_direct["actions"])),
+                }
+            except Exception as exc:  # noqa: BLE001 - health must fail closed
+                standard_direct_health.update(
+                    {
+                        "enabled": True,
+                        "status": "failed",
+                        "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                    }
+                )
+                subject_replacement_missing.append(
+                    f"profile standard-direct health failed: {exc}"
+                )
+        upload_health_config = default_effective_subject_config
+        upload_pose_policies: dict[str, str] = {}
+        if standard_direct_health.get("status") == "ready":
+            upload_health_config, upload_pose_policies = (
+                configure_uploaded_subject_validation(
+                    default_effective_subject_config,
+                    list(SUBJECT_REPLACEMENT_ACTIONS),
+                )
+            )
+            require_subject_replacement_assets(
+                default_subject_profile,
+                list(SUBJECT_REPLACEMENT_ACTIONS),
+                require_profile_references=False,
+                effective_config=upload_health_config,
+                expected_pose_policies=upload_pose_policies,
+            )
+            upload_validation_health.update(
+                {
+                    "status": "ready",
+                    "expected_pose_policies": dict(upload_pose_policies),
+                    "expected_surface_gate_actions": list(
+                        upload_health_config["upload_validation"][
+                            "expected_surface_gate_actions"
+                        ]
+                    ),
+                }
+            )
+        else:
+            upload_validation_health.update(
+                {
+                    "status": "failed",
+                    "error": (
+                        "The frozen Main_case standard-direct assets are not "
+                        "ready, so uploaded Qwen jobs cannot freeze their "
+                        "driver validation contract."
+                    ),
+                }
+            )
+            subject_replacement_missing.append(
+                "uploaded Qwen validation requires ready Main_case standard assets"
+            )
+            require_subject_replacement_assets(
+                default_subject_profile,
+                list(SUBJECT_REPLACEMENT_ACTIONS),
+                effective_config=default_effective_subject_config,
+            )
+        baseline_health: dict[str, Any] = {}
+        for action in SUBJECT_REPLACEMENT_ACTIONS:
+            action_config = upload_health_config["actions"][action]
+            gate_config = action_config.get("fur_surface_gate")
+            baseline_config = (
+                gate_config.get("baseline") if isinstance(gate_config, dict) else None
+            )
+            if not isinstance(baseline_config, dict):
+                baseline_health[action] = {
+                    "status": "failed",
+                    "issues": ["fur_surface_baseline_configuration_missing"],
+                }
+                subject_replacement_missing.append(
+                    f"{action} fur surface baseline configuration is missing"
+                )
+                continue
+            baseline_path = Path(str(baseline_config.get("source") or ""))
+            try:
+                digest = file_sha256(baseline_path)
+                if digest != baseline_config.get("source_sha256"):
+                    raise ValueError("baseline_digest_changed")
+                baseline_result = evaluate_fur_surface(
+                    baseline_path,
+                    baseline_path,
+                    baseline_is_validated=True,
+                )
+                baseline_result = json.loads(
+                    json.dumps(
+                        baseline_result,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    )
+                )
+                baseline_health[action] = {
+                    "status": (
+                        "passed"
+                        if baseline_result.get("acceptable") is True
+                        else "failed"
+                    ),
+                    "sha256": digest,
+                    "provenance": baseline_config.get("provenance"),
+                    "issues": baseline_result.get("issues", []),
+                    "metrics": baseline_result["candidate"]["metrics"],
+                }
+                if baseline_result.get("acceptable") is not True:
+                    subject_replacement_missing.append(
+                        f"{action} fur surface baseline fails absolute contract"
+                    )
+            except Exception as exc:  # noqa: BLE001 - health reports exact failure
+                baseline_health[action] = {
+                    "status": "failed",
+                    "issues": ["fur_surface_baseline_health_failed"],
+                    "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                }
+                subject_replacement_missing.append(
+                    f"{action} fur surface baseline health failed: {exc}"
+                )
+        fur_surface_gate_health["baselines"] = baseline_health
+        fur_surface_gate_health["status"] = (
+            "passed"
+            if baseline_health
+            and all(item.get("status") == "passed" for item in baseline_health.values())
+            else "failed"
+        )
+        subject_profile_items.append(subject_profile_public(default_subject_profile))
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        default_subject_profile = None
+        if upload_validation_health.get("status") == "unavailable":
+            upload_validation_health.update(
+                {
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                }
+            )
+        subject_replacement_missing.append(str(exc))
+    subject_replacement_ok = not subject_replacement_missing
     return {
         "status": (
             "ok"
@@ -5903,6 +22465,7 @@ def health() -> dict[str, Any]:
                 and API_KEY
                 and ffmpeg_ok
                 and translator_ok
+                and subject_replacement_ok
             )
             else "degraded"
         ),
@@ -5927,6 +22490,89 @@ def health() -> dict[str, Any]:
                 image_profile_public(profile) for profile in IMAGE_PROFILES.values()
             ],
         },
+        "subject_replacement": {
+            "default": True,
+            "enabled": subject_replacement_ok,
+            "ok": subject_replacement_ok,
+            "engine": "scail2-14b-fp8",
+            "engine_profile": (
+                default_effective_subject_config["engine_profile"]
+                if default_effective_subject_config
+                else None
+            ),
+            "prompt_profile": (
+                default_effective_subject_config["prompt_profile"]
+                if default_effective_subject_config
+                else None
+            ),
+            "seed_mode": (
+                default_effective_subject_config["seed_mode"]
+                if default_effective_subject_config
+                else "base_plus_action_offset"
+            ),
+            "actions": [
+                {
+                    "id": action,
+                    "label": SUBJECT_REPLACEMENT_ACTION_LABELS[action],
+                    "driving_template": Path(
+                        default_effective_subject_config["actions"][action][
+                            "driving_animation"
+                        ]
+                        if default_effective_subject_config
+                        else SCAIL_ACTION_CONFIG[action]["driving_template"]
+                    ).name,
+                    "pose_strength": (
+                        default_effective_subject_config["actions"][action][
+                            "pose_strength"
+                        ]
+                        if default_effective_subject_config
+                        else SCAIL_ACTION_CONFIG[action]["pose_strength"]
+                    ),
+                    "seed_offset": (
+                        default_effective_subject_config["actions"][action][
+                            "seed_offset"
+                        ]
+                        if default_effective_subject_config
+                        else SCAIL_ACTION_CONFIG[action]["seed_offset"]
+                    ),
+                    "effective_seed": (
+                        default_effective_subject_config["actions"][action][
+                            "effective_seed"
+                        ]
+                        if default_effective_subject_config
+                        else None
+                    ),
+                }
+                for action in SUBJECT_REPLACEMENT_ACTIONS
+            ],
+            "default_subject_profile": DEFAULT_SUBJECT_PROFILE,
+            "subject_profiles": subject_profile_items,
+            "source_frames": (
+                default_effective_subject_config["frames"]
+                if default_effective_subject_config
+                else SCAIL_FRAMES
+            ),
+            "source_fps": (
+                default_effective_subject_config["fps"]
+                if default_effective_subject_config
+                else SCAIL_FPS
+            ),
+            "steps": (
+                default_effective_subject_config["steps"]
+                if default_effective_subject_config
+                else SCAIL_STEPS
+            ),
+            "effective_subject_config": default_effective_subject_config,
+            "standard_direct": standard_direct_health,
+            "upload_validation": upload_validation_health,
+            "output": {
+                "size": [TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE],
+                "frames": TRANSPARENT_GIF_FRAMES,
+                "fps": TRANSPARENT_GIF_FPS,
+                "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+            },
+            "missing": subject_replacement_missing,
+        },
         "qwen_style": {
             "enabled": bool(QWEN_STYLE_LORA),
             "profile": QWEN_STYLE_PROFILE if QWEN_STYLE_LORA else "baseline",
@@ -5950,9 +22596,626 @@ def health() -> dict[str, Any]:
                 "pose_retry_total": QWEN_POSE_USER_LORA_RETRY_TOTAL_CAP,
                 "pose_final_total": QWEN_POSE_USER_LORA_FINAL_TOTAL_CAP,
                 "pose_per_lora": QWEN_POSE_USER_LORA_PER_LORA_CAP,
+                "subject_replacement_canonical_total": (
+                    QWEN_SUBJECT_REPLACEMENT_CANONICAL_LORA_TOTAL_CAP
+                ),
+                "subject_replacement_pose_first_total": (
+                    QWEN_SUBJECT_REPLACEMENT_POSE_LORA_TOTAL_CAP
+                ),
             },
             "pose_guard": {
                 "prompt_isolation": True,
+                "reference_pipeline": QWEN_FULL_BODY_FIRST_FRAME_PIPELINE,
+                "reference_pipeline_version": (
+                    QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION
+                ),
+                "main_case_raw_identity_chain": False,
+                "qwen_reference_generation_for_subject_replacement": True,
+                "direct_scail_uploaded_identity_reference": False,
+                "raw_upload_sent_to_scail": False,
+                "identity_upload_view_counts": [1, 3],
+                "identity_upload_three_view_roles": list(UPLOADED_IDENTITY_VIEW_ROLES),
+                "identity_upload_three_view_policy": (UPLOADED_IDENTITY_VIEW_POLICY),
+                "qwen_canonical_multi_view_supported": True,
+                "qwen_canonical_multi_view_node_inputs": [
+                    "image1",
+                    "image2",
+                    "image3",
+                ],
+                "qwen_canonical_image1_is_sampler_latent": True,
+                "qwen_action_raw_identity_views_used": False,
+                "qwen_action_input_contract": {
+                    "eating": "canonical_image1_plus_geometry_image2",
+                    "grooming": "canonical_image1_plus_geometry_image2",
+                },
+                "canonical_action_identity_palette_gate": {
+                    "enabled": True,
+                    "policy": CANONICAL_ACTION_IDENTITY_PALETTE_POLICY,
+                    "achromatic_balance_l1_max": (
+                        CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX
+                    ),
+                    "scope": "eating_and_grooming_qwen_action_candidates",
+                    "fail_closed": True,
+                },
+                "uploaded_identity_appearance_authority": True,
+                "subject_profile_appearance_role": "action_geometry_only",
+                "canonical_palette_input": "final_alpha_cutout",
+                "canonical_upper_body_palette_reference_policy": (
+                    CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY
+                ),
+                "canonical_raw_palette_retained_for_audit": True,
+                "canonical_chroma_despill": (
+                    "alpha_boundary_plus_source_palette_guarded_interior_v1"
+                ),
+                "canonical_chroma_spill_policy": (
+                    UPLOADED_IDENTITY_CHROMA_SPILL_POLICY
+                ),
+                "canonical_chroma_spill_preserves_paired_eye_accents": True,
+                "canonical_interior_hole_gate": True,
+                "profile_pixels_used_as_identity_or_scail_reference": False,
+                "profile_pixels_used_as_validation_baseline": False,
+                "uploaded_identity_absolute_surface_gate_used": True,
+                "surface_candidate_comparison_mode": (
+                    UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
+                ),
+                "canonical_reference_generated": True,
+                "canonical_reference_used": True,
+                "canonical_reference_normalized_and_matted": True,
+                "action_keyframes_normalized_and_matted": True,
+                "upload_pose_photography_lora_policy": (
+                    "disabled_after_canonical_identity_style_lock_v1"
+                ),
+                "upload_pose_builtin_style_lora_policy": (
+                    "disabled_for_canonical_actions_v2"
+                ),
+                "upload_pose_lora_policy": (
+                    "qwen_lightning_only_with_open_channel_identity_refine_v6"
+                ),
+                "upload_pose_candidate_normalization_policy": (
+                    QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+                ),
+                "upload_pose_candidate_matte_policy": (
+                    QWEN_ACTION_CANDIDATE_MATTE_POLICY
+                ),
+                "eating_mouth_contact_gate": {
+                    "policy": EATING_MOUTH_BOWL_CONTACT_POLICY,
+                    "thin_warm_rim_fallback_policy": (
+                        EATING_BOWL_SPLIT_FALLBACK_POLICY
+                    ),
+                    "fallback_preserves_width_prop_paw_and_contact_checks": True,
+                    "gap_px_min": 0,
+                    "gap_px_max": EATING_MUZZLE_BOWL_GAP_MAX_PX,
+                    "component_width_bowl_ratio_max": (
+                        EATING_MUZZLE_COMPONENT_WIDTH_BOWL_RATIO_MAX
+                    ),
+                    "component_height_bowl_ratio_max": (
+                        EATING_MUZZLE_COMPONENT_HEIGHT_BOWL_RATIO_MAX
+                    ),
+                    "component_center_margin_bowl_ratio": (
+                        EATING_MUZZLE_COMPONENT_CENTER_MARGIN_BOWL_RATIO
+                    ),
+                    "component_audit_limit": 12,
+                },
+                "normalization_contract": {
+                    "full_body": (
+                        "prepare_landscape_keyframe_then_evaluate_chroma_cutout"
+                    ),
+                    "action_keyframes": (QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY),
+                    "action_candidate_matte": (QWEN_ACTION_CANDIDATE_MATTE_POLICY),
+                    "selected_candidate_byte_copied_to_scail_reference": True,
+                    "wan_green_derived_one_way_from_rgba": True,
+                    "output_size": [512, 512],
+                    "full_body_normalized_transparent_required": True,
+                    "action_keyframes_normalized_transparent_required": True,
+                },
+                "scail_reference_kind": "qwen_generated_upload",
+                "upload_state_transition": [
+                    "upload_pending_qwen",
+                    "qwen_generated_upload",
+                ],
+                "uploaded_identity_digest_gate": {
+                    "normalized_input_sha256_required": True,
+                    "original_identity_source_sha256_required": True,
+                    "comfy_input_copy_sha256_verified": True,
+                    "all_submitted_views_sha256_required": True,
+                    "all_submitted_views_comfy_copy_sha256_verified": True,
+                    "duplicate_three_view_rejection": True,
+                    "near_duplicate_view_angle_rejection": True,
+                    "gross_palette_conflict_rejection": True,
+                    "fail_closed": True,
+                },
+                "upload_pose_reference_source": (
+                    "per_action_qwen_canonical_and_main_case_geometry_roles"
+                ),
+                "upload_pose_reference_policy": {
+                    "eating": "main_case_eating_driver_geometry_image2_guide_v4",
+                    "grooming": GROOMING_QWEN_POSE_REFERENCE_POLICY,
+                },
+                "geometry_generator_policy": {
+                    "eating": "driving_eating_geometry_image2_v4",
+                    "grooming": GROOMING_QWEN_GEOMETRY_GUIDE_POLICY,
+                },
+                "grooming_geometry_isolation": {
+                    "qwen_guide_style": GROOMING_QWEN_GUIDE_STYLE,
+                    "qwen_foreground_rgb": list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB),
+                    "qwen_foreground_palette_rgb": [
+                        list(GROOMING_QWEN_GUIDE_FOREGROUND_RGB),
+                    ],
+                    "qwen_internal_luma_variation": False,
+                    "qwen_internal_luma_variation_role": "none",
+                    "qwen_appearance_bearing_internal_luma_variation": False,
+                    "qwen_synthetic_foreleg_semantic": False,
+                    "qwen_synthetic_foreleg_semantic_method": None,
+                    "qwen_structural_negative_space": True,
+                    "qwen_structural_negative_space_method": (
+                        GROOMING_QWEN_NEGATIVE_SPACE_METHOD
+                    ),
+                    "qwen_closed_foreleg_capsule_exposed": False,
+                    "qwen_internal_green_separator_exposed": True,
+                    "qwen_raised_foreleg_validation_role": (
+                        "public_open_curve_geometry_plus_private_cv"
+                    ),
+                    "qwen_role": "image2_action_geometry_guide",
+                    "canonical_role": "image1_identity_style_and_sampler",
+                    "sampler_latent": "cartoon_reference.png",
+                    "denoise_by_attempt": None,
+                    "canonical_action_denoise_source": ("job_pose_reference_denoise"),
+                    "qwen_foreleg_repair": True,
+                    "qwen_foreleg_repair_retained_for_legacy_jobs_only": True,
+                    "qwen_foreleg_repair_policy": (
+                        GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
+                    ),
+                    "qwen_foreleg_repair_attempt": (
+                        GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
+                    ),
+                    "qwen_foreleg_repair_denoise": (
+                        GROOMING_QWEN_FORELEG_REPAIR_DENOISE
+                    ),
+                    "qwen_foreleg_repair_steps": (GROOMING_QWEN_FORELEG_REPAIR_STEPS),
+                    "qwen_foreleg_repair_source": (
+                        "best_prior_identity_palette_safe_normalized_candidate"
+                    ),
+                    "qwen_foreleg_repair_mask_dilation_px": (
+                        GROOMING_QWEN_FORELEG_REPAIR_MASK_DILATION_PX
+                    ),
+                    "qwen_foreleg_repair_anatomy_policy": (
+                        GROOMING_QWEN_FORELEG_REPAIR_ANATOMY_POLICY
+                    ),
+                    "qwen_foreleg_repair_seed_source": (
+                        "identity_safe_candidate_unchanged_before_masked_sampling"
+                    ),
+                    "qwen_foreleg_repair_seed_lowpass_sigma_px": None,
+                    "qwen_foreleg_repair_expanded_context_full_denoise_mask": (True),
+                    "qwen_foreleg_repair_seed_identity_median_blend": None,
+                    "qwen_foreleg_repair_identity_or_geometry_seed_inserted": False,
+                    "qwen_foreleg_repair_noise_mask_expansion_px": (
+                        GROOMING_QWEN_FORELEG_REPAIR_NOISE_MASK_EXPANSION_PX
+                    ),
+                    "qwen_foreleg_repair_noise_mask_feather_sigma_px": (
+                        GROOMING_QWEN_FORELEG_REPAIR_NOISE_MASK_FEATHER_SIGMA_PX
+                    ),
+                    "qwen_foreleg_repair_noise_mask_node": ("SetLatentNoiseMask"),
+                    "qwen_foreleg_repair_style_policy": (
+                        "disabled_for_canonical_masked_completion"
+                    ),
+                    "qwen_foreleg_repair_style_lora": None,
+                    "qwen_foreleg_repair_style_strength": 0.0,
+                    "qwen_foreleg_repair_style_scope": "none",
+                    "qwen_foreleg_repair_style_identity_authority": False,
+                    "qwen_foreleg_repair_style_fail_closed": True,
+                    "qwen_foreleg_repair_composite_gate_policy": None,
+                    "qwen_foreleg_repair_composite_recovery_enabled": False,
+                    "qwen_foreleg_repair_composite_edge_density_ratio_min": None,
+                    "qwen_foreleg_repair_composite_planted_paw_gradient_p90_max": None,
+                    "qwen_foreleg_repair_composite_raised_paw_gradient_p90_max": None,
+                    "canonical_completion_edge_evidence_policy": (
+                        GROOMING_CANONICAL_COMPLETION_EDGE_EVIDENCE_POLICY
+                    ),
+                    "canonical_completion_edge_density_ratio_min": (
+                        GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN
+                    ),
+                    "canonical_completion_independent_fur_surface_required": True,
+                    "canonical_full_pose_recovery_enabled": True,
+                    "canonical_full_pose_rescue_policy": (
+                        GROOMING_CANONICAL_FULL_POSE_RESCUE_POLICY
+                    ),
+                    "canonical_full_pose_rescue_attempt": (
+                        GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
+                    ),
+                    "canonical_full_pose_identity_refine_policy": (
+                        GROOMING_CANONICAL_FULL_POSE_REFINE_POLICY
+                    ),
+                    "canonical_full_pose_identity_refine_attempt": (
+                        GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT
+                    ),
+                    "canonical_full_pose_recovery_attempt_budget": (
+                        GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT
+                    ),
+                    "canonical_full_pose_recovery_steps": (
+                        GROOMING_CANONICAL_FULL_POSE_RESCUE_STEPS
+                    ),
+                    "canonical_full_pose_rescue_denoise": (
+                        GROOMING_CANONICAL_FULL_POSE_RESCUE_DENOISE
+                    ),
+                    "canonical_full_pose_identity_refine_denoise": (
+                        GROOMING_CANONICAL_FULL_POSE_REFINE_DENOISE
+                    ),
+                    "canonical_full_pose_recovery_style_lora": None,
+                    "canonical_full_pose_recovery_qwen_lightning_only": True,
+                    "canonical_full_pose_recovery_global_thresholds_changed": False,
+                    "canonical_full_pose_recovery_image_roles": {
+                        "attempt4_image1": (
+                            "canonical_palette_conditioned_lowpass_action_"
+                            "anatomy_sampler"
+                        ),
+                        "attempt4_image2": (
+                            "approved_canonical_sole_identity_appearance_authority"
+                        ),
+                        "attempt4_image3": None,
+                        "attempt5_image1": (
+                            "attempt4_seed_bound_pose_and_surface_approved_"
+                            "candidate_sampler_no_identity_authority"
+                        ),
+                        "attempt5_image2": (
+                            "approved_canonical_sole_identity_appearance_authority"
+                        ),
+                        "attempt5_image3": (
+                            "digest_bound_lowpass_action_geometry_"
+                            "corroboration_only"
+                        ),
+                    },
+                    "canonical_full_pose_refine_source_policy": (
+                        GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY
+                    ),
+                    "canonical_full_pose_refine_uploaded_front_exposed": False,
+                    "canonical_full_pose_refine_identity_source": (
+                        "approved_canonical_three_view_consensus_only"
+                    ),
+                    "canonical_pose_transfer_seed_lowpass_sigma_px": (
+                        GROOMING_CANONICAL_POSE_TRANSFER_LOWPASS_SIGMA_PX
+                    ),
+                    "canonical_pose_transfer_source_alpha_geometry_preserved": True,
+                    "canonical_pose_transfer_source_rgb_exposed": False,
+                    "canonical_pose_transfer_source_chroma_exposed": False,
+                    "canonical_pose_transfer_source_raw_luma_exposed": False,
+                    "canonical_pose_transfer_seed_policy": (
+                        GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY
+                    ),
+                    "canonical_pose_transfer_seed_bound_matte_policy": (
+                        GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY
+                    ),
+                    "canonical_pose_transfer_seed_bound_alpha_provenance": (
+                        GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE
+                    ),
+                    "canonical_pose_safe_refine_structural_edge_density_min": (
+                        GROOMING_CANONICAL_POSE_SAFE_STRUCTURAL_EDGE_DENSITY_MIN
+                    ),
+                    "canonical_pose_safe_refine_allowed_identity_issues": sorted(
+                        GROOMING_CANONICAL_POSE_SAFE_IDENTITY_ONLY_ISSUES
+                    ),
+                    "canonical_pose_transfer_rejected_candidate_used_as_sampler": (
+                        True
+                    ),
+                    "canonical_pose_transfer_rejected_candidate_scope": (
+                        "attempt4_identity_palette_only_after_seed_bound_matte_"
+                        "pose_quality_and_independent_surface_pass"
+                    ),
+                    "canonical_full_pose_geometry_guide_policy": (
+                        GROOMING_CANONICAL_FULL_POSE_GUIDE_POLICY
+                    ),
+                    "canonical_full_pose_geometry_luma_half_span": None,
+                    "qwen_foreleg_repair_global_edge_density_min": (
+                        GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN
+                    ),
+                    "qwen_foreleg_repair_global_pose_threshold_changed": False,
+                    "qwen_foreleg_repair_composite_scope": (
+                        "none_for_production_canonical_masked_completion"
+                    ),
+                    "qwen_foreleg_repair_image_roles": {
+                        "image1": ("identity_safe_candidate_unchanged_masked_sampler"),
+                        "image2": "approved_canonical_identity_appearance_authority",
+                        "image3": "single_tone_open_channel_grooming_geometry",
+                    },
+                    "qwen_foreleg_repair_synthetic_capsule_exposed": False,
+                    "qwen_foreleg_repair_open_channel_anatomy_image3": True,
+                    "qwen_foreleg_repair_private_cv_luma_image3": False,
+                    "main_case_appearance_exposed_to_qwen": False,
+                    "private_cv_gate_policy": (GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY),
+                    "private_cv_gate_exposed_to_qwen_initial_attempts": False,
+                    "private_cv_gate_neutral_copy_exposed_on_repair_attempt": False,
+                    "public_open_channel_copy_exposed_on_repair_attempt": True,
+                    "private_completion_mask_policy": (
+                        GROOMING_PRIVATE_COMPLETION_MASK_POLICY
+                    ),
+                    "private_completion_mask_exposed_to_qwen": False,
+                    "private_completion_mask_loaded_as_qwen_image": False,
+                    "private_completion_mask_role": (
+                        "local_noise_mask_derivation_only"
+                    ),
+                    "digest_bound": True,
+                    "fail_closed": True,
+                },
+                "legacy_profile_action_reference_used": {
+                    "eating": False,
+                    "grooming": False,
+                },
+                "profile_action_reference_used_as_generation_input": {
+                    "eating": False,
+                    "grooming": False,
+                },
+                "profile_action_reference_generation_scope": {
+                    "eating": None,
+                    "grooming": None,
+                },
+                "profile_action_reference_used_as_validation_baseline": {
+                    "eating": True,
+                    "grooming": True,
+                },
+                "pose_reference_role": "per_action_geometry_input_role",
+                "pose_identity_input_policy": POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+                "pose_identity_input_policy_scope": (
+                    "eating_and_grooming_canonical_image1_geometry_image2"
+                ),
+                "pose_identity_input_policies": {
+                    "eating": POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+                    "grooming": POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+                },
+                "pose_identity_input_role": {
+                    "eating": "image1_qwen_full_body_canonical",
+                    "grooming": "image1_qwen_full_body_canonical",
+                },
+                "pose_identity_palette_reference_role": {
+                    "eating": "qwen_full_body_canonical",
+                    "grooming": "qwen_full_body_canonical",
+                },
+                "pose_identity_geometry_role": {
+                    "eating": "image2_main_case_driver_geometry_guide",
+                    "grooming": "image2_main_case_driver_geometry_guide",
+                },
+                "eating_pose_lora_policy": (
+                    "canonical_identity_plus_main_case_geometry_v1"
+                ),
+                "eating_identity_refine": {
+                    "enabled": True,
+                    "policy": EATING_CANONICAL_IDENTITY_REFINE_POLICY,
+                    "attempt": EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT,
+                    "source": ("best_prior_pose_and_bowl_safe_palette_drift_candidate"),
+                    "steps": EATING_CANONICAL_IDENTITY_REFINE_STEPS,
+                    "denoise": EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
+                    "qwen_lightning_only": True,
+                    "style_lora": None,
+                    "sampler_noise_mask": None,
+                    "image_roles": {
+                        "image1": (
+                            "approved_eating_pose_and_bowl_sampler_no_identity_authority"
+                        ),
+                        "image2": (
+                            "approved_canonical_sole_pet_identity_appearance_authority"
+                        ),
+                        "image3": (
+                            "uploaded_front_real_identity_palette_corroboration"
+                        ),
+                    },
+                    "identity_gate_unchanged": True,
+                    "eating_pose_gate_unchanged": True,
+                    "fur_surface_gate_unchanged": True,
+                    "global_thresholds_changed": False,
+                    "fallback_when_no_pose_safe_palette_drift_source": (
+                        "existing_fifth_seed_retry"
+                    ),
+                },
+                "grooming_pose_lora_policy": (
+                    "canonical_identity_open_channel_seed_bound_pose_safe_refine_v11"
+                ),
+                "generated_canonical_bypassed": False,
+                "grooming_pose_gate": {
+                    "enabled": True,
+                    "policy": GROOMING_POSE_GATE_POLICY,
+                    "version": GROOMING_POSE_GATE_VERSION,
+                    "scope": "main_case_guided_grooming_qwen_candidates",
+                    "input": "rembg_alpha_cutout",
+                    "geometry_input": (
+                        "public_open_channel_generation_plus_private_cv_validation"
+                    ),
+                    "fail_closed": True,
+                    "retry_on_rejection": True,
+                    "blocks_scail_on_exhaustion": True,
+                    "global_edge_density_min": (
+                        GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN
+                    ),
+                    "global_edge_density_min_unchanged": True,
+                    "structural_edge_policy": (
+                        "gaussian_lowpass_organic_foreleg_structure_v1"
+                    ),
+                    "structural_blur_sigma": (GROOMING_POSE_STRUCTURAL_BLUR_SIGMA),
+                    "structural_edge_density_min": (
+                        GROOMING_POSE_STRUCTURAL_EDGE_DENSITY_MIN
+                    ),
+                    "fine_fur_edges_cannot_satisfy_structural_gate": True,
+                    "canonical_direct_structural_edge_evidence": {
+                        "policy": (
+                            GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_EVIDENCE_POLICY
+                        ),
+                        "maximum_attempt": (
+                            GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+                        ),
+                        "raw_edge_density_ratio_min": (
+                            GROOMING_CANONICAL_DIRECT_EDGE_DENSITY_RATIO_MIN
+                        ),
+                        "structural_edge_density_min": (
+                            GROOMING_CANONICAL_DIRECT_STRUCTURAL_EDGE_DENSITY_MIN
+                        ),
+                        "strict_chamfer_coverage_min": (
+                            GROOMING_CANONICAL_DIRECT_CHAMFER_COVERAGE_MIN
+                        ),
+                        "strict_chamfer_mean_distance_max": (
+                            GROOMING_CANONICAL_DIRECT_CHAMFER_MEAN_DISTANCE_MAX
+                        ),
+                        "strict_chamfer_p90_distance_max": (
+                            GROOMING_CANONICAL_DIRECT_CHAMFER_P90_DISTANCE_MAX
+                        ),
+                        "offguide_organic_paw_evidence": {
+                            "only_chamfer_issues_allowed": True,
+                            "structural_edge_density_min": (
+                                GROOMING_CANONICAL_DIRECT_OFFGUIDE_STRUCTURAL_EDGE_DENSITY_MIN
+                            ),
+                            "chamfer_coverage_min": (
+                                GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_COVERAGE_MIN
+                            ),
+                            "chamfer_mean_distance_max": (
+                                GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_MEAN_DISTANCE_MAX
+                            ),
+                            "chamfer_p90_distance_max": (
+                                GROOMING_CANONICAL_DIRECT_OFFGUIDE_CHAMFER_P90_DISTANCE_MAX
+                            ),
+                            "paw_lab_delta_max": (
+                                GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_LAB_DELTA_MAX
+                            ),
+                            "paw_histogram_max": (
+                                GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_HISTOGRAM_MAX
+                            ),
+                            "paw_texture_ratio_range": [
+                                GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_TEXTURE_RATIO_MIN,
+                                GROOMING_CANONICAL_DIRECT_OFFGUIDE_PAW_TEXTURE_RATIO_MAX,
+                            ],
+                            "fail_closed": True,
+                        },
+                        "aligned_organic_paw_evidence": {
+                            "raw_pose_gate_must_pass_without_issue": True,
+                            "strict_guide_alignment_required": True,
+                            "structural_edge_density_min": (
+                                GROOMING_CANONICAL_DIRECT_ALIGNED_STRUCTURAL_EDGE_DENSITY_MIN
+                            ),
+                            "paw_lab_delta_max": (
+                                GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_LAB_DELTA_MAX
+                            ),
+                            "paw_histogram_max": (
+                                GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_HISTOGRAM_MAX
+                            ),
+                            "paw_texture_ratio_range": [
+                                GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MIN,
+                                GROOMING_CANONICAL_DIRECT_ALIGNED_PAW_TEXTURE_RATIO_MAX,
+                            ],
+                            "fail_closed": True,
+                        },
+                        "achromatic_palette_normalization": {
+                            "policy": (
+                                GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_PALETTE_POLICY
+                            ),
+                            "operation": "foreground_lab_l_histogram_match_only",
+                            "achromatic_fraction_min": (
+                                GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_ACHROMATIC_MIN
+                            ),
+                            "input_balance_l1_max": (
+                                GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_BALANCE_L1_MAX
+                            ),
+                            "source_alpha_geometry_must_remain_exact": True,
+                            "source_ab_roundtrip_delta_max": 2,
+                            "new_hue_or_marking_drift_allowed": False,
+                            "pose_and_identity_revalidation_required": True,
+                            "independent_fur_surface_gate_still_required": True,
+                            "fail_closed": True,
+                        },
+                        "rejects_historical_straight_prop_candidates": True,
+                        "rejects_mismatched_hanging_prop_material": True,
+                        "identity_palette_gate_still_required": True,
+                        "independent_fur_surface_gate_still_required": True,
+                        "global_pose_threshold_changed": False,
+                        "fail_closed": True,
+                    },
+                    "canonical_direct_surface_nonexpansion": {
+                        "policy": (
+                            GROOMING_CANONICAL_DIRECT_SURFACE_NONEXPANSION_POLICY
+                        ),
+                        "maximum_attempt": (
+                            GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+                        ),
+                        "only_recoverable_issue": "brush_texture_coherence",
+                        "requires_strict_pose_recovery": True,
+                        "requires_identity_palette_pass": True,
+                        "requires_digest_bound_transparent_canonical": True,
+                        "coherent_fraction_max": (
+                            GROOMING_CANONICAL_DIRECT_SURFACE_COHERENT_FRACTION_MAX
+                        ),
+                        "coherent_fraction_delta_max": (
+                            GROOMING_CANONICAL_DIRECT_SURFACE_COHERENT_FRACTION_DELTA_MAX
+                        ),
+                        "coherence_mean_max": (
+                            GROOMING_CANONICAL_DIRECT_SURFACE_COHERENCE_MEAN_MAX
+                        ),
+                        "coherence_mean_delta_max": (
+                            GROOMING_CANONICAL_DIRECT_SURFACE_COHERENCE_MEAN_DELTA_MAX
+                        ),
+                        "orientation_max": (
+                            GROOMING_CANONICAL_DIRECT_SURFACE_ORIENTATION_MAX
+                        ),
+                        "orientation_delta_max": (
+                            GROOMING_CANONICAL_DIRECT_SURFACE_ORIENTATION_DELTA_MAX
+                        ),
+                        "hough_radial_delta_max": (
+                            GROOMING_CANONICAL_DIRECT_SURFACE_HOUGH_RADIAL_DELTA_MAX
+                        ),
+                        "canonical_long_energy_max": (
+                            GROOMING_CANONICAL_DIRECT_SURFACE_CANONICAL_LONG_ENERGY_MAX
+                        ),
+                        "independent_final_video_fur_audit_still_required": True,
+                        "global_surface_thresholds_changed": False,
+                        "fail_closed": True,
+                    },
+                    "masked_pet3d_composite_recovery": {
+                        "production_enabled": False,
+                        "legacy_geometry_first_jobs_only": True,
+                        "policy": (GROOMING_QWEN_FORELEG_REPAIR_COMPOSITE_GATE_POLICY),
+                        "attempt": GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT,
+                        "edge_density_ratio_min": (
+                            GROOMING_QWEN_FORELEG_REPAIR_EDGE_DENSITY_RATIO_MIN
+                        ),
+                        "requires_edge_density_issue": True,
+                        "allows_only_optional_low_texture_planted_paw_ratio_issue": (
+                            True
+                        ),
+                        "planted_paw_gradient_p90_max": (
+                            GROOMING_QWEN_FORELEG_REPAIR_PLANTED_PAW_GRADIENT_P90_MAX
+                        ),
+                        "raised_paw_gradient_p90_max": (
+                            GROOMING_QWEN_FORELEG_REPAIR_RAISED_PAW_GRADIENT_P90_MAX
+                        ),
+                        "requires_geometry_contact_color_histogram_pass": True,
+                        "requires_independent_fur_surface_pass": True,
+                        "requires_digest_bound_noise_masked_pet3d_repair": True,
+                        "fail_closed": True,
+                    },
+                },
+                "fur_surface_gate": fur_surface_gate_health,
+                "eating_geometry_first_denoise": {
+                    "enabled": False,
+                    "default_policy": False,
+                    "reason": "production_uploads_use_qwen_canonical_image1",
+                },
+                "reference_prompt_source": (
+                    "uploaded_identity_qwen_full_body_profile_locked"
+                ),
+                "user_prompt_excluded_from_reference": True,
+                "eating_pose_strength_max": SCAIL_EATING_POSE_STRENGTH_MAX,
+                "sleek_eating_profile_fast_path_policy": (
+                    SCAIL_FROZEN_SLEEK_EATING_POLICY
+                ),
+                "sleek_eating_qwen_reference_bypassed_for_upload": False,
+                "sleek_eating_profile_fast_path_without_upload": True,
+                "sleek_eating_uploaded_identity_required": True,
+                "sleek_eating_uploaded_identity_applied": True,
+                "canonical_retry_lora_strengths_locked": False,
+                "pose_retry_lora_strengths_locked": False,
+                "eating_motion_alignment": (FULL_DRIVER_EATING_POSE_POLICY),
+                "eating_reference_fur_gate": ("profile_relative_eating_contour_v1"),
+                "eating_video_fur_gate": (FINAL_VIDEO_FUR_AUDIT_POLICY),
+                "fur_constraints_snapshot_locked": True,
+                "subject_replacement_pose_denoise": (
+                    QWEN_SUBJECT_REPLACEMENT_POSE_DENOISE
+                ),
+                "subject_replacement_pose_denoise_step": (
+                    QWEN_SUBJECT_REPLACEMENT_POSE_DENOISE_STEP
+                ),
                 "max_attempts": QWEN_POSE_MAX_ATTEMPTS,
                 "running_extra_attempts": QWEN_RUNNING_POSE_EXTRA_ATTEMPTS,
                 "bowl_extra_attempts": QWEN_BOWL_POSE_EXTRA_ATTEMPTS,
@@ -5970,6 +23233,9 @@ def health() -> dict[str, Any]:
                 ),
                 "similarity_iou": QWEN_POSE_SIMILARITY_IOU_THRESHOLD,
                 "similarity_dhash": QWEN_POSE_SIMILARITY_DHASH_THRESHOLD,
+                "action_canonical_iou": QWEN_ACTION_CANONICAL_IOU_THRESHOLD,
+                "action_canonical_dhash": QWEN_ACTION_CANONICAL_DHASH_THRESHOLD,
+                "bowl_action_min_aspect_ratio": (QWEN_BOWL_ACTION_MIN_ASPECT_RATIO),
                 "hard_duplicate_iou": QWEN_POSE_HARD_DUPLICATE_IOU,
                 "hard_duplicate_dhash": QWEN_POSE_HARD_DUPLICATE_DHASH,
             },
@@ -6007,10 +23273,518 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.get(f"{API_PREFIX}/subjects")
+def list_subject_profiles(
+    _: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for path in sorted(SUBJECT_PROFILE_DIR.glob("*.json")):
+        try:
+            items.append(subject_profile_public(load_subject_profile(path.stem)))
+        except (ValueError, FileNotFoundError):
+            LOGGER.exception("Ignoring invalid subject profile %s", path)
+    return {
+        "default": DEFAULT_SUBJECT_PROFILE,
+        "items": items,
+        "actions": [
+            {"id": action, "label": SUBJECT_REPLACEMENT_ACTION_LABELS[action]}
+            for action in SUBJECT_REPLACEMENT_ACTIONS
+        ],
+    }
+
+
+@app.get(f"{API_PREFIX}/subjects/{{profile_id}}/preview")
+def subject_profile_preview(
+    profile_id: str,
+    action: str | None = Query(default=None),
+    _: None = Depends(require_api_key),
+) -> FileResponse:
+    try:
+        profile = load_subject_profile(profile_id)
+        selected_action = parse_subject_actions(
+            action or str(profile.get("preview_action") or "eating")
+        )[0]
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    preview = Path(profile["action_references"][selected_action])
+    if not preview.is_file():
+        raise HTTPException(status_code=404, detail="Subject preview is unavailable.")
+    return FileResponse(
+        preview,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+async def close_uploaded_identity_uploads(
+    *uploads: UploadFile | None,
+) -> None:
+    for upload in uploads:
+        if upload is not None:
+            await upload.close()
+
+
+async def read_uploaded_identity_views(
+    image: UploadFile | None,
+    image_left: UploadFile | None,
+    image_right: UploadFile | None,
+) -> dict[str, bytes]:
+    uploads = {
+        "front": image,
+        "left": image_left,
+        "right": image_right,
+    }
+    present_roles = tuple(
+        role
+        for role in UPLOADED_IDENTITY_VIEW_ROLES
+        if uploads[role] is not None and bool(uploads[role].filename)
+    )
+    try:
+        if present_roles not in {
+            (),
+            ("front",),
+            UPLOADED_IDENTITY_VIEW_ROLES,
+        }:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Identity upload must contain either image only, or the "
+                    "complete image + image_left + image_right set."
+                ),
+            )
+        raw_views: dict[str, bytes] = {}
+        for role in present_roles:
+            upload = uploads[role]
+            if upload is None:
+                raise RuntimeError("Resolved upload unexpectedly disappeared.")
+            raw = await upload.read(MAX_UPLOAD_BYTES + 1)
+            if not raw:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Uploaded identity {role} image is empty.",
+                )
+            if len(raw) > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=(f"Identity {role} image exceeds {MAX_UPLOAD_BYTES} bytes."),
+                )
+            raw_views[role] = raw
+        return raw_views
+    finally:
+        await close_uploaded_identity_uploads(image, image_left, image_right)
+
+
+async def create_subject_replacement_api_job(
+    *,
+    image: UploadFile | None,
+    prompt: str,
+    actions_raw: str | None,
+    subject_profile_id: str | None,
+    output_format: str,
+    scail_steps: int | None,
+    pose_strength: float | None,
+    seed: int | None,
+    image_left: UploadFile | None = None,
+    image_right: UploadFile | None = None,
+) -> dict[str, Any]:
+    try:
+        actions = parse_subject_actions(actions_raw)
+        profile = load_subject_profile(subject_profile_id)
+        effective_subject_config = resolve_effective_subject_config(
+            profile,
+            actions,
+            seed=seed,
+            scail_steps=scail_steps,
+            pose_strength=pose_strength,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        await close_uploaded_identity_uploads(image, image_left, image_right)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if output_format not in {"mp4", "transparent_gif"}:
+        await close_uploaded_identity_uploads(image, image_left, image_right)
+        raise HTTPException(
+            status_code=422,
+            detail="Subject replacement output_format must be mp4 or transparent_gif.",
+        )
+    if JOB_QUEUE.full():
+        await close_uploaded_identity_uploads(image, image_left, image_right)
+        raise HTTPException(
+            status_code=503,
+            detail="Generation queue is full; try again later.",
+        )
+
+    raw_views = await read_uploaded_identity_views(
+        image,
+        image_left,
+        image_right,
+    )
+    raw = raw_views.get("front")
+
+    prompt = prompt.strip()
+    if prompt:
+        translated, translation = translate_texts_to_english([prompt])
+        prompt_en = translated[0]
+        translation.update(
+            {
+                "prompt_applied": contains_han(prompt),
+                "pose_applied_count": 0,
+                "applied": contains_han(prompt),
+            }
+        )
+    else:
+        prompt_en = ""
+        translation = {
+            "enabled": PROMPT_TRANSLATION_ENABLED,
+            "applied": False,
+            "prompt_applied": False,
+            "pose_applied_count": 0,
+        }
+
+    expected_pose_policies: dict[str, str] = {}
+    try:
+        # Profile stills remain immutable downstream contour/fur standards only.
+        # Qwen pose geometry is generated from the frozen Main_case driving
+        # videos, never from these historical action stills.
+        raw_standard_direct = effective_subject_config.get("standard_direct")
+        standard_direct_request = bool(
+            raw is None
+            and isinstance(raw_standard_direct, dict)
+            and raw_standard_direct.get("enabled") is True
+        )
+        if raw is not None:
+            effective_subject_config, expected_pose_policies = (
+                configure_uploaded_subject_validation(
+                    effective_subject_config,
+                    actions,
+                )
+            )
+        profile_reference_actions = [] if standard_direct_request else list(actions)
+        if standard_direct_request:
+            verify_profile_standard_direct_assets(raw_standard_direct, actions)
+        else:
+            require_subject_replacement_assets(
+                profile,
+                actions,
+                require_profile_references=bool(profile_reference_actions),
+                profile_reference_actions=profile_reference_actions,
+                effective_config=effective_subject_config,
+                expected_pose_policies=expected_pose_policies,
+            )
+    except (FileNotFoundError, RuntimeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    resolved_seed = int(effective_subject_config["base_seed"])
+    job_id = (
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:10]}"
+    )
+    job_dir = OUTPUT_ROOT / job_id
+    try:
+        subject_source = "profile"
+        uploaded_identity_input_sha256: str | None = None
+        uploaded_identity_source_sha256: str | None = None
+        uploaded_identity_views: dict[str, dict[str, Any]] = {}
+        uploaded_identity_view_mode: str | None = None
+        if raw is not None:
+            uploaded_identity_views = persist_uploaded_identity_views(
+                job_dir,
+                raw_views,
+            )
+            front_view = uploaded_identity_views["front"]
+            uploaded_identity_input_sha256 = front_view["input_sha256"]
+            uploaded_identity_source_sha256 = front_view["source_sha256"]
+            uploaded_identity_view_mode = (
+                "front_left_right"
+                if len(uploaded_identity_views) == 3
+                else "single_view"
+            )
+            subject_source = "upload_pending_qwen"
+        if profile_reference_actions:
+            effective_subject_config = snapshot_effective_subject_references(
+                effective_subject_config,
+                job_dir,
+                profile_reference_actions,
+            )
+        effective_actions = effective_subject_config["actions"]
+        final_frames = (
+            TRANSPARENT_GIF_FRAMES
+            if output_format == "transparent_gif"
+            else int(effective_subject_config["frames"])
+        )
+        final_fps = (
+            TRANSPARENT_GIF_FPS
+            if output_format == "transparent_gif"
+            else float(effective_subject_config["fps"])
+        )
+        final_duration = (
+            TRANSPARENT_GIF_DURATION_SECONDS
+            if output_format == "transparent_gif"
+            else float(effective_subject_config["frames"])
+            / float(effective_subject_config["fps"])
+        )
+        job = {
+            "job_id": job_id,
+            "status": "queued",
+            "stage": "queued",
+            "progress": 0,
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+            "started_at": None,
+            "finished_at": None,
+            "generation_mode": "subject_replacement",
+            "request_kind": "video",
+            "prompt": prompt,
+            "prompt_original": prompt,
+            "prompt_en": prompt_en,
+            "prompt_translation": translation,
+            "actions": actions,
+            "action_labels": [
+                SUBJECT_REPLACEMENT_ACTION_LABELS[item] for item in actions
+            ],
+            "action_count": len(actions),
+            "poses": actions,
+            "poses_original": actions,
+            "poses_en": actions,
+            "pose_count": len(actions),
+            "subject_profile": profile["id"],
+            "subject_profile_label": profile.get("display_name") or profile["id"],
+            "subject_profile_path": profile["_path"],
+            "subject_profile_sha256": effective_subject_config["profile_sha256"],
+            "subject_source": subject_source,
+            "requested_subject_source": ("upload" if raw is not None else "profile"),
+            "effective_subject_source": subject_source,
+            "uploaded_identity_input_sha256": (uploaded_identity_input_sha256),
+            "uploaded_identity_source_sha256": (uploaded_identity_source_sha256),
+            "uploaded_identity_view_policy": (
+                UPLOADED_IDENTITY_VIEW_POLICY if raw is not None else None
+            ),
+            "uploaded_identity_view_mode": uploaded_identity_view_mode,
+            "uploaded_identity_view_count": len(uploaded_identity_views),
+            "uploaded_identity_view_roles": list(uploaded_identity_views),
+            "uploaded_identity_views": uploaded_identity_views,
+            "subject_reference_paths": (
+                {}
+                if raw is not None
+                else {
+                    action: str(
+                        effective_subject_config["standard_direct"]["actions"][action][
+                            "selected_reference"
+                        ]["cutout"]
+                        if standard_direct_request
+                        else effective_actions[action]["reference"]
+                    )
+                    for action in actions
+                }
+            ),
+            "reference_pipeline": (
+                QWEN_FULL_BODY_FIRST_FRAME_PIPELINE
+                if raw is not None
+                else (
+                    PROFILE_STANDARD_DIRECT_POLICY
+                    if standard_direct_request
+                    else "validated_subject_profile_fast_path"
+                )
+            ),
+            "reference_pipeline_version": (
+                QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION if raw is not None else None
+            ),
+            "expected_pose_policies": dict(expected_pose_policies),
+            "expected_surface_gate_actions": (list(actions) if raw is not None else []),
+            "fur_contour_validation_policy": None,
+            "upload_validation_policy": (
+                QWEN_FULL_BODY_FIRST_FRAME_PIPELINE if raw is not None else None
+            ),
+            "surface_texture_gate_status": (
+                "pending_qwen_reference" if raw is not None else None
+            ),
+            "reference_generation_status": (
+                "pending"
+                if raw is not None
+                else (
+                    "standard_direct_ready"
+                    if standard_direct_request
+                    else "profile_ready"
+                )
+            ),
+            "reference_image_profile": (
+                SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE if raw is not None else None
+            ),
+            "reference_normalization_contract": (
+                {
+                    "full_body": "landscape_normalize_then_alpha_matte",
+                    "action_keyframes": (QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY),
+                    "action_candidate_matte": (QWEN_ACTION_CANDIDATE_MATTE_POLICY),
+                    "size": [512, 512],
+                    "identity_view_mode": uploaded_identity_view_mode,
+                    "identity_view_roles": list(uploaded_identity_views),
+                    "identity_view_policy": UPLOADED_IDENTITY_VIEW_POLICY,
+                    "identity_views_used_only_for_qwen_canonical": True,
+                    "action_stage_raw_identity_views_used": False,
+                    "action_stage_identity_input": (
+                        "normalized_qwen_full_body_canonical_image1"
+                    ),
+                    "action_stage_geometry_input": ("main_case_action_guide_image2"),
+                    "raw_upload_sent_to_scail": False,
+                    "selected_candidate_byte_copied_to_scail_reference": True,
+                    "wan_green_derived_one_way_from_rgba": True,
+                }
+                if raw is not None
+                else None
+            ),
+            "driving_templates": {
+                action: str(effective_actions[action]["driving_animation"])
+                for action in actions
+            },
+            "seed_mode": effective_subject_config["seed_mode"],
+            "effective_action_seeds": {
+                action: int(effective_actions[action]["effective_seed"])
+                for action in actions
+            },
+            "effective_action_pose_strengths": {
+                action: float(effective_actions[action]["pose_strength"])
+                for action in actions
+            },
+            "effective_subject_config": effective_subject_config,
+            "output_format": output_format,
+            "skip_video": False,
+            "generation_engine": (
+                "deterministic-main-case-standard-direct"
+                if standard_direct_request
+                else (
+                    "qwen-image-edit-plus-scail2-14b-fp8"
+                    if raw is not None
+                    else "scail2-14b-fp8"
+                )
+            ),
+            "reference_generation_engine": (
+                "qwen-image-edit" if raw is not None else None
+            ),
+            "video_engine": (
+                "deterministic-main-case-standard-direct"
+                if standard_direct_request
+                else "scail2-14b-fp8"
+            ),
+            "scail_model": (
+                None if standard_direct_request else effective_subject_config["model"]
+            ),
+            "scail_dpo_lora": (
+                None
+                if standard_direct_request
+                else {"name": SCAIL_DPO_LORA, "strength": 1.0}
+            ),
+            "scail_distill_lora": (
+                None
+                if standard_direct_request
+                else {"name": SCAIL_DISTILL_LORA, "strength": 0.8}
+            ),
+            "scail_steps": (
+                None
+                if standard_direct_request
+                else int(effective_subject_config["steps"])
+            ),
+            "pose_strength": pose_strength,
+            "source_frames": int(effective_subject_config["frames"]),
+            "source_fps": float(effective_subject_config["fps"]),
+            "resolution": "512x512",
+            "width": 512,
+            "height": 512,
+            "frames": final_frames,
+            "fps": final_fps,
+            "duration_seconds": final_duration,
+            "seed": resolved_seed,
+            "visual_style": (
+                "uploaded_identity_qwen_full_body_action_keyframes_scail"
+                if raw is not None
+                else (
+                    "main_case_profile_standard_direct"
+                    if standard_direct_request
+                    else "sleek_tabby_subject_replacement"
+                )
+            ),
+            "standard_direct_policy": (
+                PROFILE_STANDARD_DIRECT_POLICY if standard_direct_request else None
+            ),
+            "standard_direct_revision": (
+                effective_subject_config["standard_direct"]["revision"]
+                if standard_direct_request
+                else None
+            ),
+            "standard_direct_role": (
+                effective_subject_config["standard_direct"]["role"]
+                if standard_direct_request
+                else None
+            ),
+            "standard_direct_actions": (
+                json.loads(
+                    json.dumps(effective_subject_config["standard_direct"]["actions"])
+                )
+                if standard_direct_request
+                else {}
+            ),
+            "gpu_required": False if standard_direct_request else True,
+            "gpu_submitted": False,
+            "gpu_bypass_reason": (
+                effective_subject_config["standard_direct"]["gpu_bypass_reason"]
+                if standard_direct_request
+                else None
+            ),
+            "generation_controls_applied": not standard_direct_request,
+            "qwen_reference_generation_for_subject_replacement": bool(raw is not None),
+            "direct_scail_uploaded_identity_reference": False,
+            "canonical_reference_generated": False,
+            "canonical_reference_used": False,
+            "current_action": None,
+            "current_action_label": None,
+            "current_action_index": None,
+            "outputs": [],
+            "subject_replacement_results": [],
+            "error": None,
+            "cancel_requested": False,
+            "active_prompt_id": None,
+        }
+        with JOBS_LOCK:
+            JOBS[job_id] = job
+        persist_job(job_id)
+        JOB_QUEUE.put_nowait(job_id)
+    except Exception:
+        with JOBS_LOCK:
+            JOBS.pop(job_id, None)
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise
+    return public_job(job)
+
+
 @app.post(f"{API_PREFIX}/jobs", status_code=status.HTTP_202_ACCEPTED)
 async def create_job(
-    image: UploadFile = File(..., description="Reference image (PNG/JPEG/WebP)."),
-    prompt: str = Form(..., min_length=1, max_length=2000),
+    image: UploadFile | None = File(
+        default=None,
+        description=(
+            "Optional front/primary subject image (PNG/JPEG/WebP). Use with "
+            "image_left and image_right for three-view canonical generation."
+        ),
+    ),
+    image_left: UploadFile | None = File(
+        default=None,
+        description="Optional left-side view; requires image and image_right.",
+    ),
+    image_right: UploadFile | None = File(
+        default=None,
+        description="Optional right-side view; requires image and image_left.",
+    ),
+    prompt: str = Form(default="", max_length=2000),
+    generation_mode: str = Form(
+        default="subject_replacement",
+        description="subject_replacement (default) or keyframe_video.",
+    ),
+    actions: str | None = Form(
+        default=None,
+        description="Subject replacement actions: eating and/or grooming.",
+    ),
+    subject_profile: str | None = Form(default=DEFAULT_SUBJECT_PROFILE),
+    scail_steps: int | None = Form(default=None, ge=4, le=12),
+    pose_strength: float | None = Form(default=None, ge=0.0, le=2.0),
     poses: str | None = Form(
         default=None,
         description="Optional JSON string array, newline-separated list, or pipe-separated list.",
@@ -6056,6 +23830,51 @@ async def create_job(
     seed: int | None = Form(default=None, ge=0, le=2**63 - 1),
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
+    normalized_generation_mode = generation_mode.strip().lower().replace("-", "_")
+    generation_mode_aliases = {
+        "subject_replacement": "subject_replacement",
+        "replacement": "subject_replacement",
+        "scail": "subject_replacement",
+        "keyframe_video": "keyframe_video",
+        "legacy": "keyframe_video",
+    }
+    normalized_generation_mode = generation_mode_aliases.get(
+        normalized_generation_mode,
+        normalized_generation_mode,
+    )
+    if normalized_generation_mode not in {"subject_replacement", "keyframe_video"}:
+        await close_uploaded_identity_uploads(image, image_left, image_right)
+        raise HTTPException(
+            status_code=422,
+            detail="generation_mode must be subject_replacement or keyframe_video.",
+        )
+    if normalized_generation_mode == "subject_replacement":
+        return await create_subject_replacement_api_job(
+            image=image,
+            image_left=image_left,
+            image_right=image_right,
+            prompt=prompt,
+            actions_raw=actions,
+            subject_profile_id=subject_profile,
+            output_format=output_format,
+            scail_steps=scail_steps,
+            pose_strength=pose_strength,
+            seed=seed,
+        )
+    if image_left is not None or image_right is not None:
+        await close_uploaded_identity_uploads(image, image_left, image_right)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "image_left and image_right are supported only for "
+                "generation_mode=subject_replacement."
+            ),
+        )
+    if image is None:
+        raise HTTPException(
+            status_code=422,
+            detail="An image is required for the legacy keyframe_video workflow.",
+        )
     request_kind = request_kind.strip().lower()
     if request_kind not in {"image", "video"}:
         raise HTTPException(
@@ -6251,7 +24070,7 @@ async def create_job(
                 profile.get("identity_palette_policy")
                 if profile
                 else (
-                    "source_palette_guard_v1"
+                    "source_palette_guard_v2"
                     if output_format == "transparent_gif"
                     else None
                 )

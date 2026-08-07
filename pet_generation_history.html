@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>历史图片 · 萌宠生成测试台</title>
+  <title>生成历史 · 萌宠生成测试台</title>
   <style>
     :root {
       --bg: #f5f2eb;
@@ -68,10 +68,24 @@
       box-shadow: 0 10px 30px rgba(73,57,34,.07);
     }
     .preview {
-      position: relative; min-height: 270px; display: grid; place-items: center; overflow: hidden;
+      position: relative; min-height: 270px; display: grid; place-items: stretch; overflow: hidden;
       background: var(--checker); border-right: 1px solid var(--line);
     }
-    .preview img { width: 100%; height: 100%; max-height: 340px; object-fit: contain; display: block; }
+    .preview-media-grid { width: 100%; min-height: 270px; display: grid; grid-template-columns: 1fr; }
+    .preview-media-grid.multi { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .preview-media-item {
+      position: relative; min-width: 0; min-height: 135px; display: grid; place-items: center;
+      overflow: hidden; background: var(--checker);
+    }
+    .preview-media-grid.multi .preview-media-item { border: solid rgba(222,216,204,.9); border-width: 0 1px 1px 0; }
+    .preview-media-item > a { width: 100%; height: 100%; display: grid; place-items: center; }
+    .preview img, .preview video { width: 100%; height: 100%; max-height: 340px; object-fit: contain; display: block; }
+    .preview-media-grid.multi img, .preview-media-grid.multi video { max-height: 180px; }
+    .media-label {
+      position: absolute; z-index: 1; left: 8px; top: 8px; max-width: calc(100% - 16px); padding: 4px 7px;
+      border-radius: 8px; color: white; background: rgba(39,37,31,.76); font-size: 11px; font-weight: 800;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none;
+    }
     .preview-count {
       position: absolute; right: 10px; bottom: 10px; padding: 5px 9px; border-radius: 999px;
       color: white; background: rgba(39,37,31,.76); font-size: 12px; font-weight: 800;
@@ -122,14 +136,15 @@
       min-height: 430px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line);
       border-radius: 16px; background: var(--checker);
     }
-    .main-image img { width: 100%; max-height: 620px; object-fit: contain; display: block; }
+    .main-image > a { width: 100%; display: grid; place-items: center; }
+    .main-image img, .main-image video { width: 100%; max-height: 620px; object-fit: contain; display: block; }
     .thumbs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 9px; }
     .thumb {
       aspect-ratio: 1; padding: 0; overflow: hidden; border: 2px solid transparent; border-radius: 10px;
       background: var(--checker); cursor: pointer;
     }
     .thumb.active { border-color: var(--brand); }
-    .thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .thumb img, .thumb video { width: 100%; height: 100%; object-fit: contain; display: block; pointer-events: none; }
     .metadata { min-width: 0; }
     .section { padding: 14px 0; border-bottom: 1px solid var(--line); }
     .section:first-child { padding-top: 0; }
@@ -171,8 +186,8 @@
   <div class="shell">
     <header>
       <div>
-        <h1>历史生成图片</h1>
-        <p class="subtitle">按任务查看已生成图片、提示词、LoRA 名称与权重，以及当时保存的请求参数。</p>
+        <h1>历史生成媒体</h1>
+        <p class="subtitle">按任务查看已生成图片、GIF、视频、提示词，以及当时保存的请求参数。</p>
       </div>
       <a class="back-link" href="./">返回生成测试台</a>
     </header>
@@ -185,16 +200,16 @@
         <select id="kind">
           <option value="all">全部任务</option>
           <option value="image">图片任务</option>
-          <option value="video">视频任务首帧</option>
+          <option value="video">视频任务</option>
         </select>
       </label>
       <label>任务状态
         <select id="state">
           <option value="all">全部状态</option>
           <option value="completed">已完成</option>
-          <option value="failed">失败但已有图片</option>
-          <option value="cancelled">已取消但已有图片</option>
-          <option value="active">进行中且已有图片</option>
+          <option value="failed">失败但已有媒体</option>
+          <option value="cancelled">已取消但已有媒体</option>
+          <option value="active">进行中且已有媒体</option>
         </select>
       </label>
       <label>用户 LoRA
@@ -214,7 +229,7 @@
     <div id="error" class="notice" role="alert"></div>
     <div id="loading" class="loading"></div>
     <div id="empty" class="empty" hidden>
-      <div><div style="font-size:48px">🐾</div><p id="emptyText">完成一次生成后，图片会出现在这里。</p></div>
+      <div><div style="font-size:48px">🐾</div><p id="emptyText">完成一次生成后，图片、GIF 或视频会出现在这里。</p></div>
     </div>
     <main id="historyList" class="history-list" hidden></main>
     <nav class="pager" aria-label="历史分页">
@@ -254,12 +269,37 @@
     };
     const outputLabels = {
       cartoon_reference: '卡通角色基准图',
+      subject_reference: 'SCAIL 主体参考图（身份/外观）',
+      subject_reference_mask: 'SCAIL 主体参考遮罩（身份/外观区域）',
+      reference_identity_mask: 'SCAIL 主体参考遮罩（身份/外观区域）',
+      main_case_geometry_guide: 'Main_case 动作几何引导图（姿态/道具/机位）',
+      main_case_geometry_mask: 'Main_case 动作几何遮罩（主体/道具区域）',
+      final_video_fur_surface_audit: '最终视频毛发表面抽帧审计（JSON）',
+      uploaded_identity_cutout: '上传主体抠图（身份唯一来源）',
+      uploaded_identity_reference_input: '上传主体 SCAIL 输入参考（非默认主体）',
+      eating_geometry_guide: 'Main_case 吃饭几何引导图（姿态/道具/机位）',
+      grooming_geometry_guide: 'Main_case 舔毛几何引导图（姿态/道具/机位）',
+      driving_template_preview: 'Main_case 动作标准预览（姿态/道具/机位）',
+      standard_direct_reference: 'Main_case 主体与动作标准参考图',
+      standard_direct_selected_frame: 'Main_case 主体与动作标准代表帧',
+      standard_direct_mask: 'Main_case 主体与道具标准蒙版',
+      standard_direct_provenance: 'Main_case 标准直出溯源（JSON）',
       transparent_keyframe: '透明姿态首帧',
       keyframe: '姿态首帧',
       image: '未抠图姿态图',
       transparent_image: '透明图片',
       transparent_gif: '透明 GIF',
-      transparent_apng: '透明 APNG'
+      transparent_apng: '透明 APNG',
+      subject_replacement_video: '主体替换 MP4',
+      video_preview: '视频预览',
+      video: '视频'
+    };
+    const actionLabels = {
+      eating: '吃饭',
+      eat: '吃饭',
+      grooming: '舔毛',
+      groom: '舔毛',
+      licking: '舔毛'
     };
     const parameterLabels = {
       seed: '随机种子',
@@ -283,6 +323,15 @@
       output_format: '输出格式',
       skip_video: '跳过视频',
       generation_mode: '生成模式',
+      actions: '动作',
+      subject_profile: '主体配置',
+      subject_source: '主体来源',
+      requested_subject_source: '请求主体来源',
+      effective_subject_source: '实际主体来源',
+      driving_templates: 'Main_case 动作标准（姿态/道具/机位）',
+      generation_engine: 'SCAIL 引擎',
+      scail_steps: 'SCAIL 步数',
+      pose_strength: '动作跟随强度',
       qwen_steps: 'Qwen 步数',
       qwen_cfg: 'Qwen CFG',
       qwen_denoise: 'Qwen 重绘强度',
@@ -298,6 +347,13 @@
       duration_seconds: '视频时长（秒）'
     };
     const parameterOrder = Object.keys(parameterLabels);
+    const subjectParameterOrder = [
+      'generation_mode', 'actions', 'subject_profile',
+      'requested_subject_source', 'effective_subject_source', 'subject_source',
+      'driving_templates', 'generation_engine', 'scail_steps', 'pose_strength',
+      'seed', 'resolution', 'width', 'height', 'output_format', 'frames', 'fps',
+      'duration_seconds'
+    ];
 
     function element(tag, className, text) {
       const node = document.createElement(tag);
@@ -321,7 +377,174 @@
       if (value === null || value === undefined || value === '') return '历史任务未记录';
       if (Array.isArray(value)) return value.length ? value.join('\n') : '无';
       if (typeof value === 'boolean') return value ? '是' : '否';
+      if (typeof value === 'object') {
+        try {
+          return JSON.stringify(value, null, 2);
+        } catch (_) {
+          return String(value);
+        }
+      }
       return String(value);
+    }
+
+    function itemParameter(item, key) {
+      const parameters = item && item.parameters && typeof item.parameters === 'object'
+        ? item.parameters
+        : {};
+      const value = parameters[key];
+      return value === null || value === undefined ? item?.[key] : value;
+    }
+
+    function parseActions(value) {
+      if (Array.isArray(value)) return value.map(String).filter(Boolean);
+      if (value === null || value === undefined || value === '') return [];
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (trimmed.startsWith('[')) {
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (Array.isArray(parsed)) return parsed.map(String).filter(Boolean);
+          } catch (_) {
+            // 旧任务可能保存为逗号分隔文本，继续使用下面的兼容路径。
+          }
+        }
+        return trimmed.split(/[,，、/]+/).map(item => item.trim()).filter(Boolean);
+      }
+      return [String(value)];
+    }
+
+    function actionLabel(value, includeKey = false) {
+      const key = String(value || '').trim();
+      const label = actionLabels[key.toLowerCase()] || key || '动作未记录';
+      return includeKey && label !== key ? `${label}（${key}）` : label;
+    }
+
+    function itemActions(item, includeKeys = false) {
+      const actions = parseActions(itemParameter(item, 'actions'));
+      return actions.map(action => actionLabel(action, includeKeys)).join('、');
+    }
+
+    function generationMode(item) {
+      return String(itemParameter(item, 'generation_mode') || '').trim().toLowerCase();
+    }
+
+    function isSubjectReplacement(item) {
+      return generationMode(item) === 'subject_replacement';
+    }
+
+    function engineLabel(value) {
+      const raw = String(value || '').trim();
+      if (!raw) return '历史任务未记录';
+      if (raw.toLowerCase() === 'scail2-14b-fp8') return 'SCAIL‑2 14B FP8（scail2-14b-fp8）';
+      return raw;
+    }
+
+    function parameterValue(item, key) {
+      const value = itemParameter(item, key);
+      if (key === 'generation_mode' && String(value || '').toLowerCase() === 'subject_replacement') {
+        return '主体替换（subject_replacement）';
+      }
+      if (key === 'actions') return itemActions(item, true) || value;
+      if (key === 'generation_engine') return engineLabel(value);
+      if (
+        key === 'subject_source'
+        || key === 'requested_subject_source'
+        || key === 'effective_subject_source'
+      ) {
+        if (value === 'profile') return '主体配置（profile）';
+        if (value === 'upload') return '本次上传（upload）';
+        if (value === 'upload_pending_qwen') return '本次上传（正在生成 Qwen 参考）';
+        if (value === 'qwen_generated_upload') return '本次上传（Qwen 参考已生成）';
+      }
+      if (key === 'driving_templates' && value && typeof value === 'object' && !Array.isArray(value)) {
+        return Object.entries(value)
+          .map(([action, template]) => `${actionLabel(action, true)}：${template}`)
+          .join('\n');
+      }
+      return value;
+    }
+
+    function isVideoMedia(output) {
+      if (!output) return false;
+      if (output.media_kind === 'video') return true;
+      if (['video', 'video_preview', 'subject_replacement_video'].includes(output.type)) return true;
+      const path = String(output.filename || output.download_url || '').split(/[?#]/, 1)[0];
+      return /\.(mp4|webm|mov|mkv)$/i.test(path);
+    }
+
+    function itemMedia(item) {
+      if (Array.isArray(item.media)) return item.media.filter(Boolean);
+      const images = Array.isArray(item.images) ? item.images : [];
+      const videos = Array.isArray(item.videos) ? item.videos : [];
+      return [...images, ...videos].filter(Boolean);
+    }
+
+    function mediaIdentity(output) {
+      return `${output?.media_kind || ''}|${output?.filename || output?.download_url || ''}`;
+    }
+
+    function cardMedia(item) {
+      const all = itemMedia(item);
+      const usable = all.filter(output => output.available !== false);
+      const source = usable.length ? usable : all;
+      if (!source.length) return [];
+
+      if (isSubjectReplacement(item)) {
+        const selected = [];
+        const seen = new Set();
+        const add = output => {
+          if (!output) return;
+          const identity = mediaIdentity(output);
+          if (seen.has(identity)) return;
+          seen.add(identity);
+          selected.push(output);
+        };
+        parseActions(itemParameter(item, 'actions')).forEach(action => {
+          add(source.find(output => output.action === action && isVideoMedia(output)));
+          add(source.find(output => output.action === action && !isVideoMedia(output)));
+        });
+        source.filter(isVideoMedia).forEach(add);
+        source.filter(output => !isVideoMedia(output)).forEach(add);
+        return selected.slice(0, 4);
+      }
+
+      const firstVideo = source.find(isVideoMedia);
+      if (firstVideo) {
+        const firstImage = source.find(output => !isVideoMedia(output));
+        return firstImage ? [firstVideo, firstImage] : [firstVideo];
+      }
+      const thumbnail = item.thumbnail && item.thumbnail.available !== false ? item.thumbnail : null;
+      return [thumbnail || source[0]];
+    }
+
+    function mediaKindLabel(output) {
+      const type = String(output?.type || '');
+      if (outputLabels[type]) return outputLabels[type];
+      const filename = String(output?.filename || '').toLowerCase();
+      if (/geometry[_-]?guide|qwen[_-]?pose[_-]?guide/.test(filename)) {
+        return 'Main_case 动作几何引导图（姿态/道具/机位）';
+      }
+      if (/subject[_-]?reference.*mask|reference[_-]?identity[_-]?mask/.test(filename)) {
+        return 'SCAIL 主体参考遮罩（身份/外观区域）';
+      }
+      if (/subject[_-]?reference|reference[_-]?normalized/.test(filename)) {
+        return 'SCAIL 主体参考图（身份/外观）';
+      }
+      return isVideoMedia(output) ? '视频' : '图片';
+    }
+
+    function mediaTitle(output) {
+      const action = output?.action ? `${actionLabel(output.action)} · ` : '';
+      const kind = mediaKindLabel(output);
+      return `${action}${kind}`;
+    }
+
+    function taskTitle(item) {
+      if (isSubjectReplacement(item)) {
+        const actions = itemActions(item);
+        return `主体替换任务${actions ? ` · ${actions}` : ''}`;
+      }
+      return item.request_kind === 'image' ? '图片生成任务' : '视频生成任务';
     }
 
     function loraLabel(item) {
@@ -369,76 +592,133 @@
       return `${stage.profile || '配置未记录'}；${scale}；${mode}；${names}${sampling}`;
     }
 
-    function missingMedia(message = '图片文件不存在') {
+    function missingMedia(message = '媒体文件不存在') {
       return element('div', 'missing', message);
     }
 
     function mediaImage(output, className = '') {
       const image = document.createElement('img');
       image.src = output.download_url;
-      image.alt = outputLabels[output.type] || output.filename;
+      image.alt = mediaTitle(output) || output.filename;
       image.loading = 'lazy';
       image.decoding = 'async';
       if (className) image.className = className;
       return image;
     }
 
-    function replaceBrokenImage(image, message) {
-      image.addEventListener('error', () => {
+    function mediaVideo(output, controls = true) {
+      const video = document.createElement('video');
+      video.src = output.download_url;
+      video.controls = controls;
+      video.preload = 'metadata';
+      video.playsInline = true;
+      video.muted = !controls;
+      video.setAttribute('aria-label', mediaTitle(output));
+      return video;
+    }
+
+    function mediaElement(output, controls = true) {
+      return isVideoMedia(output) ? mediaVideo(output, controls) : mediaImage(output);
+    }
+
+    function replaceBrokenMedia(media, message) {
+      media.addEventListener('error', () => {
         const replacement = missingMedia(message);
-        image.replaceWith(replacement);
+        media.replaceWith(replacement);
       }, {once: true});
+    }
+
+    function appendLinkedMedia(container, output, controls = true) {
+      const media = mediaElement(output, controls);
+      replaceBrokenMedia(media, isVideoMedia(output) ? '视频加载失败' : '图片加载失败');
+      if (isVideoMedia(output)) {
+        container.appendChild(media);
+        return media;
+      }
+      const link = document.createElement('a');
+      link.href = output.download_url;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.appendChild(media);
+      container.appendChild(link);
+      return media;
     }
 
     function renderCard(item) {
       const card = element('article', 'history-card');
       const preview = element('div', 'preview');
-      const thumbnail = item.thumbnail;
-      if (thumbnail && thumbnail.available) {
-        const link = document.createElement('a');
-        link.href = thumbnail.download_url;
-        link.target = '_blank';
-        link.rel = 'noopener';
-        const image = mediaImage(thumbnail);
-        replaceBrokenImage(image, '缩略图加载失败');
-        link.appendChild(image);
-        preview.appendChild(link);
+      const allMedia = itemMedia(item);
+      const previewItems = cardMedia(item);
+      if (previewItems.length) {
+        const grid = element('div', `preview-media-grid${previewItems.length > 1 ? ' multi' : ''}`);
+        previewItems.forEach(output => {
+          const cell = element('div', 'preview-media-item');
+          if (output.available === false) {
+            cell.appendChild(missingMedia('媒体文件已丢失'));
+          } else {
+            const media = appendLinkedMedia(cell, output, true);
+            if (isVideoMedia(output)) media.muted = true;
+          }
+          cell.appendChild(element('span', 'media-label', mediaTitle(output)));
+          grid.appendChild(cell);
+        });
+        preview.appendChild(grid);
       } else {
-        preview.appendChild(missingMedia('历史记录存在，但图片文件已丢失'));
+        preview.appendChild(missingMedia('历史记录存在，但没有可展示的媒体文件'));
       }
-      preview.appendChild(element('span', 'preview-count', `${item.available_image_count}/${item.image_count} 张可用`));
+      const availableMediaCount = allMedia.filter(output => output.available !== false).length;
+      const hasVideo = allMedia.some(isVideoMedia);
+      preview.appendChild(element(
+        'span',
+        'preview-count',
+        `${availableMediaCount}/${allMedia.length} ${hasVideo ? '个媒体可用' : '张图片可用'}`
+      ));
 
       const content = element('div', 'history-content');
       const top = element('div', 'card-top');
       const titleBlock = element('div');
       titleBlock.append(
-        element('h2', '', item.request_kind === 'image' ? '图片生成任务' : '视频任务生成图片'),
+        element('h2', '', taskTitle(item)),
         element('div', 'time', formatDate(item.created_at))
       );
-      const status = element('span', `status ${item.status}`, statusLabels[item.status] || item.status);
+      const itemStatus = item.status || 'unknown';
+      const status = element('span', `status ${itemStatus}`, statusLabels[itemStatus] || itemStatus);
       top.append(titleBlock, status);
       content.appendChild(top);
 
       const prompt = element('div', 'prompt', item.prompt || '历史任务未记录提示词');
       content.appendChild(prompt);
 
-      const loras = element('div', 'chips');
-      item.user_loras.forEach(lora => addLoraChip(loras, lora));
-      if (item.builtin_lora) addLoraChip(loras, item.builtin_lora);
-      item.workflow_loras.forEach(lora => addLoraChip(loras, lora));
-      if (!loras.childElementCount) loras.appendChild(element('span', 'chip', 'LoRA 信息未记录'));
-      if (item.user_lora_mode) {
-        loras.appendChild(element('span', 'chip', item.user_lora_mode === 'stack' ? '叠加内置 LoRA' : '替换内置 LoRA'));
+      if (!isSubjectReplacement(item)) {
+        const loras = element('div', 'chips');
+        (Array.isArray(item.user_loras) ? item.user_loras : []).forEach(lora => addLoraChip(loras, lora));
+        if (item.builtin_lora) addLoraChip(loras, item.builtin_lora);
+        (Array.isArray(item.workflow_loras) ? item.workflow_loras : []).forEach(lora => addLoraChip(loras, lora));
+        if (!loras.childElementCount) loras.appendChild(element('span', 'chip', 'LoRA 信息未记录'));
+        if (item.user_lora_mode) {
+          loras.appendChild(element('span', 'chip', item.user_lora_mode === 'stack' ? '叠加内置 LoRA' : '替换内置 LoRA'));
+        }
+        content.appendChild(loras);
       }
-      content.appendChild(loras);
 
       const parameters = element('div', 'chips');
-      const quickParameters = [
-        ['Qwen', item.parameters.qwen_steps],
-        ['CFG', item.parameters.qwen_cfg],
-        ['Seed', item.parameters.seed],
-        ['分辨率', item.parameters.resolution]
-      ];
+      const quickParameters = isSubjectReplacement(item)
+        ? [
+            ['模式', 'subject_replacement'],
+            ['动作', itemActions(item) || itemParameter(item, 'actions')],
+            ['主体配置', itemParameter(item, 'subject_profile')],
+            ['SCAIL 引擎', itemParameter(item, 'generation_engine')],
+            ['SCAIL 步数', itemParameter(item, 'scail_steps')],
+            ['动作跟随强度', itemParameter(item, 'pose_strength')],
+            ['Seed', itemParameter(item, 'seed')],
+            ['分辨率', itemParameter(item, 'resolution')]
+          ]
+        : [
+            ['Qwen', itemParameter(item, 'qwen_steps')],
+            ['CFG', itemParameter(item, 'qwen_cfg')],
+            ['Seed', itemParameter(item, 'seed')],
+            ['分辨率', itemParameter(item, 'resolution')]
+          ];
       quickParameters.forEach(([label, value]) => {
         parameters.appendChild(element('span', 'chip', `${label}: ${formatValue(value)}`));
       });
@@ -463,7 +743,7 @@
 
       const bottom = element('div', 'card-bottom');
       bottom.appendChild(element('div', 'job-id', item.job_id));
-      const button = element('button', 'detail-button', '查看全部图片与参数');
+      const button = element('button', 'detail-button', '查看全部媒体与参数');
       button.type = 'button';
       button.addEventListener('click', () => openDetail(item));
       bottom.appendChild(button);
@@ -480,26 +760,19 @@
       container.appendChild(list);
     }
 
-    function setMainImage(container, output, thumbnails, selectedButton) {
+    function setMainMedia(container, output, thumbnails, selectedButton) {
       container.replaceChildren();
       thumbnails.forEach(button => button.classList.toggle('active', button === selectedButton));
-      if (!output.available) {
-        container.appendChild(missingMedia('图片文件不存在'));
+      if (output.available === false) {
+        container.appendChild(missingMedia('媒体文件不存在'));
         return;
       }
-      const link = document.createElement('a');
-      link.href = output.download_url;
-      link.target = '_blank';
-      link.rel = 'noopener';
-      const image = mediaImage(output);
-      image.loading = 'eager';
-      replaceBrokenImage(image, '图片加载失败');
-      link.appendChild(image);
-      container.appendChild(link);
+      const media = appendLinkedMedia(container, output, true);
+      if (!isVideoMedia(output)) media.loading = 'eager';
     }
 
     function openDetail(item) {
-      $('detailTitle').textContent = `${item.request_kind === 'image' ? '图片任务' : '视频任务'} · ${item.job_id}`;
+      $('detailTitle').textContent = `${taskTitle(item)} · ${item.job_id}`;
       const body = $('detailBody');
       body.replaceChildren();
 
@@ -507,31 +780,41 @@
       const main = element('div', 'main-image');
       const thumbs = element('div', 'thumbs');
       const thumbButtons = [];
-      item.images.forEach(output => {
+      const mediaItems = itemMedia(item);
+      mediaItems.forEach(output => {
         const button = element('button', 'thumb');
         button.type = 'button';
-        button.title = outputLabels[output.type] || output.filename;
-        if (output.available) {
-          const image = mediaImage(output);
-          replaceBrokenImage(image, '文件丢失');
-          button.appendChild(image);
+        button.title = `${mediaTitle(output)} · ${output.filename || ''}`;
+        if (output.available !== false) {
+          const media = mediaElement(output, false);
+          replaceBrokenMedia(media, '文件丢失');
+          button.appendChild(media);
         } else {
           button.appendChild(missingMedia('缺失'));
         }
-        button.addEventListener('click', () => setMainImage(main, output, thumbButtons, button));
+        button.addEventListener('click', () => setMainMedia(main, output, thumbButtons, button));
         thumbButtons.push(button);
         thumbs.appendChild(button);
       });
+      if (!mediaItems.length) main.appendChild(missingMedia('该历史任务没有可展示的媒体记录'));
       mediaPanel.append(main, thumbs);
 
       const metadata = element('section', 'metadata');
       const summarySection = element('div', 'section');
       const summaryChips = element('div', 'chips');
+      const itemStatus = item.status || 'unknown';
       summaryChips.append(
-        element('span', `status ${item.status}`, statusLabels[item.status] || item.status),
+        element('span', `status ${itemStatus}`, statusLabels[itemStatus] || itemStatus),
         element('span', 'chip', item.request_kind === 'image' ? '图片任务' : '视频任务'),
         element('span', 'chip', item.source === 'legacy' ? '旧测试台记录' : '本地模型接口记录')
       );
+      if (isSubjectReplacement(item)) {
+        summaryChips.append(
+          element('span', 'chip', '主体替换（subject_replacement）'),
+          element('span', 'chip', `动作：${itemActions(item) || '未记录'}`),
+          element('span', 'chip', `主体：${formatValue(itemParameter(item, 'subject_profile'))}`)
+        );
+      }
       if (item.prompt_translation?.applied) summaryChips.appendChild(element('span', 'chip', '中文已译为英文'));
       if (item.image_profile) summaryChips.appendChild(element('span', 'chip', `图片基准：${item.image_profile_label || item.image_profile}`));
       if (item.image_profile_revision) summaryChips.appendChild(element('span', 'chip', `基准版本：${item.image_profile_revision}`));
@@ -542,14 +825,30 @@
         summaryChips.appendChild(element('span', 'chip', '基准图毛色检测不可用'));
       }
       summarySection.appendChild(summaryChips);
+      const imageItems = mediaItems.filter(output => !isVideoMedia(output));
+      const videoItems = mediaItems.filter(isVideoMedia);
       appendDefinitionList(summarySection, [
         ['任务 ID', item.job_id],
+        ['当前阶段', item.stage],
         ['创建时间', formatDate(item.created_at)],
         ['开始时间', formatDate(item.started_at)],
         ['完成时间', formatDate(item.finished_at)],
-        ['可用图片', `${item.available_image_count}/${item.image_count}`]
+        ['可用图片/GIF', `${imageItems.filter(output => output.available !== false).length}/${imageItems.length}`],
+        ['可用视频', `${videoItems.filter(output => output.available !== false).length}/${videoItems.length}`]
       ]);
       metadata.appendChild(summarySection);
+
+      if (isSubjectReplacement(item)) {
+        const assetRoleSection = element('div', 'section');
+        assetRoleSection.appendChild(element('h3', '', '身份与动作标准（按任务来源区分）'));
+        appendDefinitionList(assetRoleSection, [
+          ['身份来源', parameterValue(item, 'effective_subject_source') || parameterValue(item, 'subject_source')],
+          ['主体参考图 / 遮罩', '默认任务直接来自 Main_case 标准视频；上传任务来自上传主体'],
+          ['Main_case 标准视频', '未上传时同时提供身份、毛发、动作与道具；上传时只提供动作几何'],
+          ['本任务记录的动作标准', parameterValue(item, 'driving_templates')]
+        ]);
+        metadata.appendChild(assetRoleSection);
+      }
 
       const promptSection = element('div', 'section');
       promptSection.append(
@@ -564,40 +863,47 @@
       }
       metadata.appendChild(promptSection);
 
-      const loraSection = element('div', 'section');
-      loraSection.appendChild(element('h3', '', 'LoRA'));
-      const loraChips = element('div', 'chips');
-      item.user_loras.forEach(lora => addLoraChip(loraChips, lora));
-      if (item.builtin_lora) addLoraChip(loraChips, item.builtin_lora);
-      item.workflow_loras.forEach(lora => addLoraChip(loraChips, lora));
-      if (!loraChips.childElementCount) loraChips.appendChild(element('span', 'chip', '历史任务未记录 LoRA'));
-      loraSection.appendChild(loraChips);
-      appendDefinitionList(loraSection, [
-        ['图片基准', item.image_profile_label || item.image_profile],
-        ['融合模式', item.user_lora_mode === 'stack' ? '叠加 LoRA' : (item.user_lora_mode === 'replace' ? '替换模式' : null)],
-        ['用户 LoRA 数量', item.user_loras.length]
-      ]);
+      const userLoras = Array.isArray(item.user_loras) ? item.user_loras : [];
+      const workflowLoras = Array.isArray(item.workflow_loras) ? item.workflow_loras : [];
       const effective = item.effective_lora || {};
-      if (effective.canonical || (Array.isArray(effective.poses) && effective.poses.length)) {
-        const effectiveRows = [];
-        if (effective.canonical) {
-          effectiveRows.push(['基准图实际 LoRA', effectiveLoraText(effective.canonical)]);
+      const hasLoraDetails = userLoras.length || workflowLoras.length || item.builtin_lora
+        || effective.canonical || (Array.isArray(effective.poses) && effective.poses.length);
+      if (!isSubjectReplacement(item) || hasLoraDetails) {
+        const loraSection = element('div', 'section');
+        loraSection.appendChild(element('h3', '', 'LoRA'));
+        const loraChips = element('div', 'chips');
+        userLoras.forEach(lora => addLoraChip(loraChips, lora));
+        if (item.builtin_lora) addLoraChip(loraChips, item.builtin_lora);
+        workflowLoras.forEach(lora => addLoraChip(loraChips, lora));
+        if (!loraChips.childElementCount) loraChips.appendChild(element('span', 'chip', '历史任务未记录 LoRA'));
+        loraSection.appendChild(loraChips);
+        appendDefinitionList(loraSection, [
+          ['图片基准', item.image_profile_label || item.image_profile],
+          ['融合模式', item.user_lora_mode === 'stack' ? '叠加 LoRA' : (item.user_lora_mode === 'replace' ? '替换模式' : null)],
+          ['用户 LoRA 数量', userLoras.length]
+        ]);
+        if (effective.canonical || (Array.isArray(effective.poses) && effective.poses.length)) {
+          const effectiveRows = [];
+          if (effective.canonical) {
+            effectiveRows.push(['基准图实际 LoRA', effectiveLoraText(effective.canonical)]);
+          }
+          (effective.poses || []).forEach(stage => {
+            effectiveRows.push([
+              `姿态 ${stage.pose_index || '?'} 实际 LoRA`,
+              effectiveLoraText(stage)
+            ]);
+          });
+          appendDefinitionList(loraSection, effectiveRows);
         }
-        (effective.poses || []).forEach(stage => {
-          effectiveRows.push([
-            `姿态 ${stage.pose_index || '?'} 实际 LoRA`,
-            effectiveLoraText(stage)
-          ]);
-        });
-        appendDefinitionList(loraSection, effectiveRows);
+        metadata.appendChild(loraSection);
       }
-      metadata.appendChild(loraSection);
 
       const parameterSection = element('div', 'section');
       parameterSection.appendChild(element('h3', '', '请求参数'));
-      const parameterRows = parameterOrder.map(key => {
-        let value = item.parameters[key];
-        if (item.request_kind === 'image' && ['wan_steps','wan_cfg','wan_shift','frames','fps','duration_seconds'].includes(key)) {
+      const displayedParameterOrder = isSubjectReplacement(item) ? subjectParameterOrder : parameterOrder;
+      const parameterRows = displayedParameterOrder.map(key => {
+        let value = parameterValue(item, key);
+        if (!isSubjectReplacement(item) && item.request_kind === 'image' && ['wan_steps','wan_cfg','wan_shift','frames','fps','duration_seconds'].includes(key)) {
           value = '未使用（图片任务）';
         }
         return [parameterLabels[key], value];
@@ -615,20 +921,22 @@
       metadata.appendChild(parameterSection);
 
       const outputSection = element('div', 'section');
-      outputSection.appendChild(element('h3', '', '全部图片'));
+      outputSection.appendChild(element('h3', '', '全部媒体'));
+      outputSection.appendChild(element('div', 'recovery-note', '这里只为任务 outputs 中实际记录的媒体生成链接；未记录的主体遮罩或 Main_case geometry guide 不补造下载链接。'));
       const links = element('div', 'output-links');
-      item.images.forEach((output, index) => {
-        if (output.available) {
+      mediaItems.forEach((output, index) => {
+        if (output.available !== false) {
           const link = document.createElement('a');
           link.href = output.download_url;
           link.target = '_blank';
           link.rel = 'noopener';
-          link.textContent = `${index + 1}. ${outputLabels[output.type] || output.type} · ${output.filename}`;
+          link.textContent = `${index + 1}. ${mediaTitle(output)} · ${output.filename || '未命名文件'}`;
           links.appendChild(link);
         } else {
-          links.appendChild(element('span', '', `${index + 1}. ${output.filename}（文件不存在）`));
+          links.appendChild(element('span', '', `${index + 1}. ${mediaTitle(output)} · ${output.filename || '未命名文件'}（文件不存在）`));
         }
       });
+      if (!mediaItems.length) links.appendChild(element('span', '', '历史任务未记录输出媒体'));
       outputSection.appendChild(links);
       metadata.appendChild(outputSection);
       if (item.error) {
@@ -638,7 +946,10 @@
       }
 
       body.append(mediaPanel, metadata);
-      if (item.images.length) setMainImage(main, item.images[0], thumbButtons, thumbButtons[0]);
+      if (mediaItems.length) {
+        const firstIndex = Math.max(0, mediaItems.findIndex(output => output.available !== false));
+        setMainMedia(main, mediaItems[firstIndex], thumbButtons, thumbButtons[firstIndex]);
+      }
       $('detail').showModal();
     }
 
@@ -655,10 +966,10 @@
         historyState.items.forEach(item => $('historyList').appendChild(renderCard(item)));
       } else {
         const filtered = $('search').value.trim() || $('kind').value !== 'all' || $('state').value !== 'all' || $('lora').value !== 'all';
-        $('emptyText').textContent = filtered ? '没有符合当前筛选条件的历史图片。' : '完成一次生成后，图片会出现在这里。';
+        $('emptyText').textContent = filtered ? '没有符合当前筛选条件的历史媒体。' : '完成一次生成后，图片、GIF 或视频会出现在这里。';
       }
       $('summary').replaceChildren(
-        element('strong', '', `共 ${payload.total || 0} 个含图片的任务`),
+        element('strong', '', `共 ${payload.total || 0} 个含媒体的任务`),
         document.createTextNode(`，当前显示 ${historyState.items.length} 个`)
       );
       $('previous').disabled = historyState.cursorStack.length === 0;

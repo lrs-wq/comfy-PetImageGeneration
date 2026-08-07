@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>萌宠图片与视频生成测试台</title>
+  <title>萌宠图片与主体替换测试台</title>
   <style>
     :root {
       --bg: #f5f2eb;
@@ -50,6 +50,22 @@
     .drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
     .drop img { width: 100%; height: 250px; object-fit: contain; display: none; background: repeating-conic-gradient(#eee 0 25%, #fff 0 50%) 0/20px 20px; }
     .drop-copy strong { display: block; font-size: 17px; }
+    .default-subject { display: grid; grid-template-columns: 126px minmax(0, 1fr); gap: 14px; align-items: center; padding: 12px; border: 1px solid #c8d9d0; border-radius: 14px; background: #f3f8f5; }
+    .default-subject img { width: 126px; height: 96px; object-fit: contain; border-radius: 10px; background: #52bf4f; }
+    .default-subject strong, .default-subject span { display: block; }
+    .default-subject span { margin-top: 4px; color: var(--muted); font-size: 13px; }
+    .upload-note { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 7px 0 0; }
+    .clear-image { border: 1px solid #cbbca5; border-radius: 9px; padding: 6px 10px; color: var(--brand-dark); background: #fffdf8; cursor: pointer; font-size: 12px; font-weight: 700; }
+    .identity-views { margin-top: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: #fbfaf6; }
+    .identity-views > strong { display: block; }
+    .identity-views > .hint { display: block; margin: 2px 0 9px; }
+    .side-view-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+    .side-view { display: grid; gap: 6px; padding: 9px; border: 1px solid #d7cdbd; border-radius: 11px; background: white; color: var(--muted); font-size: 12px; font-weight: 700; }
+    .side-view input { width: 100%; min-width: 0; color: var(--ink); font-size: 12px; }
+    .side-view img { display: none; width: 100%; height: 112px; object-fit: contain; border-radius: 8px; background: repeating-conic-gradient(#eee 0 25%, #fff 0 50%) 0/16px 16px; }
+    .action-check { align-items: flex-start; padding: 12px; }
+    .action-check strong, .action-check small { display: block; }
+    .action-check small { margin-top: 2px; color: var(--muted); line-height: 1.4; }
     textarea, input[type="number"], select { width: 100%; border: 1px solid var(--line); border-radius: 12px; background: white; color: var(--ink); outline: none; padding: 11px 12px; }
     textarea:focus, input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(223,107,72,.12); }
     textarea { resize: vertical; min-height: 112px; }
@@ -126,7 +142,9 @@
       .shell { width: min(100% - 20px, 1380px); padding-top: 18px; }
       .gallery { grid-template-columns: 1fr; padding: 12px; }
       .form-card { padding: 16px; }
-      .checks, .row, .param-grid { grid-template-columns: 1fr; }
+      .checks, .row, .param-grid, .side-view-grid { grid-template-columns: 1fr; }
+      .default-subject { grid-template-columns: 92px minmax(0, 1fr); }
+      .default-subject img { width: 92px; height: 76px; }
     }
   </style>
 </head>
@@ -134,130 +152,171 @@
   <div class="shell">
     <header>
       <div>
-        <h1>萌宠生成测试台</h1>
-        <p class="subtitle">上传一张参考图，使用本地 Qwen Image 与 Wan2.2 I2V-A14B 生成图片或 5 秒视频。</p>
+        <h1>萌宠图片与主体替换测试台</h1>
+        <p class="subtitle">可单独测试 Qwen 卡通图片，也可运行“卡通主体 → SCAIL‑2 动作替换”的完整链路。</p>
       </div>
       <div class="header-actions">
-        <a class="history-link" href="history" target="_blank" rel="noopener">查看历史图片</a>
+        <a class="history-link" href="history" target="_blank" rel="noopener">查看生成历史</a>
         <div class="health"><span id="healthDot" class="dot"></span><span id="healthText">正在检查模型…</span></div>
       </div>
     </header>
 
     <main class="grid">
       <section class="card form-card">
-        <div class="tabs">
-          <button class="tab active" data-mode="image">生成图片</button>
-          <button class="tab" data-mode="video">生成视频</button>
+        <div class="tabs" role="tablist" aria-label="生成模式">
+          <button class="tab active" type="button" role="tab" aria-selected="true" data-ui-mode="replacement">完整链路 / 主体替换视频</button>
+          <button class="tab" type="button" role="tab" aria-selected="false" data-ui-mode="image">图片单独测试</button>
         </div>
 
         <form id="form">
-          <input id="mode" name="mode" type="hidden" value="image">
-          <label class="title">参考图片</label>
+          <input id="subjectProfile" name="subject_profile" type="hidden" value="">
+
+          <label id="defaultSubjectLabel" class="title">未上传图片时的 Main_case 标准主体</label>
+          <div id="defaultSubject" class="default-subject">
+            <img id="defaultSubjectPreview" alt="默认身份预览" hidden>
+            <div>
+              <strong id="defaultSubjectName">正在读取服务器默认身份…</strong>
+              <span id="defaultSubjectStatus">正在读取 Main_case 主体与动作标准。</span>
+            </div>
+          </div>
+
+          <label id="imageLabel" class="title">上传原始宠物图片（可选）</label>
           <div id="drop" class="drop">
-            <input id="image" name="image" type="file" accept="image/png,image/jpeg,image/webp" required>
-            <div id="dropCopy" class="drop-copy"><strong>点击或拖入图片</strong><span>PNG / JPG / WebP，最大 15MB</span></div>
-            <img id="preview" alt="上传预览">
+            <input id="image" name="image" type="file" accept="image/png,image/jpeg,image/webp">
+            <div id="dropCopy" class="drop-copy"><strong id="dropTitle">点击或拖入图片以替换身份</strong><span>PNG / JPG / WebP，最大 15MB</span></div>
+            <img id="preview" alt="上传主体预览">
+          </div>
+          <div class="upload-note">
+            <span id="subjectSourceHint" class="hint">未上传图片，将直接使用 Main_case 标准视频中的主体与动作。</span>
+            <button id="clearImage" class="clear-image" type="button" hidden>移除上传并恢复默认身份</button>
           </div>
 
-          <label class="title" for="prompt">提示词</label>
-          <textarea id="prompt" name="prompt" required placeholder="例如：保留猫咪原有毛色和脸型，生成可爱的3D卡通形象，完整全身，侧身抬起一只前爪，表情开心。">以参考图片中的猫咪为唯一身份标准，完整保留毛色和花纹位置、脸型、眼睛颜色与间距、耳形、鼻色、毛长、体型比例和尾巴特征；生成高品质萌系3D卡通角色，毛发细腻柔软，光照明亮柔和，保持自然无衣服无配饰的完整全身形象。不继承或固定参考图中的姿态、肢体坐标和构图，具体动作只由所选姿态决定。</textarea>
-
-          <div id="imageProfilePanel" class="lora-panel">
-            <label class="title" for="imageProfile">图片与视频首帧统一基准</label>
-            <select id="imageProfile">
-              <option value="pet-multipose-20260717-v2" data-lora-count="2" data-qwen-steps="6" data-identity-palette-guard="true" selected>20260717 小猫四姿态统一基准 v2</option>
-              <option value="">不使用任务基准</option>
-            </select>
-            <p class="hint">这是图片和视频首帧共用的四姿态角色基准，不是进食专用基准：统一身份、毛色、3D 风格、完整全身构图、LoRA 与参数；动作和道具仅由奔跑、吃饭、喝水、趴卧各自模板控制。系统会自动拦截毛色漂移，中文会先在服务器本地翻译为英文。</p>
-            <div id="profileLoras" class="profile-loras">
-              <div class="profile-lora"><span title="宠物小猫 _ 写实摄影_v3.0.safetensors">宠物小猫 _ 写实摄影_v3.0.safetensors</span><strong>0.50</strong></div>
-              <div class="profile-lora"><span title="Qwen Image-Kitten Photography_QWEN-小猫摄影.safetensors">Qwen Image-Kitten Photography_QWEN-小猫摄影.safetensors</span><strong>0.60</strong></div>
-            </div>
-            <p id="profilePolicy" class="hint">未上传额外 LoRA 时直接使用以上两项；上传后可选择替换或叠加基准。</p>
-          </div>
-
-          <div class="lora-panel">
-            <label class="title" for="lora">逐个添加额外用户 LoRA（可选）</label>
-            <input id="lora" class="lora-file" type="file" accept=".safetensors,application/octet-stream">
-            <p class="hint">每次添加 1 个，最多 4 个 Qwen Image/Edit LoRA；每个最大 2GB、合计最大 4GB。可单独删除，文件名相同的 LoRA 不能重复添加。</p>
-            <div id="loraEntries" class="lora-items"><div class="lora-empty">尚未选择 LoRA</div></div>
-            <div class="row">
-              <div>
-                <label class="title" for="loraMode">加载方式</label>
-                <select id="loraMode">
-                  <option id="loraModeReplace" value="replace">上传 LoRA 替换统一基准</option>
-                  <option id="loraModeStack" value="stack">上传 LoRA 叠加统一基准</option>
-                </select>
-              </div>
-              <div id="fusionNote" class="fusion-note">“替换”使用上传 LoRA 替换基准；“叠加”会把上传 LoRA 接在基准后面。</div>
+          <div id="multiViewPanel" class="identity-views">
+            <strong>可选三视角身份增强</strong>
+            <span class="hint">需要同时上传同一只宠物的正面 + 左侧 + 右侧。正面使用上方图片；左右图只参与 Qwen 全身统一形象，舔毛/吃饭阶段不会直接读取原始三视角。</span>
+            <div class="side-view-grid">
+              <label class="side-view">宠物左侧视角
+                <input id="imageLeft" name="image_left" type="file" accept="image/png,image/jpeg,image/webp">
+                <img id="previewLeft" alt="宠物左侧视角预览">
+              </label>
+              <label class="side-view">宠物右侧视角
+                <input id="imageRight" name="image_right" type="file" accept="image/png,image/jpeg,image/webp">
+                <img id="previewRight" alt="宠物右侧视角预览">
+              </label>
             </div>
           </div>
 
-          <details class="advanced">
-            <summary>高级生成参数</summary>
-            <div class="param-grid">
-              <label>Qwen 步数<input id="qwenSteps" type="number" min="1" max="30" value="6"></label>
-              <label>Qwen CFG<input id="qwenCfg" type="number" min="0.1" max="5" step="0.1" value="1.0"></label>
-              <label>重绘强度<input id="qwenDenoise" type="number" min="0.1" max="1" step="0.05" value="1.0"></label>
-            </div>
-            <p id="qwenHint" class="hint">Qwen 步数允许 1–30；当前图片基准使用 6 步。</p>
-            <div id="wanAdvanced" hidden>
-              <div class="param-grid">
-                <label>Wan 步数<input id="wanSteps" type="number" min="4" max="40" value="20"></label>
-                <label>Wan CFG<input id="wanCfg" type="number" min="1" max="8" step="0.1" value="3.5"></label>
-                <label>Wan Shift<input id="wanShift" type="number" min="1" max="12" step="0.1" value="5.0"></label>
-              </div>
-            </div>
-            <p class="hint">推荐保持默认值。上传 LoRA 通常只需调节强度；参数过高可能导致脸部、花纹或四肢失真。</p>
-          </details>
+          <label id="promptLabel" class="title" for="prompt">附加约束（可选）</label>
+          <textarea id="prompt" name="prompt" placeholder="例如：眼睛保持稳定，背部毛发不额外膨胀。未上传图片时按 Main_case 主体与动作标准直出；上传图片时才执行主体替换。"></textarea>
+          <p id="promptHint" class="hint">未上传图片：Main_case/eat.mp4 与 TM.mp4 同时决定主体、毛发、动作和道具并确定性直出。上传图片：上传图决定身份，Main_case 只提供动作几何。</p>
 
-          <div id="imageOptions">
-            <div class="mode-note">先生成不绑定动作的卡通角色基准图，再按下方独立模板输出各姿态 PNG。</div>
-          </div>
-
-          <div id="poseOptions">
-            <label id="poseTitle" class="title">图片姿态</label>
+          <div id="replacementPanel">
+            <label class="title">动作链路</label>
             <div class="checks">
-              <label class="check"><input class="pose" data-pose-key="running" type="checkbox" value="三分之四侧面完整全身视角，呈稳定的起跑准备站姿；身体略微前倾，头部自然抬起，四条腿完整可见并前后错开，四只完整爪全部清晰压在同一地面基线上且没有悬空缝隙，远侧腿不能被身体遮住或与近侧腿重叠；尾巴从根部到末端完整可见。这是供后续动画使用的静态落地准备姿态，不是奔跑瞬间、跳跃或四脚腾空" checked> <span>奔跑</span></label>
-              <label class="check"><input class="pose" data-pose-key="eating" type="checkbox" value="俯身低头，嘴巴凑近浅米色陶瓷猫粮碗，碗内装有棕色颗粒猫粮，正在进食的自然动态" checked> <span>吃饭</span></label>
-              <label class="check"><input class="pose" data-pose-key="drinking" type="checkbox" value="俯身低头，嘴巴凑近浅米色陶瓷水碗，碗内装有平静清水，一小段短小粉色三角形舌尖从下唇伸出并与水面相交接触，舌尖长度不超过头部宽度的二十分之一，正在喝水的自然动态" checked> <span>喝水</span></label>
-              <label class="check"><input class="pose" data-pose-key="lying_down" type="checkbox" value="身体自然降低并完整趴卧，胸腹贴近地面，前爪平行向前伸出，后腿自然收拢，头部轻轻抬起，尾巴沿身体一侧完整弯曲，安静趴卧的自然状态" checked> <span>趴卧</span></label>
+              <label class="check action-check">
+                <input class="action" type="checkbox" value="eating" checked disabled>
+                <span><strong>吃饭</strong><small>eating 使用 Main_case/eat.mp4：未上传时同时作为黑白猫主体、毛发与进食动作标准；上传时只提供低头进食、碗和机位。</small></span>
+              </label>
+              <label class="check action-check">
+                <input class="action" type="checkbox" value="grooming" disabled>
+                <span><strong>舔毛</strong><small>grooming 使用 Main_case/TM.mp4：未上传时同时作为黑白猫主体、毛发与舔毛动作标准；上传时只提供舔爪/擦脸和机位。</small></span>
+              </label>
             </div>
-            <label class="title" for="customPoses">自定义姿态（可选，每行一个）</label>
-            <textarea id="customPoses" placeholder="例如：sitting and gently waving one front paw"></textarea>
-            <p id="poseHint" class="hint">将生成所选姿态的透明 PNG；至少选择或填写一个姿态。</p>
-          </div>
+            <p id="actionHint" class="hint">至少选择一个动作；同时选择时按顺序生成两段视频。服务器会使用对应标准视频的标准化运行副本。</p>
 
-          <div id="videoOptions" hidden>
             <div class="row">
               <div>
                 <label class="title" for="format">输出格式</label>
-                <select id="format" style="width:100%;padding:11px;border:1px solid var(--line);border-radius:12px;background:#fff">
+                <select id="format">
                   <option value="transparent_gif">透明 GIF + MP4</option>
                   <option value="mp4">仅 MP4</option>
                 </select>
               </div>
               <div>
-                <label class="title" for="seed">随机种子</label>
-                <input id="seed" type="number" min="0" value="20260715">
+                <label class="title" for="seed">基础随机种子</label>
+                <input id="seed" type="number" min="0" value="20260726">
               </div>
             </div>
-            <p class="hint">14B 20步预计每个姿态 8–12 分钟；4 个姿态约 35–50 分钟。</p>
+
+            <details class="advanced">
+              <summary>SCAIL 高级参数</summary>
+              <div class="param-grid">
+                <label>SCAIL 步数<input id="scailSteps" type="number" min="4" max="12" value="6"></label>
+                <label>动作跟随强度<input id="poseStrength" type="number" min="0" max="2" step="0.05" placeholder="按动作默认值"></label>
+              </div>
+              <p class="hint">推荐保持 6 步并留空动作跟随强度；留空时吃饭和舔毛会分别使用已验证的默认值。</p>
+            </details>
+
+            <div class="mode-note">未上传图片：Main_case/eat.mp4 与 Main_case/TM.mp4 是主体身份、毛发和动作的共同标准。上传图片：上传图是身份来源，Main_case 只控制姿态、道具和机位。固定输出 512×512。</div>
           </div>
 
-          <div id="imageSeed" class="row">
-            <div>
-              <label class="title" for="seedImage">随机种子</label>
-              <input id="seedImage" type="number" min="0" value="20260715">
+          <div id="imagePanel" hidden>
+            <div id="imageProfilePanel" class="lora-panel">
+              <label class="title" for="imageProfile">图片基准配置</label>
+              <select id="imageProfile">
+                <option value="pet-multipose-20260717-v2" data-lora-count="2" data-qwen-steps="6" data-identity-palette-guard="true" selected>20260717 小猫多姿态统一基准 v2</option>
+                <option value="">不使用任务基准</option>
+              </select>
+              <p class="hint">统一身份、毛色、3D 卡通风格、完整全身构图、LoRA 与 Qwen 参数；中文提示词会先在服务器本地翻译为英文。</p>
+              <div id="profileLoras" class="profile-loras">
+                <div class="profile-lora"><span title="宠物小猫 _ 写实摄影_v3.0.safetensors">宠物小猫 _ 写实摄影_v3.0.safetensors</span><strong>0.50</strong></div>
+                <div class="profile-lora"><span title="Qwen Image-Kitten Photography_QWEN-小猫摄影.safetensors">Qwen Image-Kitten Photography_QWEN-小猫摄影.safetensors</span><strong>0.60</strong></div>
+              </div>
+              <p id="profilePolicy" class="hint">未添加额外 LoRA 时使用以上基准；添加后可选择替换或叠加。</p>
             </div>
+
+            <div class="lora-panel">
+              <label class="title" for="lora">逐个添加用户 LoRA（可选）</label>
+              <input id="lora" class="lora-file" type="file" accept=".safetensors,application/octet-stream">
+              <p class="hint">每次添加 1 个，最多 4 个；单个最大 2GB、合计最大 4GB。可单独删除，并按规范化文件名拦截重复添加。</p>
+              <div id="loraEntries" class="lora-items"><div class="lora-empty">尚未添加额外 LoRA，将使用上方图片基准</div></div>
+              <div class="row">
+                <div>
+                  <label class="title" for="loraMode">融合方式</label>
+                  <select id="loraMode">
+                    <option id="loraModeReplace" value="replace">上传 LoRA 替换图片基准</option>
+                    <option id="loraModeStack" value="stack">上传 LoRA 叠加图片基准</option>
+                  </select>
+                </div>
+                <div id="fusionNote" class="fusion-note">“替换”只使用上传项；“叠加”会把上传项接在基准 LoRA 后。</div>
+              </div>
+            </div>
+
+            <label class="title">图片姿态</label>
+            <div class="checks">
+              <label class="check"><input class="pose" data-pose-key="running" type="checkbox" value="三分之四侧面完整全身视角，呈稳定的起跑准备站姿；身体略微前倾，头部自然抬起，四条腿完整可见并前后错开，四只完整爪全部清晰压在同一地面基线上且没有悬空缝隙，远侧腿不能被身体遮住或与近侧腿重叠；尾巴从根部到末端完整可见。这是供后续动画使用的静态落地准备姿态，不是奔跑瞬间、跳跃或四脚腾空" checked><span>奔跑</span></label>
+              <label class="check"><input class="pose" data-pose-key="eating" type="checkbox" value="俯身低头，嘴巴凑近浅米色陶瓷猫粮碗，碗内装有棕色颗粒猫粮，正在进食的自然动态" checked><span>吃饭</span></label>
+              <label class="check"><input class="pose" data-pose-key="drinking" type="checkbox" value="俯身低头，嘴巴凑近浅米色陶瓷水碗，碗内装有平静清水，一小段短小粉色三角形舌尖从下唇伸出并与水面相交接触，舌尖长度不超过头部宽度的二十分之一，正在喝水的自然动态" checked><span>喝水</span></label>
+              <label class="check"><input class="pose" data-pose-key="lying_down" type="checkbox" value="身体自然降低并完整趴卧，胸腹贴近地面，前爪平行向前伸出，后腿自然收拢，头部轻轻抬起，尾巴沿身体一侧完整弯曲，安静趴卧的自然状态" checked><span>趴卧</span></label>
+            </div>
+            <label class="title" for="customPoses">自定义姿态（可选，每行一个）</label>
+            <textarea id="customPoses" placeholder="例如：sitting and gently waving one front paw"></textarea>
+            <p id="imagePoseHint" class="hint">每次任务都会生成 1 张卡通角色基准图，并生成全部所选姿态图；至少选择或填写一个姿态。</p>
+
+            <details class="advanced">
+              <summary>Qwen 高级参数</summary>
+              <div class="param-grid">
+                <label>Qwen 步数<input id="qwenSteps" type="number" min="1" max="30" value="6"></label>
+                <label>Qwen CFG<input id="qwenCfg" type="number" min="0.1" max="5" step="0.1" value="1.0"></label>
+                <label>重绘强度<input id="qwenDenoise" type="number" min="0.1" max="1" step="0.05" value="1.0"></label>
+              </div>
+              <p id="qwenHint" class="hint">Qwen 步数允许 1–30；当前图片基准默认使用 6 步。</p>
+            </details>
+
+            <div class="row">
+              <div>
+                <label class="title" for="seedImage">随机种子</label>
+                <input id="seedImage" type="number" min="0" value="20260726">
+              </div>
+            </div>
+            <div class="mode-note">图片模式只运行 Qwen 生图，固定提交 keyframe_video + request_kind=image + skip_video=true，不会启动 Wan 或 SCAIL。</div>
           </div>
 
           <div class="actions">
-            <button id="submit" class="submit" type="submit">生成 5 张图片</button>
-            <button id="skipVideo" class="skip-video" type="button" hidden>仅生成姿态首帧（跳过视频）</button>
+            <button id="submit" class="submit" type="submit">生成 1 个主体替换视频</button>
             <button id="cancelJob" class="cancel-job" type="button" hidden>终止当前任务</button>
           </div>
-          <div id="engine" class="engine">等待模型信息…</div>
+          <div id="engine" class="engine">等待 SCAIL‑2 模型信息…</div>
         </form>
       </section>
 
@@ -277,24 +336,108 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+    const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
     const MAX_LORA_FILES = 4;
     const MAX_LORA_FILE_BYTES = 2 * 1024 * 1024 * 1024;
     const MAX_LORA_TOTAL_BYTES = 4 * 1024 * 1024 * 1024;
+    const DEFAULT_IMAGE_PROMPT = '以参考图片中的宠物为唯一身份标准，完整保留毛色和花纹位置、脸型、眼睛颜色与间距、耳形、鼻色、毛长、体型比例和尾巴特征；生成高品质萌系3D卡通角色，毛发细腻柔软，光照明亮柔和，保持自然无衣服无配饰的完整全身形象。不继承或固定参考图中的姿态、肢体坐标和构图，具体动作只由所选姿态决定。';
+    const actionLabels = {eating: '吃饭', grooming: '舔毛'};
     const loraItems = [];
     const imageProfiles = new Map();
-    let mode = 'image';
-    let promptTouched = false;
-    const qwenStepsByMode = {image: '6', video: '6'};
+    const promptByMode = {replacement: '', image: DEFAULT_IMAGE_PROMPT};
+    const promptTouchedByMode = {replacement: false, image: false};
+    let uiMode = 'replacement';
+    let healthState = null;
+    let imageProfilesInitialized = false;
     let pollTimer = null;
     let currentJob = null;
+    let uploadedPreviewUrl = null;
+    const sidePreviewUrls = {left: null, right: null};
+    let subjectsReady = false;
+    let defaultSubjectDisplayName = '';
+    let defaultDrivingStandardsSummary = '';
+    let pollFailureCount = 0;
+    let renderedOutputSignature = null;
+
+    const labels = {
+      subject_reference: 'SCAIL 主体参考图（身份/外观）',
+      subject_reference_mask: 'SCAIL 主体参考遮罩（身份/外观区域）',
+      reference_identity_mask: 'SCAIL 主体参考遮罩（身份/外观区域）',
+      main_case_geometry_guide: 'Main_case 动作几何引导图（姿态/道具/机位）',
+      main_case_geometry_mask: 'Main_case 动作几何遮罩（主体/道具区域）',
+      final_video_fur_surface_audit: '最终视频毛发表面抽帧审计（JSON）',
+      uploaded_identity_cutout: '上传主体抠图（身份唯一来源）',
+      uploaded_identity_reference_input: '上传主体 SCAIL 输入参考（非默认主体）',
+      eating_geometry_guide: 'Main_case 吃饭几何引导图（姿态/道具/机位）',
+      grooming_geometry_guide: 'Main_case 舔毛几何引导图（姿态/道具/机位）',
+      driving_template: 'Main_case 动作标准（姿态/道具/机位）',
+      driving_template_preview: 'Main_case 动作标准预览（姿态/道具/机位）',
+      standard_direct_reference: 'Main_case 主体与动作标准参考图',
+      standard_direct_selected_frame: 'Main_case 主体与动作标准代表帧',
+      standard_direct_mask: 'Main_case 主体与道具标准蒙版',
+      standard_direct_provenance: 'Main_case 标准直出溯源（JSON）',
+      subject_replacement_video: '主体替换 MP4',
+      video_preview: '视频 MP4',
+      cartoon_reference: '卡通角色基准图',
+      transparent_keyframe: '姿态首帧',
+      keyframe: '姿态首帧',
+      transparent_gif: '透明 GIF',
+      transparent_apng: '软边 APNG',
+      transparent_image: '透明图片',
+      image: '生成图片'
+    };
+    const stageLabels = {
+      queued: '等待执行',
+      waiting_for_gpu: '等待 GPU',
+      preparing_subject_replacement: '正在准备主体替换任务',
+      preparing_subject_reference: '正在准备身份/外观参考图',
+      subject_references_ready: '身份/外观参考已准备完成',
+      preparing_driving_template: '正在准备 Main_case 动作标准',
+      generating_cartoon_reference: '正在生成卡通基准图',
+      retrying_cartoon_reference: '基准图质量或身份不合格，正在自动恢复',
+      generating_cartoon_keyframes: '正在生成姿态图片',
+      generating_keyframes: '正在生成姿态图片',
+      retrying_cartoon_keyframe: '姿态完整性不足，正在换种子重试',
+      finalizing_keyframes: '正在整理生成图片',
+      completed_keyframes_only: '图片生成完成',
+      generating_subject_replacement: '正在使用 SCAIL 生成主体替换视频',
+      extracting_transparent_animation: '正在提取透明动图',
+      verifying_profile_standard_direct: '正在核验 Main_case 主体与动作标准',
+      copying_profile_standard_direct: '正在生成 Main_case 标准白底视频',
+      matting_profile_standard_direct_outputs: '正在逐帧移除 Main_case 标准绿幕',
+      publishing_profile_standard_transparency: '正在发布 Main_case 标准透明动图',
+      stabilizing_transparent_animation: '正在处理透明动图',
+      finalizing_subject_replacement: '正在整理主体替换结果',
+      cancel_requested: '正在终止任务',
+      cancelled: '任务已终止',
+      completed: '生成完成',
+      failed: '生成失败'
+    };
+
+    function selectedActions() {
+      return [...document.querySelectorAll('.action:checked:not(:disabled)')].map(input => input.value);
+    }
+
+    function updateActionCopy() {
+      const actions = selectedActions();
+      if (uiMode === 'replacement') $('submit').textContent = `生成 ${actions.length || 0} 个主体替换视频`;
+      $('actionHint').textContent = actions.length
+        ? `将生成：${actions.map(action => actionLabels[action] || action).join('、')}。未上传时按 Main_case 主体与动作标准直出；上传时由上传图提供身份。`
+        : '至少选择一个动作；未上传时 Main_case 视频同时提供主体与动作标准。';
+    }
+
+    function selectedImagePoses() {
+      const poses = [...document.querySelectorAll('.pose:checked')].map(input => input.value);
+      $('customPoses').value.split(/\r?\n/).map(value => value.trim()).filter(Boolean).forEach(value => poses.push(value));
+      return poses;
+    }
 
     function imageProfileEnabled() {
       return Boolean($('imageProfile').value);
     }
 
     function selectedProfileLoraCount() {
-      const option = $('imageProfile').selectedOptions[0];
-      return Math.max(0, Number(option?.dataset.loraCount || 0));
+      return Math.max(0, Number($('imageProfile').selectedOptions[0]?.dataset.loraCount || 0));
     }
 
     function maxUploadedLoras() {
@@ -303,15 +446,78 @@
         : MAX_LORA_FILES;
     }
 
+    function formatFileSize(bytes) {
+      if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+      if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+      return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    }
+
+    function loraFilenameKey(filename) {
+      return filename.normalize('NFKC').trim().toLocaleLowerCase('zh-CN');
+    }
+
+    function renderLoraEntries() {
+      $('loraEntries').replaceChildren();
+      if (!loraItems.length) {
+        const empty = document.createElement('div');
+        empty.className = 'lora-empty';
+        empty.textContent = imageProfileEnabled() ? '尚未添加额外 LoRA，将使用上方图片基准' : '尚未添加 LoRA';
+        $('loraEntries').appendChild(empty);
+        return;
+      }
+      loraItems.forEach((item, index) => {
+        const row = document.createElement('div');
+        row.className = 'lora-entry';
+        const info = document.createElement('div');
+        const name = document.createElement('strong');
+        name.textContent = `${index + 1}. ${item.file.name}`;
+        name.title = item.file.name;
+        const size = document.createElement('small');
+        size.textContent = formatFileSize(item.file.size);
+        info.append(name, size);
+        const strengthLabel = document.createElement('label');
+        strengthLabel.textContent = '融合强度';
+        const strength = document.createElement('input');
+        strength.className = 'lora-strength';
+        strength.type = 'number';
+        strength.min = '0';
+        strength.max = '2';
+        strength.step = '0.05';
+        strength.value = String(item.strength);
+        strength.addEventListener('input', () => { item.strength = strength.value; });
+        strengthLabel.appendChild(strength);
+        const remove = document.createElement('button');
+        remove.className = 'lora-remove';
+        remove.type = 'button';
+        remove.textContent = '删除';
+        remove.setAttribute('aria-label', `删除 LoRA：${item.file.name}`);
+        remove.addEventListener('click', () => {
+          loraItems.splice(index, 1);
+          renderLoraEntries();
+        });
+        row.append(info, strengthLabel, remove);
+        $('loraEntries').appendChild(row);
+      });
+    }
+
+    function addLoraFile(file) {
+      if (loraItems.length >= maxUploadedLoras()) return `当前融合配置最多还能添加 ${maxUploadedLoras()} 个 LoRA，请先删除一个或改用“替换”`;
+      if (!file.name.toLocaleLowerCase('zh-CN').endsWith('.safetensors')) return 'LoRA 必须是 .safetensors 文件';
+      if (file.size > MAX_LORA_FILE_BYTES) return '单个 LoRA 文件不能超过 2GB';
+      if (loraItems.some(item => loraFilenameKey(item.file.name) === loraFilenameKey(file.name))) return `文件名“${file.name}”已经添加，请勿重复添加`;
+      if (loraItems.reduce((total, item) => total + item.file.size, 0) + file.size > MAX_LORA_TOTAL_BYTES) return 'LoRA 文件合计不能超过 4GB';
+      loraItems.push({file, strength: '0.8'});
+      return '';
+    }
+
     function renderProfileLoras(profile) {
-      if (!profile?.user_loras?.length) return;
       $('profileLoras').replaceChildren();
-      profile.user_loras.forEach(item => {
+      (profile?.user_loras || []).forEach(item => {
         const row = document.createElement('div');
         row.className = 'profile-lora';
         const name = document.createElement('span');
-        name.textContent = item.original_filename;
-        name.title = item.original_filename;
+        name.textContent = item.original_filename || item.model_name;
+        name.title = name.textContent;
         const strength = document.createElement('strong');
         strength.textContent = Number(item.strength).toFixed(2);
         row.append(name, strength);
@@ -326,39 +532,43 @@
         if (!preset) return;
         input.value = preset.prompt_zh;
         input.title = `${preset.label}：${preset.prompt_zh}`;
-        const label = input.closest('label')?.querySelector('span');
-        if (label) label.textContent = preset.label;
+        const text = input.closest('label')?.querySelector('span');
+        if (text) text.textContent = preset.label;
       });
     }
 
     function applyImageProfile(profile, resetPrompt = false) {
       if (!profile) return;
-      const previousDefault = qwenStepsByMode[mode];
       renderProfileLoras(profile);
       applyPosePresets(profile);
-      if ((resetPrompt || !promptTouched) && profile.default_prompt) {
-        $('prompt').value = profile.default_prompt;
-        promptTouched = false;
+      if ((resetPrompt || !promptTouchedByMode.image) && profile.default_prompt) {
+        promptByMode.image = profile.default_prompt;
+        if (uiMode === 'image') $('prompt').value = profile.default_prompt;
+        promptTouchedByMode.image = false;
       }
-      const profileSteps = String(profile.qwen_steps || 6);
-      qwenStepsByMode.image = profileSteps;
-      qwenStepsByMode.video = profileSteps;
-      if ($('qwenSteps').value === previousDefault) $('qwenSteps').value = profileSteps;
-      updateModeCopy();
+      $('qwenSteps').value = String(profile.qwen_steps || 6);
+      $('qwenHint').textContent = `Qwen 步数允许 1–30；当前图片基准默认使用 ${profile.qwen_steps || 6} 步。`;
     }
 
     function registerImageProfiles(profileState) {
       (profileState?.items || []).forEach(profile => {
         imageProfiles.set(profile.id, profile);
-        const option = [...$('imageProfile').options].find(item => item.value === profile.id);
-        if (!option) return;
-        option.textContent = profile.label;
+        let option = [...$('imageProfile').options].find(item => item.value === profile.id);
+        if (!option) {
+          option = document.createElement('option');
+          option.value = profile.id;
+          $('imageProfile').insertBefore(option, [...$('imageProfile').options].find(item => !item.value) || null);
+        }
+        option.textContent = profile.label || profile.id;
         option.dataset.loraCount = String(profile.user_loras?.length || 0);
         option.dataset.qwenSteps = String(profile.qwen_steps || 6);
         option.dataset.identityPaletteGuard = profile.identity_palette_guard ? 'true' : 'false';
       });
       const active = imageProfiles.get($('imageProfile').value);
-      if (active) applyImageProfile(active);
+      if (active && !imageProfilesInitialized) applyImageProfile(active);
+      else if (active) renderProfileLoras(active);
+      imageProfilesInitialized = true;
+      updateProfileCopy();
     }
 
     function updateProfileCopy() {
@@ -366,121 +576,304 @@
       const profile = imageProfiles.get($('imageProfile').value);
       $('profileLoras').hidden = !enabled;
       $('profilePolicy').textContent = enabled
-        ? `${profile?.identity_palette_guard ? '系统会自动识别参考图毛色并拦截重新着色；' : ''}图片和视频首帧的角色与风格由本基准统一，四个动作由各自姿态模板控制；额外 LoRA 可替换或叠加。`
+        ? `${profile?.identity_palette_guard ? '系统会自动识别参考图毛色并拦截重新着色；' : ''}额外 LoRA 可替换或叠加本基准。`
         : '当前不使用任务基准，仅使用本次上传的 LoRA。';
-      $('loraModeReplace').textContent = enabled
-        ? '上传 LoRA 替换统一基准'
-        : '替换内置风格 LoRA';
-      $('loraModeStack').textContent = enabled
-        ? '上传 LoRA 叠加统一基准'
-        : '叠加内置风格 LoRA';
-      $('fusionNote').textContent = enabled
-        ? '“替换”使用上传 LoRA 替换基准；“叠加”会把上传 LoRA 接在基准后面。'
-        : '每个 LoRA 可单独设置 0–2 强度；0 表示本次不加载。';
+      $('loraModeReplace').textContent = enabled ? '上传 LoRA 替换图片基准' : '替换内置风格 LoRA';
+      $('loraModeStack').textContent = enabled ? '上传 LoRA 叠加图片基准' : '叠加内置风格 LoRA';
+      $('fusionNote').textContent = enabled ? '“替换”只使用上传项；“叠加”会把上传项接在基准 LoRA 后。' : '每个 LoRA 可单独设置 0–2 强度。';
       renderLoraEntries();
     }
 
-    const labels = {
-      cartoon_reference: '卡通角色基准图', transparent_keyframe: '姿态首帧',
-      video_preview: '原始 MP4', transparent_gif: '透明 GIF',
-      transparent_apng: '软边 APNG', transparent_image: '透明图片', image: '生成图片'
-    };
-    const stageLabels = {
-      queued: '等待执行', waiting_for_gpu: '等待 GPU', generating_cartoon_reference: '正在生成卡通基准图',
-      retrying_cartoon_reference: '基准图质量或身份不合格，正在自动恢复',
-      generating_cartoon_keyframes: '正在生成姿态首帧', generating_keyframes: '正在生成姿态首帧',
-      finalizing_keyframes: '正在整理姿态首帧', completed_keyframes_only: '姿态首帧生成完成',
-      retrying_cartoon_keyframe: '姿态完整性不足，正在换种子重试',
-      switching_to_video_model: '正在切换视频模型', generating_videos: '正在生成视频',
-      stabilizing_transparent_animation: '正在处理透明动图', cancel_requested: '正在终止任务',
-      cancelled: '任务已终止', completed: '生成完成', failed: '生成失败'
-    };
-
-    function selectedPoses() {
-      const poses = [...document.querySelectorAll('.pose:checked')].map(x => x.value);
-      $('customPoses').value.split(/\r?\n/).map(x => x.trim()).filter(Boolean).forEach(x => poses.push(x));
-      return poses;
+    function updateImageCopy() {
+      const poseCount = selectedImagePoses().length;
+      if (uiMode === 'image') $('submit').textContent = `生成 ${poseCount + 1} 张图片`;
+      $('imagePoseHint').textContent = poseCount
+        ? `将生成 1 张卡通角色基准图及 ${poseCount} 张姿态图。`
+        : '每次任务都会生成卡通角色基准图；请至少选择或填写一个姿态。';
     }
 
-    function formatFileSize(bytes) {
-      if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-      if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-      return `${Math.max(1, Math.round(bytes / 1024))} KB`;
-    }
-
-    function renderLoraEntries() {
-      $('loraEntries').replaceChildren();
-      if (!loraItems.length) {
-        const empty = document.createElement('div');
-        empty.className = 'lora-empty';
-        empty.textContent = imageProfileEnabled()
-          ? '尚未添加额外 LoRA，将使用上方图片基准'
-          : '尚未添加 LoRA';
-        $('loraEntries').appendChild(empty);
+    function updateEngineCopy() {
+      if (!healthState) return;
+      const pipeline = healthState.pipeline || {};
+      if (uiMode === 'image') {
+        const qwen = pipeline.qwen_style || {};
+        const translation = pipeline.prompt_translation || {};
+        $('engine').textContent = `图片：Qwen Image${qwen.enabled ? ` + 猫咪 LoRA ${qwen.strength}` : ''} ｜ 本地中英翻译：${translation.ok ? '就绪' : '不可用'} ｜ 步数范围：1–30`;
         return;
       }
-      loraItems.forEach((item, index) => {
-        const file = item.file;
-        const row = document.createElement('div');
-        row.className = 'lora-entry';
-        const info = document.createElement('div');
-        const name = document.createElement('strong');
-        name.textContent = `${index + 1}. ${file.name}`;
-        name.title = file.name;
-        const size = document.createElement('small');
-        size.textContent = formatFileSize(file.size);
-        info.append(name, size);
-        const label = document.createElement('label');
-        label.textContent = '融合强度';
-        const strength = document.createElement('input');
-        strength.className = 'lora-strength';
-        strength.type = 'number';
-        strength.min = '0';
-        strength.max = '2';
-        strength.step = '0.05';
-        strength.value = String(item.strength);
-        strength.dataset.index = String(index);
-        strength.addEventListener('input', () => {
-          item.strength = strength.value;
-        });
-        label.appendChild(strength);
-        const remove = document.createElement('button');
-        remove.className = 'lora-remove';
-        remove.type = 'button';
-        remove.textContent = '删除';
-        remove.title = `删除 ${file.name}`;
-        remove.setAttribute('aria-label', `删除 LoRA：${file.name}`);
-        remove.addEventListener('click', () => {
-          loraItems.splice(index, 1);
-          renderLoraEntries();
-        });
-        row.append(info, label, remove);
-        $('loraEntries').appendChild(row);
+      const replacement = pipeline.subject_replacement || healthState.subject_replacement || {};
+      const actions = Array.isArray(replacement.actions)
+        ? replacement.actions.map(action => typeof action === 'string' ? (actionLabels[action] || action) : (action.label || actionLabels[action.id] || action.id)).filter(Boolean).join('、')
+        : '吃饭、舔毛';
+      const defaultProfile = replacement.default_subject_profile || $('subjectProfile').value || '由服务端决定';
+      const standardDirect = replacement.standard_direct || {};
+      const defaultEngine = standardDirect.enabled && standardDirect.status === 'ready'
+        ? `Main_case 标准直出（无 GPU，${standardDirect.revision || defaultProfile}）`
+        : `默认链路 ${replacement.engine || 'SCAIL‑2 14B FP8'}`;
+      $('engine').textContent = `未上传：${defaultEngine} ｜ 上传主体：${replacement.engine || 'SCAIL‑2 14B FP8'} ｜ 动作：${actions}`;
+    }
+
+    function updateModeUi(nextMode) {
+      if (nextMode && nextMode !== uiMode) {
+        promptByMode[uiMode] = $('prompt').value;
+        uiMode = nextMode;
+        $('prompt').value = promptByMode[uiMode];
+      }
+      const imageMode = uiMode === 'image';
+      $('replacementPanel').hidden = imageMode;
+      $('imagePanel').hidden = !imageMode;
+      $('multiViewPanel').hidden = imageMode;
+      $('imageLeft').disabled = imageMode;
+      $('imageRight').disabled = imageMode;
+      if (imageMode) resetSideViews();
+      $('defaultSubjectLabel').hidden = imageMode;
+      $('defaultSubject').hidden = imageMode || Boolean($('image').files[0]);
+      $('imageLabel').textContent = imageMode ? '上传参考图片（必填）' : '上传原始宠物图片（可选）';
+      $('dropTitle').textContent = imageMode ? '点击或拖入参考图片' : '点击或拖入图片以替换身份';
+      $('promptLabel').textContent = imageMode ? '卡通图片提示词（必填）' : '附加约束（可选）';
+      $('prompt').placeholder = imageMode
+        ? '描述需要保留的宠物特征、卡通风格、毛发和完整全身构图。'
+        : '例如：眼睛保持稳定，毛发不要超出 Main_case 标准轮廓。';
+      $('prompt').required = imageMode;
+      $('image').required = imageMode;
+      $('promptHint').textContent = imageMode
+        ? '中文会先在服务器本地翻译成英文；身份与动作模板由所选图片基准统一。'
+        : '未上传时 Main_case 视频同时决定主体、毛发和动作并直接输出；上传图片后，上传图决定身份，Main_case 只控制动作几何。';
+      $('clearImage').textContent = imageMode ? '清除图片' : '移除上传并恢复默认身份';
+      $('subjectSourceHint').textContent = $('image').files[0]
+        ? (imageMode ? `当前参考图片：${$('image').files[0].name}` : uploadedSubjectHint())
+        : (imageMode ? '图片单独测试必须上传参考图片。' : replacementSubjectHint());
+      document.querySelectorAll('.tab').forEach(button => {
+        const active = button.dataset.uiMode === uiMode;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', String(active));
+      });
+      if (imageMode) updateImageCopy(); else updateActionCopy();
+      updateEngineCopy();
+    }
+
+    function resetUploadedPreview() {
+      if (uploadedPreviewUrl) URL.revokeObjectURL(uploadedPreviewUrl);
+      uploadedPreviewUrl = null;
+      $('image').value = '';
+      $('preview').removeAttribute('src');
+      $('preview').style.display = 'none';
+      $('dropCopy').style.display = '';
+      $('clearImage').hidden = true;
+      resetSideViews();
+      $('defaultSubject').hidden = uiMode === 'image';
+      $('subjectSourceHint').textContent = uiMode === 'image' ? '图片单独测试必须上传参考图片。' : replacementSubjectHint();
+    }
+
+    function useFile(file) {
+      if (!file) return;
+      if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+        alert('仅支持 PNG、JPG 或 WebP 图片');
+        resetUploadedPreview();
+        return;
+      }
+      if (file.size > MAX_UPLOAD_BYTES) {
+        alert('上传图片不能超过 15MB');
+        resetUploadedPreview();
+        return;
+      }
+      if (uploadedPreviewUrl) URL.revokeObjectURL(uploadedPreviewUrl);
+      uploadedPreviewUrl = URL.createObjectURL(file);
+      $('preview').src = uploadedPreviewUrl;
+      $('preview').style.display = 'block';
+      $('dropCopy').style.display = 'none';
+      $('clearImage').hidden = false;
+      $('defaultSubject').hidden = true;
+      $('subjectSourceHint').textContent = uiMode === 'image'
+        ? `当前参考图片：${file.name}`
+        : uploadedSubjectHint();
+    }
+
+    function resetSideViews() {
+      ['left', 'right'].forEach(role => {
+        if (sidePreviewUrls[role]) URL.revokeObjectURL(sidePreviewUrls[role]);
+        sidePreviewUrls[role] = null;
+        const input = role === 'left' ? $('imageLeft') : $('imageRight');
+        const preview = role === 'left' ? $('previewLeft') : $('previewRight');
+        input.value = '';
+        preview.removeAttribute('src');
+        preview.style.display = 'none';
       });
     }
 
-    function loraFilenameKey(filename) {
-      return filename.normalize('NFKC').trim().toLowerCase();
+    function useSideFile(role, file) {
+      const input = role === 'left' ? $('imageLeft') : $('imageRight');
+      const preview = role === 'left' ? $('previewLeft') : $('previewRight');
+      if (sidePreviewUrls[role]) URL.revokeObjectURL(sidePreviewUrls[role]);
+      sidePreviewUrls[role] = null;
+      preview.removeAttribute('src');
+      preview.style.display = 'none';
+      if (!file) {
+        $('subjectSourceHint').textContent = $('image').files[0]
+          ? uploadedSubjectHint()
+          : replacementSubjectHint();
+        return;
+      }
+      if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+        alert('左右视角仅支持 PNG、JPG 或 WebP 图片');
+        input.value = '';
+      } else if (file.size > MAX_UPLOAD_BYTES) {
+        alert('每张视角图片不能超过 15MB');
+        input.value = '';
+      } else {
+        sidePreviewUrls[role] = URL.createObjectURL(file);
+        preview.src = sidePreviewUrls[role];
+        preview.style.display = 'block';
+      }
+      $('subjectSourceHint').textContent = $('image').files[0]
+        ? uploadedSubjectHint()
+        : replacementSubjectHint();
     }
 
-    function addLoraFile(file) {
-      const maximum = maxUploadedLoras();
-      if (loraItems.length >= maximum) {
-        return `当前配置最多还能添加 ${maximum} 个 LoRA 文件，请先删除一个或改用“替换”`;
-      }
-      if (file.size > MAX_LORA_FILE_BYTES) {
-        return '单个 LoRA 文件不能超过 2GB';
-      }
-      if (loraItems.some(item => loraFilenameKey(item.file.name) === loraFilenameKey(file.name))) {
-        return `文件名“${file.name}”已经添加，请勿重复添加`;
-      }
-      if (loraItems.reduce((total, item) => total + item.file.size, 0) + file.size > MAX_LORA_TOTAL_BYTES) {
-        return 'LoRA 文件合计不能超过 4GB';
-      }
-      loraItems.push({file, strength: '0.8'});
-      return '';
+    function setDefaultSubjectPreview(url) {
+      if (!url || $('defaultSubjectPreview').src === new URL(url, window.location.href).href) return;
+      $('defaultSubjectPreview').hidden = false;
+      $('defaultSubjectPreview').src = url;
     }
 
+    function shortSha(value) {
+      const digest = typeof value === 'string' ? value.trim() : '';
+      return /^[0-9a-f]{64}$/i.test(digest) ? digest.slice(0, 8) : 'SHA 未登记';
+    }
+
+    function drivingStandardsSummary(profile) {
+      const standards = profile?.driving_standards;
+      if (!standards || typeof standards !== 'object') return '动作标准元数据未登记。';
+      const records = standards.actions && typeof standards.actions === 'object'
+        ? standards.actions
+        : {};
+      const actionSummary = (action, label) => {
+        const record = records[action];
+        if (!record || typeof record !== 'object') return `${label}未登记`;
+        const rawFilename = typeof record.source_filename === 'string'
+          ? record.source_filename
+          : '';
+        const filename = rawFilename.replace(/\\/g, '/').split('/').pop() || '源文件未登记';
+        return `${label} ${filename}（SHA ${shortSha(record.source_sha256)}）`;
+      };
+      const revision = typeof standards.revision === 'string' && standards.revision.trim()
+        ? standards.revision.trim()
+        : '版本未登记';
+      return `主体与动作标准 ${revision}：${actionSummary('eating', '吃饭')}；${actionSummary('grooming', '舔毛')}。未上传时它们同时控制身份、毛发、动作和道具。`;
+    }
+
+    function replacementSubjectHint() {
+      return defaultSubjectDisplayName
+        ? `未上传图片，将直接使用 Main_case 标准主体：${defaultSubjectDisplayName}，并按所选标准动作输出。`
+        : '未上传图片，将直接使用服务器登记的 Main_case 主体与动作标准。';
+    }
+
+    function uploadedSubjectHint() {
+      const front = $('image').files[0];
+      const left = $('imageLeft').files[0];
+      const right = $('imageRight').files[0];
+      if (!front) return replacementSubjectHint();
+      if (left && right) {
+        return `当前三视角主体：正面 ${front.name}；左侧 ${left.name}；右侧 ${right.name}。三张图只用于统一 Qwen 全身身份。`;
+      }
+      if (left || right) {
+        return `三视角尚未完整：已选择正面和${left ? '左侧' : '右侧'}，还需要${left ? '右侧' : '左侧'}图片。`;
+      }
+      return `当前上传主体（单图兼容）：${front.name}。也可同时补充同一宠物的左侧和右侧视角。`;
+    }
+
+    async function loadSubjects() {
+      subjectsReady = false;
+      document.querySelectorAll('.action').forEach(input => { input.disabled = true; });
+      try {
+        const response = await fetch('api/subjects', {cache: 'no-store'});
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || '主体配置读取失败');
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        const profile = items.find(item => item?.id === payload.default) || items[0];
+        if (!profile?.id) throw new Error('服务器没有返回可用的默认身份');
+
+        const availableActions = new Map(
+          (Array.isArray(payload.actions) ? payload.actions : [])
+            .map(action => typeof action === 'string' ? [action, action] : [action?.id, action?.label])
+            .filter(([id]) => id)
+        );
+        const profileActions = new Map(
+          (Array.isArray(profile.actions) ? profile.actions : [])
+            .map(action => typeof action === 'string' ? [action, {id: action}] : [action?.id, action])
+            .filter(([id]) => id)
+        );
+        const enabledActions = [];
+        document.querySelectorAll('.action').forEach(input => {
+          const action = profileActions.get(input.value);
+          const enabled = availableActions.has(input.value)
+            && Boolean(action)
+            && action.reference_ready !== false;
+          input.disabled = !enabled;
+          if (!enabled) input.checked = false;
+          if (enabled) {
+            enabledActions.push(input.value);
+            const label = action.label || availableActions.get(input.value);
+            if (label) {
+              actionLabels[input.value] = label;
+              const labelNode = input.closest('label')?.querySelector('strong');
+              if (labelNode) labelNode.textContent = label;
+            }
+          }
+        });
+        if (!selectedActions().length && enabledActions.length) {
+          const defaultAction = enabledActions.includes('eating') ? 'eating' : enabledActions[0];
+          const input = document.querySelector(`.action[value="${defaultAction}"]`);
+          if (input) input.checked = true;
+        }
+
+        $('subjectProfile').value = profile.id;
+        defaultSubjectDisplayName = profile.display_name || profile.id;
+        $('defaultSubjectName').textContent = defaultSubjectDisplayName;
+        $('defaultSubjectPreview').alt = `${defaultSubjectDisplayName} 默认身份预览`;
+        const previewRevision = profile?.driving_standards?.revision || profile?.profile_sha256 || Date.now();
+        setDefaultSubjectPreview(`api/subjects/${encodeURIComponent(profile.id)}/preview?v=${encodeURIComponent(previewRevision)}`);
+        subjectsReady = enabledActions.length > 0;
+        defaultDrivingStandardsSummary = drivingStandardsSummary(profile);
+        $('defaultSubjectStatus').textContent = subjectsReady
+          ? `Main_case 标准配置 ${profile.id} 已加载。可用主体动作：${enabledActions.map(action => actionLabels[action] || action).join('、')}。${defaultDrivingStandardsSummary}`
+          : `Main_case 标准配置 ${profile.id} 没有已就绪的动作链路，暂时不能提交任务。${defaultDrivingStandardsSummary}`;
+        if (!$('image').files[0] && uiMode === 'replacement') {
+          $('subjectSourceHint').textContent = replacementSubjectHint();
+        }
+        updateActionCopy();
+        updateEngineCopy();
+      } catch (error) {
+        document.querySelectorAll('.action').forEach(input => {
+          input.checked = false;
+          input.disabled = true;
+        });
+        $('subjectProfile').value = '';
+        defaultSubjectDisplayName = '';
+        defaultDrivingStandardsSummary = '';
+        $('defaultSubjectName').textContent = '默认身份读取失败';
+        $('defaultSubjectStatus').textContent = `${error.message}；请等待服务恢复后刷新页面。`;
+        $('defaultSubjectPreview').hidden = true;
+        updateActionCopy();
+      }
+    }
+
+    $('defaultSubjectPreview').addEventListener('error', () => {
+      $('defaultSubjectPreview').hidden = true;
+      $('defaultSubjectStatus').textContent = `Main_case 标准主体已在服务器登记；预览暂时不可用，但仍可提交任务。${defaultDrivingStandardsSummary}`;
+    });
+    $('image').addEventListener('change', event => useFile(event.target.files[0]));
+    $('imageLeft').addEventListener('change', event => useSideFile('left', event.target.files[0]));
+    $('imageRight').addEventListener('change', event => useSideFile('right', event.target.files[0]));
+    $('clearImage').addEventListener('click', resetUploadedPreview);
+    $('prompt').addEventListener('input', () => {
+      promptByMode[uiMode] = $('prompt').value;
+      promptTouchedByMode[uiMode] = true;
+    });
+    document.querySelectorAll('.tab').forEach(button => button.addEventListener('click', () => updateModeUi(button.dataset.uiMode)));
+    document.querySelectorAll('.action').forEach(input => input.addEventListener('change', updateActionCopy));
+    document.querySelectorAll('.pose').forEach(input => input.addEventListener('change', updateImageCopy));
+    $('customPoses').addEventListener('input', updateImageCopy);
     $('lora').addEventListener('change', event => {
       const file = event.target.files[0];
       event.target.value = '';
@@ -490,110 +883,100 @@
       renderLoraEntries();
     });
     $('imageProfile').addEventListener('change', () => {
-      const previousDefault = qwenStepsByMode[mode];
-      const selectedOption = $('imageProfile').selectedOptions[0];
-      const selectedDefault = imageProfileEnabled()
-        ? String(selectedOption?.dataset.qwenSteps || '6')
-        : '4';
-      qwenStepsByMode.image = selectedDefault;
-      qwenStepsByMode.video = selectedDefault;
-      if ($('qwenSteps').value === previousDefault) {
-        $('qwenSteps').value = qwenStepsByMode[mode];
+      const profile = imageProfiles.get($('imageProfile').value);
+      if (profile) applyImageProfile(profile, true);
+      else {
+        $('qwenSteps').value = '4';
+        $('qwenHint').textContent = 'Qwen 步数允许 1–30；不使用图片基准时默认 4 步。';
       }
-      const selectedProfile = imageProfiles.get($('imageProfile').value);
-      if (selectedProfile) applyImageProfile(selectedProfile, true);
       updateProfileCopy();
     });
     $('loraMode').addEventListener('change', updateProfileCopy);
-    $('prompt').addEventListener('input', () => { promptTouched = true; });
-
-    function updateModeCopy() {
-      const poseCount = selectedPoses().length;
-      $('poseTitle').textContent = mode === 'image' ? '图片姿态' : '视频姿态';
-      $('poseHint').textContent = mode === 'image'
-        ? '优先生成所选姿态的透明 PNG；无法可靠抠图时会返回未抠图原图。至少选择或填写一个姿态。'
-        : '每个所选姿态会单独生成一段视频；至少选择或填写一个姿态。';
-      $('qwenHint').textContent = `Qwen 步数允许 1–30；当前${mode === 'image' ? '图片' : '视频首帧'}配置默认使用 ${qwenStepsByMode[mode]} 步。`;
-      $('submit').textContent = mode === 'image'
-        ? `生成 ${poseCount + 1} 张图片`
-        : `生成 ${poseCount} 个姿态视频`;
-    }
-
-    document.querySelectorAll('.tab').forEach(btn => btn.addEventListener('click', () => {
-      qwenStepsByMode[mode] = $('qwenSteps').value || qwenStepsByMode[mode];
-      mode = btn.dataset.mode;
-      $('qwenSteps').value = qwenStepsByMode[mode];
-      $('mode').value = mode;
-      document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === btn));
-      $('imageOptions').hidden = mode !== 'image';
-      $('imageSeed').hidden = mode !== 'image';
-      $('videoOptions').hidden = mode !== 'video';
-      $('wanAdvanced').hidden = mode !== 'video';
-      $('skipVideo').hidden = mode !== 'video';
-      $('imageProfilePanel').hidden = false;
-      updateProfileCopy();
-      updateModeCopy();
+    ['dragenter', 'dragover'].forEach(name => $('drop').addEventListener(name, event => {
+      event.preventDefault();
+      $('drop').classList.add('drag');
     }));
-    document.querySelectorAll('.pose').forEach(input => input.addEventListener('change', updateModeCopy));
-    $('customPoses').addEventListener('input', updateModeCopy);
-
-    function useFile(file) {
+    ['dragleave', 'drop'].forEach(name => $('drop').addEventListener(name, event => {
+      event.preventDefault();
+      $('drop').classList.remove('drag');
+    }));
+    $('drop').addEventListener('drop', event => {
+      const file = event.dataTransfer.files[0];
       if (!file) return;
-      const url = URL.createObjectURL(file);
-      $('preview').src = url;
-      $('preview').style.display = 'block';
-      $('dropCopy').style.display = 'none';
-    }
-    $('image').addEventListener('change', e => useFile(e.target.files[0]));
-    ['dragenter','dragover'].forEach(name => $('drop').addEventListener(name, e => { e.preventDefault(); $('drop').classList.add('drag'); }));
-    ['dragleave','drop'].forEach(name => $('drop').addEventListener(name, e => { e.preventDefault(); $('drop').classList.remove('drag'); }));
-    $('drop').addEventListener('drop', e => {
-      if (!e.dataTransfer.files.length) return;
-      const dt = new DataTransfer(); dt.items.add(e.dataTransfer.files[0]); $('image').files = dt.files; useFile(dt.files[0]);
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      $('image').files = transfer.files;
+      useFile(file);
     });
 
     async function checkHealth() {
       try {
-        const res = await fetch('api/health', {cache:'no-store'});
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || '健康检查失败');
-        const p = data.pipeline || {};
-        $('healthDot').className = 'dot ' + (data.status === 'ok' ? 'ok' : '');
-        $('healthText').textContent = data.status === 'ok' ? '模型服务正常' : '模型服务降级';
-        const wan = p.wan_video || {};
-        const qwen = p.qwen_style || {};
-        const translation = p.prompt_translation || {};
-        registerImageProfiles(p.image_profiles);
-        $('engine').textContent = `生图：Qwen Image${qwen.enabled ? ' + 猫咪 LoRA ' + qwen.strength : ''} ｜ 中英翻译：${translation.ok ? '本地模型就绪' : '不可用'} ｜ 视频：${wan.engine || '未知'}，${wan.steps || '?'} steps ｜ Control：${p.wan_control?.enabled ? '开启' : '关闭'}`;
-      } catch (err) {
+        const response = await fetch('api/health', {cache: 'no-store'});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || '健康检查失败');
+        healthState = data;
+        const pipeline = data.pipeline || {};
+        const standardDirect = (
+          pipeline.subject_replacement?.standard_direct
+          || data.subject_replacement?.standard_direct
+          || {}
+        );
+        const standardDirectReady = standardDirect.enabled === true
+          && standardDirect.status === 'ready';
+        const serviceReady = data.status === 'ok' || standardDirectReady;
+        $('healthDot').className = `dot${serviceReady ? ' ok' : ''}`;
+        $('healthText').textContent = data.status === 'ok'
+          ? '图片与视频服务正常'
+          : (standardDirectReady
+            ? 'Main_case 标准直出正常（上传链路降级）'
+            : '生成服务降级');
+        registerImageProfiles(pipeline.image_profiles || data.image_profiles);
+        updateEngineCopy();
+      } catch (error) {
+        $('healthDot').className = 'dot';
         $('healthText').textContent = '模型服务不可用';
-        $('engine').textContent = err.message;
+        $('engine').textContent = error.message;
       }
     }
 
     function setBusy(busy) {
       $('submit').disabled = busy;
-      $('skipVideo').disabled = busy;
+      document.querySelectorAll('.tab').forEach(button => { button.disabled = busy; });
       $('cancelJob').hidden = !(busy && currentJob);
       $('cancelJob').disabled = !busy;
       if (!busy) $('cancelJob').textContent = '终止当前任务';
     }
+
     function showStatus(job) {
       $('statusWrap').style.display = 'block';
       $('jobId').textContent = job.job_id || '';
-      $('stageText').textContent = stageLabels[job.stage] || job.stage || job.status || '处理中';
+      const stage = stageLabels[job.stage] || job.stage || job.status || '处理中';
+      const actionLabel = job.current_action_label || actionLabels[job.current_action] || job.current_action;
+      const actionIndex = Number(job.current_action_index);
+      const actionCount = Number(job.action_count);
+      const actionContext = [];
+      if (Number.isInteger(actionIndex) && actionIndex > 0 && Number.isInteger(actionCount) && actionCount > 0) {
+        actionContext.push(`${actionIndex}/${actionCount}`);
+      }
+      if (actionLabel) actionContext.push(actionLabel);
+      $('stageText').textContent = actionContext.length ? `${stage}（${actionContext.join(' · ')}）` : stage;
       const value = Math.max(0, Math.min(100, Number(job.progress || 0)));
       $('percent').textContent = value.toFixed(value % 1 ? 1 : 0) + '%';
       $('bar').style.width = value + '%';
-      const opaqueFallback = Boolean(job.background_removal_failed)
-        || (job.outputs || []).some(out => out.background_removal_failed);
       const notices = [];
+      if (job.subject_source === 'profile') notices.push(`本次未上传图片，主体、毛发与动作均使用 Main_case 标准：${job.subject_profile || '服务器默认标准'}。`);
+      if (job.subject_source === 'upload_pending_qwen') notices.push('本次使用上传图片；正在生成用于替换的卡通主体参考。');
+      if (job.subject_source === 'qwen_generated_upload') notices.push('本次使用由上传图片生成的卡通主体参考。');
+      if (job.subject_source === 'upload') notices.push('本次使用上传的主体图片。');
       if (job.prompt_translation?.applied) {
         notices.push('中文提示词已在服务器本地翻译为英文后送入模型。');
       }
+      const opaqueFallback = Boolean(job.background_removal_failed)
+        || (job.outputs || []).some(output => output.background_removal_failed);
       if (opaqueFallback && job.request_kind === 'image') {
-        notices.push('部分图片无法可靠移除背景，已按原始生成结果返回。标记为“未抠图”的下载文件不是透明图片。');
+        notices.push('部分图片无法可靠移除背景，已返回未抠图原图。');
       }
+      if (job.warning) notices.push(String(job.warning));
       if (notices.length) {
         $('warning').style.display = 'block';
         $('warning').textContent = notices.join('\n');
@@ -601,47 +984,106 @@
         $('warning').style.display = 'none';
         $('warning').textContent = '';
       }
-      if (job.error) { $('error').style.display = 'block'; $('error').textContent = job.error; }
-      else { $('error').style.display = 'none'; }
+      if (job.error) {
+        $('error').style.display = 'block';
+        $('error').textContent = job.error;
+      } else {
+        $('error').style.display = 'none';
+        $('error').textContent = '';
+      }
     }
 
     function renderOutputs(outputs) {
       $('gallery').replaceChildren();
-      const sorted = [...outputs].sort((a,b) => Number(Boolean(b.primary)) - Number(Boolean(a.primary)));
-      sorted.forEach(out => {
-        const opaqueFallback = Boolean(out.background_removal_failed) || out.transparent === false;
-        const card = document.createElement('article'); card.className = 'output';
-        if (out.background_removal_failed) card.classList.add('warning-output');
-        const media = document.createElement('div'); media.className = 'media';
-        if (opaqueFallback) media.classList.add('opaque');
-        if ((out.filename || '').toLowerCase().endsWith('.mp4') || out.type === 'video_preview') {
-          const video = document.createElement('video'); video.src = out.download_url; video.controls = true; video.loop = true; video.preload = 'metadata'; media.appendChild(video);
+      const sorted = [...outputs].sort((a, b) => Number(Boolean(b.primary)) - Number(Boolean(a.primary)));
+      sorted.forEach(output => {
+        const card = document.createElement('article');
+        card.className = 'output';
+        if (output.background_removal_failed) card.classList.add('warning-output');
+        const media = document.createElement('div');
+        media.className = 'media';
+        if (output.background_removal_failed || output.transparent === false) media.classList.add('opaque');
+        const isVideo = (output.filename || '').toLowerCase().endsWith('.mp4')
+          || ['video_preview', 'subject_replacement_video'].includes(output.type);
+        if (isVideo) {
+          const video = document.createElement('video');
+          video.src = output.download_url;
+          video.controls = true;
+          video.loop = true;
+          video.preload = 'metadata';
+          media.appendChild(video);
         } else {
-          const img = document.createElement('img'); img.src = out.download_url; img.alt = labels[out.type] || out.type || '输出'; img.loading = 'lazy'; media.appendChild(img);
+          const image = document.createElement('img');
+          image.src = output.download_url;
+          image.alt = labels[output.type] || output.type || '生成结果';
+          image.loading = 'lazy';
+          media.appendChild(image);
         }
-        const meta = document.createElement('div'); meta.className = 'meta';
+        const meta = document.createElement('div');
+        meta.className = 'meta';
         const text = document.createElement('div');
         const strong = document.createElement('strong');
-        strong.textContent = out.background_removal_failed
-          ? (out.type === 'cartoon_reference' ? '卡通角色基准图（未抠图）' : '姿态原图（未抠图）')
-          : (labels[out.type] || out.type || '生成结果');
-        const small = document.createElement('small'); small.textContent = [out.width && out.height ? `${out.width}×${out.height}` : '', out.frames ? `${out.frames}帧` : '', out.pose_index ? `姿态 ${out.pose_index}` : '', out.transparent === false ? '透明背景：否' : '', out.background_removal_failed ? '背景移除：失败' : ''].filter(Boolean).join(' · ');
+        const action = actionLabels[output.action] || output.action;
+        strong.textContent = `${labels[output.type] || output.type || '生成结果'}${action ? ` · ${action}` : ''}`;
+        const small = document.createElement('small');
+        small.textContent = [
+          output.width && output.height ? `${output.width}×${output.height}` : '',
+          output.frames ? `${output.frames}帧` : '',
+          output.fps ? `${output.fps} FPS` : '',
+          output.duration_seconds ? `${output.duration_seconds}秒` : '',
+          output.pose_index ? `姿态 ${output.pose_index}` : '',
+          output.background_removal_failed ? '未抠图' : ''
+        ].filter(Boolean).join(' · ');
         text.append(strong, small);
-        const link = document.createElement('a'); link.className = 'download'; link.href = out.download_url; link.download = out.filename; link.textContent = '下载';
-        meta.append(text, link); card.append(media, meta); $('gallery').appendChild(card);
+        const link = document.createElement('a');
+        link.className = 'download';
+        link.href = output.download_url;
+        link.download = output.filename;
+        link.textContent = '下载';
+        meta.append(text, link);
+        card.append(media, meta);
+        $('gallery').appendChild(card);
       });
       $('empty').style.display = outputs.length ? 'none' : 'grid';
       $('gallery').style.display = outputs.length ? 'grid' : 'none';
     }
 
+    function outputSignature(outputs) {
+      return JSON.stringify(outputs.map(output => [
+        output.type,
+        output.media_kind,
+        output.filename,
+        output.download_url,
+        output.action,
+        Boolean(output.primary),
+        Boolean(output.background_removal_failed),
+        output.transparent,
+        output.width,
+        output.height,
+        output.frames,
+        output.fps,
+        output.duration_seconds,
+        output.pose_index
+      ]));
+    }
+
+    function renderOutputsIfChanged(outputs) {
+      const normalized = Array.isArray(outputs) ? outputs : [];
+      const signature = outputSignature(normalized);
+      if (signature === renderedOutputSignature) return;
+      renderedOutputSignature = signature;
+      renderOutputs(normalized);
+    }
+
     async function poll(url) {
       try {
-        const res = await fetch(url, {cache:'no-store'});
-        const job = await res.json();
-        if (!res.ok) throw new Error(job.detail || '状态查询失败');
+        const response = await fetch(url, {cache: 'no-store'});
+        const job = await response.json();
+        if (!response.ok) throw new Error(job.detail || '状态查询失败');
+        pollFailureCount = 0;
         currentJob = job;
         showStatus(job);
-        if (job.outputs?.length) renderOutputs(job.outputs);
+        renderOutputsIfChanged(job.outputs);
         if (['completed', 'failed', 'cancelled'].includes(job.status)) {
           currentJob = null;
           setBusy(false);
@@ -653,60 +1095,151 @@
           $('cancelJob').textContent = '正在终止…';
         }
         pollTimer = setTimeout(() => poll(url), 3000);
-      } catch (err) {
-        $('error').style.display = 'block'; $('error').textContent = err.message;
+      } catch (error) {
+        pollFailureCount += 1;
+        const retryDelay = Math.min(30000, 1000 * (2 ** Math.min(pollFailureCount - 1, 5)));
+        $('error').style.display = 'block';
+        $('error').textContent = `${error.message}；将在 ${Math.ceil(retryDelay / 1000)} 秒后重试状态查询。`;
+        if (currentJob?.status_url) {
+          setBusy(true);
+          pollTimer = setTimeout(() => poll(currentJob.status_url), retryDelay);
+        } else {
+          setBusy(false);
+        }
+      }
+    }
+
+    function beginSubmission(stageText) {
+      clearTimeout(pollTimer);
+      currentJob = null;
+      pollFailureCount = 0;
+      renderedOutputSignature = null;
+      setBusy(true);
+      renderOutputsIfChanged([]);
+      $('warning').style.display = 'none';
+      $('warning').textContent = '';
+      $('error').style.display = 'none';
+      $('error').textContent = '';
+      $('statusWrap').style.display = 'block';
+      $('stageText').textContent = stageText;
+      $('bar').style.width = '1%';
+      $('percent').textContent = '1%';
+    }
+
+    async function postJob(form) {
+      try {
+        const response = await fetch('api/jobs', {method: 'POST', body: form});
+        const job = await response.json();
+        if (!response.ok) throw new Error(typeof job.detail === 'string' ? job.detail : JSON.stringify(job.detail));
+        currentJob = job;
+        setBusy(true);
+        showStatus(job);
+        poll(job.status_url);
+      } catch (error) {
+        $('error').style.display = 'block';
+        $('error').textContent = error.message;
         setBusy(false);
       }
     }
 
-    async function submitJob(skipVideo = false) {
-      if (!$('image').files.length) { alert('请先上传参考图片'); return; }
-      if (!$('prompt').value.trim()) { alert('请输入提示词'); return; }
-      const poses = selectedPoses();
-      if (!poses.length) { alert('至少选择或填写一个姿态'); return; }
+    async function submitReplacementJob() {
+      if (!subjectsReady || !$('subjectProfile').value) {
+        alert('默认身份或 Main_case 动作链路尚未准备完成，请等待服务恢复后刷新页面');
+        return;
+      }
+      const actions = selectedActions();
+      if (!actions.length) {
+        alert('至少选择吃饭或舔毛中的一个动作');
+        return;
+      }
+      const steps = Number($('scailSteps').value);
+      if (!Number.isInteger(steps) || steps < 4 || steps > 12) {
+        alert('SCAIL 步数必须是 4–12 之间的整数');
+        return;
+      }
+      const poseStrengthText = $('poseStrength').value.trim();
+      const poseStrength = poseStrengthText === '' ? null : Number(poseStrengthText);
+      if (poseStrength !== null && (!Number.isFinite(poseStrength) || poseStrength < 0 || poseStrength > 2)) {
+        alert('动作跟随强度必须在 0–2 之间，或留空使用动作默认值');
+        return;
+      }
+      const identityFront = $('image').files[0];
+      const identityLeft = $('imageLeft').files[0];
+      const identityRight = $('imageRight').files[0];
+      if ((identityLeft || identityRight) && (!identityFront || !identityLeft || !identityRight)) {
+        alert('三视角必须同时提供同一只宠物的正面、左侧和右侧图片；也可以只保留正面单图。');
+        return;
+      }
+
+      beginSubmission('正在提交完整主体替换链路');
+
+      const form = new FormData();
+      if (identityFront) form.append('image', identityFront);
+      if (identityLeft) form.append('image_left', identityLeft);
+      if (identityRight) form.append('image_right', identityRight);
+      form.append('prompt', $('prompt').value.trim());
+      form.append('generation_mode', 'subject_replacement');
+      form.append('subject_profile', $('subjectProfile').value);
+      form.append('actions', JSON.stringify(actions));
+      form.append('output_format', $('format').value);
+      form.append('seed', $('seed').value || '20260726');
+      form.append('scail_steps', String(steps));
+      if (poseStrength !== null) form.append('pose_strength', String(poseStrength));
+
+      await postJob(form);
+    }
+
+    async function submitImageJob() {
+      const image = $('image').files[0];
+      const prompt = $('prompt').value.trim();
+      const poses = selectedImagePoses();
+      if (!image) { alert('图片单独测试必须先上传参考图片'); return; }
+      if (!prompt) { alert('请输入卡通图片提示词'); return; }
+      if (!poses.length) { alert('至少选择或填写一个图片姿态'); return; }
+      if (poses.length > 8) { alert('每个任务最多生成 8 个姿态'); return; }
+
       const loraFiles = loraItems.map(item => item.file);
       const loraStrengths = loraItems.map(item => Number(item.strength));
       if (loraFiles.length > maxUploadedLoras()) { alert(`当前配置最多上传 ${maxUploadedLoras()} 个 LoRA 文件`); return; }
       if (loraFiles.some(file => file.size > MAX_LORA_FILE_BYTES)) { alert('单个 LoRA 文件不能超过 2GB'); return; }
       if (loraFiles.reduce((total, file) => total + file.size, 0) > MAX_LORA_TOTAL_BYTES) { alert('LoRA 文件合计不能超过 4GB'); return; }
       if (new Set(loraFiles.map(file => loraFilenameKey(file.name))).size !== loraFiles.length) { alert('存在文件名相同的 LoRA，请删除重复项'); return; }
-      if (loraFiles.length !== loraStrengths.length) { alert('LoRA 文件与强度数量不一致，请重新选择'); return; }
       if (loraStrengths.some(value => !Number.isFinite(value) || value < 0 || value > 2)) { alert('LoRA 融合强度必须在 0–2 之间'); return; }
-      clearTimeout(pollTimer); currentJob = null; setBusy(true); renderOutputs([]);
-      $('warning').style.display = 'none'; $('warning').textContent = '';
-      $('error').style.display = 'none'; $('error').textContent = '';
-      $('statusWrap').style.display = 'block'; $('stageText').textContent = skipVideo ? '正在提交首帧任务' : '正在提交'; $('bar').style.width = '1%'; $('percent').textContent = '1%';
-      const fd = new FormData();
-      fd.append('image', $('image').files[0]); fd.append('prompt', $('prompt').value.trim()); fd.append('mode', mode);
-      fd.append('image_profile', $('imageProfile').value);
-      loraFiles.forEach(file => fd.append('lora', file));
-      if (loraFiles.length) fd.append('lora_strengths', JSON.stringify(loraStrengths));
-      fd.append('lora_mode', $('loraMode').value);
-      fd.append('qwen_steps', $('qwenSteps').value || qwenStepsByMode[mode] || '6');
-      fd.append('qwen_cfg', $('qwenCfg').value || '1.0');
-      fd.append('qwen_denoise', $('qwenDenoise').value || '1.0');
-      fd.append('wan_steps', $('wanSteps').value || '20');
-      fd.append('wan_cfg', $('wanCfg').value || '3.5');
-      fd.append('wan_shift', $('wanShift').value || '5.0');
-      fd.append('poses', JSON.stringify(poses));
-      fd.append('pose_count', String(poses.length));
-      if (mode === 'image') {
-        fd.append('seed', $('seedImage').value || '20260715');
-      } else {
-        fd.append('output_format', $('format').value); fd.append('skip_video', skipVideo ? 'true' : 'false'); fd.append('seed', $('seed').value || '20260715');
-      }
-      try {
-        const res = await fetch('api/jobs', {method:'POST', body:fd});
-        const job = await res.json();
-        if (!res.ok) throw new Error(typeof job.detail === 'string' ? job.detail : JSON.stringify(job.detail));
-        currentJob = job; setBusy(true); showStatus(job); poll(job.status_url);
-      } catch (err) {
-        $('error').style.display = 'block'; $('error').textContent = err.message; setBusy(false);
-      }
+
+      const qwenSteps = Number($('qwenSteps').value);
+      const qwenCfg = Number($('qwenCfg').value);
+      const qwenDenoise = Number($('qwenDenoise').value);
+      if (!Number.isInteger(qwenSteps) || qwenSteps < 1 || qwenSteps > 30) { alert('Qwen 步数必须是 1–30 之间的整数'); return; }
+      if (!Number.isFinite(qwenCfg) || qwenCfg < 0.1 || qwenCfg > 5) { alert('Qwen CFG 必须在 0.1–5 之间'); return; }
+      if (!Number.isFinite(qwenDenoise) || qwenDenoise < 0.1 || qwenDenoise > 1) { alert('重绘强度必须在 0.1–1 之间'); return; }
+
+      beginSubmission('正在提交图片单独测试');
+      const form = new FormData();
+      form.append('image', image);
+      form.append('prompt', prompt);
+      form.append('generation_mode', 'keyframe_video');
+      form.append('mode', 'image');
+      form.append('request_kind', 'image');
+      form.append('skip_video', 'true');
+      form.append('output_format', 'transparent_gif');
+      form.append('image_profile', $('imageProfile').value);
+      form.append('poses', JSON.stringify(poses));
+      form.append('pose_count', String(poses.length));
+      form.append('qwen_steps', String(qwenSteps));
+      form.append('qwen_cfg', String(qwenCfg));
+      form.append('qwen_denoise', String(qwenDenoise));
+      form.append('seed', $('seedImage').value || '20260726');
+      form.append('lora_mode', $('loraMode').value);
+      loraFiles.forEach(file => form.append('lora', file));
+      if (loraFiles.length) form.append('lora_strengths', JSON.stringify(loraStrengths));
+      await postJob(form);
     }
 
-    $('form').addEventListener('submit', e => { e.preventDefault(); submitJob(false); });
-    $('skipVideo').addEventListener('click', () => submitJob(true));
+    $('form').addEventListener('submit', event => {
+      event.preventDefault();
+      if (uiMode === 'image') submitImageJob();
+      else submitReplacementJob();
+    });
     $('cancelJob').addEventListener('click', async () => {
       if (!currentJob || !confirm('确定终止当前生成任务吗？已完成的输出会保留。')) return;
       clearTimeout(pollTimer);
@@ -714,28 +1247,34 @@
       $('cancelJob').textContent = '正在终止…';
       try {
         const cancelUrl = currentJob.cancel_url || `${currentJob.status_url}/cancel`;
-        const res = await fetch(cancelUrl, {method: 'POST'});
-        const job = await res.json();
-        if (!res.ok) throw new Error(job.detail || '终止任务失败');
+        const response = await fetch(cancelUrl, {method: 'POST'});
+        const job = await response.json();
+        if (!response.ok) throw new Error(job.detail || '终止任务失败');
         currentJob = job;
         showStatus(job);
-        if (job.outputs?.length) renderOutputs(job.outputs);
+        renderOutputsIfChanged(job.outputs);
         if (job.status === 'cancelled') {
           currentJob = null;
           setBusy(false);
         } else {
           pollTimer = setTimeout(() => poll(job.status_url), 500);
         }
-      } catch (err) {
+      } catch (error) {
         $('error').style.display = 'block';
-        $('error').textContent = err.message;
+        $('error').textContent = error.message;
         $('cancelJob').disabled = false;
         $('cancelJob').textContent = '终止当前任务';
         if (currentJob?.status_url) pollTimer = setTimeout(() => poll(currentJob.status_url), 1000);
       }
     });
 
-    updateProfileCopy(); updateModeCopy(); checkHealth(); setInterval(checkHealth, 30000);
+    updateProfileCopy();
+    updateImageCopy();
+    updateModeUi('replacement');
+    updateActionCopy();
+    loadSubjects();
+    checkHealth();
+    setInterval(checkHealth, 30000);
   </script>
 </body>
 </html>

@@ -151,11 +151,24 @@ def _subject_mask(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     soft_alpha[soft_alpha < 3] = 0
     soft_alpha[soft_alpha > 252] = 255
 
-    # Remove green spill from fur edges without changing neutral/cream subject colors.
+    # Remove green spill only in the narrow matte boundary.  Clamping every opaque
+    # foreground pixel recolors legitimate green eyes and other identity accents.
+    # Interior spill remains visible to the downstream palette gate and therefore
+    # cannot be silently hidden by background removal.
     non_green_limit = np.maximum(red, blue).astype(np.uint8)
     green_channel = rgb[:, :, 1]
     subject_support = soft_alpha > 0
-    spill = subject_support & (green_channel > non_green_limit)
+    interior_distance = cv2.distanceTransform(
+        (component > 0).astype(np.uint8),
+        cv2.DIST_L2,
+        5,
+    )
+    matte_boundary = (soft_alpha < 248) | (interior_distance <= 6.0)
+    spill = (
+        subject_support
+        & matte_boundary
+        & (green_channel > non_green_limit)
+    )
     green_channel[spill] = non_green_limit[spill]
     rgb[~subject_support] = 0
     return rgb, soft_alpha
@@ -645,6 +658,174 @@ def build_transparent_animations(
         gif_temporary.unlink(missing_ok=True)
         if apng_temporary:
             apng_temporary.unlink(missing_ok=True)
+        shutil.rmtree(frames_root, ignore_errors=True)
+
+
+def build_standard_direct_outputs(
+    source: Path,
+    white_mp4_target: Path,
+    gif_target: Path | None = None,
+    *,
+    ffmpeg_bin: str = "ffmpeg",
+    size: int = 512,
+    source_fps: int = 16,
+    source_frame_count: int = 81,
+    gif_fps: int = 20,
+    gif_frame_count: int = 100,
+) -> dict[str, object]:
+    """Chroma-matte an approved standard without spatially changing its action.
+
+    The white MP4 and optional transparent GIF are derived from the exact same
+    per-source-frame RGB/alpha pair.  Only the GIF timeline is resampled; there
+    is no anchoring, stabilization, scaling, optical flow, or generative redraw.
+    """
+
+    frames_root = white_mp4_target.parent / (
+        f".{white_mp4_target.stem}.{uuid4().hex}.standard-direct.frames"
+    )
+    white_frames = frames_root / "white"
+    rgba_frames = frames_root / "rgba"
+    gif_frames = frames_root / "gif"
+    mp4_temporary = white_mp4_target.with_name(
+        f".{white_mp4_target.stem}.{uuid4().hex}.mp4"
+    )
+    gif_temporary = (
+        gif_target.with_name(f".{gif_target.stem}.{uuid4().hex}.gif")
+        if gif_target is not None
+        else None
+    )
+    white_frames.mkdir(parents=True, exist_ok=False)
+    rgba_frames.mkdir(parents=True, exist_ok=False)
+    if gif_target is not None:
+        gif_frames.mkdir(parents=True, exist_ok=False)
+    try:
+        source_frames = _selected_video_frames(source, size, source_frame_count)
+        alpha_foreground_fractions: list[float] = []
+        matte_frames: list[tuple[np.ndarray, np.ndarray]] = []
+        for index, frame in enumerate(source_frames):
+            rgb, alpha = _subject_mask(frame.copy())
+            matte_frames.append((rgb, alpha))
+            alpha_float = alpha.astype(np.float32)[:, :, None] / 255.0
+            white = np.clip(
+                rgb.astype(np.float32) * alpha_float
+                + 255.0 * (1.0 - alpha_float),
+                0,
+                255,
+            ).astype(np.uint8)
+            Image.fromarray(white, mode="RGB").save(
+                white_frames / f"frame_{index:03d}.png"
+            )
+            _save_rgba(rgba_frames / f"frame_{index:03d}.png", rgb, alpha)
+            alpha_foreground_fractions.append(
+                float(np.count_nonzero(alpha >= 128)) / float(alpha.size)
+            )
+
+        _run(
+            [
+                ffmpeg_bin,
+                "-y",
+                "-loglevel",
+                "error",
+                "-framerate",
+                str(source_fps),
+                "-i",
+                str(white_frames / "frame_%03d.png"),
+                "-frames:v",
+                str(source_frame_count),
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(mp4_temporary),
+            ],
+            "Standard-direct white-background MP4 encoding",
+        )
+        os.replace(mp4_temporary, white_mp4_target)
+
+        gif_validation: dict[str, object] | None = None
+        sampled_indices: list[int] | None = None
+        if gif_target is not None and gif_temporary is not None:
+            sampled_indices = np.rint(
+                np.linspace(0, source_frame_count - 1, gif_frame_count)
+            ).astype(int).tolist()
+            for output_index, source_index in enumerate(sampled_indices):
+                rgb, alpha = matte_frames[source_index]
+                _save_rgba(
+                    gif_frames / f"frame_{output_index:03d}.png",
+                    rgb,
+                    _gif_alpha(alpha),
+                )
+            gif_filter = (
+                "[0:v]format=rgba,split[gif][pal];"
+                "[pal]palettegen=reserve_transparent=1:"
+                "transparency_color=0x000000:stats_mode=diff[p];"
+                "[gif][p]paletteuse=dither=sierra2_4a:"
+                "alpha_threshold=128:diff_mode=rectangle[v]"
+            )
+            _run(
+                [
+                    ffmpeg_bin,
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-framerate",
+                    str(gif_fps),
+                    "-i",
+                    str(gif_frames / "frame_%03d.png"),
+                    "-filter_complex",
+                    gif_filter,
+                    "-map",
+                    "[v]",
+                    "-frames:v",
+                    str(gif_frame_count),
+                    "-loop",
+                    "0",
+                    "-final_delay",
+                    str(int(round(100 / gif_fps))),
+                    str(gif_temporary),
+                ],
+                "Standard-direct transparent GIF encoding",
+            )
+            gif_validation = validate_animation(
+                gif_temporary,
+                size=size,
+                frame_count=gif_frame_count,
+                duration_ms=int(round(gif_frame_count * 1000 / gif_fps)),
+            )
+            os.replace(gif_temporary, gif_target)
+
+        return {
+            "policy": "shared_per_frame_chroma_matte_no_spatial_transform_v1",
+            "source_frames": source_frame_count,
+            "source_fps": source_fps,
+            "size": [size, size],
+            "white_mp4": {
+                "frames": source_frame_count,
+                "fps": source_fps,
+                "duration_seconds": source_frame_count / source_fps,
+                "bytes": white_mp4_target.stat().st_size,
+            },
+            "transparent_gif": gif_validation,
+            "gif_sampled_source_indices": sampled_indices,
+            "foreground_fraction": {
+                "minimum": min(alpha_foreground_fractions),
+                "maximum": max(alpha_foreground_fractions),
+            },
+            "foreground_rgb_redrawn": False,
+            "spatial_stabilization": False,
+            "spatial_scaling": False,
+            "spatial_translation": False,
+            "temporal_resampling": (
+                "gif_only_nearest_source_frame" if gif_target is not None else False
+            ),
+        }
+    finally:
+        mp4_temporary.unlink(missing_ok=True)
+        if gif_temporary is not None:
+            gif_temporary.unlink(missing_ok=True)
         shutil.rmtree(frames_root, ignore_errors=True)
 
 
