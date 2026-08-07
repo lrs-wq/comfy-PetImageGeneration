@@ -6385,6 +6385,14 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
+            "no continuous black or dark stroke from muzzle through paw",
+            prompt,
+        )
+        self.assertIn(
+            "an unstriped region must remain unstriped",
+            prompt,
+        )
+        self.assertIn(
             "the no-prop rule forbids only a detached rigid item",
             prompt,
         )
@@ -6402,6 +6410,30 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             prompt,
         )
         self.assertNotIn("Image 1 is the original uploaded pet photo", prompt)
+
+    def test_grooming_action_transfer_prompt_keeps_canonical_identity(self) -> None:
+        prompt = pipeline.build_advisory_grooming_action_transfer_prompt(
+            pipeline.subject_replacement_pose_prompt("grooming"),
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+        )
+
+        self.assertIn(
+            "Image 1 is the approved Qwen full-body canonical",
+            prompt,
+        )
+        self.assertIn(
+            "Image 2 is a digest-verified seated self-grooming action frame",
+            prompt,
+        )
+        self.assertIn(
+            "Image 3 is the original uploaded front identity view",
+            prompt,
+        )
+        self.assertIn(
+            "no microphone, cable, cord, wire",
+            prompt,
+        )
+        self.assertIn("an unstriped region remains unstriped", prompt)
 
         retry_prompt = pipeline.build_qwen_prompt(
             "",
@@ -6529,6 +6561,10 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         )
         self.assertEqual(workflow["10"]["inputs"]["pixels"], ["5", 0])
         self.assertEqual(workflow["14"]["inputs"]["latent_image"], ["10", 0])
+        self.assertEqual(
+            workflow["14"]["inputs"]["denoise"],
+            pipeline.QWEN_GROOMING_CANONICAL_GEOMETRY_DENOISE_BY_ATTEMPT[0],
+        )
         action_prompt = workflow["6"]["inputs"]["prompt"]
         self.assertIn(
             "Image 1 is the approved canonical target and the only identity",
@@ -6553,6 +6589,61 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         }
         self.assertEqual(loaded_loras, {pipeline.QWEN_LORA: 1.0})
         self.assertNotIn(self.TEST_QWEN_STYLE_LORA, loaded_loras)
+
+    def test_advisory_grooming_keeps_palette_generation_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, _, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="grooming",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                identity_palette_guard=True,
+                visual_audits_blocking=False,
+            )
+
+        action_prompt = workflow["6"]["inputs"]["prompt"]
+        negative_prompt = workflow["7"]["inputs"]["prompt"]
+        load_images = {
+            node["inputs"]["image"]
+            for node in workflow.values()
+            if node.get("class_type") == "LoadImage"
+        }
+        expected_canonical = "local_video_api/capture-grooming/cartoon_reference.png"
+        expected_action_reference = (
+            "local_video_api/capture-grooming/"
+            "grooming_validated_action_reference.png"
+        )
+        expected_uploaded_front = "local_video_api/capture-grooming/input.png"
+        self.assertEqual(
+            load_images,
+            {
+                expected_canonical,
+                expected_action_reference,
+                expected_uploaded_front,
+            },
+        )
+        self.assertNotIn(pose_input, load_images)
+        self.assertIn(
+            "CRITICAL GROOMING FIRST-FRAME IDENTITY TRANSFER",
+            action_prompt,
+        )
+        self.assertIn(
+            "Image 2 is a digest-verified seated self-grooming action frame",
+            action_prompt,
+        )
+        self.assertIn(
+            "Image 3 is the original uploaded front identity view",
+            action_prompt,
+        )
+        self.assertIn("visible source coat is achromatic", action_prompt)
+        self.assertIn("black seam, dark seam, dark contour line", negative_prompt)
+        self.assertEqual(
+            workflow["14"]["inputs"]["denoise"],
+            pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE,
+        )
+        self.assertEqual(
+            workflow["14"]["inputs"]["steps"],
+            pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_STEPS,
+        )
 
     def test_production_eating_attempt5_refines_pose_safe_palette_drift(
         self,
