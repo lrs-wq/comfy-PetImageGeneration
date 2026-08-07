@@ -922,6 +922,73 @@ class EatingScenePropMaskTests(unittest.TestCase):
         )
 
 
+class SemanticCleanupComponentTests(unittest.TestCase):
+    def test_high_confidence_subject_fragment_survives_guidance_cleanup(
+        self,
+    ) -> None:
+        hard = np.zeros((32, 48), dtype=np.uint8)
+        hard[4:26, 3:15] = 1
+        hard[8:20, 20:28] = 1
+        hard[3:15, 35:43] = 1
+        _count, labels, stats, _centroids = (
+            cv2.connectedComponentsWithStats(hard, connectivity=8)
+        )
+        primary_label = int(labels[8, 8])
+        paw_fragment_label = int(labels[10, 22])
+        noise_label = int(labels[5, 37])
+
+        guidance = np.zeros_like(hard, dtype=bool)
+        guidance[5:25, 4:14] = True
+        semantic_core = np.zeros_like(hard, dtype=bool)
+        semantic_core[4:26, 3:15] = True
+        semantic_core[8:20, 20:28] = True
+        semantic_core[3:5, 35:40] = True
+
+        selected, recovered = (
+            scail._select_pose_guided_semantic_components(
+                labels,
+                stats,
+                guidance,
+                semantic_core,
+            )
+        )
+
+        self.assertIn(primary_label, selected)
+        self.assertIn(paw_fragment_label, selected)
+        self.assertIn(paw_fragment_label, recovered)
+        self.assertNotIn(noise_label, selected)
+        self.assertNotIn(noise_label, recovered)
+
+    def test_low_confidence_detached_noise_is_not_recovered(self) -> None:
+        hard = np.zeros((32, 48), dtype=np.uint8)
+        hard[4:26, 3:15] = 1
+        hard[8:20, 20:28] = 1
+        _count, labels, stats, _centroids = (
+            cv2.connectedComponentsWithStats(hard, connectivity=8)
+        )
+        primary_label = int(labels[8, 8])
+        noise_label = int(labels[10, 22])
+
+        guidance = np.zeros_like(hard, dtype=bool)
+        guidance[5:25, 4:14] = True
+        semantic_core = np.zeros_like(hard, dtype=bool)
+        semantic_core[4:26, 3:15] = True
+        semantic_core[8:12, 20:24] = True
+
+        selected, recovered = (
+            scail._select_pose_guided_semantic_components(
+                labels,
+                stats,
+                guidance,
+                semantic_core,
+            )
+        )
+
+        self.assertEqual(selected, [primary_label])
+        self.assertEqual(recovered, [])
+        self.assertNotIn(noise_label, selected)
+
+
 class DrivingAnimationDecodeTests(unittest.TestCase):
     def test_video_driver_decodes_all_frames_with_constant_timing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

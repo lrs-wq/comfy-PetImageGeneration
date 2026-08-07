@@ -3462,6 +3462,60 @@ def _validate_white_background_mp4(
     }
 
 
+def _select_pose_guided_semantic_components(
+    labels: np.ndarray,
+    stats: np.ndarray,
+    guidance: np.ndarray,
+    semantic_core: np.ndarray,
+    *,
+    minimum_area: int = 64,
+    minimum_guidance_overlap: int = 32,
+    minimum_guidance_fraction: float = 0.20,
+    minimum_semantic_core_pixels: int = 64,
+    minimum_semantic_core_fraction: float = 0.20,
+) -> tuple[list[int], list[int]]:
+    """Keep guided components plus high-confidence fragments of that subject.
+
+    The alpha passed to this helper has already been restricted to components
+    accepted against the pose guide. A later cleanup can cut a thin soft-alpha
+    bridge through a real paw, ear, or tail and split that accepted subject into
+    a second component. Preserve such a fragment only when it still contains a
+    substantial high-confidence semantic core; detached low-confidence noise
+    remains excluded.
+    """
+    candidates: list[tuple[int, int, int, int]] = []
+    guided_labels: list[int] = []
+    semantic_fragment_labels: list[int] = []
+    for label in range(1, int(stats.shape[0])):
+        component = labels == label
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        overlap = int(np.count_nonzero(component & guidance))
+        core_pixels = int(np.count_nonzero(component & semantic_core))
+        candidates.append((overlap, area, core_pixels, label))
+        if (
+            area >= minimum_area
+            and overlap >= minimum_guidance_overlap
+            and overlap / float(max(1, area))
+            >= minimum_guidance_fraction
+        ):
+            guided_labels.append(label)
+        if (
+            area >= minimum_area
+            and core_pixels >= minimum_semantic_core_pixels
+            and core_pixels / float(max(1, area))
+            >= minimum_semantic_core_fraction
+        ):
+            semantic_fragment_labels.append(label)
+
+    selected_labels = sorted(
+        set(guided_labels) | set(semantic_fragment_labels)
+    )
+    if not selected_labels:
+        selected_labels = [max(candidates)[3]]
+    recovered_labels = sorted(set(selected_labels) - set(guided_labels))
+    return selected_labels, recovered_labels
+
+
 def build_unstabilized_transparent_gif(
     source_video: Path,
     gif_target: Path,
@@ -3611,6 +3665,7 @@ def build_unstabilized_transparent_gif(
                 )
                 alpha = np.where(support > 0, alpha, 0).astype(np.uint8)
                 semantic_alpha_anchored = alpha.copy()
+                recovered_semantic_fragment_labels: list[int] = []
                 if guidance is not None:
                     # Guidance is only a component/noise constraint. It must
                     # never become a hard crop: a replacement animal can have
@@ -3655,28 +3710,15 @@ def build_unstabilized_transparent_gif(
                             "Pose-guided semantic extraction removed the subject "
                             f"in frame {index}"
                         )
-                    restricted_candidates: list[tuple[int, int, int]] = []
-                    for label in range(1, restricted_count):
-                        area = int(
-                            restricted_stats[label, cv2.CC_STAT_AREA]
-                        )
-                        overlap = int(
-                            np.count_nonzero(
-                                (restricted_labels == label) & guidance
-                            )
-                        )
-                        restricted_candidates.append((overlap, area, label))
-                    restricted_selected_labels = [
-                        label
-                        for overlap, area, label in restricted_candidates
-                        if area >= 64
-                        and overlap >= 32
-                        and overlap / float(max(1, area)) >= 0.20
-                    ]
-                    if not restricted_selected_labels:
-                        restricted_selected_labels = [
-                            max(restricted_candidates)[2]
-                        ]
+                    (
+                        restricted_selected_labels,
+                        recovered_semantic_fragment_labels,
+                    ) = _select_pose_guided_semantic_components(
+                        restricted_labels,
+                        restricted_stats,
+                        guidance,
+                        semantic_alpha_anchored >= 160,
+                    )
                     restricted_component = np.isin(
                         restricted_labels,
                         restricted_selected_labels,
@@ -3884,6 +3926,9 @@ def build_unstabilized_transparent_gif(
                         ),
                         "semantic_grid_core_retention_min": (
                             semantic_grid_core_retention_min
+                        ),
+                        "semantic_fragment_recovery_count": len(
+                            recovered_semantic_fragment_labels
                         ),
                     }
                 )
