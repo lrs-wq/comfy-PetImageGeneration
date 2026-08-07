@@ -87,7 +87,8 @@ DEFAULT_PROMPT = (
     "Stable face and identity without freezing it, no food, no bowl, no prop, "
     "no clothes, no collar and no accessories. Static camera, centered complete "
     "uncropped body, clean uniform white studio background, smooth temporally "
-    "coherent motion."
+    "coherent motion. Separate pale fur from the background only with natural "
+    "soft tonal lighting, never with a drawn silhouette border."
 )
 
 DEFAULT_NEGATIVE_PROMPT = (
@@ -99,6 +100,7 @@ DEFAULT_NEGATIVE_PROMPT = (
     "fur, needle-like fur, wire-like fur, rigid fur clumps, long isolated "
     "strands, dorsal ridge, mohawk, jagged back silhouette, changing back "
     "contour, missing back, clipped back, fur crawling, texture crawling, "
+    "black contour, dark outline, ink line, comic stroke, silhouette halo, "
     "camera movement, zoom, flicker, jitter"
 )
 
@@ -128,7 +130,8 @@ EATING_PROMPT = (
     "Keep the recognizable face temporally stable without freezing it. Static "
     "camera, stable scale and placement, complete uncropped subject and tail, "
     "clean perfectly uniform white studio background, no floor shadow, smooth "
-    "temporally coherent motion."
+    "temporally coherent motion. Separate pale fur from the background only "
+    "with natural soft tonal lighting, never with a drawn silhouette border."
 )
 
 EATING_NEGATIVE_PROMPT = (
@@ -144,6 +147,7 @@ EATING_NEGATIVE_PROMPT = (
     "long isolated strands, hanging tufts, dorsal ridge, mohawk, jagged fur "
     "silhouette, changing back contour, missing back, clipped back, multiple "
     "cats, cropped body, cropped tail, camera movement, zoom, flicker, jitter, "
+    "black contour, dark outline, ink line, comic stroke, silhouette halo, "
     "green background, floor, shadow, gradient, texture, text, watermark"
 )
 
@@ -3516,6 +3520,140 @@ def _select_pose_guided_semantic_components(
     return selected_labels, recovered_labels
 
 
+def _remove_dark_silhouette_halo(
+    rgb: np.ndarray,
+    alpha: np.ndarray,
+    *,
+    band_width: int = 5,
+    minimum_luma_delta: float = 30.0,
+    minimum_reference_luma: float = 64.0,
+    minimum_candidate_pixels: int = 64,
+    minimum_candidate_fraction: float = 0.06,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Replace a generated dark outline with colors propagated from the coat.
+
+    SCAIL can draw a thin charcoal border to separate a pale subject from its
+    white studio background. The transparency matte already supplies that
+    separation. Reconstruct only the inner boundary band from foreground-side
+    neighbors and replace pixels that are substantially darker than that local
+    reference. A dark animal or a broad marking stays dark because its inward
+    reference is dark too, and a small isolated marking cannot trigger the
+    frame-level continuity threshold.
+    """
+    foreground = alpha >= 64
+    foreground_pixels = int(np.count_nonzero(foreground))
+    if foreground_pixels < minimum_candidate_pixels:
+        return rgb, {
+            "policy": "local_inward_color_dark_halo_v1",
+            "applied": False,
+            "band_pixels": 0,
+            "candidate_pixels": 0,
+            "replaced_pixels": 0,
+            "candidate_fraction": 0.0,
+        }
+
+    width = max(1, int(band_width))
+    core = cv2.erode(
+        foreground.astype(np.uint8),
+        np.ones((width * 2 + 1, width * 2 + 1), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    if int(np.count_nonzero(core)) < minimum_candidate_pixels:
+        return rgb, {
+            "policy": "local_inward_color_dark_halo_v1",
+            "applied": False,
+            "band_pixels": 0,
+            "candidate_pixels": 0,
+            "replaced_pixels": 0,
+            "candidate_fraction": 0.0,
+        }
+
+    reconstructed = rgb.astype(np.float32).copy()
+    known = core.copy()
+    neighbor_kernel = np.ones((3, 3), dtype=np.float32)
+    for _ in range(width):
+        known_float = known.astype(np.float32)
+        neighbor_count = cv2.filter2D(
+            known_float,
+            ddepth=-1,
+            kernel=neighbor_kernel,
+            borderType=cv2.BORDER_CONSTANT,
+        )
+        frontier = (
+            (cv2.dilate(known.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
+            & foreground
+            & ~known
+            & (neighbor_count > 0)
+        )
+        if not np.any(frontier):
+            break
+        for channel in range(3):
+            neighbor_sum = cv2.filter2D(
+                reconstructed[:, :, channel] * known_float,
+                ddepth=-1,
+                kernel=neighbor_kernel,
+                borderType=cv2.BORDER_CONSTANT,
+            )
+            reconstructed[:, :, channel][frontier] = (
+                neighbor_sum[frontier] / neighbor_count[frontier]
+            )
+        known |= frontier
+
+    band = foreground & ~core & known
+    band_pixels = int(np.count_nonzero(band))
+    if not band_pixels:
+        return rgb, {
+            "policy": "local_inward_color_dark_halo_v1",
+            "applied": False,
+            "band_pixels": 0,
+            "candidate_pixels": 0,
+            "replaced_pixels": 0,
+            "candidate_fraction": 0.0,
+        }
+
+    source_float = rgb.astype(np.float32)
+    source_luma = (
+        source_float[:, :, 0] * 0.2126
+        + source_float[:, :, 1] * 0.7152
+        + source_float[:, :, 2] * 0.0722
+    )
+    reference_luma = (
+        reconstructed[:, :, 0] * 0.2126
+        + reconstructed[:, :, 1] * 0.7152
+        + reconstructed[:, :, 2] * 0.0722
+    )
+    candidates = (
+        band
+        & (reference_luma >= float(minimum_reference_luma))
+        & (
+            reference_luma - source_luma
+            >= float(minimum_luma_delta)
+        )
+    )
+    candidate_pixels = int(np.count_nonzero(candidates))
+    candidate_fraction = float(candidate_pixels) / float(band_pixels)
+    applied = (
+        candidate_pixels >= int(minimum_candidate_pixels)
+        and candidate_fraction >= float(minimum_candidate_fraction)
+    )
+    cleaned = rgb.copy()
+    if applied:
+        blended = np.clip(
+            reconstructed * 0.95 + source_float * 0.05,
+            0,
+            255,
+        ).astype(np.uint8)
+        cleaned[candidates] = blended[candidates]
+    return cleaned, {
+        "policy": "local_inward_color_dark_halo_v1",
+        "applied": applied,
+        "band_pixels": band_pixels,
+        "candidate_pixels": candidate_pixels,
+        "replaced_pixels": candidate_pixels if applied else 0,
+        "candidate_fraction": candidate_fraction,
+    }
+
+
 def build_unstabilized_transparent_gif(
     source_video: Path,
     gif_target: Path,
@@ -3933,6 +4071,17 @@ def build_unstabilized_transparent_gif(
                     }
                 )
 
+        edge_cleanup_metrics: list[dict[str, Any]] = []
+        cleaned_extracted_frames: list[tuple[np.ndarray, np.ndarray]] = []
+        for rgb, alpha in extracted_frames:
+            cleaned_rgb, cleanup_metrics = _remove_dark_silhouette_halo(
+                rgb,
+                alpha,
+            )
+            cleaned_extracted_frames.append((cleaned_rgb, alpha))
+            edge_cleanup_metrics.append(cleanup_metrics)
+        extracted_frames = cleaned_extracted_frames
+
         sampled_indices = [
             min(
                 len(source_frames) - 1,
@@ -4055,6 +4204,33 @@ def build_unstabilized_transparent_gif(
         return {
             "mode": "per_frame_foreground_extraction_no_spatial_stabilization",
             "extraction_method": extraction_method,
+            "silhouette_edge_cleanup": {
+                "policy": "local_inward_color_dark_halo_v1",
+                "applied_frames": sum(
+                    1
+                    for item in edge_cleanup_metrics
+                    if bool(item["applied"])
+                ),
+                "source_frames": len(edge_cleanup_metrics),
+                "replaced_pixels_total": sum(
+                    int(item["replaced_pixels"])
+                    for item in edge_cleanup_metrics
+                ),
+                "replaced_pixels_max": max(
+                    (
+                        int(item["replaced_pixels"])
+                        for item in edge_cleanup_metrics
+                    ),
+                    default=0,
+                ),
+                "candidate_fraction_max": max(
+                    (
+                        float(item["candidate_fraction"])
+                        for item in edge_cleanup_metrics
+                    ),
+                    default=0.0,
+                ),
+            },
             "source_frames": len(source_frames),
             "source_fps": source_fps,
             "sampled_source_indices": sampled_indices,

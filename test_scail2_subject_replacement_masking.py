@@ -923,6 +923,62 @@ class EatingScenePropMaskTests(unittest.TestCase):
 
 
 class SemanticCleanupComponentTests(unittest.TestCase):
+    @staticmethod
+    def _outlined_subject() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        rgb = np.full((64, 64, 3), 255, dtype=np.uint8)
+        alpha = np.zeros((64, 64), dtype=np.uint8)
+        alpha[8:56, 8:56] = 255
+        rgb[8:56, 8:56] = 232
+        outline = np.zeros((64, 64), dtype=bool)
+        outline[8:10, 8:56] = True
+        outline[54:56, 8:56] = True
+        outline[8:56, 8:10] = True
+        outline[8:56, 54:56] = True
+        rgb[outline] = 18
+        return rgb, alpha, outline
+
+    def test_continuous_dark_silhouette_halo_uses_inward_coat_color(
+        self,
+    ) -> None:
+        rgb, alpha, outline = self._outlined_subject()
+
+        cleaned, metrics = scail._remove_dark_silhouette_halo(rgb, alpha)
+
+        self.assertTrue(metrics["applied"])
+        self.assertGreater(metrics["replaced_pixels"], 64)
+        self.assertGreater(float(cleaned[outline].mean()), 180.0)
+        self.assertGreater(float(cleaned[outline].mean()), float(rgb[outline].mean()))
+
+    def test_dark_subject_and_small_edge_marking_are_preserved(self) -> None:
+        dark_rgb = np.full((64, 64, 3), 255, dtype=np.uint8)
+        dark_alpha = np.zeros((64, 64), dtype=np.uint8)
+        dark_alpha[8:56, 8:56] = 255
+        dark_rgb[8:56, 8:56] = 24
+
+        dark_cleaned, dark_metrics = scail._remove_dark_silhouette_halo(
+            dark_rgb,
+            dark_alpha,
+        )
+
+        self.assertFalse(dark_metrics["applied"])
+        self.assertTrue(np.array_equal(dark_cleaned, dark_rgb))
+
+        marked_rgb = np.full((64, 64, 3), 255, dtype=np.uint8)
+        marked_alpha = np.zeros((64, 64), dtype=np.uint8)
+        marked_alpha[8:56, 8:56] = 255
+        marked_rgb[8:56, 8:56] = 232
+        marked_rgb[8:10, 28:34] = 18
+
+        marked_cleaned, marked_metrics = (
+            scail._remove_dark_silhouette_halo(
+                marked_rgb,
+                marked_alpha,
+            )
+        )
+
+        self.assertFalse(marked_metrics["applied"])
+        self.assertTrue(np.array_equal(marked_cleaned, marked_rgb))
+
     def test_high_confidence_subject_fragment_survives_guidance_cleanup(
         self,
     ) -> None:
