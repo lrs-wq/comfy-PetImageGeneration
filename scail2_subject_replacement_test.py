@@ -66,8 +66,8 @@ EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN = 0.012
 DEFAULT_PROMPT = (
     "A complete full-body premium stylized 3D cartoon cat matching the sleek "
     "reference as the only identity standard. Preserve the exact face shape, "
-    "cheek width, eye color and spacing, pupils, nose, muzzle, ear shape, gray-"
-    "white coat colors and marking placement, compact body volume, full tail, "
+    "cheek width, eye color and spacing, pupils, nose, muzzle, ear shape, exact "
+    "reference coat colors and marking placement, compact body volume, full tail, "
     "and exact smooth rounded back silhouette. Preserve the source coat-length "
     "category without amplifying it. Fur is dense, compact, uniformly directed "
     "and naturally close to the body with only short soft edge hairs. The cat "
@@ -81,6 +81,9 @@ DEFAULT_PROMPT = (
     "foreleg ends in the only planted front paw at the bottom. Never leave a "
     "second ground paw for the raised foreleg and never create a third "
     "foreleg. Keep the two seated hind legs distinct from the front legs. "
+    "The supplied reference image already contains this one-raised, one-planted "
+    "foreleg topology. Animate those same two forelegs from the first frame; "
+    "never preserve two planted forepaws and then add a new raised paw. "
     "Stable face and identity without freezing it, no food, no bowl, no prop, "
     "no clothes, no collar and no accessories. Static camera, centered complete "
     "uncropped body, clean uniform white studio background, smooth temporally "
@@ -3177,6 +3180,7 @@ def make_reference_assets(
     reference_path: Path,
     canvas_size: tuple[int, int],
     separate_eating_prop: bool = False,
+    contain_fraction: float = 0.84,
 ) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
     with Image.open(reference_path) as source:
         reference = source.convert("RGBA")
@@ -3222,7 +3226,9 @@ def make_reference_assets(
     if not alpha_bbox:
         raise ValueError(f"Reference has no visible alpha subject: {reference_path}")
     cropped = reference.crop(expand_bbox(alpha_bbox, reference.size, margin_fraction=0.04))
-    normalized = contain_rgba(cropped, canvas_size, 0.84)
+    if not 0.50 <= contain_fraction <= 0.95:
+        raise ValueError("reference contain fraction must be between 0.50 and 0.95")
+    normalized = contain_rgba(cropped, canvas_size, contain_fraction)
     alpha = normalized.getchannel("A")
     hard_alpha = alpha.point(lambda value: 255 if value >= 16 else 0)
     hard_alpha = hard_alpha.filter(ImageFilter.MaxFilter(5))
@@ -3249,6 +3255,7 @@ def make_reference_assets(
     )
     metadata = {
         "reference_extraction": reference_extraction,
+        "reference_contain_fraction": round(float(contain_fraction), 6),
         "reference_alpha_bbox": list(alpha_bbox),
         "reference_subject_fraction": (
             float(np.count_nonzero(np.asarray(hard_alpha)))
@@ -4459,6 +4466,7 @@ def main() -> int:
         args.reference,
         (args.width, args.height),
         separate_eating_prop=args.action == "eating",
+        contain_fraction=0.88 if args.action == "grooming" else 0.84,
     )
     if args.action == "eating":
         pose_frames, pose_masks, pose_metadata = (

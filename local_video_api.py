@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.22.4"
+API_VERSION = "2.22.5"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -240,7 +240,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.36.0"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.37.0"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "main_case_grooming_canonical_open_channel_then_identity_refine_v26"
 )
@@ -345,10 +345,26 @@ GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
     "canonical_palette_conditioned_action_pose_transfer_seed_v1"
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
-    "canonical_image1_validated_action_image2_uploaded_front_image3_v2"
+    "canonical_image1_identity_neutral_action_image2_v3"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = 1.0
+GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = 3
+GROOMING_ADVISORY_MINIMUM_GATE_POLICY = (
+    "grooming_action_identity_minimum_contract_v1"
+)
+GROOMING_ADVISORY_MINIMUM_GATE_VERSION = "1.0"
+GROOMING_ADVISORY_IDENTITY_PALETTE_L1_MAX = 0.60
+GROOMING_ADVISORY_IDENTITY_BLACK_FRACTION_DELTA_MAX = 0.30
+GROOMING_ADVISORY_IDENTITY_CHROMATIC_FRACTION_DELTA_MAX = 0.24
+GROOMING_ADVISORY_BLOCKING_POSE_ISSUES = frozenset(
+    {
+        "continuous_raised_foreleg_edge_unavailable",
+        "continuous_raised_foreleg_edge_too_short",
+        "paw_muzzle_gap_unavailable",
+        "raised_paw_too_far_from_muzzle",
+    }
+)
 GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY = (
     "canonical_pose_transfer_seed_bound_matte_union_v1"
 )
@@ -3998,25 +4014,24 @@ def build_advisory_grooming_action_transfer_prompt(
     *,
     profile_fur_lock: str = "",
 ) -> str:
-    """Transfer a validated grooming action while keeping uploaded identity."""
+    """Transfer grooming geometry without exposing another pet's appearance."""
 
     fur_lock = profile_fur_lock.strip() or (
         "Preserve Image 1's exact natural coat length, visible volume, strand "
         "direction, genuine tufts, and source-bounded silhouette."
     )
     return f"""CRITICAL GROOMING FIRST-FRAME IDENTITY TRANSFER:
-IMAGE ROLES - non-negotiable: Image 1 is the approved Qwen full-body canonical generated from the uploaded identity view set. It is the sampler canvas and the sole authority for the target pet's identity, face, head shape, eyes, ears, nose, coat palette, markings, body proportions, paws, tail, natural fur, material, lighting, and restrained stylized 3D rendering. Image 2 is a digest-verified seated self-grooming action frame and controls only the biological joint geometry, tongue-to-paw contact, action layout, framing, subject scale, and flat green background. Image 2 may depict a completely different animal: copy absolutely no identity, color, marking, coat length, texture, lighting, or rendering style from it. Image 3 is the original uploaded front identity view and independently confirms the same target pet as Image 1.
+IMAGE ROLES - exact and exclusive: Image 1 is the approved Qwen full-body canonical produced from the uploaded front, left and right identity views. It is the sampler canvas and the only detailed identity and rendering authority: preserve its face, head shape, eyes, ears, nose, coat palette, localized markings, body proportions, paws, tail, fur, material and lighting. Image 2 is an identity-neutral low-pass anatomy maquette derived from the validated grooming action. Its original animal RGB, chroma, markings and high-frequency fur were removed before this request. Image 2 controls only the seated joint layout, raised-paw-to-mouth contact, framing, scale and green negative space. Never render Image 2 as a gray model and never infer an animal identity from its shading.
 
-ACTION TRANSFER: repose the exact target pet from Images 1 and 3 into Image 2's self-grooming action. The viewer-left foreleg is one continuous biological limb visibly attached from shoulder through a natural elbow and wrist to one rounded furry paw at the mouth. A small pink tongue visibly contacts only the fur of that raised paw. The viewer-right front paw stays planted. Keep both attached hind legs and one complete tail. The mouth holds nothing and the raised paw holds nothing; do not keep a duplicate raised paw on the ground.
+ACTION TRANSFER: repose the exact Image 1 pet into Image 2's grooming anatomy. Exactly one viewer-left foreleg remains continuously attached from shoulder through elbow and wrist to one rounded furry paw touching the mouth. Exactly one viewer-right foreleg ends in the only planted front paw. The raised foreleg replaces its former planted position; never retain or regenerate a second planted paw for that same foreleg. Keep both attached hind legs and one complete tail. A single small pink tongue touches the raised paw. Nothing is held by the mouth or paw.
 
-IDENTITY LOCK: repaint every animal pixel using Image 1's identity, especially the raised paw, wrist, foreleg, shoulder, muzzle, torso, planted paw, hind legs, and tail. Preserve Image 1's exact light-versus-dark coat-area balance and localized markings; an unstriped region remains unstriped. The raised and planted paws must share Image 1's coat palette, fur length, texture scale, lighting, and restrained toe treatment. Join muzzle, tongue, paw, wrist, foreleg, shoulder, and chest as natural anatomy with seamless target-pet fur. {fur_lock}
+IDENTITY LOCK: repaint the complete animal from Image 1, including face, muzzle, raised paw, wrist, foreleg, shoulder, chest, torso, planted paw, hind legs and tail. Preserve Image 1's light-versus-dark coat-area balance and exact localized markings; an unstriped region remains unstriped. Both front paws share Image 1's palette, fur length, texture scale, lighting and toe treatment. {fur_lock}
 
-STRICTLY NO OBJECTS OR GUIDE RESIDUE: no microphone, cable, cord, wire, handle, tube, stick, pen, toothbrush, bottle, food, bowl, collar, clothing, accessory, prop, detached shape, hanging item, black line, dark contour, hard outline, seam, guide-shaped stripe, or internal green channel. Anatomical separation may use only natural low-contrast fur shading. Never translate a dark area from Image 2 into a new marking on the target pet.
+NO GUIDE RESIDUE: no microphone, cable, cord, wire, handle, tube, stick, pen, toothbrush, bottle, food, bowl, collar, clothing, accessory, detached shape, hanging item, black line, dark contour, hard outline, seam, gray maquette patch, guide-shaped stripe or internal green channel. Anatomical separation uses only natural low-contrast fur shading.
 
 POSE CONTRACT: {qwen_first_frame_spec(pose)}
-{action_first_frame_rules(pose)}
 
-OUTPUT CONTRACT: return exactly one clean static 512x512 first frame. Keep the complete cat within 72% of canvas width and height with at least 12% clear green margin on every edge. Every non-cat pixel must be flat pure #00FF00. No floor, floor line, shadow, reflection, scenery, background variation, text, logo, watermark, motion blur, extra limb, duplicate paw, or extra subject. Return only the completed grooming keyframe."""
+OUTPUT CONTRACT: return one clean static grooming first frame. Keep the complete cat within 72% of canvas width and height with at least 12% clear green margin on every edge. Every non-cat pixel is flat pure #00FF00. No floor, shadow, reflection, scenery, text, logo, watermark, motion blur, extra limb, duplicate paw or extra subject."""
 
 
 def build_canonical_grooming_full_pose_identity_refine_prompt(
@@ -5778,8 +5793,9 @@ def prepare_canonical_grooming_pose_transfer_seed(
     was lost by the one-tone silhouette guide.  Its RGB, chroma, markings and
     high-frequency texture must not reach Qwen, however.  Preserve only its
     alpha geometry and a heavily low-passed luminance ordering, remapped into
-    the canonical subject's coarse LAB range.  The resulting Image 1 is a
-    high-key anatomy maquette; Image 2/3 remain the identity authorities.
+    the canonical subject's coarse LAB range.  The resulting conditioning
+    image is a high-key anatomy maquette; the canonical reference remains the
+    only detailed identity authority.
     """
 
     with Image.open(action_reference) as loaded:
@@ -7644,6 +7660,186 @@ def canonical_action_identity_palette_quality(
         ),
         "canonical_action_achromatic_balance_enforced": True,
         "canonical_action_achromatic_balance_drift": balance_drift,
+    }
+
+
+def advisory_grooming_minimum_palette_quality(
+    source: dict[str, Any],
+    candidate: dict[str, Any],
+) -> dict[str, Any]:
+    """Reject only unmistakable identity replacement in advisory grooming.
+
+    This deliberately does not reuse the production identity-palette gate.  The
+    advisory chain needs broad tolerance for pose-dependent lighting, but it
+    must not accept a candidate whose coat distribution was taken from the
+    profile action animal instead of the uploaded pet.
+    """
+
+    if not source.get("available") or not candidate.get("available"):
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["minimum_identity_palette_signature_unavailable"],
+            "warnings": [],
+            "penalty": 1000.0,
+            "source": source,
+            "candidate": candidate,
+        }
+    source_fractions = source.get("fractions")
+    candidate_fractions = candidate.get("fractions")
+    if not isinstance(source_fractions, dict) or not isinstance(
+        candidate_fractions,
+        dict,
+    ):
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["minimum_identity_palette_fractions_unavailable"],
+            "warnings": [],
+            "penalty": 1000.0,
+            "source": source,
+            "candidate": candidate,
+        }
+    deltas = {
+        category: round(
+            float(candidate_fractions.get(category, 0.0))
+            - float(source_fractions.get(category, 0.0)),
+            6,
+        )
+        for category in IDENTITY_PALETTE_CATEGORIES
+    }
+    l1_distance = float(sum(abs(value) for value in deltas.values()))
+    black_delta = float(deltas.get("black", 0.0))
+    chromatic_delta = float(candidate.get("chromatic_fraction", 0.0)) - float(
+        source.get("chromatic_fraction", 0.0)
+    )
+    issues: list[str] = []
+    if l1_distance > GROOMING_ADVISORY_IDENTITY_PALETTE_L1_MAX:
+        issues.append("gross_identity_palette_l1_drift")
+    if abs(black_delta) > GROOMING_ADVISORY_IDENTITY_BLACK_FRACTION_DELTA_MAX:
+        issues.append("gross_dark_marking_area_drift")
+    if (
+        abs(chromatic_delta)
+        > GROOMING_ADVISORY_IDENTITY_CHROMATIC_FRACTION_DELTA_MAX
+    ):
+        issues.append("gross_chromatic_coat_fraction_drift")
+    return {
+        "available": True,
+        "acceptable": not issues,
+        "issues": issues,
+        "warnings": [],
+        "penalty": round(l1_distance * 50.0 + len(issues) * 100.0, 6),
+        "deltas": deltas,
+        "palette_l1_distance": round(l1_distance, 6),
+        "black_fraction_delta": round(black_delta, 6),
+        "chromatic_fraction_delta": round(chromatic_delta, 6),
+        "thresholds": {
+            "palette_l1_max": GROOMING_ADVISORY_IDENTITY_PALETTE_L1_MAX,
+            "black_fraction_delta_max": (
+                GROOMING_ADVISORY_IDENTITY_BLACK_FRACTION_DELTA_MAX
+            ),
+            "chromatic_fraction_delta_max": (
+                GROOMING_ADVISORY_IDENTITY_CHROMATIC_FRACTION_DELTA_MAX
+            ),
+        },
+        "source_dominant": source.get("dominant", []),
+        "candidate_dominant": candidate.get("dominant", []),
+    }
+
+
+def advisory_grooming_minimum_pose_quality(
+    pose_quality: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep only raised-paw continuity/contact as blocking pose evidence."""
+
+    if pose_quality.get("available") is not True:
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["minimum_grooming_pose_evidence_unavailable"],
+            "warnings": list(pose_quality.get("issues") or []),
+            "penalty": 1000.0,
+            "full_pose_quality": pose_quality,
+        }
+    measured_issues = [str(issue) for issue in pose_quality.get("issues", [])]
+    blocking_issues = [
+        issue
+        for issue in measured_issues
+        if issue in GROOMING_ADVISORY_BLOCKING_POSE_ISSUES
+    ]
+    warnings = [issue for issue in measured_issues if issue not in blocking_issues]
+    return {
+        "available": True,
+        "acceptable": not blocking_issues,
+        "issues": blocking_issues,
+        "warnings": warnings,
+        "penalty": round(100.0 * len(blocking_issues), 6),
+        "blocking_issue_policy": sorted(GROOMING_ADVISORY_BLOCKING_POSE_ISSUES),
+        "full_pose_quality": pose_quality,
+    }
+
+
+def evaluate_advisory_grooming_minimum_gate(
+    candidate: Path,
+    *,
+    identity_reference_palette: dict[str, Any],
+    identity_reference_path: Path,
+    geometry_guide: Path,
+    geometry_metadata: Path,
+) -> dict[str, Any]:
+    """Require recognizable identity and one real paw-to-mouth grooming limb."""
+
+    candidate_palette = identity_palette_signature(candidate)
+    palette_quality = advisory_grooming_minimum_palette_quality(
+        identity_reference_palette,
+        candidate_palette,
+    )
+    full_pose_quality = evaluate_grooming_pose(
+        candidate,
+        geometry_guide,
+        geometry_metadata=geometry_metadata,
+    )
+    pose_quality = advisory_grooming_minimum_pose_quality(full_pose_quality)
+    issues = list(
+        dict.fromkeys(
+            [
+                *[str(issue) for issue in palette_quality.get("issues", [])],
+                *[str(issue) for issue in pose_quality.get("issues", [])],
+            ]
+        )
+    )
+    warnings = list(
+        dict.fromkeys(
+            [
+                *[str(issue) for issue in palette_quality.get("warnings", [])],
+                *[str(issue) for issue in pose_quality.get("warnings", [])],
+            ]
+        )
+    )
+    return {
+        "policy": GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
+        "version": GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
+        "available": bool(
+            palette_quality.get("available") and pose_quality.get("available")
+        ),
+        "acceptable": not issues,
+        "issues": issues,
+        "warnings": warnings,
+        "penalty": round(
+            float(palette_quality.get("penalty", 1000.0))
+            + float(pose_quality.get("penalty", 1000.0)),
+            6,
+        ),
+        "candidate_path": str(candidate),
+        "candidate_sha256": file_sha256(candidate),
+        "identity_reference_path": str(identity_reference_path),
+        "identity_reference_sha256": file_sha256(identity_reference_path),
+        "geometry_guide_path": str(geometry_guide),
+        "geometry_guide_sha256": file_sha256(geometry_guide),
+        "geometry_metadata_path": str(geometry_metadata),
+        "geometry_metadata_sha256": file_sha256(geometry_metadata),
+        "identity_palette": palette_quality,
+        "pose": pose_quality,
     }
 
 
@@ -11123,6 +11319,7 @@ def pose_attempt_failure_issues(attempts: list[dict[str, Any]]) -> list[str]:
             "fur_silhouette",
             "fur_surface_gate",
             "grooming_pose_gate",
+            "grooming_advisory_minimum_gate",
         ):
             section = failed_attempt.get(section_name)
             if (
@@ -11152,6 +11349,7 @@ def pose_attempt_failure_summary(attempts: list[dict[str, Any]]) -> str:
             "fur_silhouette",
             "fur_surface_gate",
             "grooming_pose_gate",
+            "grooming_advisory_minimum_gate",
         ):
             section = failed_attempt.get(section_name)
             if (
@@ -15429,6 +15627,12 @@ def revalidate_uploaded_qwen_references_before_scail(
     selected_surface_metrics = job.get("fur_surface_gate_selected_metrics")
     stored_surface_quality = job.get("subject_fur_surface_quality")
     final_surface_quality = job.get("fur_surface_gate_final_quality")
+    advisory_grooming_minimum_status = job.get(
+        "grooming_advisory_minimum_gate_status"
+    )
+    advisory_grooming_minimum_selected = job.get(
+        "grooming_advisory_minimum_gate_selected"
+    )
     surface_provenance_complete = bool(
         isinstance(fur_surface_status, dict)
         and isinstance(selected_surface_metrics, dict)
@@ -15499,6 +15703,56 @@ def revalidate_uploaded_qwen_references_before_scail(
                 )
 
         if not GENERATION_VISUAL_AUDITS_BLOCKING:
+            if action == "grooming":
+                selected_minimum = (
+                    advisory_grooming_minimum_selected.get(action)
+                    if isinstance(advisory_grooming_minimum_selected, dict)
+                    else None
+                )
+                selected_candidate = Path(
+                    str(
+                        selected_minimum.get("selected_candidate_path")
+                        if isinstance(selected_minimum, dict)
+                        else ""
+                    )
+                )
+                selected_candidate_sha256 = str(
+                    selected_minimum.get("selected_candidate_sha256")
+                    if isinstance(selected_minimum, dict)
+                    else ""
+                ).strip().lower()
+                minimum_identity_reference = Path(
+                    str(
+                        selected_minimum.get("identity_reference_path")
+                        if isinstance(selected_minimum, dict)
+                        else ""
+                    )
+                )
+                if (
+                    advisory_grooming_minimum_status != "passed"
+                    or not isinstance(selected_minimum, dict)
+                    or selected_minimum.get("policy")
+                    != GROOMING_ADVISORY_MINIMUM_GATE_POLICY
+                    or selected_minimum.get("version")
+                    != GROOMING_ADVISORY_MINIMUM_GATE_VERSION
+                    or selected_minimum.get("acceptable") is not True
+                    or selected_minimum.get("candidate_sha256")
+                    != selected_candidate_sha256
+                    or not selected_candidate.is_file()
+                    or file_sha256(selected_candidate)
+                    != selected_candidate_sha256
+                    or selected_candidate_sha256 != reference_digest
+                    or minimum_identity_reference != canonical_qwen_image1
+                    or not minimum_identity_reference.is_file()
+                    or file_sha256(minimum_identity_reference)
+                    != canonical_qwen_image1_sha256
+                    or selected_minimum.get("identity_reference_sha256")
+                    != canonical_qwen_image1_sha256
+                ):
+                    raise RuntimeError(
+                        "Persisted Qwen grooming reference lost its minimum "
+                        "action/identity contract before SCAIL."
+                    )
             continue
 
         selected_surface = selected_surface_metrics.get(action)
@@ -15575,7 +15829,16 @@ def revalidate_uploaded_qwen_references_before_scail(
         qwen_reference_pre_scail_visual_audit_status=(
             "passed"
             if GENERATION_VISUAL_AUDITS_BLOCKING
-            else "skipped_advisory"
+            else (
+                "minimum_contract_passed"
+                if "grooming" in actions
+                else "skipped_advisory"
+            )
+        ),
+        qwen_reference_pre_scail_minimum_contract_status=(
+            "passed"
+            if not GENERATION_VISUAL_AUDITS_BLOCKING and "grooming" in actions
+            else "not_applicable"
         ),
         qwen_reference_pre_scail_revalidated=True,
         qwen_reference_pre_scail_revalidated_at=utc_now(),
@@ -17963,6 +18226,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
     effective_pose_lora_attempts: list[dict[str, Any]] = []
     grooming_pose_gate_attempt_audits: list[dict[str, Any]] = []
     grooming_pose_gate_selected_metrics: dict[str, dict[str, Any]] = {}
+    grooming_advisory_minimum_gate_attempts: list[dict[str, Any]] = []
+    grooming_advisory_minimum_gate_selected: dict[str, dict[str, Any]] = {}
     fur_surface_gate_attempt_audits: list[dict[str, Any]] = []
     fur_surface_gate_selected_metrics: dict[str, dict[str, Any]] = {}
     fur_surface_gate_status_by_action: dict[str, str] = {}
@@ -18048,6 +18313,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             and action_key(pose) == "grooming"
             and qwen_guided_identity_policy
         )
+        advisory_grooming_minimum_gate_required = bool(
+            not GENERATION_VISUAL_AUDITS_BLOCKING
+            and force_qwen_reference
+            and action_key(pose) == "grooming"
+            and qwen_guided_identity_policy
+        )
         pose_effective_subject_config = job.get("effective_subject_config")
         pose_action_config = (
             pose_effective_subject_config.get("actions", {}).get(action_key(pose))
@@ -18069,16 +18340,23 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             and isinstance(pose_fur_surface_gate, dict)
             and pose_fur_surface_gate.get("enabled") is True
         )
-        if (
-            not GENERATION_VISUAL_AUDITS_BLOCKING
-            and force_qwen_reference
-            and action_key(pose) == "grooming"
-        ):
+        if advisory_grooming_minimum_gate_required:
             update_job(
                 job_id,
-                grooming_pose_gate_status="skipped_advisory",
+                grooming_pose_gate_status="minimum_contract_running",
                 grooming_pose_gate_fail_closed=False,
                 grooming_pose_gate_blocking=False,
+                grooming_advisory_minimum_gate_policy=(
+                    GROOMING_ADVISORY_MINIMUM_GATE_POLICY
+                ),
+                grooming_advisory_minimum_gate_version=(
+                    GROOMING_ADVISORY_MINIMUM_GATE_VERSION
+                ),
+                grooming_advisory_minimum_gate_status="running",
+                grooming_advisory_minimum_gate_blocking=True,
+                grooming_advisory_minimum_gate_max_attempts=(
+                    GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                ),
             )
         fur_surface_rejection_streak = 0
         if fur_surface_gate_required:
@@ -18121,7 +18399,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         grooming_pose_gate_guide_path: Path | None = None
         grooming_pose_gate_metadata_path: Path | None = None
         grooming_completion_mask_path: Path | None = None
-        if grooming_pose_gate_required:
+        if (
+            grooming_pose_gate_required
+            or advisory_grooming_minimum_gate_required
+        ):
             if pose_reference_input_name is None:
                 raise RuntimeError(
                     "Main_case grooming pose gate requires its frozen geometry guide."
@@ -18135,19 +18416,22 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 job,
                 qwen_grooming_guide_path,
             )
-            update_job(
-                job_id,
-                grooming_pose_gate_policy=GROOMING_POSE_GATE_POLICY,
-                grooming_pose_gate_version=GROOMING_POSE_GATE_VERSION,
-                grooming_pose_gate_scope=("main_case_guided_grooming_qwen_candidates"),
-                grooming_pose_gate_fail_closed=True,
-                grooming_pose_gate_input="rembg_alpha_cutout",
-                grooming_pose_gate_geometry_input=(
-                    "public_open_channel_generation_plus_private_cv_gate_and_"
-                    "non_qwen_completion_mask"
-                ),
-                grooming_pose_gate_status="running",
-            )
+            if grooming_pose_gate_required:
+                update_job(
+                    job_id,
+                    grooming_pose_gate_policy=GROOMING_POSE_GATE_POLICY,
+                    grooming_pose_gate_version=GROOMING_POSE_GATE_VERSION,
+                    grooming_pose_gate_scope=(
+                        "main_case_guided_grooming_qwen_candidates"
+                    ),
+                    grooming_pose_gate_fail_closed=True,
+                    grooming_pose_gate_input="rembg_alpha_cutout",
+                    grooming_pose_gate_geometry_input=(
+                        "public_open_channel_generation_plus_private_cv_gate_and_"
+                        "non_qwen_completion_mask"
+                    ),
+                    grooming_pose_gate_status="running",
+                )
         if (
             effective_pose_identity_input_policy
             == POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD
@@ -18202,7 +18486,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         if transparent_gif:
             active_pose_profiles = pose_generation_profiles(pose, pose_profiles)
             if not GENERATION_VISUAL_AUDITS_BLOCKING:
-                active_pose_profiles = active_pose_profiles[:1]
+                active_pose_profiles = active_pose_profiles[
+                    : (
+                        GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                        if action_key(pose) == "grooming"
+                        else 1
+                    )
+                ]
             negative_prompt += ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
             if source_palette_negative:
                 negative_prompt += ", " + source_palette_negative
@@ -18314,6 +18604,17 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
                 else None
             )
+            advisory_grooming_identity_palette_reference = (
+                identity_palette_signature(
+                    pose_palette_reference_path,
+                    exclude_bottom_fraction=0.0,
+                )
+                if (
+                    advisory_grooming_minimum_gate_required
+                    and pose_palette_reference_path is not None
+                )
+                else None
+            )
             attempts: list[dict[str, Any]] = []
             best_attempt: dict[str, Any] | None = None
             best_raw_attempt: dict[str, Any] | None = None
@@ -18396,24 +18697,20 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     raise RuntimeError(
                         "Advisory grooming action transfer lacks its canonical Image 1."
                     )
-                uploaded_front_identity_reference = (
-                    COMFY_INPUT / uploaded_qwen_input_name
-                )
-                if not uploaded_front_identity_reference.is_file():
-                    raise RuntimeError(
-                        "Advisory grooming action transfer lacks uploaded Image 3."
-                    )
                 advisory_grooming_action_canvas_path = (
-                    comfy_input_dir / "grooming_validated_action_reference.png"
+                    comfy_input_dir
+                    / "grooming_identity_neutral_action_reference.png"
                 )
                 advisory_grooming_action_canvas_audit = (
-                    prepare_canonical_action_identity_refine_canvas(
+                    prepare_canonical_grooming_pose_transfer_seed(
                         action_reference_path,
+                        canonical_action_identity_reference,
                         advisory_grooming_action_canvas_path,
-                        action="grooming",
-                        policy=GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY,
                     )
                 )
+                advisory_grooming_action_canvas_audit[
+                    "advisory_input_policy"
+                ] = GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY
                 advisory_grooming_action_input_name = (
                     comfy_relative_dir / advisory_grooming_action_canvas_path.name
                 ).as_posix()
@@ -18424,9 +18721,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                     grooming_action_first_frame_open_channel_loaded_by_qwen=False,
                     grooming_action_first_frame_identity_input=(qwen_input_name),
-                    grooming_action_first_frame_identity_confirmation_input=(
-                        uploaded_qwen_input_name
-                    ),
+                    grooming_action_first_frame_identity_confirmation_input=None,
                     grooming_action_first_frame_geometry_input=(
                         advisory_grooming_action_input_name
                     ),
@@ -18441,9 +18736,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                     grooming_action_first_frame_image_roles={
                         "image1": "approved_canonical_identity_sampler",
-                        "image2": "validated_action_geometry_only",
-                        "image3": "uploaded_front_identity_confirmation",
+                        "image2": (
+                            "canonical_palette_conditioned_lowpass_action_anatomy"
+                        ),
                     },
+                    grooming_action_first_frame_raw_action_rgb_loaded_by_qwen=False,
+                    grooming_action_first_frame_source_chroma_loaded_by_qwen=False,
+                    grooming_action_first_frame_source_texture_loaded_by_qwen=False,
                 )
             if canonical_action_reference:
                 pose_effective_lora_policy = (
@@ -18599,13 +18898,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ):
                         raise RuntimeError(
                             "Advisory grooming action canvas disappeared before Qwen."
-                        )
+                    )
                     attempt_primary_input_name = qwen_input_name
                     attempt_secondary_input_name = advisory_grooming_action_input_name
-                    attempt_tertiary_input_name = uploaded_qwen_input_name
+                    attempt_tertiary_input_name = None
                     attempt_additional_reference_input_names = [
                         attempt_secondary_input_name,
-                        attempt_tertiary_input_name,
                     ]
                     attempt_geometry_input_name = advisory_grooming_action_input_name
                     attempt_prompt = build_advisory_grooming_action_transfer_prompt(
@@ -18615,13 +18913,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     if pose_identity_palette_prompt_signature is not None:
                         attempt_prompt += "\n\n" + identity_palette_prompt(
                             pose_identity_palette_prompt_signature,
-                            retry=False,
+                            retry=attempt > 1,
                         )
                     grooming_advisory_action_transfer_attempt = {
                         "policy": GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY,
                         "image1_role": "approved_canonical_identity_sampler",
-                        "image2_role": "validated_action_geometry_only",
-                        "image3_role": "uploaded_front_identity_confirmation",
+                        "image2_role": (
+                            "canonical_palette_conditioned_lowpass_action_anatomy"
+                        ),
+                        "image3_role": None,
+                        "raw_action_rgb_loaded_by_qwen": False,
                         "public_open_channel_loaded_by_qwen": False,
                         "action_canvas": advisory_grooming_action_canvas_audit,
                     }
@@ -20334,6 +20635,93 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             grooming_pose_gate_metrics.get("composite_recovery")
                         ),
                     )
+                advisory_grooming_minimum_gate_metrics: dict[str, Any] | None = None
+                if (
+                    advisory_grooming_minimum_gate_required
+                    and chroma_metrics.get("acceptable") is True
+                    and attempt_cutout.is_file()
+                ):
+                    if (
+                        not isinstance(
+                            advisory_grooming_identity_palette_reference,
+                            dict,
+                        )
+                        or pose_palette_reference_path is None
+                        or grooming_pose_gate_guide_path is None
+                        or grooming_pose_gate_metadata_path is None
+                    ):
+                        raise RuntimeError(
+                            "Advisory grooming minimum gate lost its immutable "
+                            "identity or geometry reference."
+                        )
+                    advisory_grooming_minimum_gate_metrics = (
+                        evaluate_advisory_grooming_minimum_gate(
+                            attempt_cutout,
+                            identity_reference_palette=(
+                                advisory_grooming_identity_palette_reference
+                            ),
+                            identity_reference_path=pose_palette_reference_path,
+                            geometry_guide=grooming_pose_gate_guide_path,
+                            geometry_metadata=grooming_pose_gate_metadata_path,
+                        )
+                    )
+                    minimum_gate_audit = {
+                        "pose_index": index,
+                        "pose": pose,
+                        "action": action_key(pose),
+                        "attempt": attempt,
+                        "seed": attempt_seed,
+                        "gate": advisory_grooming_minimum_gate_metrics,
+                        "result": (
+                            "passed"
+                            if advisory_grooming_minimum_gate_metrics.get(
+                                "acceptable"
+                            )
+                            is True
+                            else "rejected"
+                        ),
+                    }
+                    grooming_advisory_minimum_gate_attempts.append(
+                        minimum_gate_audit
+                    )
+                    write_json_atomic(
+                        job_dir
+                        / "workflows"
+                        / f"qwen_pose_{index:02d}_grooming_minimum_gate.json",
+                        {
+                            "policy": GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
+                            "version": GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
+                            "blocking_scope": (
+                                "gross_identity_replacement_and_missing_"
+                                "paw_to_mouth_action_only"
+                            ),
+                            "attempts": [
+                                item
+                                for item in grooming_advisory_minimum_gate_attempts
+                                if item["pose_index"] == index
+                            ],
+                        },
+                    )
+                    minimum_status = (
+                        "candidate_passed"
+                        if advisory_grooming_minimum_gate_metrics.get("acceptable")
+                        is True
+                        else (
+                            "failed"
+                            if attempt == len(active_pose_profiles)
+                            else "retrying"
+                        )
+                    )
+                    update_job(
+                        job_id,
+                        grooming_pose_gate_status=(
+                            f"minimum_contract_{minimum_status}"
+                        ),
+                        grooming_advisory_minimum_gate_status=minimum_status,
+                        grooming_advisory_minimum_gate_attempts=(
+                            grooming_advisory_minimum_gate_attempts
+                        ),
+                    )
                 record = {
                     "attempt": attempt,
                     "profile": profile["name"],
@@ -20377,6 +20765,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         candidate_upper_body_identity_palette
                     ),
                     "grooming_pose_gate": grooming_pose_gate_metrics,
+                    "grooming_advisory_minimum_gate": (
+                        advisory_grooming_minimum_gate_metrics
+                    ),
                     "fur_surface_gate": fur_surface_gate_metrics,
                     "combined_penalty": None,
                     "settings": {
@@ -20439,7 +20830,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 else (
                                     attempt_tertiary_input_name
                                     if grooming_foreleg_repair_active
-                                    else pose_geometry_input_name
+                                    else attempt_geometry_input_name
                                 )
                             )
                         ),
@@ -20909,6 +21300,23 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         float(fur_surface_gate_metrics.get("penalty", 1000.0))
                         if isinstance(fur_surface_gate_metrics, dict)
                         else (1000.0 if fur_surface_gate_required else 0.0)
+                    )
+                    + (
+                        float(
+                            advisory_grooming_minimum_gate_metrics.get(
+                                "penalty",
+                                1000.0,
+                            )
+                        )
+                        if isinstance(
+                            advisory_grooming_minimum_gate_metrics,
+                            dict,
+                        )
+                        else (
+                            1000.0
+                            if advisory_grooming_minimum_gate_required
+                            else 0.0
+                        )
                     ),
                     6,
                 )
@@ -20942,11 +21350,29 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 attempts.append(
                     {key: value for key, value in record.items() if key != "workflow"}
                 )
+                advisory_minimum_acceptable = bool(
+                    not advisory_grooming_minimum_gate_required
+                    or (
+                        isinstance(
+                            advisory_grooming_minimum_gate_metrics,
+                            dict,
+                        )
+                        and advisory_grooming_minimum_gate_metrics.get("acceptable")
+                        is True
+                    )
+                )
                 if (
                     (
-                        not GENERATION_VISUAL_AUDITS_BLOCKING
+                        (
+                            not GENERATION_VISUAL_AUDITS_BLOCKING
+                            and advisory_minimum_acceptable
+                        )
                         or (
-                            (palette_quality is None or palette_quality["acceptable"])
+                            GENERATION_VISUAL_AUDITS_BLOCKING
+                            and (
+                                palette_quality is None
+                                or palette_quality["acceptable"]
+                            )
                             and (
                                 fur_silhouette_quality is None
                                 or fur_silhouette_quality["acceptable"]
@@ -20975,9 +21401,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 ):
                     best_attempt = record
                 candidate_acceptable = bool(
-                    not GENERATION_VISUAL_AUDITS_BLOCKING
+                    (
+                        not GENERATION_VISUAL_AUDITS_BLOCKING
+                        and advisory_minimum_acceptable
+                    )
                     or (
-                        quality["acceptable"]
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                        and quality["acceptable"]
                         and similarity["acceptable"]
                         and (
                             palette_quality is None
@@ -21023,10 +21453,20 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 "fur_silhouette": fur_silhouette_quality,
                                 "fur_surface_gate": fur_surface_gate_metrics,
                                 "grooming_pose_gate": grooming_pose_gate_metrics,
+                                "grooming_advisory_minimum_gate": (
+                                    advisory_grooming_minimum_gate_metrics
+                                ),
                             },
                         )
                     break
-                if palette_quality is not None and not palette_quality["acceptable"]:
+                if (
+                    advisory_grooming_minimum_gate_required
+                    and not advisory_minimum_acceptable
+                ):
+                    rejection_reason = (
+                        "grooming_minimum_action_identity_contract_failed"
+                    )
+                elif palette_quality is not None and not palette_quality["acceptable"]:
                     rejection_reason = "pose_identity_palette_drift"
                 elif (
                     fur_silhouette_quality is not None
@@ -21066,10 +21506,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "fur_silhouette": fur_silhouette_quality,
                         "fur_surface_gate": fur_surface_gate_metrics,
                         "grooming_pose_gate": grooming_pose_gate_metrics,
+                        "grooming_advisory_minimum_gate": (
+                            advisory_grooming_minimum_gate_metrics
+                        ),
                     },
                 )
                 LOGGER.warning(
-                    "%s pose %s attempt %s failed pose checks: quality=%s similarity=%s identity_palette=%s fur_silhouette=%s fur_surface=%s",
+                    "%s pose %s attempt %s failed pose checks: quality=%s similarity=%s identity_palette=%s fur_silhouette=%s fur_surface=%s minimum_gate=%s",
                     job_id,
                     index,
                     attempt,
@@ -21084,6 +21527,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     (
                         fur_surface_gate_metrics.get("issues")
                         if isinstance(fur_surface_gate_metrics, dict)
+                        else None
+                    ),
+                    (
+                        advisory_grooming_minimum_gate_metrics.get("issues")
+                        if isinstance(
+                            advisory_grooming_minimum_gate_metrics,
+                            dict,
+                        )
                         else None
                     ),
                 )
@@ -21171,6 +21622,20 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     },
                 )
                 best_attempt = None
+            if best_attempt is None and advisory_grooming_minimum_gate_required:
+                update_job(
+                    job_id,
+                    grooming_pose_gate_status="minimum_contract_failed",
+                    grooming_advisory_minimum_gate_status="failed",
+                    grooming_advisory_minimum_gate_attempts=(
+                        grooming_advisory_minimum_gate_attempts
+                    ),
+                )
+                raise RuntimeError(
+                    "Grooming minimum action/identity contract rejected every "
+                    f"Qwen candidate after {len(active_pose_profiles)} attempts: "
+                    + pose_attempt_failure_summary(attempts)
+                )
             if best_attempt is None and image_request and best_raw_attempt is not None:
                 best_attempt = best_raw_attempt
                 append_background_removal_failure(
@@ -21885,6 +22350,65 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         grooming_pose_gate_selected_metrics
                     ),
                 )
+            if advisory_grooming_minimum_gate_required:
+                selected_minimum_gate = best_attempt.get(
+                    "grooming_advisory_minimum_gate"
+                )
+                selected_digest = file_sha256(selected_keyframe)
+                if (
+                    not isinstance(selected_minimum_gate, dict)
+                    or selected_minimum_gate.get("acceptable") is not True
+                    or selected_minimum_gate.get("policy")
+                    != GROOMING_ADVISORY_MINIMUM_GATE_POLICY
+                    or selected_minimum_gate.get("version")
+                    != GROOMING_ADVISORY_MINIMUM_GATE_VERSION
+                    or selected_minimum_gate.get("candidate_sha256")
+                    != selected_digest
+                    or pose_palette_reference_path is None
+                    or selected_minimum_gate.get("identity_reference_path")
+                    != str(pose_palette_reference_path)
+                    or selected_minimum_gate.get("identity_reference_sha256")
+                    != file_sha256(pose_palette_reference_path)
+                ):
+                    update_job(
+                        job_id,
+                        grooming_pose_gate_status="minimum_contract_failed",
+                        grooming_advisory_minimum_gate_status="failed",
+                        grooming_advisory_minimum_gate_attempts=(
+                            grooming_advisory_minimum_gate_attempts
+                        ),
+                    )
+                    raise RuntimeError(
+                        "Advisory grooming selected candidate lost its minimum "
+                        "action/identity contract."
+                    )
+                selected_minimum_gate = json.loads(
+                    json.dumps(selected_minimum_gate)
+                )
+                selected_minimum_gate["selected_candidate_path"] = str(
+                    selected_keyframe
+                )
+                selected_minimum_gate["selected_candidate_sha256"] = (
+                    selected_digest
+                )
+                selected_minimum_gate["selected_attempt"] = best_attempt["attempt"]
+                best_attempt["grooming_advisory_minimum_gate"] = (
+                    selected_minimum_gate
+                )
+                grooming_advisory_minimum_gate_selected[action_key(pose)] = (
+                    selected_minimum_gate
+                )
+                update_job(
+                    job_id,
+                    grooming_pose_gate_status="minimum_contract_passed",
+                    grooming_advisory_minimum_gate_status="passed",
+                    grooming_advisory_minimum_gate_attempts=(
+                        grooming_advisory_minimum_gate_attempts
+                    ),
+                    grooming_advisory_minimum_gate_selected=(
+                        grooming_advisory_minimum_gate_selected
+                    ),
+                )
             write_workflow(
                 job_dir, f"qwen_pose_{index:02d}.json", best_attempt["workflow"]
             )
@@ -21929,6 +22453,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "grooming_pose_gate_version": GROOMING_POSE_GATE_VERSION,
                     "selected_grooming_pose_gate": best_attempt.get(
                         "grooming_pose_gate"
+                    ),
+                    "selected_grooming_advisory_minimum_gate": best_attempt.get(
+                        "grooming_advisory_minimum_gate"
                     ),
                     "selected_color_recovery": best_attempt.get("color_recovery"),
                     "reference_identity_palette": pose_reference_identity_palette,
@@ -22001,6 +22528,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "fur_silhouette": best_attempt.get("fur_silhouette"),
                     "fur_surface_gate": best_attempt.get("fur_surface_gate"),
                     "grooming_pose_gate": best_attempt.get("grooming_pose_gate"),
+                    "grooming_advisory_minimum_gate": best_attempt.get(
+                        "grooming_advisory_minimum_gate"
+                    ),
                 }
             )
             if keyframe_is_transparent and best_attempt["attempt"] > 1:
@@ -23640,7 +24170,10 @@ def health() -> dict[str, Any]:
                     "grooming": (
                         "image2_main_case_driver_geometry_guide"
                         if GENERATION_VISUAL_AUDITS_BLOCKING
-                        else "image2_digest_verified_action_reference"
+                        else (
+                            "image2_canonical_palette_conditioned_lowpass_"
+                            "action_anatomy"
+                        )
                     ),
                 },
                 "grooming_advisory_first_frame": {
@@ -23650,15 +24183,32 @@ def health() -> dict[str, Any]:
                     "denoise": GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE,
                     "image_roles": {
                         "image1": "approved_canonical_identity_sampler",
-                        "image2": "validated_action_geometry_only",
-                        "image3": "uploaded_front_identity_confirmation",
+                        "image2": (
+                            "canonical_palette_conditioned_lowpass_action_anatomy"
+                        ),
                     },
-                    "validated_action_rgb_loaded_by_qwen": True,
+                    "validated_action_rgb_loaded_by_qwen": False,
                     "validated_action_rgb_exposed_as_identity_authority": False,
+                    "validated_action_chroma_loaded_by_qwen": False,
+                    "validated_action_high_frequency_texture_loaded_by_qwen": False,
                     "public_open_channel_loaded_by_qwen": False,
-                    "gray_pose_seed_loaded_by_qwen": False,
+                    "identity_neutral_pose_seed_loaded_by_qwen": True,
                     "identity_palette_prompt_conditioning": True,
+                    "maximum_attempts": (
+                        GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                    ),
+                    "minimum_contract": {
+                        "policy": GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
+                        "version": GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
+                        "blocks_only": [
+                            "gross_identity_palette_replacement",
+                            "missing_or_disconnected_raised_foreleg",
+                            "missing_paw_to_mouth_contact",
+                        ],
+                        "fur_surface_audit_enabled": False,
+                    },
                     "adds_visual_audit_retries": False,
+                    "adds_minimum_contract_retries": True,
                 },
                 "eating_pose_lora_policy": (
                     "canonical_identity_plus_main_case_geometry_v1"
@@ -23695,7 +24245,10 @@ def health() -> dict[str, Any]:
                 "grooming_pose_lora_policy": (
                     "canonical_identity_open_channel_seed_bound_pose_safe_refine_v11"
                     if GENERATION_VISUAL_AUDITS_BLOCKING
-                    else "canonical_identity_action_transfer_lightning_only_v1"
+                    else (
+                        "canonical_identity_neutral_action_transfer_"
+                        "minimum_contract_v2"
+                    )
                 ),
                 "generated_canonical_bypassed": False,
                 "grooming_pose_gate": {

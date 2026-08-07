@@ -5994,6 +5994,28 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 "gate": {"alpha_provenance": alpha_provenance},
             }
 
+        def fake_advisory_grooming_minimum_gate(
+            candidate: Path,
+            *,
+            identity_reference_path: Path,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            return {
+                "policy": pipeline.GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
+                "version": pipeline.GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
+                "available": True,
+                "acceptable": True,
+                "issues": [],
+                "warnings": [],
+                "penalty": 0.0,
+                "candidate_path": str(candidate),
+                "candidate_sha256": pipeline.file_sha256(candidate),
+                "identity_reference_path": str(identity_reference_path),
+                "identity_reference_sha256": pipeline.file_sha256(
+                    identity_reference_path
+                ),
+            }
+
         with (
             patch.multiple(
                 pipeline,
@@ -6082,6 +6104,11 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 pipeline,
                 "evaluate_main_case_fur_surface_candidate",
                 side_effect=fake_fur_surface_candidate,
+            ),
+            patch.object(
+                pipeline,
+                "evaluate_advisory_grooming_minimum_gate",
+                side_effect=fake_advisory_grooming_minimum_gate,
             ),
         ):
             try:
@@ -6422,13 +6449,10 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
-            "Image 2 is a digest-verified seated self-grooming action frame",
+            "Image 2 is an identity-neutral low-pass anatomy maquette",
             prompt,
         )
-        self.assertIn(
-            "Image 3 is the original uploaded front identity view",
-            prompt,
-        )
+        self.assertNotIn("Image 3", prompt)
         self.assertIn(
             "no microphone, cable, cord, wire",
             prompt,
@@ -6610,15 +6634,13 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         expected_canonical = "local_video_api/capture-grooming/cartoon_reference.png"
         expected_action_reference = (
             "local_video_api/capture-grooming/"
-            "grooming_validated_action_reference.png"
+            "grooming_identity_neutral_action_reference.png"
         )
-        expected_uploaded_front = "local_video_api/capture-grooming/input.png"
         self.assertEqual(
             load_images,
             {
                 expected_canonical,
                 expected_action_reference,
-                expected_uploaded_front,
             },
         )
         self.assertNotIn(pose_input, load_images)
@@ -6627,13 +6649,12 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             action_prompt,
         )
         self.assertIn(
-            "Image 2 is a digest-verified seated self-grooming action frame",
+            "Image 2 is an identity-neutral low-pass anatomy maquette",
             action_prompt,
         )
-        self.assertIn(
-            "Image 3 is the original uploaded front identity view",
-            action_prompt,
-        )
+        self.assertNotIn("Image 3", action_prompt)
+        self.assertNotIn("image3", workflow["6"]["inputs"])
+        self.assertNotIn("image3", workflow["7"]["inputs"])
         self.assertIn("visible source coat is achromatic", action_prompt)
         self.assertIn("black seam, dark seam, dark contour line", negative_prompt)
         self.assertEqual(
@@ -6643,6 +6664,121 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertEqual(
             workflow["14"]["inputs"]["steps"],
             pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_STEPS,
+        )
+
+    def test_advisory_grooming_minimum_palette_rejects_identity_takeover(
+        self,
+    ) -> None:
+        source = self._identity_palette_signature_for_test(
+            {
+                "black": 0.02,
+                "gray": 0.51,
+                "white": 0.47,
+                "warm_brown_or_orange": 0.0,
+                "red_or_pink": 0.0,
+                "yellow_or_gold": 0.0,
+                "green": 0.0,
+                "blue_or_cyan": 0.0,
+                "purple": 0.0,
+            },
+            saturated_warm_fraction=0.0,
+        )
+        candidate = self._identity_palette_signature_for_test(
+            {
+                "black": 0.38,
+                "gray": 0.21,
+                "white": 0.39,
+                "warm_brown_or_orange": 0.01,
+                "red_or_pink": 0.01,
+                "yellow_or_gold": 0.0,
+                "green": 0.0,
+                "blue_or_cyan": 0.0,
+                "purple": 0.0,
+            },
+            saturated_warm_fraction=0.0,
+        )
+
+        quality = pipeline.advisory_grooming_minimum_palette_quality(
+            source,
+            candidate,
+        )
+
+        self.assertFalse(quality["acceptable"])
+        self.assertIn("gross_identity_palette_l1_drift", quality["issues"])
+        self.assertIn("gross_dark_marking_area_drift", quality["issues"])
+
+    def test_advisory_grooming_minimum_palette_allows_pose_lighting_shift(
+        self,
+    ) -> None:
+        source = self._identity_palette_signature_for_test(
+            {
+                "black": 0.08,
+                "gray": 0.42,
+                "white": 0.48,
+                "warm_brown_or_orange": 0.02,
+                "red_or_pink": 0.0,
+                "yellow_or_gold": 0.0,
+                "green": 0.0,
+                "blue_or_cyan": 0.0,
+                "purple": 0.0,
+            },
+            saturated_warm_fraction=0.0,
+        )
+        candidate = self._identity_palette_signature_for_test(
+            {
+                "black": 0.14,
+                "gray": 0.49,
+                "white": 0.34,
+                "warm_brown_or_orange": 0.02,
+                "red_or_pink": 0.01,
+                "yellow_or_gold": 0.0,
+                "green": 0.0,
+                "blue_or_cyan": 0.0,
+                "purple": 0.0,
+            },
+            saturated_warm_fraction=0.0,
+        )
+
+        quality = pipeline.advisory_grooming_minimum_palette_quality(
+            source,
+            candidate,
+        )
+
+        self.assertTrue(quality["acceptable"])
+        self.assertEqual(quality["issues"], [])
+
+    def test_advisory_grooming_minimum_pose_blocks_only_action_topology(
+        self,
+    ) -> None:
+        appearance_only = pipeline.advisory_grooming_minimum_pose_quality(
+            {
+                "available": True,
+                "issues": [
+                    "raised_paw_color_inconsistent_with_planted_paw",
+                    "guide_chamfer_coverage_too_low",
+                ],
+            }
+        )
+        missing_contact = pipeline.advisory_grooming_minimum_pose_quality(
+            {
+                "available": True,
+                "issues": [
+                    "raised_paw_color_inconsistent_with_planted_paw",
+                    "raised_paw_too_far_from_muzzle",
+                ],
+            }
+        )
+
+        self.assertTrue(appearance_only["acceptable"])
+        self.assertEqual(appearance_only["issues"], [])
+        self.assertIn(
+            "raised_paw_color_inconsistent_with_planted_paw",
+            appearance_only["warnings"],
+        )
+        self.assertFalse(missing_contact["acceptable"])
+        self.assertEqual(
+            missing_contact["issues"],
+            ["raised_paw_too_far_from_muzzle"],
         )
 
     def test_production_eating_attempt5_refines_pose_safe_palette_drift(
@@ -10133,6 +10269,127 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
                 "skipped_advisory",
             )
             self.assertEqual(jobs[job_id]["subject_fur_surface_quality"], {})
+
+    def test_advisory_grooming_pre_scail_requires_minimum_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "outputs"
+            comfy_input = root / "comfy-input"
+            job_id = "advisory-grooming-pre-scail"
+            job_dir = output_root / job_id
+            job_dir.mkdir(parents=True)
+            canonical = job_dir / "cartoon_reference_transparent.png"
+            canonical_image1 = job_dir / "cartoon_reference.png"
+            action_reference = job_dir / "grooming_transparent.png"
+            rgba = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            rgba.paste((220, 220, 220, 255), (128, 64, 384, 448))
+            rgba.save(canonical)
+            rgba.save(action_reference)
+            green = Image.new("RGB", (512, 512), (0, 255, 0))
+            green.paste((220, 220, 220), (128, 64, 384, 448))
+            green.save(canonical_image1)
+            comfy_canonical = (
+                comfy_input
+                / "local_video_api"
+                / job_id
+                / canonical_image1.name
+            )
+            comfy_canonical.parent.mkdir(parents=True)
+            comfy_canonical.write_bytes(canonical_image1.read_bytes())
+            canonical_digest = pipeline.file_sha256(canonical)
+            image1_digest = pipeline.file_sha256(canonical_image1)
+            action_digest = pipeline.file_sha256(action_reference)
+            selected_minimum = {
+                "policy": pipeline.GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
+                "version": pipeline.GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
+                "acceptable": True,
+                "candidate_sha256": action_digest,
+                "selected_candidate_path": str(action_reference),
+                "selected_candidate_sha256": action_digest,
+                "identity_reference_path": str(canonical_image1),
+                "identity_reference_sha256": image1_digest,
+            }
+            jobs: dict[str, dict[str, object]] = {
+                job_id: {
+                    "job_id": job_id,
+                    "subject_source": "qwen_generated_upload",
+                    "reference_generation_completed": True,
+                    "reference_generation_status": "completed",
+                    "reference_normalization_status": "completed",
+                    "canonical_reference_generated": True,
+                    "canonical_reference_used": True,
+                    "canonical_reference_normalized": True,
+                    "canonical_reference_transparent": True,
+                    "qwen_action_keyframes_normalized": True,
+                    "qwen_action_keyframes_transparent": True,
+                    "qwen_action_reference_normalization_policy": (
+                        pipeline.QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+                    ),
+                    "qwen_action_reference_byte_preserved": True,
+                    "surface_texture_gate_status": "skipped_advisory",
+                    "canonical_reference_path": str(canonical),
+                    "canonical_reference_sha256": canonical_digest,
+                    "canonical_public_reference_path": str(canonical),
+                    "canonical_public_reference_sha256": canonical_digest,
+                    "canonical_qwen_image1_path": str(canonical_image1),
+                    "canonical_qwen_image1_comfy_path": str(comfy_canonical),
+                    "canonical_qwen_image1_sha256": image1_digest,
+                    "canonical_qwen_image1_comfy_sha256": image1_digest,
+                    "subject_reference_paths": {
+                        "grooming": str(action_reference)
+                    },
+                    "qwen_action_keyframe_sha256s": {
+                        "grooming": action_digest
+                    },
+                    "qwen_reference_generated_actions": ["grooming"],
+                    "grooming_advisory_minimum_gate_status": "passed",
+                    "grooming_advisory_minimum_gate_selected": {
+                        "grooming": selected_minimum
+                    },
+                }
+            }
+            effective_config = {
+                "actions": {
+                    "grooming": {
+                        "reference_kind": "qwen_generated_upload",
+                        "reference": str(action_reference),
+                        "reference_sha256": action_digest,
+                    }
+                }
+            }
+            with (
+                patch.multiple(
+                    pipeline,
+                    OUTPUT_ROOT=output_root,
+                    COMFY_INPUT=comfy_input,
+                    JOBS=jobs,
+                    GENERATION_VISUAL_AUDITS_BLOCKING=False,
+                ),
+                patch.object(pipeline, "verify_uploaded_identity_submission"),
+            ):
+                pipeline.revalidate_uploaded_qwen_references_before_scail(
+                    job_id,
+                    jobs[job_id],
+                    effective_config,
+                    ["grooming"],
+                )
+                self.assertEqual(
+                    jobs[job_id][
+                        "qwen_reference_pre_scail_minimum_contract_status"
+                    ],
+                    "passed",
+                )
+                selected_minimum["selected_candidate_sha256"] = "0" * 64
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "minimum action/identity contract",
+                ):
+                    pipeline.revalidate_uploaded_qwen_references_before_scail(
+                        job_id,
+                        jobs[job_id],
+                        effective_config,
+                        ["grooming"],
+                    )
 
 
 if __name__ == "__main__":

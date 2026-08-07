@@ -877,6 +877,50 @@ class EatingScenePropMaskTests(unittest.TestCase):
         )
         self.assertTrue(np.any(model_rgba[..., 3] > 0))
 
+    def test_grooming_prompt_uses_reference_palette_and_existing_forelegs(
+        self,
+    ) -> None:
+        self.assertIn("exact reference coat colors", scail.DEFAULT_PROMPT)
+        self.assertNotIn("gray-white coat colors", scail.DEFAULT_PROMPT)
+        self.assertIn(
+            "already contains this one-raised, one-planted foreleg topology",
+            scail.DEFAULT_PROMPT,
+        )
+        self.assertIn(
+            "never preserve two planted forepaws and then add a new raised paw",
+            scail.DEFAULT_PROMPT,
+        )
+
+    def test_grooming_reference_can_match_driver_contain_fraction(self) -> None:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        ImageDraw.Draw(reference).ellipse(
+            (140, 72, 372, 462),
+            fill=(180, 180, 180, 255),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "grooming-reference.png"
+            reference.save(path)
+            _default_reference, _default_mask, default_metadata = (
+                scail.make_reference_assets(
+                    path,
+                    (512, 512),
+                )
+            )
+            _aligned_reference, _aligned_mask, aligned_metadata = (
+                scail.make_reference_assets(
+                    path,
+                    (512, 512),
+                    contain_fraction=0.88,
+                )
+            )
+
+        self.assertEqual(default_metadata["reference_contain_fraction"], 0.84)
+        self.assertEqual(aligned_metadata["reference_contain_fraction"], 0.88)
+        self.assertGreater(
+            aligned_metadata["reference_subject_fraction"],
+            default_metadata["reference_subject_fraction"],
+        )
+
 
 class DrivingAnimationDecodeTests(unittest.TestCase):
     def test_video_driver_decodes_all_frames_with_constant_timing(self) -> None:
