@@ -1048,7 +1048,8 @@ class IdentityPaletteGuardTests(unittest.TestCase):
 
         self.assertIs(selected, identity_safe)
 
-    def test_fallback_selection_fails_when_all_candidates_drift(self) -> None:
+    @patch.object(pipeline, "GENERATION_VISUAL_AUDITS_BLOCKING", True)
+    def test_strict_fallback_selection_fails_when_all_candidates_drift(self) -> None:
         attempts = [
             {
                 "identity_palette": {

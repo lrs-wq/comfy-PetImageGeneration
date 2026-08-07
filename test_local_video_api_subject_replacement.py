@@ -1251,6 +1251,11 @@ class SubjectReplacementEffectiveConfigTests(unittest.TestCase):
             patch.object(pipeline, "JOBS", jobs),
             patch.object(
                 pipeline,
+                "GENERATION_VISUAL_AUDITS_BLOCKING",
+                True,
+            ),
+            patch.object(
+                pipeline,
                 "prepare_uploaded_subject_qwen_references",
             ) as prepare_qwen,
         ):
@@ -3117,7 +3122,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             pipeline.CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY,
         )
 
-    def test_multi_view_source_audit_rejects_duplicate_views(self) -> None:
+    def test_multi_view_source_audit_reports_duplicate_views_as_advisory(self) -> None:
         signature = self._identity_palette_signature_for_test(
             {
                 "black": 0.5,
@@ -3177,7 +3182,8 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             audit = pipeline.audit_uploaded_identity_view_set(integrity)
         self.assertFalse(audit["acceptable"])
         self.assertIn("duplicate_identity_views_front_left", audit["issues"])
-        self.assertTrue(audit["fail_closed"])
+        self.assertFalse(audit["fail_closed"])
+        self.assertFalse(audit["blocking"])
 
     def test_achromatic_palette_gate_rejects_new_warm_fur(self) -> None:
         source = self._identity_palette_signature_for_test(
@@ -3303,6 +3309,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 PROMPT_TRANSLATION_ENABLED=False,
                 QWEN_POSE_MAX_ATTEMPTS=3,
                 QWEN_BOWL_POSE_EXTRA_ATTEMPTS=2,
+                GENERATION_VISUAL_AUDITS_BLOCKING=True,
             ),
             patch.object(pipeline.requests, "get", return_value=response),
             patch.object(pipeline, "required_model_paths", return_value=[]),
@@ -3896,6 +3903,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                     PROMPT_TRANSLATION_ENABLED=False,
                     QWEN_POSE_MAX_ATTEMPTS=3,
                     QWEN_BOWL_POSE_EXTRA_ATTEMPTS=2,
+                    GENERATION_VISUAL_AUDITS_BLOCKING=True,
                     FFMPEG_BIN=str(ffmpeg),
                 ),
                 patch.object(pipeline.requests, "get", return_value=response),
@@ -5383,6 +5391,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         main_case_raw_identity_chain: bool | None = None,
         persist_identity_digest: bool = True,
         persist_identity_source_digest: bool = True,
+        visual_audits_blocking: bool = True,
     ) -> tuple[dict[str, object], str, str]:
         if pose_attempt not in {1, 2, 3, 4, 5}:
             raise ValueError("pose_attempt must be between 1 and 5")
@@ -5994,6 +6003,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 QWEN_STYLE_LORA=style_lora,
                 QWEN_POSE_MAX_ATTEMPTS=3,
                 QWEN_BOWL_POSE_EXTRA_ATTEMPTS=2,
+                GENERATION_VISUAL_AUDITS_BLOCKING=visual_audits_blocking,
                 QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH=style_strength,
                 MODEL_ROOT=model_root,
                 USER_LORA_DIR=user_lora_dir,
@@ -8226,10 +8236,17 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             job_dir.mkdir(parents=True)
             upload_digests = _write_test_upload_identity(job_dir)
             profile = _subject_profile_with_action_references(root)
-            effective_config, expected_pose_policies = _configured_test_upload_profile(
-                profile,
-                ["eating", "grooming"],
-            )
+            with patch.object(
+                pipeline,
+                "GENERATION_VISUAL_AUDITS_BLOCKING",
+                True,
+            ):
+                effective_config, expected_pose_policies = (
+                    _configured_test_upload_profile(
+                        profile,
+                        ["eating", "grooming"],
+                    )
+                )
             jobs = {
                 job_id: {
                     "job_id": job_id,
@@ -8515,6 +8532,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                     OUTPUT_ROOT=output_root,
                     COMFY_INPUT=comfy_input,
                     JOBS=jobs,
+                    GENERATION_VISUAL_AUDITS_BLOCKING=True,
                 ),
                 patch.object(
                     pipeline,
@@ -9871,6 +9889,159 @@ class PoseAttemptFailureReportingTests(unittest.TestCase):
         ]
         summary = pipeline.pose_attempt_failure_summary(attempts)
         self.assertEqual(summary, "persistent: coherent_long_fur_energy")
+
+
+class AdvisoryGenerationAuditTests(unittest.TestCase):
+    def test_default_policy_keeps_only_runtime_integrity_blocking(self) -> None:
+        self.assertFalse(pipeline.GENERATION_VISUAL_AUDITS_BLOCKING)
+        self.assertEqual(
+            pipeline.GENERATION_AUDIT_POLICY,
+            "runtime_integrity_required_visual_content_advisory_v1",
+        )
+        audit = pipeline.skipped_visual_audit("grooming_pose_detail")
+        self.assertTrue(audit["acceptable"])
+        self.assertFalse(audit["blocking"])
+        self.assertEqual(audit["status"], "skipped_advisory")
+
+    def test_palette_drift_no_longer_rejects_all_canonical_candidates(self) -> None:
+        attempts = [
+            {
+                "attempt": attempt,
+                "identity_palette": {
+                    "acceptable": False,
+                    "issues": ["achromatic_coat_value_balance_lost"],
+                    "penalty": float(attempt),
+                },
+                "quality": {"penalty": float(attempt)},
+                "chroma": {"acceptable": True},
+            }
+            for attempt in range(1, 4)
+        ]
+        selected = pipeline.select_canonical_fallback_attempt(
+            attempts,
+            identity_palette_required=True,
+        )
+        self.assertEqual(selected["attempt"], 1)
+
+    def test_semantic_recovery_ignores_visual_issues_but_not_bad_alpha(self) -> None:
+        failed_visual = {
+            "acceptable": False,
+            "issues": ["visual_issue"],
+        }
+        self.assertIsNone(
+            pipeline.semantic_recovery_gate_failure(
+                {"acceptable": True},
+                failed_visual,
+                failed_visual,
+                failed_visual,
+                failed_visual,
+                failed_visual,
+            )
+        )
+        self.assertEqual(
+            pipeline.semantic_recovery_gate_failure(
+                {"acceptable": False},
+                failed_visual,
+                failed_visual,
+                failed_visual,
+            ),
+            "semantic_chroma_invalid",
+        )
+
+    def test_pre_scail_revalidation_needs_alpha_and_digests_not_surface_scores(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "outputs"
+            comfy_input = root / "comfy-input"
+            job_id = "advisory-pre-scail"
+            job_dir = output_root / job_id
+            job_dir.mkdir(parents=True)
+            canonical = job_dir / "cartoon_reference_transparent.png"
+            canonical_image1 = job_dir / "cartoon_reference.png"
+            action_reference = job_dir / "eating_transparent.png"
+            rgba = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            rgba.paste((90, 100, 110, 255), (128, 64, 384, 448))
+            rgba.save(canonical)
+            rgba.save(action_reference)
+            green = Image.new("RGB", (512, 512), (0, 255, 0))
+            green.paste((90, 100, 110), (128, 64, 384, 448))
+            green.save(canonical_image1)
+            comfy_canonical = (
+                comfy_input
+                / "local_video_api"
+                / job_id
+                / canonical_image1.name
+            )
+            comfy_canonical.parent.mkdir(parents=True)
+            comfy_canonical.write_bytes(canonical_image1.read_bytes())
+            canonical_digest = pipeline.file_sha256(canonical)
+            image1_digest = pipeline.file_sha256(canonical_image1)
+            action_digest = pipeline.file_sha256(action_reference)
+            jobs: dict[str, dict[str, object]] = {
+                job_id: {
+                    "job_id": job_id,
+                    "subject_source": "qwen_generated_upload",
+                    "reference_generation_completed": True,
+                    "reference_generation_status": "completed",
+                    "reference_normalization_status": "completed",
+                    "canonical_reference_generated": True,
+                    "canonical_reference_used": True,
+                    "canonical_reference_normalized": True,
+                    "canonical_reference_transparent": True,
+                    "qwen_action_keyframes_normalized": True,
+                    "qwen_action_keyframes_transparent": True,
+                    "qwen_action_reference_normalization_policy": (
+                        pipeline.QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+                    ),
+                    "qwen_action_reference_byte_preserved": True,
+                    "surface_texture_gate_status": "skipped_advisory",
+                    "canonical_reference_path": str(canonical),
+                    "canonical_reference_sha256": canonical_digest,
+                    "canonical_public_reference_path": str(canonical),
+                    "canonical_public_reference_sha256": canonical_digest,
+                    "canonical_qwen_image1_path": str(canonical_image1),
+                    "canonical_qwen_image1_comfy_path": str(comfy_canonical),
+                    "canonical_qwen_image1_sha256": image1_digest,
+                    "canonical_qwen_image1_comfy_sha256": image1_digest,
+                    "subject_reference_paths": {"eating": str(action_reference)},
+                    "qwen_action_keyframe_sha256s": {"eating": action_digest},
+                    "qwen_reference_generated_actions": ["eating"],
+                }
+            }
+            effective_config = {
+                "actions": {
+                    "eating": {
+                        "reference_kind": "qwen_generated_upload",
+                        "reference": str(action_reference),
+                        "reference_sha256": action_digest,
+                    }
+                }
+            }
+            with (
+                patch.multiple(
+                    pipeline,
+                    OUTPUT_ROOT=output_root,
+                    COMFY_INPUT=comfy_input,
+                    JOBS=jobs,
+                    GENERATION_VISUAL_AUDITS_BLOCKING=False,
+                ),
+                patch.object(pipeline, "verify_uploaded_identity_submission"),
+            ):
+                pipeline.revalidate_uploaded_qwen_references_before_scail(
+                    job_id,
+                    jobs[job_id],
+                    effective_config,
+                    ["eating"],
+                )
+
+            self.assertTrue(jobs[job_id]["qwen_reference_pre_scail_revalidated"])
+            self.assertEqual(
+                jobs[job_id]["qwen_reference_pre_scail_visual_audit_status"],
+                "skipped_advisory",
+            )
+            self.assertEqual(jobs[job_id]["subject_fur_surface_quality"], {})
 
 
 if __name__ == "__main__":

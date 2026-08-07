@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.21.43"
+API_VERSION = "2.22.0"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -144,6 +144,20 @@ MAX_UPLOAD_BYTES = int(
 QWEN_POSE_MAX_ATTEMPTS = max(
     1, min(3, int(os.environ.get("QWEN_POSE_MAX_ATTEMPTS", "3")))
 )
+GENERATION_AUDIT_POLICY = "runtime_integrity_required_visual_content_advisory_v1"
+GENERATION_VISUAL_AUDIT_MODE = os.environ.get(
+    "LOCAL_VIDEO_VISUAL_AUDIT_MODE",
+    "advisory",
+).strip().lower()
+GENERATION_VISUAL_AUDITS_BLOCKING = GENERATION_VISUAL_AUDIT_MODE in {
+    "blocking",
+    "strict",
+    "enforced",
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 FUR_SURFACE_GATE_MAX_REJECTIONS = 3
 FUR_SURFACE_GATE_RETRY_POLICY = "preserve_configured_eating_bowl_surface_recovery_v1"
 QWEN_BOWL_POSE_RETRY_NAME = "bowl_palette_canvas_seed_retry"
@@ -226,7 +240,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.31.11"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.32.0"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "main_case_grooming_canonical_open_channel_then_identity_refine_v26"
 )
@@ -1774,11 +1788,12 @@ def configure_uploaded_subject_validation(
             raise RuntimeError(
                 f"Uploaded {action} driver is not the frozen Main_case runtime."
             )
-        require_uploaded_fur_surface_gate(action_config, action)
-        action_config["fur_surface_gate"]["candidate_comparison_mode"] = (
-            UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
-        )
-        expected_surface_gate_actions.append(action)
+        if GENERATION_VISUAL_AUDITS_BLOCKING:
+            require_uploaded_fur_surface_gate(action_config, action)
+            action_config["fur_surface_gate"]["candidate_comparison_mode"] = (
+                UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
+            )
+            expected_surface_gate_actions.append(action)
 
         if action == "eating":
             expected_pose_policies[action] = FULL_DRIVER_EATING_POSE_POLICY
@@ -1813,13 +1828,25 @@ def configure_uploaded_subject_validation(
         "canonical_chroma_spill_policy": (UPLOADED_IDENTITY_CHROMA_SPILL_POLICY),
         "canonical_chroma_spill_preserves_paired_eye_accents": True,
         "canonical_interior_hole_gate": True,
-        "surface_texture_gate_required_before_scail": True,
+        "generation_audit_policy": GENERATION_AUDIT_POLICY,
+        "visual_content_audit_mode": (
+            "blocking" if GENERATION_VISUAL_AUDITS_BLOCKING else "advisory"
+        ),
+        "runtime_integrity_checks_required": True,
+        "visual_content_audits_blocking": GENERATION_VISUAL_AUDITS_BLOCKING,
+        "surface_texture_gate_required_before_scail": (
+            GENERATION_VISUAL_AUDITS_BLOCKING
+        ),
         "profile_relative_surface_gate_used": False,
         "uploaded_identity_absolute_surface_gate_used": True,
         "surface_candidate_comparison_mode": (
             UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
         ),
-        "surface_texture_gate": "required_before_scail",
+        "surface_texture_gate": (
+            "required_before_scail"
+            if GENERATION_VISUAL_AUDITS_BLOCKING
+            else "skipped_advisory"
+        ),
         "absolute_animation_contour_gate": False,
         "actions": list(actions),
         "expected_surface_gate_actions": expected_surface_gate_actions,
@@ -2363,7 +2390,7 @@ def require_subject_replacement_assets(
         else SCAIL_ACTION_CONFIG[action]["driving_template"]
         for action in actions
     )
-    if effective_config is not None:
+    if effective_config is not None and GENERATION_VISUAL_AUDITS_BLOCKING:
         for action in actions:
             action_config = effective_config["actions"][action]
             surface_gate = action_config.get("fur_surface_gate")
@@ -8226,6 +8253,24 @@ def identity_palette_audit(
     }
 
 
+def skipped_visual_audit(name: str) -> dict[str, Any]:
+    """Describe a deliberately skipped content audit as a non-blocking result."""
+    return {
+        "audit": name,
+        "available": False,
+        "evaluated": False,
+        "acceptable": True,
+        "status": "skipped_advisory",
+        "verdict": "not_blocking",
+        "blocking": False,
+        "warning": False,
+        "issues": [],
+        "warnings": [],
+        "penalty": 0.0,
+        "generation_audit_policy": GENERATION_AUDIT_POLICY,
+    }
+
+
 def canonical_fallback_score(record: dict[str, Any]) -> float:
     """Rank canonical retries while making an identity failure prohibitively costly."""
     palette = record.get("identity_palette")
@@ -8253,7 +8298,7 @@ def select_canonical_fallback_attempt(
     *,
     identity_palette_required: bool,
 ) -> dict[str, Any]:
-    """Select the best usable retry and fail closed when every coat palette drifted."""
+    """Select the best usable retry without blocking on advisory visual drift."""
     if not attempts:
         raise RuntimeError("Canonical generation produced no fallback candidate.")
     identity_safe = [
@@ -8262,7 +8307,11 @@ def select_canonical_fallback_attempt(
         if not isinstance(record.get("identity_palette"), dict)
         or record["identity_palette"].get("acceptable", True)
     ]
-    if identity_palette_required and not identity_safe:
+    if (
+        GENERATION_VISUAL_AUDITS_BLOCKING
+        and identity_palette_required
+        and not identity_safe
+    ):
         issues = list(
             dict.fromkeys(
                 issue
@@ -8279,10 +8328,12 @@ def select_canonical_fallback_attempt(
             f"{len(attempts)} attempts: "
             + (", ".join(issues) or "no identity-safe candidate")
         )
-    return min(
-        identity_safe or attempts,
-        key=canonical_fallback_score,
+    candidates = (
+        identity_safe or attempts
+        if GENERATION_VISUAL_AUDITS_BLOCKING
+        else attempts
     )
+    return min(candidates, key=canonical_fallback_score)
 
 
 SEMANTIC_RECOVERABLE_FRAMING_ISSUES = frozenset(
@@ -8310,9 +8361,11 @@ def semantic_recovery_gate_failure(
     fur_silhouette: dict[str, Any] | None = None,
     fur_surface_gate: dict[str, Any] | None = None,
 ) -> str | None:
-    """Return the first fail-closed rejection reason for a recovered keyframe."""
+    """Return a technical rejection, plus visual rejection only in strict mode."""
     if not bool(chroma.get("acceptable")):
         return "semantic_chroma_invalid"
+    if not GENERATION_VISUAL_AUDITS_BLOCKING:
+        return None
     if not bool(quality.get("acceptable")):
         return "semantic_subject_quality_invalid"
     if not bool(similarity.get("acceptable")):
@@ -8689,11 +8742,19 @@ def semantic_background_recovery(
         raise RuntimeError(
             "Semantic background recovery did not find a usable pet subject."
         )
-    semantic_quality = pose_cutout_quality(semantic_target, pose)
+    semantic_quality = (
+        pose_cutout_quality(semantic_target, pose)
+        if GENERATION_VISUAL_AUDITS_BLOCKING
+        else skipped_visual_audit("semantic_background_subject_quality")
+    )
     # The raw rembg canvas can legitimately be tight even when the complete pet
     # was recovered. prepare_landscape_keyframe below recenters and scales it, so
     # framing-only issues are evaluated again on the normalized final cutout.
-    blocking_semantic_issues = semantic_quality_blocking_issues(semantic_quality)
+    blocking_semantic_issues = (
+        semantic_quality_blocking_issues(semantic_quality)
+        if GENERATION_VISUAL_AUDITS_BLOCKING
+        else []
+    )
     if blocking_semantic_issues:
         raise RuntimeError(
             "Semantic background recovery produced an incomplete or invalid pet subject: "
@@ -11007,8 +11068,13 @@ def semantic_recovery_candidate_eligible(record: dict[str, Any]) -> bool:
     return bool(
         isinstance(chroma, dict)
         and not chroma.get("acceptable", False)
-        and isinstance(similarity, dict)
-        and similarity.get("acceptable", False)
+        and (
+            not GENERATION_VISUAL_AUDITS_BLOCKING
+            or (
+                isinstance(similarity, dict)
+                and similarity.get("acceptable", False)
+            )
+        )
     )
 
 
@@ -13402,7 +13468,9 @@ def audit_uploaded_identity_view_set(
         "roles": roles,
         "view_count": len(roles),
         "acceptable": not issues,
-        "fail_closed": True,
+        "fail_closed": GENERATION_VISUAL_AUDITS_BLOCKING,
+        "blocking": GENERATION_VISUAL_AUDITS_BLOCKING,
+        "generation_audit_policy": GENERATION_AUDIT_POLICY,
         "issues": list(dict.fromkeys(issues)),
         "duplicate_pairs": duplicate_pairs,
         "view_angle_comparisons": view_angle_comparisons,
@@ -13426,7 +13494,25 @@ def prepare_uploaded_subject_qwen_references(
         job = dict(JOBS[job_id])
     job_dir = OUTPUT_ROOT / job_id
     upload_integrity = verify_uploaded_identity_submission(job, job_dir)
-    identity_view_audit = audit_uploaded_identity_view_set(upload_integrity)
+    identity_view_audit = (
+        audit_uploaded_identity_view_set(upload_integrity)
+        if GENERATION_VISUAL_AUDITS_BLOCKING
+        else {
+            "policy": UPLOADED_IDENTITY_VIEW_POLICY,
+            "status": "skipped_advisory",
+            "acceptable": True,
+            "blocking": False,
+            "fail_closed": False,
+            "generation_audit_policy": GENERATION_AUDIT_POLICY,
+            "view_mode": upload_integrity.get("view_mode"),
+            "roles": list(upload_integrity.get("view_roles") or []),
+            "view_count": len(upload_integrity.get("view_roles") or []),
+            "issues": [],
+            "warnings": [],
+            "palettes": {},
+            "upper_body_palettes": {},
+        }
+    )
     write_json_atomic(
         job_dir / "workflows" / "uploaded_identity_view_set_audit.json",
         identity_view_audit,
@@ -13435,10 +13521,23 @@ def prepare_uploaded_subject_qwen_references(
         job_id,
         uploaded_identity_view_audit=identity_view_audit,
         uploaded_identity_view_verdict=(
-            "passed" if identity_view_audit["acceptable"] else "failed"
+            "skipped_advisory"
+            if identity_view_audit.get("status") == "skipped_advisory"
+            else (
+                "passed"
+                if identity_view_audit["acceptable"]
+                else (
+                    "failed"
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else "warning_advisory"
+                )
+            )
         ),
     )
-    if not identity_view_audit["acceptable"]:
+    if (
+        GENERATION_VISUAL_AUDITS_BLOCKING
+        and not identity_view_audit["acceptable"]
+    ):
         update_job(
             job_id,
             reference_generation_status="failed",
@@ -13447,6 +13546,12 @@ def prepare_uploaded_subject_qwen_references(
         raise RuntimeError(
             "Uploaded identity view set failed validation: "
             + ", ".join(identity_view_audit["issues"])
+        )
+    if not identity_view_audit["acceptable"]:
+        LOGGER.warning(
+            "%s uploaded identity view audit is advisory: %s",
+            job_id,
+            identity_view_audit["issues"],
         )
 
     image_profile = IMAGE_PROFILES[SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE]
@@ -13487,17 +13592,21 @@ def prepare_uploaded_subject_qwen_references(
     if (
         not isinstance(upload_validation, dict)
         or upload_validation.get("policy") != QWEN_FULL_BODY_FIRST_FRAME_PIPELINE
-        or upload_validation.get("expected_surface_gate_actions") != actions
+        or (
+            GENERATION_VISUAL_AUDITS_BLOCKING
+            and upload_validation.get("expected_surface_gate_actions") != actions
+        )
     ):
         raise RuntimeError(
             "Uploaded Qwen job lacks its complete queue-time per-action "
             "surface validation contract."
         )
-    for action in actions:
-        require_uploaded_fur_surface_gate(
-            effective_subject_config["actions"][action],
-            action,
-        )
+    if GENERATION_VISUAL_AUDITS_BLOCKING:
+        for action in actions:
+            require_uploaded_fur_surface_gate(
+                effective_subject_config["actions"][action],
+                action,
+            )
     pose_reference_inputs: dict[str, str] = {}
     pose_reference_source_paths: dict[str, str] = {}
     pose_reference_source_sha256s: dict[str, str] = {}
@@ -14271,20 +14380,29 @@ def prepare_uploaded_subject_qwen_references(
         if isinstance(upload_validation, dict)
         else []
     )
-    if expected_surface_gate_actions != actions:
+    if (
+        GENERATION_VISUAL_AUDITS_BLOCKING
+        and expected_surface_gate_actions != actions
+    ):
         raise RuntimeError(
             "Uploaded Qwen references lost their complete per-action fur surface "
             "gate contract."
         )
-    for action in actions:
-        require_uploaded_fur_surface_gate(
-            effective_subject_config["actions"][action],
-            action,
-        )
-    gated_surface_actions = list(actions)
+    if GENERATION_VISUAL_AUDITS_BLOCKING:
+        for action in actions:
+            require_uploaded_fur_surface_gate(
+                effective_subject_config["actions"][action],
+                action,
+            )
+    gated_surface_actions = (
+        list(actions) if GENERATION_VISUAL_AUDITS_BLOCKING else []
+    )
     fur_surface_quality_by_action: dict[str, Any] = {}
     selected_surface_metrics = refreshed.get("fur_surface_gate_selected_metrics")
-    if not isinstance(selected_surface_metrics, dict):
+    if (
+        GENERATION_VISUAL_AUDITS_BLOCKING
+        and not isinstance(selected_surface_metrics, dict)
+    ):
         raise RuntimeError(
             "Qwen references lack selected fur surface metrics; refusing "
             "to enter SCAIL."
@@ -14367,7 +14485,9 @@ def prepare_uploaded_subject_qwen_references(
         fur_surface_quality_by_action[action] = defensive_surface
 
     fur_silhouette_quality_by_action: dict[str, Any] = {}
-    for action, reference in action_references.items():
+    for action, reference in (
+        action_references.items() if GENERATION_VISUAL_AUDITS_BLOCKING else ()
+    ):
         action_config = effective_subject_config["actions"][action]
         fur_gate = action_config.get("fur_silhouette_gate")
         if not isinstance(fur_gate, dict) or not fur_gate.get("enabled"):
@@ -14435,16 +14555,39 @@ def prepare_uploaded_subject_qwen_references(
         uploaded_identity_view_mode=upload_integrity["view_mode"],
         uploaded_identity_view_roles=upload_integrity["view_roles"],
         uploaded_identity_view_count=len(upload_integrity["view_roles"]),
-        uploaded_identity_view_verdict="passed",
+        uploaded_identity_view_verdict=(
+            "skipped_advisory"
+            if identity_view_audit.get("status") == "skipped_advisory"
+            else (
+                "passed"
+                if identity_view_audit["acceptable"]
+                else "warning_advisory"
+            )
+        ),
         subject_fur_silhouette_quality=fur_silhouette_quality_by_action,
         subject_fur_surface_quality=fur_surface_quality_by_action,
         fur_surface_gate_status={
-            action: "passed" for action in fur_surface_quality_by_action
+            action: (
+                "passed"
+                if GENERATION_VISUAL_AUDITS_BLOCKING
+                else "skipped_advisory"
+            )
+            for action in actions
         },
-        surface_texture_gate_status=("passed"),
+        surface_texture_gate_status=(
+            "passed"
+            if GENERATION_VISUAL_AUDITS_BLOCKING
+            else "skipped_advisory"
+        ),
         fur_surface_gate_final_quality={
             "scope": "qwen_action_reference_pre_scail",
-            "status": "passed",
+            "status": (
+                "passed"
+                if GENERATION_VISUAL_AUDITS_BLOCKING
+                else "skipped_advisory"
+            ),
+            "blocking": GENERATION_VISUAL_AUDITS_BLOCKING,
+            "generation_audit_policy": GENERATION_AUDIT_POLICY,
             "policy": FUR_SURFACE_GATE_POLICY,
             "gate_version": FUR_SURFACE_GATE_VERSION,
             "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
@@ -15184,7 +15327,10 @@ def revalidate_uploaded_qwen_references_before_scail(
         or job.get("qwen_action_reference_normalization_policy")
         != QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
         or job.get("qwen_action_reference_byte_preserved") is not True
-        or job.get("surface_texture_gate_status") != "passed"
+        or (
+            GENERATION_VISUAL_AUDITS_BLOCKING
+            and job.get("surface_texture_gate_status") != "passed"
+        )
     ):
         raise RuntimeError(
             "Persisted uploaded Qwen reference stage is incomplete; refusing "
@@ -15249,15 +15395,21 @@ def revalidate_uploaded_qwen_references_before_scail(
     selected_surface_metrics = job.get("fur_surface_gate_selected_metrics")
     stored_surface_quality = job.get("subject_fur_surface_quality")
     final_surface_quality = job.get("fur_surface_gate_final_quality")
+    surface_provenance_complete = bool(
+        isinstance(fur_surface_status, dict)
+        and isinstance(selected_surface_metrics, dict)
+        and isinstance(stored_surface_quality, dict)
+        and isinstance(final_surface_quality, dict)
+        and final_surface_quality.get("status") == "passed"
+    )
     if (
         not isinstance(reference_paths, dict)
         or not isinstance(qwen_reference_sha256s, dict)
-        or not isinstance(fur_surface_status, dict)
-        or not isinstance(selected_surface_metrics, dict)
-        or not isinstance(stored_surface_quality, dict)
-        or not isinstance(final_surface_quality, dict)
-        or final_surface_quality.get("status") != "passed"
         or list(job.get("qwen_reference_generated_actions") or []) != actions
+        or (
+            GENERATION_VISUAL_AUDITS_BLOCKING
+            and not surface_provenance_complete
+        )
     ):
         raise RuntimeError(
             "Persisted uploaded Qwen per-action quality provenance is incomplete."
@@ -15265,10 +15417,11 @@ def revalidate_uploaded_qwen_references_before_scail(
 
     fresh_surface_quality: dict[str, Any] = {}
     for action in actions:
-        require_uploaded_fur_surface_gate(
-            effective_subject_config["actions"][action],
-            action,
-        )
+        if GENERATION_VISUAL_AUDITS_BLOCKING:
+            require_uploaded_fur_surface_gate(
+                effective_subject_config["actions"][action],
+                action,
+            )
         reference_path = Path(str(reference_paths.get(action) or ""))
         reference_digest = (
             file_sha256(reference_path) if reference_path.is_file() else ""
@@ -15286,7 +15439,13 @@ def revalidate_uploaded_qwen_references_before_scail(
             or not re.fullmatch(r"[0-9a-f]{64}", reference_digest)
             or expected_reference_digest != reference_digest
             or persisted_qwen_digest != reference_digest
-            or fur_surface_status.get(action) != "passed"
+            or (
+                GENERATION_VISUAL_AUDITS_BLOCKING
+                and (
+                    not isinstance(fur_surface_status, dict)
+                    or fur_surface_status.get(action) != "passed"
+                )
+            )
         ):
             raise RuntimeError(
                 f"Persisted Qwen {action} reference changed before SCAIL."
@@ -15304,6 +15463,9 @@ def revalidate_uploaded_qwen_references_before_scail(
                     f"Persisted Qwen {action} reference is not a usable "
                     "512x512 transparent cutout."
                 )
+
+        if not GENERATION_VISUAL_AUDITS_BLOCKING:
+            continue
 
         selected_surface = selected_surface_metrics.get(action)
         selected_gate = (
@@ -15372,6 +15534,15 @@ def revalidate_uploaded_qwen_references_before_scail(
     update_job(
         job_id,
         subject_fur_surface_quality=fresh_surface_quality,
+        generation_audit_policy=GENERATION_AUDIT_POLICY,
+        visual_content_audit_mode=(
+            "blocking" if GENERATION_VISUAL_AUDITS_BLOCKING else "advisory"
+        ),
+        qwen_reference_pre_scail_visual_audit_status=(
+            "passed"
+            if GENERATION_VISUAL_AUDITS_BLOCKING
+            else "skipped_advisory"
+        ),
         qwen_reference_pre_scail_revalidated=True,
         qwen_reference_pre_scail_revalidated_at=utc_now(),
         qwen_reference_pre_scail_sha256s={
@@ -15439,7 +15610,11 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "normalized_transparent_references_required"
             )
             is not True
-            or frozen_upload_validation.get("expected_surface_gate_actions") != actions
+            or (
+                GENERATION_VISUAL_AUDITS_BLOCKING
+                and frozen_upload_validation.get("expected_surface_gate_actions")
+                != actions
+            )
             or frozen_upload_validation.get("expected_pose_policies")
             != expected_pose_policies
         ):
@@ -15447,11 +15622,12 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "Uploaded identity job lacks its frozen Qwen full-body and "
                 "action-keyframe validation policy."
             )
-        for action in actions:
-            require_uploaded_fur_surface_gate(
-                effective_subject_config["actions"][action],
-                action,
-            )
+        if GENERATION_VISUAL_AUDITS_BLOCKING:
+            for action in actions:
+                require_uploaded_fur_surface_gate(
+                    effective_subject_config["actions"][action],
+                    action,
+                )
     frozen_actions, upload_reference_actions = partition_subject_reference_actions(
         effective_subject_config,
         actions,
@@ -15476,7 +15652,7 @@ def run_subject_replacement_job(job_id: str) -> None:
             raise RuntimeError(
                 "Uploaded identity reference stage lost the effective subject config."
             )
-    if uploaded_job:
+    if uploaded_job and GENERATION_VISUAL_AUDITS_BLOCKING:
         refreshed_upload_validation = effective_subject_config.get("upload_validation")
         if (
             not isinstance(refreshed_upload_validation, dict)
@@ -15767,12 +15943,18 @@ def run_subject_replacement_job(job_id: str) -> None:
             expected_pose_policy,
         )
         pose_metadata = manifest.get("pose_metadata")
-        final_video_comparison_scope = select_final_video_fur_surface_comparison_scope(
-            action=action,
-            action_config=action_config,
-            output_format=job.get("output_format"),
-            reference_policy=reference_policy,
-            pose_metadata=(pose_metadata if isinstance(pose_metadata, dict) else None),
+        final_video_comparison_scope = (
+            select_final_video_fur_surface_comparison_scope(
+                action=action,
+                action_config=action_config,
+                output_format=job.get("output_format"),
+                reference_policy=reference_policy,
+                pose_metadata=(
+                    pose_metadata if isinstance(pose_metadata, dict) else None
+                ),
+            )
+            if GENERATION_VISUAL_AUDITS_BLOCKING
+            else None
         )
         write_workflow(job_dir, f"scail_{action}.json", workflow)
         write_json_atomic(job_dir / f"{action}_prepare_manifest.json", manifest)
@@ -15877,7 +16059,11 @@ def run_subject_replacement_job(job_id: str) -> None:
         shutil.copy2(generated_video, video_target)
         final_video_fur_surface: dict[str, Any] | None = None
         fur_surface_config = action_config.get("fur_surface_gate")
-        if isinstance(fur_surface_config, dict) and fur_surface_config.get("enabled"):
+        if (
+            GENERATION_VISUAL_AUDITS_BLOCKING
+            and isinstance(fur_surface_config, dict)
+            and fur_surface_config.get("enabled")
+        ):
             update_job(
                 job_id,
                 stage="auditing_final_video_fur_surface",
@@ -16018,6 +16204,38 @@ def run_subject_replacement_job(job_id: str) -> None:
                     "primary": False,
                 },
             )
+        elif isinstance(fur_surface_config, dict) and fur_surface_config.get(
+            "enabled"
+        ):
+            final_video_fur_surface = {
+                "status": "skipped_advisory",
+                "passed": None,
+                "blocking": False,
+                "action": action,
+                "policy": FINAL_VIDEO_FUR_AUDIT_POLICY,
+                "version": FINAL_VIDEO_FUR_AUDIT_VERSION,
+                "generation_audit_policy": GENERATION_AUDIT_POLICY,
+                "reason": "visual_content_audits_are_non_blocking",
+            }
+            final_video_fur_surface_by_action[action] = final_video_fur_surface
+            update_job(
+                job_id,
+                final_video_fur_surface_status={
+                    audit_action: str(audit.get("status") or "skipped_advisory")
+                    for audit_action, audit in final_video_fur_surface_by_action.items()
+                },
+                final_video_fur_surface_quality=dict(
+                    final_video_fur_surface_by_action
+                ),
+                fur_surface_gate_final_quality={
+                    "scope": "candidate_reference_and_final_video",
+                    "status": "skipped_advisory",
+                    "blocking": False,
+                    "generation_audit_policy": GENERATION_AUDIT_POLICY,
+                    "actions": dict(final_video_fur_surface_by_action),
+                    "final_video_frame_audit": False,
+                },
+            )
         video_output = {
             "type": "subject_replacement_video",
             "action": action,
@@ -16033,7 +16251,11 @@ def run_subject_replacement_job(job_id: str) -> None:
             "driving_template": Path(action_config["driving_animation"]).name,
             "final_video_fur_surface_audit": (
                 f"{action}_final_video_fur_surface.json"
-                if final_video_fur_surface is not None
+                if (
+                    final_video_fur_surface is not None
+                    and final_video_fur_surface.get("status")
+                    != "skipped_advisory"
+                )
                 else None
             ),
             "primary": job.get("output_format") != "transparent_gif",
@@ -16070,7 +16292,11 @@ def run_subject_replacement_job(job_id: str) -> None:
             transparent_metrics = logged_json(transparent_log)
             fur_contour_quality: dict[str, Any] | None = None
             fur_gate = action_config.get("fur_silhouette_gate")
-            if isinstance(fur_gate, dict) and fur_gate.get("enabled"):
+            if (
+                GENERATION_VISUAL_AUDITS_BLOCKING
+                and isinstance(fur_gate, dict)
+                and fur_gate.get("enabled")
+            ):
                 pose_metadata = manifest.get("pose_metadata")
                 full_driver_pose = isinstance(
                     pose_metadata, dict
@@ -16124,6 +16350,19 @@ def run_subject_replacement_job(job_id: str) -> None:
                         baseline_path,
                     )
                 transparent_metrics["fur_contour"] = fur_contour_quality
+            elif isinstance(fur_gate, dict) and fur_gate.get("enabled"):
+                transparent_metrics["fur_contour"] = {
+                    "status": "skipped_advisory",
+                    "acceptable": None,
+                    "blocking": False,
+                    "generation_audit_policy": GENERATION_AUDIT_POLICY,
+                }
+                update_job(
+                    job_id,
+                    fur_contour_gate_status="skipped_advisory",
+                    fur_contour_gate_action=action,
+                    fur_contour_gate_quality=transparent_metrics["fur_contour"],
+                )
             write_json_atomic(
                 job_dir / f"{action}_transparent_metrics.json",
                 transparent_metrics,
@@ -16339,6 +16578,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         progress=1,
         started_at=job.get("started_at") or utc_now(),
         error=None,
+        generation_audit_policy=GENERATION_AUDIT_POLICY,
+        visual_content_audit_mode=(
+            "blocking" if GENERATION_VISUAL_AUDITS_BLOCKING else "advisory"
+        ),
+        visual_content_audits_blocking=GENERATION_VISUAL_AUDITS_BLOCKING,
+        runtime_integrity_checks_required=True,
     )
     raise_if_cancelled(job_id)
     require_models(include_video=not skip_video)
@@ -16669,7 +16914,21 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             raise RuntimeError(
                 "Main_case uploaded identity input is missing or its digest changed."
             )
-    identity_palette_guard = bool(job.get("identity_palette_guard", False))
+    requested_identity_palette_guard = bool(
+        job.get("identity_palette_guard", False)
+    )
+    identity_palette_guard = bool(
+        GENERATION_VISUAL_AUDITS_BLOCKING
+        and requested_identity_palette_guard
+    )
+    update_job(
+        job_id,
+        requested_identity_palette_guard=requested_identity_palette_guard,
+        effective_identity_palette_guard=identity_palette_guard,
+        identity_palette_audit_status=(
+            "enabled" if identity_palette_guard else "skipped_advisory"
+        ),
+    )
     identity_source_path = job_dir / "input_identity_source.png"
     if force_qwen_reference:
         if upload_integrity is None:
@@ -16806,7 +17065,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         cartoon_attempts: list[dict[str, Any]] = []
         cartoon_workflows: list[dict[str, Any]] = []
         selected_cartoon: dict[str, Any] | None = None
-        canonical_profiles = recovery_profiles
+        canonical_profiles = (
+            recovery_profiles
+            if GENERATION_VISUAL_AUDITS_BLOCKING
+            else recovery_profiles[:1]
+        )
         for attempt, profile in enumerate(canonical_profiles, start=1):
             raise_if_cancelled(job_id)
             if attempt > 1:
@@ -16904,7 +17167,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 chroma_metrics = evaluate_chroma_cutout(
                     attempt_reference,
                     attempt_cutout,
-                    validate_canonical_interior=True,
+                    validate_canonical_interior=(
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 - image requests may return the saved raw image
                 if not image_request:
@@ -16946,6 +17211,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
                         },
                     }
+                    if not GENERATION_VISUAL_AUDITS_BLOCKING:
+                        chroma_metrics["warnings"] = list(
+                            chroma_metrics.get("issues", [])
+                        )
+                        chroma_metrics["issues"] = []
+                        chroma_metrics["acceptable"] = True
             palette_input_path = (
                 attempt_cutout if attempt_cutout.is_file() else attempt_reference
             )
@@ -16991,7 +17262,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 upper_body_palette_quality,
             )
             cartoon_quality = (
-                pose_cutout_quality(attempt_cutout, "canonical character")
+                (
+                    pose_cutout_quality(attempt_cutout, "canonical character")
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else skipped_visual_audit("canonical_subject_quality")
+                )
                 if chroma_metrics["acceptable"]
                 else None
             )
@@ -17014,9 +17289,17 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 }
             attempt_acceptable = bool(
                 chroma_metrics["acceptable"]
-                and cartoon_quality
-                and cartoon_quality["acceptable_after_normalization"]
-                and (palette_quality is None or palette_quality["acceptable"])
+                and (
+                    not GENERATION_VISUAL_AUDITS_BLOCKING
+                    or (
+                        cartoon_quality
+                        and cartoon_quality["acceptable_after_normalization"]
+                        and (
+                            palette_quality is None
+                            or palette_quality["acceptable"]
+                        )
+                    )
+                )
             )
             record = {
                 "attempt": attempt,
@@ -17225,6 +17508,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         fallback_cutout,
                         source_identity_palette,
                     )
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else {
+                        "policy": UPLOADED_IDENTITY_CHROMA_SPILL_POLICY,
+                        "applied": False,
+                        "status": "skipped_advisory",
+                    }
                 )
                 fallback_candidate_palette = (
                     identity_palette_signature(fallback_cutout)
@@ -17268,6 +17557,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     fallback_upper_quality,
                 )
                 if (
+                    GENERATION_VISUAL_AUDITS_BLOCKING
+                    and
                     fallback_palette_quality is not None
                     and fallback_palette_quality.get("acceptable") is not True
                 ):
@@ -17278,6 +17569,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             str(issue)
                             for issue in fallback_palette_quality.get("issues", [])
                         )
+                    )
+                if (
+                    fallback_palette_quality is not None
+                    and fallback_palette_quality.get("acceptable") is not True
+                ):
+                    LOGGER.warning(
+                        "%s canonical identity palette audit is advisory after "
+                        "semantic recovery: %s",
+                        job_id,
+                        fallback_palette_quality.get("issues", []),
                     )
                 with Image.open(fallback_green) as recovered_image:
                     cartoon_size = recovered_image.size
@@ -17365,7 +17666,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 normalized_chroma = evaluate_chroma_cutout(
                     cartoon_reference,
                     cartoon_transparent,
-                    validate_canonical_interior=True,
+                    validate_canonical_interior=(
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                    ),
                 )
                 if not normalized_chroma["acceptable"]:
                     raise RuntimeError(
@@ -17699,7 +18002,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
         }
         grooming_pose_gate_required = bool(
-            force_qwen_reference
+            GENERATION_VISUAL_AUDITS_BLOCKING
+            and force_qwen_reference
             and action_key(pose) == "grooming"
             and qwen_guided_identity_policy
         )
@@ -17715,7 +18019,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             else None
         )
         fur_surface_gate_required = bool(
-            force_qwen_reference
+            GENERATION_VISUAL_AUDITS_BLOCKING
+            and force_qwen_reference
             and action_key(pose) in {"eating", "grooming"}
             and qwen_guided_identity_policy
             and isinstance(pose_effective_subject_config, dict)
@@ -17723,6 +18028,17 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             and isinstance(pose_fur_surface_gate, dict)
             and pose_fur_surface_gate.get("enabled") is True
         )
+        if (
+            not GENERATION_VISUAL_AUDITS_BLOCKING
+            and force_qwen_reference
+            and action_key(pose) == "grooming"
+        ):
+            update_job(
+                job_id,
+                grooming_pose_gate_status="skipped_advisory",
+                grooming_pose_gate_fail_closed=False,
+                grooming_pose_gate_blocking=False,
+            )
         fur_surface_rejection_streak = 0
         if fur_surface_gate_required:
             assert isinstance(pose_effective_subject_config, dict)
@@ -17844,6 +18160,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         negative_prompt = QWEN_NEGATIVE
         if transparent_gif:
             active_pose_profiles = pose_generation_profiles(pose, pose_profiles)
+            if not GENERATION_VISUAL_AUDITS_BLOCKING:
+                active_pose_profiles = active_pose_profiles[:1]
             negative_prompt += ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
             if source_palette_negative:
                 negative_prompt += ", " + source_palette_negative
@@ -17876,8 +18194,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             bowl_action = action_uses_bowl(pose)
             pose_fur_reference_path: Path | None = None
             effective_subject_config = job.get("effective_subject_config")
-            if action_key(pose) == "eating" and isinstance(
-                effective_subject_config, dict
+            if (
+                GENERATION_VISUAL_AUDITS_BLOCKING
+                and action_key(pose) == "eating"
+                and isinstance(effective_subject_config, dict)
             ):
                 action_config = effective_subject_config.get("actions", {}).get(
                     "eating"
@@ -17971,7 +18291,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             active_pose_profiles = canonical_grooming_generation_profiles(
                 pose,
                 active_pose_profiles,
-                enabled=canonical_grooming_completion_capable,
+                enabled=(
+                    GENERATION_VISUAL_AUDITS_BLOCKING
+                    and canonical_grooming_completion_capable
+                ),
             )
             grooming_geometry_canonical_reference = bool(
                 effective_pose_identity_input_policy
@@ -19383,6 +19706,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 "error": (f"{type(exc).__name__}: {str(exc)[:1000]}"),
                             },
                         }
+                        if not GENERATION_VISUAL_AUDITS_BLOCKING:
+                            chroma_metrics["warnings"] = list(
+                                chroma_metrics.get("issues", [])
+                            )
+                            chroma_metrics["issues"] = []
+                            chroma_metrics["acceptable"] = True
                     if chroma_metrics.get("acceptable"):
                         cleaned_palette = evaluate_pose_identity_palette(
                             attempt_cutout,
@@ -20220,11 +20549,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         )
                     continue
                 if not chroma_metrics["acceptable"]:
-                    raw_similarity = pose_similarity_quality(
-                        attempt_keyframe,
-                        pose=pose,
-                        canonical_path=canonical_similarity_reference,
-                        previous_poses=accepted_pose_similarity_references,
+                    raw_similarity = (
+                        pose_similarity_quality(
+                            attempt_keyframe,
+                            pose=pose,
+                            canonical_path=canonical_similarity_reference,
+                            previous_poses=accepted_pose_similarity_references,
+                        )
+                        if GENERATION_VISUAL_AUDITS_BLOCKING
+                        else skipped_visual_audit("raw_pose_similarity")
                     )
                     record.update(
                         {
@@ -20328,23 +20661,37 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         chroma_metrics["issues"],
                     )
                     continue
-                quality = pre_surface_pose_quality or pose_cutout_quality(
-                    attempt_cutout,
-                    pose,
-                    require_eating_mouth_contact=(require_eating_mouth_contact),
+                quality = (
+                    pre_surface_pose_quality
+                    or pose_cutout_quality(
+                        attempt_cutout,
+                        pose,
+                        require_eating_mouth_contact=(
+                            require_eating_mouth_contact
+                        ),
+                    )
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else skipped_visual_audit("action_subject_quality")
                 )
-                similarity = pose_similarity_quality(
-                    attempt_cutout,
-                    pose=pose,
-                    canonical_path=canonical_similarity_reference,
-                    previous_poses=accepted_pose_similarity_references,
+                similarity = (
+                    pose_similarity_quality(
+                        attempt_cutout,
+                        pose=pose,
+                        canonical_path=canonical_similarity_reference,
+                        previous_poses=accepted_pose_similarity_references,
+                    )
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else skipped_visual_audit("action_pose_similarity")
                 )
                 fur_silhouette_quality = (
                     eating_fur_silhouette_quality(
                         attempt_cutout,
                         pose_fur_reference_path,
                     )
-                    if pose_fur_reference_path is not None
+                    if (
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                        and pose_fur_reference_path is not None
+                    )
                     else None
                 )
                 record["quality"] = quality
@@ -20401,23 +20748,29 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     {key: value for key, value in record.items() if key != "workflow"}
                 )
                 if (
-                    (palette_quality is None or palette_quality["acceptable"])
-                    and (
-                        fur_silhouette_quality is None
-                        or fur_silhouette_quality["acceptable"]
-                    )
-                    and (
-                        not fur_surface_gate_required
+                    (
+                        not GENERATION_VISUAL_AUDITS_BLOCKING
                         or (
-                            isinstance(fur_surface_gate_metrics, dict)
-                            and fur_surface_gate_metrics.get("acceptable") is True
-                        )
-                    )
-                    and (
-                        not grooming_pose_gate_required
-                        or (
-                            isinstance(grooming_pose_gate_metrics, dict)
-                            and grooming_pose_gate_metrics.get("acceptable")
+                            (palette_quality is None or palette_quality["acceptable"])
+                            and (
+                                fur_silhouette_quality is None
+                                or fur_silhouette_quality["acceptable"]
+                            )
+                            and (
+                                not fur_surface_gate_required
+                                or (
+                                    isinstance(fur_surface_gate_metrics, dict)
+                                    and fur_surface_gate_metrics.get("acceptable")
+                                    is True
+                                )
+                            )
+                            and (
+                                not grooming_pose_gate_required
+                                or (
+                                    isinstance(grooming_pose_gate_metrics, dict)
+                                    and grooming_pose_gate_metrics.get("acceptable")
+                                )
+                            )
                         )
                     )
                     and (
@@ -20427,25 +20780,31 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 ):
                     best_attempt = record
                 candidate_acceptable = bool(
-                    quality["acceptable"]
-                    and similarity["acceptable"]
-                    and (palette_quality is None or palette_quality["acceptable"])
-                    and (
-                        fur_silhouette_quality is None
-                        or fur_silhouette_quality["acceptable"]
-                    )
-                    and (
-                        not fur_surface_gate_required
-                        or (
-                            isinstance(fur_surface_gate_metrics, dict)
-                            and fur_surface_gate_metrics.get("acceptable") is True
+                    not GENERATION_VISUAL_AUDITS_BLOCKING
+                    or (
+                        quality["acceptable"]
+                        and similarity["acceptable"]
+                        and (
+                            palette_quality is None
+                            or palette_quality["acceptable"]
                         )
-                    )
-                    and (
-                        not grooming_pose_gate_required
-                        or (
-                            isinstance(grooming_pose_gate_metrics, dict)
-                            and grooming_pose_gate_metrics.get("acceptable")
+                        and (
+                            fur_silhouette_quality is None
+                            or fur_silhouette_quality["acceptable"]
+                        )
+                        and (
+                            not fur_surface_gate_required
+                            or (
+                                isinstance(fur_surface_gate_metrics, dict)
+                                and fur_surface_gate_metrics.get("acceptable") is True
+                            )
+                        )
+                        and (
+                            not grooming_pose_gate_required
+                            or (
+                                isinstance(grooming_pose_gate_metrics, dict)
+                                and grooming_pose_gate_metrics.get("acceptable")
+                            )
                         )
                     )
                 )
@@ -20533,7 +20892,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         else None
                     ),
                 )
-            if best_attempt is not None and (
+            if GENERATION_VISUAL_AUDITS_BLOCKING and best_attempt is not None and (
                 not best_attempt["quality"]["acceptable"]
                 or not best_attempt["similarity"]["acceptable"]
                 or (
@@ -20810,16 +21169,26 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     fallback_semantic,
                     pose=pose,
                 )
-                quality = pose_cutout_quality(
-                    fallback_cutout,
-                    pose,
-                    require_eating_mouth_contact=(require_eating_mouth_contact),
+                quality = (
+                    pose_cutout_quality(
+                        fallback_cutout,
+                        pose,
+                        require_eating_mouth_contact=(
+                            require_eating_mouth_contact
+                        ),
+                    )
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else skipped_visual_audit("semantic_subject_quality")
                 )
-                similarity = pose_similarity_quality(
-                    fallback_cutout,
-                    pose=pose,
-                    canonical_path=canonical_similarity_reference,
-                    previous_poses=accepted_pose_similarity_references,
+                similarity = (
+                    pose_similarity_quality(
+                        fallback_cutout,
+                        pose=pose,
+                        canonical_path=canonical_similarity_reference,
+                        previous_poses=accepted_pose_similarity_references,
+                    )
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else skipped_visual_audit("semantic_pose_similarity")
                 )
                 semantic_palette = evaluate_pose_identity_palette(
                     fallback_cutout,
@@ -20863,7 +21232,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     <= 0.12
                 )
                 if (
-                    palette_issues
+                    GENERATION_VISUAL_AUDITS_BLOCKING
+                    and palette_issues
                     and palette_issues.issubset(warm_cast_issues)
                     and source_upper_is_achromatic
                     and canonical_similarity_reference is not None
@@ -20974,17 +21344,33 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         fallback_cutout,
                         source_identity_palette,
                     )
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else {
+                        "policy": UPLOADED_IDENTITY_CHROMA_SPILL_POLICY,
+                        "applied": False,
+                        "status": "skipped_advisory",
+                    }
                 )
-                quality = pose_cutout_quality(
-                    fallback_cutout,
-                    pose,
-                    require_eating_mouth_contact=(require_eating_mouth_contact),
+                quality = (
+                    pose_cutout_quality(
+                        fallback_cutout,
+                        pose,
+                        require_eating_mouth_contact=(
+                            require_eating_mouth_contact
+                        ),
+                    )
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else skipped_visual_audit("semantic_subject_quality")
                 )
-                similarity = pose_similarity_quality(
-                    fallback_cutout,
-                    pose=pose,
-                    canonical_path=canonical_similarity_reference,
-                    previous_poses=accepted_pose_similarity_references,
+                similarity = (
+                    pose_similarity_quality(
+                        fallback_cutout,
+                        pose=pose,
+                        canonical_path=canonical_similarity_reference,
+                        previous_poses=accepted_pose_similarity_references,
+                    )
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else skipped_visual_audit("semantic_pose_similarity")
                 )
                 semantic_palette = evaluate_pose_identity_palette(
                     fallback_cutout,
@@ -21003,7 +21389,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         fallback_cutout,
                         pose_fur_reference_path,
                     )
-                    if pose_fur_reference_path is not None
+                    if (
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                        and pose_fur_reference_path is not None
+                    )
                     else None
                 )
                 semantic_fur_surface_quality: dict[str, Any] | None = None
@@ -22069,6 +22458,11 @@ def health() -> dict[str, Any]:
         "status": "unavailable",
         "policy": QWEN_FULL_BODY_FIRST_FRAME_PIPELINE,
         "version": QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
+        "generation_audit_policy": GENERATION_AUDIT_POLICY,
+        "visual_content_audit_mode": (
+            "blocking" if GENERATION_VISUAL_AUDITS_BLOCKING else "advisory"
+        ),
+        "runtime_integrity_checks_required": True,
         "requires_standard_direct_assets": True,
         "qwen_full_body_required": True,
         "qwen_action_keyframes_required": True,
@@ -22091,15 +22485,21 @@ def health() -> dict[str, Any]:
         ),
         "canonical_chroma_spill_policy": (UPLOADED_IDENTITY_CHROMA_SPILL_POLICY),
         "canonical_chroma_spill_preserves_paired_eye_accents": True,
-        "canonical_interior_hole_gate": True,
-        "surface_texture_gate_required_before_scail": True,
+        "canonical_interior_hole_gate": GENERATION_VISUAL_AUDITS_BLOCKING,
+        "surface_texture_gate_required_before_scail": (
+            GENERATION_VISUAL_AUDITS_BLOCKING
+        ),
         "surface_candidate_comparison_mode": (
             UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
         ),
-        "expected_surface_gate_actions": list(SUBJECT_REPLACEMENT_ACTIONS),
+        "expected_surface_gate_actions": (
+            list(SUBJECT_REPLACEMENT_ACTIONS)
+            if GENERATION_VISUAL_AUDITS_BLOCKING
+            else []
+        ),
     }
     fur_surface_gate_health: dict[str, Any] = {
-        "enabled": True,
+        "enabled": GENERATION_VISUAL_AUDITS_BLOCKING,
         "policy": FUR_SURFACE_GATE_POLICY,
         "gate_version": FUR_SURFACE_GATE_VERSION,
         "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
@@ -22109,14 +22509,14 @@ def health() -> dict[str, Any]:
         ),
         "radial_ratio_alone_can_reject": False,
         "scope": "qwen_action_references_and_all_final_scail_videos",
-        "qwen_reference_candidate_gate": True,
+        "qwen_reference_candidate_gate": GENERATION_VISUAL_AUDITS_BLOCKING,
         "direct_upload_reference_candidate_gate": False,
         "direct_upload_reference_reason": (
             "the raw upload never enters SCAIL; Qwen action references and "
             "final SCAIL video frames remain fail-closed"
         ),
         "reliable_inputs": ["alpha_cutout", "rembg_alpha_cutout"],
-        "fail_closed": True,
+        "fail_closed": GENERATION_VISUAL_AUDITS_BLOCKING,
         "max_consecutive_rejections": FUR_SURFACE_GATE_MAX_REJECTIONS,
         "retry_policy": FUR_SURFACE_GATE_RETRY_POLICY,
         "preserves_configured_eating_bowl_recovery": True,
@@ -22124,8 +22524,8 @@ def health() -> dict[str, Any]:
         "configured_eating_bowl_recovery_profile_prefix": (
             f"{QWEN_BOWL_POSE_RETRY_NAME}_"
         ),
-        "blocks_scail_on_exhaustion": True,
-        "final_video_frame_audit": True,
+        "blocks_scail_on_exhaustion": GENERATION_VISUAL_AUDITS_BLOCKING,
+        "final_video_frame_audit": GENERATION_VISUAL_AUDITS_BLOCKING,
         "final_video_policy": FINAL_VIDEO_FUR_AUDIT_POLICY,
         "final_video_version": FINAL_VIDEO_FUR_AUDIT_VERSION,
         "final_video_sample_count": FINAL_VIDEO_FUR_SAMPLE_COUNT,
@@ -22380,70 +22780,85 @@ def health() -> dict[str, Any]:
                 list(SUBJECT_REPLACEMENT_ACTIONS),
                 effective_config=default_effective_subject_config,
             )
-        baseline_health: dict[str, Any] = {}
-        for action in SUBJECT_REPLACEMENT_ACTIONS:
-            action_config = upload_health_config["actions"][action]
-            gate_config = action_config.get("fur_surface_gate")
-            baseline_config = (
-                gate_config.get("baseline") if isinstance(gate_config, dict) else None
-            )
-            if not isinstance(baseline_config, dict):
-                baseline_health[action] = {
-                    "status": "failed",
-                    "issues": ["fur_surface_baseline_configuration_missing"],
-                }
-                subject_replacement_missing.append(
-                    f"{action} fur surface baseline configuration is missing"
+        if GENERATION_VISUAL_AUDITS_BLOCKING:
+            baseline_health: dict[str, Any] = {}
+            for action in SUBJECT_REPLACEMENT_ACTIONS:
+                action_config = upload_health_config["actions"][action]
+                gate_config = action_config.get("fur_surface_gate")
+                baseline_config = (
+                    gate_config.get("baseline")
+                    if isinstance(gate_config, dict)
+                    else None
                 )
-                continue
-            baseline_path = Path(str(baseline_config.get("source") or ""))
-            try:
-                digest = file_sha256(baseline_path)
-                if digest != baseline_config.get("source_sha256"):
-                    raise ValueError("baseline_digest_changed")
-                baseline_result = evaluate_fur_surface(
-                    baseline_path,
-                    baseline_path,
-                    baseline_is_validated=True,
-                )
-                baseline_result = json.loads(
-                    json.dumps(
-                        baseline_result,
-                        ensure_ascii=False,
-                        allow_nan=False,
-                    )
-                )
-                baseline_health[action] = {
-                    "status": (
-                        "passed"
-                        if baseline_result.get("acceptable") is True
-                        else "failed"
-                    ),
-                    "sha256": digest,
-                    "provenance": baseline_config.get("provenance"),
-                    "issues": baseline_result.get("issues", []),
-                    "metrics": baseline_result["candidate"]["metrics"],
-                }
-                if baseline_result.get("acceptable") is not True:
+                if not isinstance(baseline_config, dict):
+                    baseline_health[action] = {
+                        "status": "failed",
+                        "issues": ["fur_surface_baseline_configuration_missing"],
+                    }
                     subject_replacement_missing.append(
-                        f"{action} fur surface baseline fails absolute contract"
+                        f"{action} fur surface baseline configuration is missing"
                     )
-            except Exception as exc:  # noqa: BLE001 - health reports exact failure
-                baseline_health[action] = {
-                    "status": "failed",
-                    "issues": ["fur_surface_baseline_health_failed"],
-                    "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
-                }
-                subject_replacement_missing.append(
-                    f"{action} fur surface baseline health failed: {exc}"
+                    continue
+                baseline_path = Path(str(baseline_config.get("source") or ""))
+                try:
+                    digest = file_sha256(baseline_path)
+                    if digest != baseline_config.get("source_sha256"):
+                        raise ValueError("baseline_digest_changed")
+                    baseline_result = evaluate_fur_surface(
+                        baseline_path,
+                        baseline_path,
+                        baseline_is_validated=True,
+                    )
+                    baseline_result = json.loads(
+                        json.dumps(
+                            baseline_result,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        )
+                    )
+                    baseline_health[action] = {
+                        "status": (
+                            "passed"
+                            if baseline_result.get("acceptable") is True
+                            else "failed"
+                        ),
+                        "sha256": digest,
+                        "provenance": baseline_config.get("provenance"),
+                        "issues": baseline_result.get("issues", []),
+                        "metrics": baseline_result["candidate"]["metrics"],
+                    }
+                    if baseline_result.get("acceptable") is not True:
+                        subject_replacement_missing.append(
+                            f"{action} fur surface baseline fails absolute contract"
+                        )
+                except Exception as exc:  # noqa: BLE001 - health reports exact failure
+                    baseline_health[action] = {
+                        "status": "failed",
+                        "issues": ["fur_surface_baseline_health_failed"],
+                        "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                    }
+                    subject_replacement_missing.append(
+                        f"{action} fur surface baseline health failed: {exc}"
+                    )
+            fur_surface_gate_health["baselines"] = baseline_health
+            fur_surface_gate_health["status"] = (
+                "passed"
+                if baseline_health
+                and all(
+                    item.get("status") == "passed"
+                    for item in baseline_health.values()
                 )
-        fur_surface_gate_health["baselines"] = baseline_health
-        fur_surface_gate_health["status"] = (
-            "passed"
-            if baseline_health
-            and all(item.get("status") == "passed" for item in baseline_health.values())
-            else "failed"
-        )
+                else "failed"
+            )
+        else:
+            fur_surface_gate_health.update(
+                {
+                    "status": "skipped_advisory",
+                    "baselines": {},
+                    "blocking": False,
+                    "reason": "visual_content_audits_are_non_blocking",
+                }
+            )
         subject_profile_items.append(subject_profile_public(default_subject_profile))
     except (ValueError, FileNotFoundError, RuntimeError) as exc:
         default_subject_profile = None
@@ -22470,6 +22885,33 @@ def health() -> dict[str, Any]:
             else "degraded"
         ),
         "version": API_VERSION,
+        "generation_audit": {
+            "policy": GENERATION_AUDIT_POLICY,
+            "visual_content_mode": (
+                "blocking" if GENERATION_VISUAL_AUDITS_BLOCKING else "advisory"
+            ),
+            "visual_content_blocking": GENERATION_VISUAL_AUDITS_BLOCKING,
+            "runtime_integrity_checks_required": True,
+            "required_checks": [
+                "input_digest",
+                "asset_presence",
+                "image_decode",
+                "normalized_512_rgba",
+                "usable_alpha_subject",
+                "reference_digest",
+                "model_and_process_success",
+                "video_and_gif_output_presence",
+            ],
+            "skipped_by_default": [
+                "identity_view_similarity",
+                "identity_palette_drift",
+                "pose_similarity",
+                "grooming_pose_detail",
+                "fur_surface_texture",
+                "fur_silhouette_and_contour",
+                "final_video_frame_surface_audit",
+            ],
+        },
         "worker_alive": bool(WORKER_THREAD and WORKER_THREAD.is_alive()),
         "api_key_configured": bool(API_KEY),
         "job_queue": {"pending": JOB_QUEUE.qsize(), "capacity": MAX_QUEUE_SIZE},
@@ -22609,6 +23051,13 @@ def health() -> dict[str, Any]:
                 "reference_pipeline_version": (
                     QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION
                 ),
+                "generation_audit_policy": GENERATION_AUDIT_POLICY,
+                "visual_content_audit_mode": (
+                    "blocking"
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else "advisory"
+                ),
+                "runtime_integrity_checks_required": True,
                 "main_case_raw_identity_chain": False,
                 "qwen_reference_generation_for_subject_replacement": True,
                 "direct_scail_uploaded_identity_reference": False,
@@ -22629,13 +23078,13 @@ def health() -> dict[str, Any]:
                     "grooming": "canonical_image1_plus_geometry_image2",
                 },
                 "canonical_action_identity_palette_gate": {
-                    "enabled": True,
+                    "enabled": GENERATION_VISUAL_AUDITS_BLOCKING,
                     "policy": CANONICAL_ACTION_IDENTITY_PALETTE_POLICY,
                     "achromatic_balance_l1_max": (
                         CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX
                     ),
                     "scope": "eating_and_grooming_qwen_action_candidates",
-                    "fail_closed": True,
+                    "fail_closed": GENERATION_VISUAL_AUDITS_BLOCKING,
                 },
                 "uploaded_identity_appearance_authority": True,
                 "subject_profile_appearance_role": "action_geometry_only",
@@ -22719,10 +23168,20 @@ def health() -> dict[str, Any]:
                     "comfy_input_copy_sha256_verified": True,
                     "all_submitted_views_sha256_required": True,
                     "all_submitted_views_comfy_copy_sha256_verified": True,
-                    "duplicate_three_view_rejection": True,
-                    "near_duplicate_view_angle_rejection": True,
-                    "gross_palette_conflict_rejection": True,
+                    "duplicate_three_view_rejection": (
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                    ),
+                    "near_duplicate_view_angle_rejection": (
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                    ),
+                    "gross_palette_conflict_rejection": (
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                    ),
                     "fail_closed": True,
+                    "integrity_fail_closed": True,
+                    "visual_content_fail_closed": (
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                    ),
                 },
                 "upload_pose_reference_source": (
                     "per_action_qwen_canonical_and_main_case_geometry_roles"
@@ -23590,14 +24049,32 @@ async def create_subject_replacement_api_job(
             "reference_pipeline_version": (
                 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION if raw is not None else None
             ),
+            "generation_audit_policy": GENERATION_AUDIT_POLICY,
+            "visual_content_audit_mode": (
+                "blocking" if GENERATION_VISUAL_AUDITS_BLOCKING else "advisory"
+            ),
+            "visual_content_audits_blocking": (
+                GENERATION_VISUAL_AUDITS_BLOCKING
+            ),
+            "runtime_integrity_checks_required": True,
             "expected_pose_policies": dict(expected_pose_policies),
-            "expected_surface_gate_actions": (list(actions) if raw is not None else []),
+            "expected_surface_gate_actions": (
+                list(actions)
+                if raw is not None and GENERATION_VISUAL_AUDITS_BLOCKING
+                else []
+            ),
             "fur_contour_validation_policy": None,
             "upload_validation_policy": (
                 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE if raw is not None else None
             ),
             "surface_texture_gate_status": (
-                "pending_qwen_reference" if raw is not None else None
+                (
+                    "pending_qwen_reference"
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else "skipped_advisory"
+                )
+                if raw is not None
+                else None
             ),
             "reference_generation_status": (
                 "pending"

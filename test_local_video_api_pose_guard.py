@@ -569,7 +569,8 @@ class SemanticRecoveryTests(unittest.TestCase):
                 result["alpha_sha256_after"],
             )
 
-    def test_semantic_recovery_gate_is_fail_closed_for_every_quality_layer(
+    @patch.object(pipeline, "GENERATION_VISUAL_AUDITS_BLOCKING", True)
+    def test_strict_semantic_recovery_gate_is_fail_closed_for_every_quality_layer(
         self,
     ) -> None:
         passed = {"acceptable": True, "issues": []}
