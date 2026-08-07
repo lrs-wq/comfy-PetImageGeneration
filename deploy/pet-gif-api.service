@@ -1,0 +1,21 @@
+[Unit]
+Description=Simple pet eating and grooming GIF API
+After=network-online.target local-video-api.service
+Wants=network-online.target
+Requires=local-video-api.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/comfy-pet-pipeline
+EnvironmentFile=/root/comfy-pet-pipeline/local_video_api.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PET_GIF_PUBLIC_BASE_URL=http://39.106.120.253:8051
+ExecStart=/root/comfy-pet-pipeline/.venv/bin/uvicorn simple_pet_gif_api:app --host 0.0.0.0 --port 8051 --proxy-headers
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
