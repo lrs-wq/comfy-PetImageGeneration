@@ -6449,7 +6449,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
-            "Image 2 is a geometry-only anatomy maquette",
+            "Image 2 is an appearance-free soft-depth anatomy maquette",
             prompt,
         )
         self.assertIn("Image 3 is the original uploaded front view", prompt)
@@ -6469,6 +6469,26 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertIn("GROOMING SIDE RECOVERY", retry_prompt)
         self.assertIn("do not raise the viewer's-right foreleg", retry_prompt)
         self.assertIn("FINAL GROOMING GEOMETRY CORRECTION", retry_prompt)
+
+        soft_completion_prompt = (
+            pipeline.build_canonical_grooming_foreleg_completion_prompt(
+                "grooming",
+                source_attempt=2,
+                soft_depth_anatomy=True,
+            )
+        )
+        self.assertIn(
+            "Image 3 is the frozen appearance-free soft-depth action anatomy",
+            soft_completion_prompt,
+        )
+        self.assertIn(
+            "complete silhouette has no internal green hole",
+            soft_completion_prompt,
+        )
+        self.assertNotIn(
+            "single-gray action silhouette",
+            soft_completion_prompt,
+        )
 
     def test_default_eating_action_workflow_keeps_canonical_image1(
         self,
@@ -6634,7 +6654,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         expected_canonical = "local_video_api/capture-grooming/cartoon_reference.png"
         expected_action_reference = (
             "local_video_api/capture-grooming/"
-            "grooming_geometry_only_action_reference.png"
+            "grooming_soft_foreleg_depth_action_reference.png"
         )
         self.assertEqual(
             load_images,
@@ -6650,7 +6670,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             action_prompt,
         )
         self.assertIn(
-            "Image 2 is a geometry-only anatomy maquette",
+            "Image 2 is an appearance-free soft-depth anatomy maquette",
             action_prompt,
         )
         self.assertIn("Image 3 is the original uploaded front view", action_prompt)
@@ -8068,6 +8088,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             action_inverse = root / "grooming-action-inverse.png"
             canonical = root / "canonical.png"
             geometry = root / "grooming-geometry.png"
+            foreleg = root / "grooming-foreleg.png"
             target = root / "pose-transfer-seed.png"
             inverse_target = root / "pose-transfer-seed-inverse.png"
 
@@ -8094,9 +8115,22 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 dtype=np.uint8,
             )
             geometry_foreground = foreground.copy()
-            geometry_foreground[140:310, 250:295] = False
+            geometry_foreground[240:310, 250:270] = False
             geometry_array[geometry_foreground] = (144, 144, 144)
             Image.fromarray(geometry_array, mode="RGB").save(geometry)
+
+            foreleg_array = np.full(
+                (512, 512, 3),
+                (0, 255, 0),
+                dtype=np.uint8,
+            )
+            foreleg_array[geometry_foreground] = (144, 144, 144)
+            semantic_foreleg = np.zeros((512, 512), dtype=np.uint8)
+            cv2.line(semantic_foreleg, (245, 320), (245, 220), 255, 26)
+            cv2.circle(semantic_foreleg, (245, 215), 18, 255, -1)
+            semantic_foreleg_mask = (semantic_foreleg > 0) & foreground
+            foreleg_array[semantic_foreleg_mask] = (176, 176, 176)
+            Image.fromarray(foreleg_array, mode="RGB").save(foreleg)
 
             canonical_array = np.full(
                 (512, 512, 3),
@@ -8112,22 +8146,24 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 canonical,
                 target,
                 geometry_guide=geometry,
+                foreleg_guide=foreleg,
             )
             inverse_audit = pipeline.prepare_canonical_grooming_pose_transfer_seed(
                 action_inverse,
                 canonical,
                 inverse_target,
                 geometry_guide=geometry,
+                foreleg_guide=foreleg,
             )
 
             with Image.open(target) as loaded:
                 output = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
-            self.assertTrue(np.all(output[~geometry_foreground] == (0, 255, 0)))
+            self.assertTrue(np.all(output[~foreground] == (0, 255, 0)))
             self.assertFalse(
-                np.any(np.all(output[geometry_foreground] == (245, 40, 30), axis=1))
+                np.any(np.all(output[foreground] == (245, 40, 30), axis=1))
             )
             self.assertFalse(
-                np.any(np.all(output[geometry_foreground] == (20, 50, 235), axis=1))
+                np.any(np.all(output[foreground] == (20, 50, 235), axis=1))
             )
             self.assertEqual(
                 audit["policy"],
@@ -8136,18 +8172,19 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             self.assertFalse(audit["source_alpha_geometry_preserved"])
             self.assertFalse(audit["action_alpha_overlap_blocking"])
             self.assertFalse(audit["action_reference_used_for_conditioning"])
-            self.assertLess(
-                audit["geometry_retained_fraction_of_action_alpha"],
-                0.90,
-            )
-            self.assertGreater(audit["geometry_internal_open_channel_pixels"], 0)
+            self.assertGreater(audit["public_internal_channel_pixels_filled"], 0)
+            self.assertEqual(audit["qwen_visible_internal_green_channel_pixels"], 0)
             self.assertFalse(audit["source_rgb_preserved"])
             self.assertFalse(audit["source_chroma_preserved"])
             self.assertFalse(audit["source_raw_luma_values_preserved"])
             self.assertFalse(audit["source_low_frequency_luma_exposed"])
             self.assertFalse(audit["source_luma_used_for_shading"])
             self.assertFalse(audit["source_high_frequency_texture_exposed"])
-            self.assertTrue(audit["geometry_distance_field_only"])
+            self.assertFalse(audit["geometry_distance_field_only"])
+            self.assertTrue(audit["geometry_and_soft_foreleg_depth_only"])
+            self.assertTrue(audit["soft_foreleg_depth_semantic_exposed"])
+            self.assertFalse(audit["semantic_foreleg_discrete_color_exposed"])
+            self.assertFalse(audit["public_open_channel_geometry_exposed"])
             self.assertTrue(audit["canonical_palette_conditioning_only"])
             self.assertLessEqual(audit["target_luma_range"], 24.0)
             self.assertEqual(audit["geometry_guide_unique_foreground_rgb_count"], 1)
@@ -9359,7 +9396,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         )
         self.assertEqual(
             grooming_metadata["canonical_full_pose_refine_image3"],
-            "digest_bound_geometry_only_action_corroboration",
+            "digest_bound_soft_foreleg_depth_action_corroboration",
         )
         self.assertFalse(
             grooming_metadata["canonical_full_pose_refine_uploaded_front_exposed"]
