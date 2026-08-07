@@ -6449,10 +6449,10 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
-            "Image 2 is an identity-neutral low-pass anatomy maquette",
+            "Image 2 is a geometry-only anatomy maquette",
             prompt,
         )
-        self.assertNotIn("Image 3", prompt)
+        self.assertIn("Image 3 is the original uploaded front view", prompt)
         self.assertIn(
             "no microphone, cable, cord, wire",
             prompt,
@@ -6616,7 +6616,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
 
     def test_advisory_grooming_keeps_palette_generation_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            workflow, _, pose_input = self._capture_action_workflow(
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
                 Path(temporary),
                 action="grooming",
                 action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
@@ -6634,13 +6634,14 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         expected_canonical = "local_video_api/capture-grooming/cartoon_reference.png"
         expected_action_reference = (
             "local_video_api/capture-grooming/"
-            "grooming_identity_neutral_action_reference.png"
+            "grooming_geometry_only_action_reference.png"
         )
         self.assertEqual(
             load_images,
             {
                 expected_canonical,
                 expected_action_reference,
+                uploaded_input,
             },
         )
         self.assertNotIn(pose_input, load_images)
@@ -6649,12 +6650,12 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             action_prompt,
         )
         self.assertIn(
-            "Image 2 is an identity-neutral low-pass anatomy maquette",
+            "Image 2 is a geometry-only anatomy maquette",
             action_prompt,
         )
-        self.assertNotIn("Image 3", action_prompt)
-        self.assertNotIn("image3", workflow["6"]["inputs"])
-        self.assertNotIn("image3", workflow["7"]["inputs"])
+        self.assertIn("Image 3 is the original uploaded front view", action_prompt)
+        self.assertIn("image3", workflow["6"]["inputs"])
+        self.assertIn("image3", workflow["7"]["inputs"])
         self.assertIn("visible source coat is achromatic", action_prompt)
         self.assertIn("black seam, dark seam, dark contour line", negative_prompt)
         self.assertEqual(
@@ -6746,6 +6747,48 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
 
         self.assertTrue(quality["acceptable"])
         self.assertEqual(quality["issues"], [])
+
+    def test_advisory_grooming_minimum_palette_rejects_observed_white_to_tabby_drift(
+        self,
+    ) -> None:
+        source = self._identity_palette_signature_for_test(
+            {
+                "black": 0.018,
+                "gray": 0.511,
+                "white": 0.470,
+                "warm_brown_or_orange": 0.0,
+                "red_or_pink": 0.0,
+                "yellow_or_gold": 0.0,
+                "green": 0.001,
+                "blue_or_cyan": 0.0,
+                "purple": 0.0,
+            },
+            saturated_warm_fraction=0.0,
+        )
+        candidate = self._identity_palette_signature_for_test(
+            {
+                "black": 0.167293,
+                "gray": 0.420317,
+                "white": 0.305218,
+                "warm_brown_or_orange": 0.089351,
+                "red_or_pink": 0.017774,
+                "yellow_or_gold": 0.000407,
+                "green": 0.0,
+                "blue_or_cyan": 0.0,
+                "purple": 0.0,
+            },
+            saturated_warm_fraction=0.04,
+        )
+
+        quality = pipeline.advisory_grooming_minimum_palette_quality(
+            source,
+            candidate,
+        )
+
+        self.assertFalse(quality["acceptable"])
+        self.assertIn("gross_identity_palette_l1_drift", quality["issues"])
+        self.assertIn("gross_achromatic_value_balance_drift", quality["issues"])
+        self.assertIn("new_dominant_dark_markings", quality["issues"])
 
     def test_advisory_grooming_minimum_pose_blocks_only_action_topology(
         self,
@@ -7625,7 +7668,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         prompt = workflow["6"]["inputs"]["prompt"]
         self.assertIn("CRITICAL ACTION-POSE IDENTITY TRANSFER", prompt)
         self.assertIn(
-            "original RGB, chroma, markings, face detail, lighting, and fur texture were removed",
+            "original RGB, chroma, raw luma, low-frequency markings, face detail, lighting, and fur texture were removed",
             prompt,
         )
         self.assertIn(
@@ -8022,8 +8065,11 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             action = root / "grooming-action.png"
+            action_inverse = root / "grooming-action-inverse.png"
             canonical = root / "canonical.png"
+            geometry = root / "grooming-geometry.png"
             target = root / "pose-transfer-seed.png"
+            inverse_target = root / "pose-transfer-seed-inverse.png"
 
             action_mask = np.zeros((512, 512), dtype=np.uint8)
             cv2.ellipse(action_mask, (270, 300), (120, 150), 0, 0, 360, 255, -1)
@@ -8037,6 +8083,20 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             action_array[foreground & checker, :3] = (245, 40, 30)
             action_array[foreground & ~checker, :3] = (20, 50, 235)
             Image.fromarray(action_array, mode="RGBA").save(action)
+            inverse_action_array = action_array.copy()
+            inverse_action_array[foreground & checker, :3] = (10, 245, 220)
+            inverse_action_array[foreground & ~checker, :3] = (250, 235, 15)
+            Image.fromarray(inverse_action_array, mode="RGBA").save(action_inverse)
+
+            geometry_array = np.full(
+                (512, 512, 3),
+                (0, 255, 0),
+                dtype=np.uint8,
+            )
+            geometry_foreground = foreground.copy()
+            geometry_foreground[140:310, 250:295] = False
+            geometry_array[geometry_foreground] = (144, 144, 144)
+            Image.fromarray(geometry_array, mode="RGB").save(geometry)
 
             canonical_array = np.full(
                 (512, 512, 3),
@@ -8051,26 +8111,50 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 action,
                 canonical,
                 target,
+                geometry_guide=geometry,
+            )
+            inverse_audit = pipeline.prepare_canonical_grooming_pose_transfer_seed(
+                action_inverse,
+                canonical,
+                inverse_target,
+                geometry_guide=geometry,
             )
 
             with Image.open(target) as loaded:
                 output = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
-            self.assertTrue(np.all(output[~foreground] == (0, 255, 0)))
-            self.assertFalse(np.any(np.all(output[foreground] == (245, 40, 30), axis=1)))
-            self.assertFalse(np.any(np.all(output[foreground] == (20, 50, 235), axis=1)))
+            self.assertTrue(np.all(output[~geometry_foreground] == (0, 255, 0)))
+            self.assertFalse(
+                np.any(np.all(output[geometry_foreground] == (245, 40, 30), axis=1))
+            )
+            self.assertFalse(
+                np.any(np.all(output[geometry_foreground] == (20, 50, 235), axis=1))
+            )
             self.assertEqual(
                 audit["policy"],
                 pipeline.GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY,
             )
-            self.assertTrue(audit["source_alpha_geometry_preserved"])
+            self.assertFalse(audit["source_alpha_geometry_preserved"])
+            self.assertFalse(audit["action_alpha_overlap_blocking"])
+            self.assertFalse(audit["action_reference_used_for_conditioning"])
+            self.assertLess(
+                audit["geometry_retained_fraction_of_action_alpha"],
+                0.90,
+            )
+            self.assertGreater(audit["geometry_internal_open_channel_pixels"], 0)
             self.assertFalse(audit["source_rgb_preserved"])
             self.assertFalse(audit["source_chroma_preserved"])
             self.assertFalse(audit["source_raw_luma_values_preserved"])
+            self.assertFalse(audit["source_low_frequency_luma_exposed"])
+            self.assertFalse(audit["source_luma_used_for_shading"])
             self.assertFalse(audit["source_high_frequency_texture_exposed"])
+            self.assertTrue(audit["geometry_distance_field_only"])
             self.assertTrue(audit["canonical_palette_conditioning_only"])
-            self.assertLess(
-                audit["seed_high_frequency_energy"],
-                audit["source_high_frequency_energy"],
+            self.assertLessEqual(audit["target_luma_range"], 24.0)
+            self.assertEqual(audit["geometry_guide_unique_foreground_rgb_count"], 1)
+            self.assertEqual(target.read_bytes(), inverse_target.read_bytes())
+            self.assertNotEqual(
+                audit["action_reference_sha256"],
+                inverse_audit["action_reference_sha256"],
             )
             self.assertEqual(audit["target_sha256"], pipeline.file_sha256(target))
 
@@ -9275,7 +9359,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         )
         self.assertEqual(
             grooming_metadata["canonical_full_pose_refine_image3"],
-            "digest_bound_lowpass_action_geometry_corroboration_only",
+            "digest_bound_geometry_only_action_corroboration",
         )
         self.assertFalse(
             grooming_metadata["canonical_full_pose_refine_uploaded_front_exposed"]
@@ -9284,9 +9368,19 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             grooming_metadata["canonical_full_pose_refine_identity_source"],
             "approved_canonical_three_view_consensus_only",
         )
-        self.assertTrue(
+        self.assertFalse(
             grooming_metadata[
                 "canonical_pose_transfer_source_alpha_geometry_preserved"
+            ]
+        )
+        self.assertFalse(
+            grooming_metadata[
+                "canonical_pose_transfer_action_alpha_overlap_blocking"
+            ]
+        )
+        self.assertTrue(
+            grooming_metadata[
+                "canonical_pose_transfer_public_geometry_guide_required"
             ]
         )
         self.assertFalse(

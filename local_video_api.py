@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.22.5"
+API_VERSION = "2.22.6"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -240,7 +240,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.37.0"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.37.1"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "main_case_grooming_canonical_open_channel_then_identity_refine_v26"
 )
@@ -342,21 +342,23 @@ GROOMING_CANONICAL_FULL_POSE_REFINE_POLICY = (
     "canonical_seed_bound_pose_safe_identity_refine_v6"
 )
 GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
-    "canonical_palette_conditioned_action_pose_transfer_seed_v1"
+    "canonical_palette_geometry_only_action_pose_transfer_seed_v2"
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
-    "canonical_image1_identity_neutral_action_image2_v3"
+    "canonical_image1_geometry_only_action_image2_uploaded_front_image3_v4"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = 1.0
 GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = 3
 GROOMING_ADVISORY_MINIMUM_GATE_POLICY = (
-    "grooming_action_identity_minimum_contract_v1"
+    "grooming_action_identity_minimum_contract_v2"
 )
-GROOMING_ADVISORY_MINIMUM_GATE_VERSION = "1.0"
-GROOMING_ADVISORY_IDENTITY_PALETTE_L1_MAX = 0.60
-GROOMING_ADVISORY_IDENTITY_BLACK_FRACTION_DELTA_MAX = 0.30
-GROOMING_ADVISORY_IDENTITY_CHROMATIC_FRACTION_DELTA_MAX = 0.24
+GROOMING_ADVISORY_MINIMUM_GATE_VERSION = "2.0"
+GROOMING_ADVISORY_IDENTITY_PALETTE_L1_MAX = 0.48
+GROOMING_ADVISORY_IDENTITY_BLACK_FRACTION_DELTA_MAX = 0.20
+GROOMING_ADVISORY_IDENTITY_CHROMATIC_FRACTION_DELTA_MAX = 0.14
+GROOMING_ADVISORY_IDENTITY_ACHROMATIC_BALANCE_L1_MAX = 0.38
+GROOMING_ADVISORY_IDENTITY_NEW_DARK_DOMINANT_DELTA_MIN = 0.10
 GROOMING_ADVISORY_BLOCKING_POSE_ISSUES = frozenset(
     {
         "continuous_raised_foreleg_edge_unavailable",
@@ -397,11 +399,8 @@ GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT = 5
 GROOMING_CANONICAL_FULL_POSE_RESCUE_STEPS = 12
 GROOMING_CANONICAL_FULL_POSE_RESCUE_DENOISE = 1.0
 GROOMING_CANONICAL_FULL_POSE_REFINE_DENOISE = 1.0
-GROOMING_CANONICAL_POSE_TRANSFER_LOWPASS_SIGMA_PX = 4.0
-GROOMING_CANONICAL_POSE_TRANSFER_LUMA_LOW_QUANTILE = 0.30
-GROOMING_CANONICAL_POSE_TRANSFER_LUMA_HIGH_QUANTILE = 0.92
-GROOMING_CANONICAL_POSE_TRANSFER_LUMA_LOW_OFFSET = 32.0
-GROOMING_CANONICAL_POSE_TRANSFER_LUMA_HIGH_OFFSET = 18.0
+GROOMING_CANONICAL_POSE_TRANSFER_GEOMETRY_SMOOTH_SIGMA_PX = 4.0
+GROOMING_CANONICAL_POSE_TRANSFER_GEOMETRY_LUMA_HALF_RANGE = 12.0
 EATING_CANONICAL_IDENTITY_REFINE_POLICY = (
     "canonical_eating_pose_uploaded_front_identity_refine_v2"
 )
@@ -3995,7 +3994,7 @@ def build_canonical_grooming_pose_transfer_prompt(
         "direction, genuine tufts, and source-bounded silhouette."
     )
     return f"""CRITICAL ACTION-POSE IDENTITY TRANSFER - keep Image 1 anatomy, render the uploaded pet:
-Image 1 is the sampler canvas and a deterministic high-key anatomy maquette derived from the frozen validated grooming action reference. Its alpha silhouette, head and torso placement, real viewer-left shoulder-to-elbow-to-wrist-to-paw anatomy, paw-to-mouth contact, viewer-right planted front paw, attached hind legs, tail, camera, scale, framing, and pure-green background are authoritative. Before this request its original RGB, chroma, markings, face detail, lighting, and fur texture were removed; its remaining blurred neutral tone is only low-frequency shape relief conditioned into the target palette. It is not a pet identity, coat design, gray marking, object, cord, capsule, microphone, or rendering-style reference.
+Image 1 is the sampler canvas and a deterministic high-key anatomy maquette derived from the frozen validated grooming action reference. Its alpha silhouette, head and torso placement, real viewer-left shoulder-to-elbow-to-wrist-to-paw anatomy, paw-to-mouth contact, viewer-right planted front paw, attached hind legs, tail, camera, scale, framing, and pure-green background are authoritative. Before this request its original RGB, chroma, raw luma, low-frequency markings, face detail, lighting, and fur texture were removed; its remaining neutral tone is a geometry-only distance field conditioned into the target palette. It is not a pet identity, coat design, gray marking, object, cord, capsule, microphone, or rendering-style reference.
 Image 2 is the approved Qwen full-body canonical generated from the uploaded identity view set. It is the sole target rendering authority. Replace every subject pixel from Image 1 with Image 2's exact recognizable face and head silhouette, green eyes, ears, nose, coat palette and localized markings, body proportions, natural coat category, clean fur surface, paws, tail, restrained stylized 3D material, and neutral-white lighting while preserving Image 1's action anatomy.
 There is deliberately no third reference image in this recovery pass. Image 2 already consolidates the uploaded front, left, and right identity views. Do not infer a neutral sitting pose from the identity views that created Image 2, and do not replace Image 1's raised-paw action with Image 2's two-paws-down canonical pose.
 
@@ -4021,11 +4020,11 @@ def build_advisory_grooming_action_transfer_prompt(
         "direction, genuine tufts, and source-bounded silhouette."
     )
     return f"""CRITICAL GROOMING FIRST-FRAME IDENTITY TRANSFER:
-IMAGE ROLES - exact and exclusive: Image 1 is the approved Qwen full-body canonical produced from the uploaded front, left and right identity views. It is the sampler canvas and the only detailed identity and rendering authority: preserve its face, head shape, eyes, ears, nose, coat palette, localized markings, body proportions, paws, tail, fur, material and lighting. Image 2 is an identity-neutral low-pass anatomy maquette derived from the validated grooming action. Its original animal RGB, chroma, markings and high-frequency fur were removed before this request. Image 2 controls only the seated joint layout, raised-paw-to-mouth contact, framing, scale and green negative space. Never render Image 2 as a gray model and never infer an animal identity from its shading.
+IMAGE ROLES - exact and exclusive: Image 1 is the approved Qwen full-body canonical produced from the uploaded front, left and right identity views. It is the sampler canvas and the only detailed identity, style and rendering authority: preserve its face, head shape, eyes, ears, nose, coat palette, localized markings, body proportions, paws, tail, fur, material and lighting. Image 2 is a geometry-only anatomy maquette derived from the validated grooming action. Its pixels are constructed solely from a single-tone silhouette, an open raised-foreleg channel and a geometry distance field; no source-animal RGB, chroma, raw luma, low-frequency markings or fur texture is present. Image 2 controls only the seated joint layout, raised-paw-to-mouth contact, framing, scale and green negative space. Never render Image 2 as a gray model and never infer an animal identity from its shading. Image 3 is the original uploaded front view and confirms only the real pet's face, eye color, coat palette and marking placement. Use Image 1 for the stylized rendering and Image 3 only to reject identity drift; Image 3 never controls pose, background or photographic style.
 
 ACTION TRANSFER: repose the exact Image 1 pet into Image 2's grooming anatomy. Exactly one viewer-left foreleg remains continuously attached from shoulder through elbow and wrist to one rounded furry paw touching the mouth. Exactly one viewer-right foreleg ends in the only planted front paw. The raised foreleg replaces its former planted position; never retain or regenerate a second planted paw for that same foreleg. Keep both attached hind legs and one complete tail. A single small pink tongue touches the raised paw. Nothing is held by the mouth or paw.
 
-IDENTITY LOCK: repaint the complete animal from Image 1, including face, muzzle, raised paw, wrist, foreleg, shoulder, chest, torso, planted paw, hind legs and tail. Preserve Image 1's light-versus-dark coat-area balance and exact localized markings; an unstriped region remains unstriped. Both front paws share Image 1's palette, fur length, texture scale, lighting and toe treatment. {fur_lock}
+IDENTITY LOCK: repaint the complete animal from Image 1, including face, muzzle, raised paw, wrist, foreleg, shoulder, chest, torso, planted paw, hind legs and tail. Cross-check Image 3 before returning the frame: the output must still be the uploaded pet, never the profile animal whose motion supplied the geometry. Preserve Image 1's light-versus-dark coat-area balance and exact localized markings; an unstriped region remains unstriped. Both front paws share Image 1's palette, fur length, texture scale, lighting and toe treatment. {fur_lock}
 
 NO GUIDE RESIDUE: no microphone, cable, cord, wire, handle, tube, stick, pen, toothbrush, bottle, food, bowl, collar, clothing, accessory, detached shape, hanging item, black line, dark contour, hard outline, seam, gray maquette patch, guide-shaped stripe or internal green channel. Anatomical separation uses only natural low-contrast fur shading.
 
@@ -4049,7 +4048,7 @@ def build_canonical_grooming_full_pose_identity_refine_prompt(
     return f"""CRITICAL POSE-SAFE IDENTITY REFINE - freeze the proven grooming action and repaint the pet:
 Image 1 is the normalized grooming candidate from attempt {source_attempt} and is the sampler canvas. Its matte was reconstructed only by the union of the semantic pet matte and the digest-bound deterministic action seed. It then passed the independent complete-subject check, strict raised-foreleg pose gate, guide alignment, organic shoulder-to-paw structure, paw-to-muzzle contact, and fur-surface gate. Its complete outer silhouette, head and torso placement, viewer-left shoulder-to-elbow-to-wrist-to-paw path, viewer-right planted front paw, both attached hind legs, tail, scale, framing, camera, and pure-green negative space are authoritative. Its warm/off-model coat palette, markings, face detail, lighting and material are not identity authorities.
 Image 2 is the approved Qwen full-body canonical generated from the uploaded front, left and right identity views. It is the sole identity and target-rendering authority. Repaint every animal pixel from Image 2: exact recognizable face and head silhouette, green eyes, ears, nose, achromatic coat-value balance, localized markings, body proportions, natural coat category, clean fur surface, paws, tail, restrained stylized 3D material, and neutral-white lighting.
-Image 3 is the deterministic high-key action-anatomy seed whose digest was used to validate Image 1's matte. It corroborates geometry only: the same complete seated silhouette, real viewer-left shoulder-to-elbow-to-wrist-to-paw anatomy, paw-to-mouth contact, viewer-right planted paw, attached hind legs, tail, scale, and framing. Its blurred neutral RGB and low-frequency luma are not fur, markings, identity, material, lighting, or style. Never average Image 3's tone into Image 2.
+Image 3 is the deterministic high-key action-anatomy seed whose digest was used to validate Image 1's matte. It corroborates geometry only: the same complete seated silhouette, real viewer-left shoulder-to-elbow-to-wrist-to-paw anatomy, paw-to-mouth contact, viewer-right planted paw, attached hind legs, tail, scale, and framing. Its neutral geometry-distance shading is not fur, markings, identity, material, lighting, or style. Never average Image 3's tone into Image 2.
 
 ACTION FREEZE CONTRACT: Image 1 already contains a real attached furry foreleg and paw at the mouth; repaint that anatomy in place. Image 3 confirms the same action but may not replace Image 1's pixels or silhouette. Do not return to a neutral two-paws-down sit, mirror the action, crop the body, or change camera and scale. Exactly one viewer-left foreleg remains continuously attached from the visible shoulder near (38% width, 67% height), through a soft organic elbow and wrist, to one rounded furry paw near (37% width, 51% height) touching the viewer-left underside of the muzzle. The viewer-right front paw remains planted. Keep both attached hind legs and the complete tail. Never turn the raised limb into a hanging item, curved strip, strap, pendant, tongue-shaped object, microphone, smooth tube, detached prop, or extra paw.
 
@@ -5786,18 +5785,21 @@ def prepare_canonical_grooming_pose_transfer_seed(
     action_reference: Path,
     canonical_reference: Path,
     target: Path,
+    *,
+    geometry_guide: Path,
 ) -> dict[str, Any]:
-    """Build a pose-clear, appearance-neutral sampler for grooming transfer.
+    """Build a grooming pose canvas without exposing the profile pet.
 
-    The frozen action reference has the unambiguous paw-to-mouth anatomy that
-    was lost by the one-tone silhouette guide.  Its RGB, chroma, markings and
-    high-frequency texture must not reach Qwen, however.  Preserve only its
-    alpha geometry and a heavily low-passed luminance ordering, remapped into
-    the canonical subject's coarse LAB range.  The resulting conditioning
-    image is a high-key anatomy maquette; the canonical reference remains the
-    only detailed identity authority.
+    The frozen action reference is retained only as digest-bound provenance
+    and an outer-alpha check. Qwen-visible pixels come from the public
+    single-tone geometry guide: its silhouette and open raised-foreleg channel
+    are shaded exclusively from a distance transform, then colored with the
+    canonical subject's global LAB median. No profile RGB, chroma, raw luma,
+    low-frequency coat pattern, or fur texture can reach the model.
     """
 
+    if not action_reference.is_file() or not geometry_guide.is_file():
+        raise FileNotFoundError("Grooming pose-transfer inputs are missing.")
     with Image.open(action_reference) as loaded:
         if "A" not in loaded.getbands():
             raise ValueError("grooming action reference requires alpha")
@@ -5805,13 +5807,18 @@ def prepare_canonical_grooming_pose_transfer_seed(
     with Image.open(canonical_reference) as loaded:
         canonical_has_alpha = "A" in loaded.getbands()
         canonical_image = loaded.convert("RGBA")
+    with Image.open(geometry_guide) as loaded:
+        geometry_image = loaded.convert("RGB")
     if action_image.size != (512, 512):
         raise ValueError("grooming action reference must be 512x512")
     if canonical_image.size != action_image.size:
         raise ValueError("grooming canonical reference must be 512x512")
+    if geometry_image.size != action_image.size:
+        raise ValueError("grooming geometry guide must be 512x512")
 
     action_rgba = np.asarray(action_image, dtype=np.uint8)
     canonical_rgba = np.asarray(canonical_image, dtype=np.uint8)
+    geometry_rgb = np.asarray(geometry_image, dtype=np.uint8)
     action_mask_raw = action_rgba[:, :, 3] >= 64
     component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
         action_mask_raw.astype(np.uint8),
@@ -5824,6 +5831,46 @@ def prepare_canonical_grooming_pose_transfer_seed(
     action_foreground_pixels = int(np.count_nonzero(action_mask))
     if action_foreground_pixels < 4096:
         raise RuntimeError("grooming action reference foreground is too small")
+
+    geometry_red = geometry_rgb[:, :, 0].astype(np.int16)
+    geometry_green = geometry_rgb[:, :, 1].astype(np.int16)
+    geometry_blue = geometry_rgb[:, :, 2].astype(np.int16)
+    geometry_background = (
+        (geometry_green >= 150)
+        & ((geometry_green - geometry_red) >= 60)
+        & ((geometry_green - geometry_blue) >= 60)
+    )
+    geometry_mask_raw = ~geometry_background
+    geometry_count, geometry_labels, geometry_stats, _ = (
+        cv2.connectedComponentsWithStats(
+            geometry_mask_raw.astype(np.uint8),
+            connectivity=8,
+        )
+    )
+    if geometry_count <= 1:
+        raise RuntimeError("grooming geometry guide foreground is empty")
+    geometry_label = 1 + int(
+        np.argmax(geometry_stats[1:, cv2.CC_STAT_AREA])
+    )
+    geometry_mask = geometry_labels == geometry_label
+    geometry_foreground_pixels = int(np.count_nonzero(geometry_mask))
+    if geometry_foreground_pixels < 4096:
+        raise RuntimeError("grooming geometry guide foreground is too small")
+    retained_geometry_fraction = float(
+        np.count_nonzero(action_mask & geometry_mask)
+    ) / float(action_foreground_pixels)
+    geometry_foreground_rgb = geometry_rgb[geometry_mask]
+    geometry_channel_spread = np.ptp(
+        geometry_foreground_rgb.astype(np.int16),
+        axis=1,
+    )
+    geometry_neutral_fraction = float(
+        np.count_nonzero(geometry_channel_spread <= 4)
+    ) / float(geometry_foreground_pixels)
+    if geometry_neutral_fraction < 0.98:
+        raise RuntimeError(
+            "grooming geometry guide contains appearance-bearing chroma"
+        )
 
     if canonical_has_alpha and np.any(canonical_rgba[:, :, 3] < 250):
         canonical_mask_raw = canonical_rgba[:, :, 3] >= 64
@@ -5874,78 +5921,51 @@ def prepare_canonical_grooming_pose_transfer_seed(
     if canonical_foreground_pixels < 4096:
         raise RuntimeError("grooming canonical reference foreground is too small")
 
-    action_lab = cv2.cvtColor(action_rgba[:, :, :3], cv2.COLOR_RGB2LAB)
     canonical_lab = cv2.cvtColor(
         canonical_rgba[:, :, :3],
         cv2.COLOR_RGB2LAB,
     )
-    action_alpha = action_mask.astype(np.float32)
-    sigma = float(GROOMING_CANONICAL_POSE_TRANSFER_LOWPASS_SIGMA_PX)
-    blurred_alpha = cv2.GaussianBlur(
-        action_alpha,
+    geometry_distance = cv2.distanceTransform(
+        geometry_mask.astype(np.uint8),
+        cv2.DIST_L2,
+        5,
+    )
+    sigma = float(
+        GROOMING_CANONICAL_POSE_TRANSFER_GEOMETRY_SMOOTH_SIGMA_PX
+    )
+    geometry_distance = cv2.GaussianBlur(
+        geometry_distance,
         (0, 0),
         sigmaX=sigma,
         sigmaY=sigma,
     )
-    blurred_luma_premultiplied = cv2.GaussianBlur(
-        action_lab[:, :, 0].astype(np.float32) * action_alpha,
-        (0, 0),
-        sigmaX=sigma,
-        sigmaY=sigma,
-    )
-    low_frequency_luma = np.divide(
-        blurred_luma_premultiplied,
-        np.maximum(blurred_alpha, 1e-3),
-    )
-    source_luma = low_frequency_luma[action_mask]
-    source_luma_low, source_luma_high = np.percentile(source_luma, [5.0, 95.0])
-    source_luma_span = float(source_luma_high - source_luma_low)
-    if source_luma_span < 8.0:
-        raise RuntimeError("grooming action anatomy lacks usable luminance structure")
+    geometry_distance_values = geometry_distance[geometry_mask]
+    distance_p95 = float(np.percentile(geometry_distance_values, 95.0))
+    if distance_p95 <= 1.0:
+        raise RuntimeError("grooming geometry guide lacks usable interior depth")
+    geometry_depth = np.clip(geometry_distance / distance_p95, 0.0, 1.0)
 
     canonical_values = canonical_lab[canonical_mask]
     canonical_luma = canonical_values[:, 0].astype(np.float32)
     canonical_luma_median = float(np.median(canonical_luma))
-    canonical_luma_low = float(
-        np.quantile(
-            canonical_luma,
-            GROOMING_CANONICAL_POSE_TRANSFER_LUMA_LOW_QUANTILE,
-        )
-    )
-    canonical_luma_high = float(
-        np.quantile(
-            canonical_luma,
-            GROOMING_CANONICAL_POSE_TRANSFER_LUMA_HIGH_QUANTILE,
-        )
+    luma_half_range = float(
+        GROOMING_CANONICAL_POSE_TRANSFER_GEOMETRY_LUMA_HALF_RANGE
     )
     target_luma_low = max(
         8.0,
-        min(
-            canonical_luma_low,
-            canonical_luma_median
-            - GROOMING_CANONICAL_POSE_TRANSFER_LUMA_LOW_OFFSET,
-        ),
+        canonical_luma_median - luma_half_range,
     )
     target_luma_high = min(
         247.0,
-        max(
-            canonical_luma_high,
-            canonical_luma_median
-            + GROOMING_CANONICAL_POSE_TRANSFER_LUMA_HIGH_OFFSET,
-        ),
+        canonical_luma_median + luma_half_range,
     )
-    if target_luma_high - target_luma_low < 24.0:
+    if target_luma_high - target_luma_low < 8.0:
         midpoint = (target_luma_low + target_luma_high) / 2.0
-        target_luma_low = max(8.0, midpoint - 12.0)
-        target_luma_high = min(247.0, midpoint + 12.0)
-    normalized_luma = np.clip(
-        (low_frequency_luma - source_luma_low) / source_luma_span,
-        0.0,
-        1.0,
-    )
+        target_luma_low = max(8.0, midpoint - 4.0)
+        target_luma_high = min(247.0, midpoint + 4.0)
     remapped_luma = np.rint(
         target_luma_low
-        + normalized_luma * (target_luma_high - target_luma_low)
+        + geometry_depth * (target_luma_high - target_luma_low)
     ).astype(np.uint8)
     canonical_ab = np.rint(
         np.median(canonical_values[:, 1:3].astype(np.float32), axis=0)
@@ -5957,7 +5977,7 @@ def prepare_canonical_grooming_pose_transfer_seed(
     seed_rgb = cv2.cvtColor(seed_lab, cv2.COLOR_LAB2RGB)
     output_rgb = np.empty((512, 512, 3), dtype=np.uint8)
     output_rgb[:, :] = (0, 255, 0)
-    output_rgb[action_mask] = seed_rgb[action_mask]
+    output_rgb[geometry_mask] = seed_rgb[geometry_mask]
 
     target.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(output_rgb, mode="RGB").save(
@@ -5968,54 +5988,83 @@ def prepare_canonical_grooming_pose_transfer_seed(
     with Image.open(target) as loaded:
         persisted = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
     if not np.all(
-        persisted[~action_mask]
+        persisted[~geometry_mask]
         == np.asarray((0, 255, 0), dtype=np.uint8)
     ):
         raise RuntimeError("grooming pose-transfer seed background changed")
-    if not np.array_equal(persisted[action_mask], output_rgb[action_mask]):
+    if not np.array_equal(persisted[geometry_mask], output_rgb[geometry_mask]):
         raise RuntimeError("grooming pose-transfer seed changed during persistence")
 
-    ys, xs = np.nonzero(action_mask)
-    source_gray = action_lab[:, :, 0].astype(np.float32)
+    ys, xs = np.nonzero(geometry_mask)
     seed_gray = seed_lab[:, :, 0].astype(np.float32)
-    source_high_frequency_energy = float(
-        np.mean(np.abs(cv2.Laplacian(source_gray, cv2.CV_32F))[action_mask])
-    )
     seed_high_frequency_energy = float(
-        np.mean(np.abs(cv2.Laplacian(seed_gray, cv2.CV_32F))[action_mask])
+        np.mean(
+            np.abs(cv2.Laplacian(seed_gray, cv2.CV_32F))[geometry_mask]
+        )
+    )
+    foreground_luma = seed_lab[:, :, 0][geometry_mask]
+    guide_unique_rgb_count = int(
+        np.unique(geometry_foreground_rgb, axis=0).shape[0]
     )
     return {
         "policy": GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY,
         "action_reference_path": str(action_reference),
         "action_reference_sha256": file_sha256(action_reference),
+        "geometry_guide_path": str(geometry_guide),
+        "geometry_guide_sha256": file_sha256(geometry_guide),
         "canonical_reference_path": str(canonical_reference),
         "canonical_reference_sha256": file_sha256(canonical_reference),
         "canonical_mask_method": canonical_mask_method,
         "action_foreground_pixels": action_foreground_pixels,
-        "action_foreground_bbox": [
+        "geometry_foreground_pixels": geometry_foreground_pixels,
+        "geometry_foreground_bbox": [
             int(xs.min()),
             int(ys.min()),
             int(xs.max()) + 1,
             int(ys.max()) + 1,
         ],
+        "geometry_retained_fraction_of_action_alpha": round(
+            retained_geometry_fraction,
+            6,
+        ),
+        "geometry_internal_open_channel_pixels": int(
+            np.count_nonzero(action_mask & ~geometry_mask)
+        ),
+        "geometry_guide_unique_foreground_rgb_count": guide_unique_rgb_count,
+        "geometry_guide_neutral_foreground_fraction": round(
+            geometry_neutral_fraction,
+            6,
+        ),
         "canonical_foreground_pixels": canonical_foreground_pixels,
-        "lowpass_sigma_px": sigma,
-        "source_luma_p05": round(float(source_luma_low), 6),
-        "source_luma_p95": round(float(source_luma_high), 6),
+        "geometry_smooth_sigma_px": sigma,
+        "geometry_distance_p95": round(distance_p95, 6),
         "target_luma_low": round(float(target_luma_low), 6),
         "target_luma_high": round(float(target_luma_high), 6),
+        "target_luma_range": round(
+            float(target_luma_high - target_luma_low),
+            6,
+        ),
+        "foreground_luma_min": int(foreground_luma.min()),
+        "foreground_luma_max": int(foreground_luma.max()),
         "canonical_luma_median": round(canonical_luma_median, 6),
         "canonical_ab_median": canonical_ab.tolist(),
-        "source_high_frequency_energy": round(source_high_frequency_energy, 8),
         "seed_high_frequency_energy": round(seed_high_frequency_energy, 8),
-        "source_alpha_geometry_preserved": True,
+        "source_alpha_geometry_preserved": False,
+        "source_outer_alpha_geometry_retained": False,
+        "action_alpha_overlap_blocking": False,
+        "action_reference_used_for_conditioning": False,
+        "source_rgb_read_for_conditioning": False,
         "source_rgb_preserved": False,
         "source_chroma_preserved": False,
         "source_raw_luma_values_preserved": False,
+        "source_low_frequency_luma_exposed": False,
+        "source_luma_used_for_shading": False,
         "source_high_frequency_texture_exposed": False,
+        "geometry_distance_field_only": True,
+        "public_open_channel_geometry_exposed": True,
         "canonical_spatial_pixels_copied": False,
         "canonical_palette_conditioning_only": True,
-        "sampler_role": "high_key_lowpass_action_anatomy_only",
+        "sampler_role": "canonical_palette_geometry_only_action_anatomy",
         "target_path": str(target),
         "target_sha256": file_sha256(target),
     }
@@ -7667,7 +7716,7 @@ def advisory_grooming_minimum_palette_quality(
     source: dict[str, Any],
     candidate: dict[str, Any],
 ) -> dict[str, Any]:
-    """Reject only unmistakable identity replacement in advisory grooming.
+    """Reject unmistakable identity replacement in advisory grooming.
 
     This deliberately does not reuse the production identity-palette gate.  The
     advisory chain needs broad tolerance for pose-dependent lighting, but it
@@ -7713,6 +7762,29 @@ def advisory_grooming_minimum_palette_quality(
     chromatic_delta = float(candidate.get("chromatic_fraction", 0.0)) - float(
         source.get("chromatic_fraction", 0.0)
     )
+    achromatic_balance_l1 = float(
+        sum(
+            abs(float(deltas.get(category, 0.0)))
+            for category in ("black", "gray", "white")
+        )
+    )
+    source_dominant = {str(value) for value in source.get("dominant", [])}
+    candidate_dominant = {
+        str(value) for value in candidate.get("dominant", [])
+    }
+    new_dark_dominant = bool(
+        float(source_fractions.get("black", 0.0)) <= 0.05
+        and "black" not in source_dominant
+        and "black" in candidate_dominant
+        and black_delta
+        >= GROOMING_ADVISORY_IDENTITY_NEW_DARK_DOMINANT_DELTA_MIN
+    )
+    achromatic_balance_drift = bool(
+        float(source.get("achromatic_fraction", 0.0)) >= 0.72
+        and float(candidate.get("achromatic_fraction", 0.0)) >= 0.72
+        and achromatic_balance_l1
+        > GROOMING_ADVISORY_IDENTITY_ACHROMATIC_BALANCE_L1_MAX
+    )
     issues: list[str] = []
     if l1_distance > GROOMING_ADVISORY_IDENTITY_PALETTE_L1_MAX:
         issues.append("gross_identity_palette_l1_drift")
@@ -7723,6 +7795,10 @@ def advisory_grooming_minimum_palette_quality(
         > GROOMING_ADVISORY_IDENTITY_CHROMATIC_FRACTION_DELTA_MAX
     ):
         issues.append("gross_chromatic_coat_fraction_drift")
+    if achromatic_balance_drift:
+        issues.append("gross_achromatic_value_balance_drift")
+    if new_dark_dominant:
+        issues.append("new_dominant_dark_markings")
     return {
         "available": True,
         "acceptable": not issues,
@@ -7733,6 +7809,9 @@ def advisory_grooming_minimum_palette_quality(
         "palette_l1_distance": round(l1_distance, 6),
         "black_fraction_delta": round(black_delta, 6),
         "chromatic_fraction_delta": round(chromatic_delta, 6),
+        "achromatic_balance_l1": round(achromatic_balance_l1, 6),
+        "achromatic_balance_drift": achromatic_balance_drift,
+        "new_dark_dominant": new_dark_dominant,
         "thresholds": {
             "palette_l1_max": GROOMING_ADVISORY_IDENTITY_PALETTE_L1_MAX,
             "black_fraction_delta_max": (
@@ -7741,9 +7820,15 @@ def advisory_grooming_minimum_palette_quality(
             "chromatic_fraction_delta_max": (
                 GROOMING_ADVISORY_IDENTITY_CHROMATIC_FRACTION_DELTA_MAX
             ),
+            "achromatic_balance_l1_max": (
+                GROOMING_ADVISORY_IDENTITY_ACHROMATIC_BALANCE_L1_MAX
+            ),
+            "new_dark_dominant_delta_min": (
+                GROOMING_ADVISORY_IDENTITY_NEW_DARK_DOMINANT_DELTA_MIN
+            ),
         },
-        "source_dominant": source.get("dominant", []),
-        "candidate_dominant": candidate.get("dominant", []),
+        "source_dominant": sorted(source_dominant),
+        "candidate_dominant": sorted(candidate_dominant),
     }
 
 
@@ -14138,16 +14223,18 @@ def prepare_uploaded_subject_qwen_references(
                     GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY
                 ),
                 "canonical_full_pose_refine_image3": (
-                    "digest_bound_lowpass_action_geometry_corroboration_only"
+                    "digest_bound_geometry_only_action_corroboration"
                 ),
                 "canonical_full_pose_refine_uploaded_front_exposed": False,
                 "canonical_full_pose_refine_identity_source": (
                     "approved_canonical_three_view_consensus_only"
                 ),
-                "canonical_pose_transfer_seed_lowpass_sigma_px": (
-                    GROOMING_CANONICAL_POSE_TRANSFER_LOWPASS_SIGMA_PX
+                "canonical_pose_transfer_geometry_smooth_sigma_px": (
+                    GROOMING_CANONICAL_POSE_TRANSFER_GEOMETRY_SMOOTH_SIGMA_PX
                 ),
-                "canonical_pose_transfer_source_alpha_geometry_preserved": True,
+                "canonical_pose_transfer_source_alpha_geometry_preserved": False,
+                "canonical_pose_transfer_action_alpha_overlap_blocking": False,
+                "canonical_pose_transfer_public_geometry_guide_required": True,
                 "canonical_pose_transfer_source_rgb_exposed": False,
                 "canonical_pose_transfer_source_chroma_exposed": False,
                 "canonical_pose_transfer_source_raw_luma_exposed": False,
@@ -18699,13 +18786,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                 advisory_grooming_action_canvas_path = (
                     comfy_input_dir
-                    / "grooming_identity_neutral_action_reference.png"
+                    / "grooming_geometry_only_action_reference.png"
                 )
                 advisory_grooming_action_canvas_audit = (
                     prepare_canonical_grooming_pose_transfer_seed(
                         action_reference_path,
                         canonical_action_identity_reference,
                         advisory_grooming_action_canvas_path,
+                        geometry_guide=qwen_grooming_guide_path,
                     )
                 )
                 advisory_grooming_action_canvas_audit[
@@ -18719,9 +18807,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     grooming_action_first_frame_input_policy=(
                         GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY
                     ),
-                    grooming_action_first_frame_open_channel_loaded_by_qwen=False,
+                    grooming_action_first_frame_open_channel_loaded_by_qwen=True,
                     grooming_action_first_frame_identity_input=(qwen_input_name),
-                    grooming_action_first_frame_identity_confirmation_input=None,
+                    grooming_action_first_frame_identity_confirmation_input=(
+                        uploaded_qwen_input_name
+                    ),
                     grooming_action_first_frame_geometry_input=(
                         advisory_grooming_action_input_name
                     ),
@@ -18737,12 +18827,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     grooming_action_first_frame_image_roles={
                         "image1": "approved_canonical_identity_sampler",
                         "image2": (
-                            "canonical_palette_conditioned_lowpass_action_anatomy"
+                            "canonical_palette_geometry_only_action_anatomy"
                         ),
+                        "image3": "uploaded_front_identity_confirmation",
                     },
                     grooming_action_first_frame_raw_action_rgb_loaded_by_qwen=False,
                     grooming_action_first_frame_source_chroma_loaded_by_qwen=False,
                     grooming_action_first_frame_source_texture_loaded_by_qwen=False,
+                    grooming_action_first_frame_source_low_frequency_luma_loaded_by_qwen=(
+                        False
+                    ),
                 )
             if canonical_action_reference:
                 pose_effective_lora_policy = (
@@ -18901,9 +18995,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                     attempt_primary_input_name = qwen_input_name
                     attempt_secondary_input_name = advisory_grooming_action_input_name
-                    attempt_tertiary_input_name = None
+                    attempt_tertiary_input_name = uploaded_qwen_input_name
+                    if not attempt_tertiary_input_name:
+                        raise RuntimeError(
+                            "Advisory grooming action transfer lacks uploaded front "
+                            "identity confirmation."
+                        )
                     attempt_additional_reference_input_names = [
                         attempt_secondary_input_name,
+                        attempt_tertiary_input_name,
                     ]
                     attempt_geometry_input_name = advisory_grooming_action_input_name
                     attempt_prompt = build_advisory_grooming_action_transfer_prompt(
@@ -18919,11 +19019,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "policy": GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY,
                         "image1_role": "approved_canonical_identity_sampler",
                         "image2_role": (
-                            "canonical_palette_conditioned_lowpass_action_anatomy"
+                            "canonical_palette_geometry_only_action_anatomy"
                         ),
-                        "image3_role": None,
+                        "image3_role": "uploaded_front_identity_confirmation",
                         "raw_action_rgb_loaded_by_qwen": False,
-                        "public_open_channel_loaded_by_qwen": False,
+                        "source_low_frequency_luma_loaded_by_qwen": False,
+                        "public_open_channel_loaded_by_qwen": True,
                         "action_canvas": advisory_grooming_action_canvas_audit,
                     }
                 if grooming_foreleg_repair_active:
@@ -19300,6 +19401,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             action_reference_path,
                             canonical_recovery_reference_path,
                             pose_transfer_seed_path,
+                            geometry_guide=qwen_grooming_guide_path,
                         )
                     )
                     pose_transfer_seed_input_name = (
@@ -19425,14 +19527,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "seed_bound_pose_and_surface_approved_candidate_"
                             "sampler_no_identity_authority"
                             if pose_safe_candidate_used_as_sampler
-                            else "canonical_palette_conditioned_lowpass_action_"
+                            else "canonical_palette_geometry_only_action_"
                             "anatomy_sampler"
                         ),
                         "image2_role": (
                             "approved_canonical_sole_identity_appearance_authority"
                         ),
                         "image3_role": (
-                            "digest_bound_lowpass_action_geometry_corroboration_only"
+                            "digest_bound_geometry_only_action_corroboration"
                             if pose_safe_candidate_used_as_sampler
                             else None
                         ),
@@ -19448,10 +19550,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "main_case_raw_luma_exposed": (
                             pose_safe_candidate_used_as_sampler
                         ),
-                        "main_case_low_frequency_action_geometry_exposed": True,
+                        "main_case_low_frequency_action_geometry_exposed": False,
+                        "geometry_distance_field_exposed": True,
                         "uploaded_front_identity_reference_exposed": False,
                         "uploaded_identity_views_consumed_via_canonical_only": True,
-                        "public_open_channel_geometry_exposed": False,
+                        "public_open_channel_geometry_exposed": True,
                         "rejected_qwen_candidate_used_as_sampler": (
                             pose_safe_candidate_used_as_sampler
                         ),
@@ -20692,7 +20795,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "policy": GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
                             "version": GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
                             "blocking_scope": (
-                                "gross_identity_replacement_and_missing_"
+                                "identity_replacement_and_missing_"
                                 "paw_to_mouth_action_only"
                             ),
                             "attempts": [
@@ -24038,7 +24141,7 @@ def health() -> dict[str, Any]:
                     "canonical_full_pose_recovery_global_thresholds_changed": False,
                     "canonical_full_pose_recovery_image_roles": {
                         "attempt4_image1": (
-                            "canonical_palette_conditioned_lowpass_action_"
+                            "canonical_palette_geometry_only_action_"
                             "anatomy_sampler"
                         ),
                         "attempt4_image2": (
@@ -24053,8 +24156,7 @@ def health() -> dict[str, Any]:
                             "approved_canonical_sole_identity_appearance_authority"
                         ),
                         "attempt5_image3": (
-                            "digest_bound_lowpass_action_geometry_"
-                            "corroboration_only"
+                            "digest_bound_geometry_only_action_corroboration"
                         ),
                     },
                     "canonical_full_pose_refine_source_policy": (
@@ -24064,10 +24166,12 @@ def health() -> dict[str, Any]:
                     "canonical_full_pose_refine_identity_source": (
                         "approved_canonical_three_view_consensus_only"
                     ),
-                    "canonical_pose_transfer_seed_lowpass_sigma_px": (
-                        GROOMING_CANONICAL_POSE_TRANSFER_LOWPASS_SIGMA_PX
+                    "canonical_pose_transfer_geometry_smooth_sigma_px": (
+                        GROOMING_CANONICAL_POSE_TRANSFER_GEOMETRY_SMOOTH_SIGMA_PX
                     ),
-                    "canonical_pose_transfer_source_alpha_geometry_preserved": True,
+                    "canonical_pose_transfer_source_alpha_geometry_preserved": False,
+                    "canonical_pose_transfer_action_alpha_overlap_blocking": False,
+                    "canonical_pose_transfer_public_geometry_guide_required": True,
                     "canonical_pose_transfer_source_rgb_exposed": False,
                     "canonical_pose_transfer_source_chroma_exposed": False,
                     "canonical_pose_transfer_source_raw_luma_exposed": False,
@@ -24171,7 +24275,7 @@ def health() -> dict[str, Any]:
                         "image2_main_case_driver_geometry_guide"
                         if GENERATION_VISUAL_AUDITS_BLOCKING
                         else (
-                            "image2_canonical_palette_conditioned_lowpass_"
+                            "image2_canonical_palette_geometry_only_"
                             "action_anatomy"
                         )
                     ),
@@ -24184,15 +24288,18 @@ def health() -> dict[str, Any]:
                     "image_roles": {
                         "image1": "approved_canonical_identity_sampler",
                         "image2": (
-                            "canonical_palette_conditioned_lowpass_action_anatomy"
+                            "canonical_palette_geometry_only_action_anatomy"
                         ),
+                        "image3": "uploaded_front_identity_confirmation",
                     },
                     "validated_action_rgb_loaded_by_qwen": False,
                     "validated_action_rgb_exposed_as_identity_authority": False,
                     "validated_action_chroma_loaded_by_qwen": False,
+                    "validated_action_low_frequency_luma_loaded_by_qwen": False,
                     "validated_action_high_frequency_texture_loaded_by_qwen": False,
-                    "public_open_channel_loaded_by_qwen": False,
-                    "identity_neutral_pose_seed_loaded_by_qwen": True,
+                    "public_open_channel_loaded_by_qwen": True,
+                    "uploaded_front_identity_confirmation_loaded_by_qwen": True,
+                    "geometry_only_pose_seed_loaded_by_qwen": True,
                     "identity_palette_prompt_conditioning": True,
                     "maximum_attempts": (
                         GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
@@ -24201,10 +24308,25 @@ def health() -> dict[str, Any]:
                         "policy": GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
                         "version": GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
                         "blocks_only": [
-                            "gross_identity_palette_replacement",
+                            "identity_palette_replacement",
+                            "new_dominant_dark_markings",
                             "missing_or_disconnected_raised_foreleg",
                             "missing_paw_to_mouth_contact",
                         ],
+                        "thresholds": {
+                            "palette_l1_max": (
+                                GROOMING_ADVISORY_IDENTITY_PALETTE_L1_MAX
+                            ),
+                            "black_fraction_delta_max": (
+                                GROOMING_ADVISORY_IDENTITY_BLACK_FRACTION_DELTA_MAX
+                            ),
+                            "chromatic_fraction_delta_max": (
+                                GROOMING_ADVISORY_IDENTITY_CHROMATIC_FRACTION_DELTA_MAX
+                            ),
+                            "achromatic_balance_l1_max": (
+                                GROOMING_ADVISORY_IDENTITY_ACHROMATIC_BALANCE_L1_MAX
+                            ),
+                        },
                         "fur_surface_audit_enabled": False,
                     },
                     "adds_visual_audit_retries": False,
@@ -24246,8 +24368,8 @@ def health() -> dict[str, Any]:
                     "canonical_identity_open_channel_seed_bound_pose_safe_refine_v11"
                     if GENERATION_VISUAL_AUDITS_BLOCKING
                     else (
-                        "canonical_identity_neutral_action_transfer_"
-                        "minimum_contract_v2"
+                        "canonical_identity_geometry_only_action_transfer_"
+                        "minimum_contract_v3"
                     )
                 ),
                 "generated_canonical_bypassed": False,
