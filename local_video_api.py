@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.22.7"
+API_VERSION = "2.22.8"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -240,7 +240,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.37.2"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.37.3"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "main_case_grooming_canonical_open_channel_then_identity_refine_v26"
 )
@@ -345,7 +345,7 @@ GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
     "canonical_palette_soft_foreleg_depth_action_pose_transfer_seed_v3"
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
-    "canonical_image1_soft_foreleg_depth_image2_uploaded_front_image3_v5"
+    "canonical_image1_soft_foreleg_depth_image2_no_pose_competing_image3_v6"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = 1.0
@@ -4044,7 +4044,7 @@ def build_advisory_grooming_action_transfer_prompt(
         "direction, genuine tufts, and source-bounded silhouette."
     )
     return f"""CRITICAL GROOMING FIRST-FRAME IDENTITY TRANSFER:
-IMAGE ROLES - exact and exclusive: Image 1 is the approved Qwen full-body canonical produced from the uploaded front, left and right identity views. It is the sampler canvas and the only detailed identity, style and rendering authority: preserve its face, head shape, eyes, ears, nose, coat palette, localized markings, body proportions, paws, tail, fur, material and lighting. Image 2 is an appearance-free soft-depth anatomy maquette derived from the validated grooming geometry. Its pixels contain only a complete silhouette, a geometry distance field and one broad low-contrast raised-foreleg depth volume; no source-animal RGB, chroma, raw luma, low-frequency markings, fur texture, internal green hole or discrete part color is present. The upper rounded end of that soft volume is the viewer-left paw touching the underside of the muzzle, and its lower end joins the viewer-left shoulder and chest. Image 2 controls only the seated joint layout, raised-paw-to-mouth contact, framing, scale and exterior green negative space. Render the soft volume as a real attached furry foreleg, never as a stripe, marking, hole, pendant, curved strip or object. Image 3 is the original uploaded front view and confirms only the real pet's face, eye color, coat palette and marking placement. Use Image 1 for the stylized rendering and Image 3 only to reject identity drift; Image 3 never controls pose, background or photographic style.
+IMAGE ROLES - exact and exclusive: Image 1 is the approved Qwen full-body canonical produced from the uploaded front, left and right identity views. It is the sampler canvas and the only detailed identity, style and rendering authority: preserve its face, head shape, eyes, ears, nose, coat palette, localized markings, body proportions, paws, tail, fur, material and lighting. Image 2 is an appearance-free soft-depth anatomy maquette derived from the validated grooming geometry. Its pixels contain only a complete silhouette, a geometry distance field and one broad low-contrast raised-foreleg depth volume; no source-animal RGB, chroma, raw luma, low-frequency markings, fur texture, internal green hole or discrete part color is present. The upper rounded end of that soft volume is the viewer-left paw touching the underside of the muzzle, and its lower end joins the viewer-left shoulder and chest. Image 2 controls only the seated joint layout, raised-paw-to-mouth contact, framing, scale and exterior green negative space. Render the soft volume as a real attached furry foreleg, never as a stripe, marking, hole, pendant, curved strip or object. There is deliberately no Image 3: all uploaded front, left and right identity evidence was already consolidated into Image 1. Do not reconstruct the neutral two-paws-down pose from those source photographs; Image 2 alone controls the action anatomy.
 
 ACTION TRANSFER: repose the exact Image 1 pet into Image 2's grooming anatomy. Exactly one viewer-left foreleg remains continuously attached from shoulder through elbow and wrist to one rounded furry paw touching the mouth. Exactly one viewer-right foreleg ends in the only planted front paw. The raised foreleg replaces its former planted position; never retain or regenerate a second planted paw for that same foreleg. Keep both attached hind legs and one complete tail. A single small pink tongue touches the raised paw. Nothing is held by the mouth or paw.
 
@@ -18962,9 +18962,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     grooming_action_first_frame_open_channel_loaded_by_qwen=False,
                     grooming_action_first_frame_soft_foreleg_depth_loaded_by_qwen=True,
                     grooming_action_first_frame_identity_input=(qwen_input_name),
-                    grooming_action_first_frame_identity_confirmation_input=(
-                        uploaded_qwen_input_name
-                    ),
+                    grooming_action_first_frame_identity_confirmation_input=None,
                     grooming_action_first_frame_geometry_input=(
                         advisory_grooming_action_input_name
                     ),
@@ -18982,8 +18980,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "image2": (
                             "canonical_palette_soft_foreleg_depth_action_anatomy"
                         ),
-                        "image3": "uploaded_front_identity_confirmation",
+                        "image3": None,
                     },
+                    grooming_action_first_frame_uploaded_views_consumed_via_canonical_only=(
+                        True
+                    ),
                     grooming_action_first_frame_raw_action_rgb_loaded_by_qwen=False,
                     grooming_action_first_frame_source_chroma_loaded_by_qwen=False,
                     grooming_action_first_frame_source_texture_loaded_by_qwen=False,
@@ -19148,15 +19149,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                     attempt_primary_input_name = qwen_input_name
                     attempt_secondary_input_name = advisory_grooming_action_input_name
-                    attempt_tertiary_input_name = uploaded_qwen_input_name
-                    if not attempt_tertiary_input_name:
-                        raise RuntimeError(
-                            "Advisory grooming action transfer lacks uploaded front "
-                            "identity confirmation."
-                        )
+                    attempt_tertiary_input_name = None
                     attempt_additional_reference_input_names = [
                         attempt_secondary_input_name,
-                        attempt_tertiary_input_name,
                     ]
                     attempt_geometry_input_name = advisory_grooming_action_input_name
                     attempt_prompt = build_advisory_grooming_action_transfer_prompt(
@@ -19174,7 +19169,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "image2_role": (
                             "canonical_palette_soft_foreleg_depth_action_anatomy"
                         ),
-                        "image3_role": "uploaded_front_identity_confirmation",
+                        "image3_role": None,
+                        "uploaded_identity_views_consumed_via_canonical_only": True,
                         "raw_action_rgb_loaded_by_qwen": False,
                         "source_low_frequency_luma_loaded_by_qwen": False,
                         "public_open_channel_loaded_by_qwen": False,
@@ -21669,6 +21665,87 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         is True
                     )
                 )
+                advisory_repair_palette_quality = (
+                    advisory_grooming_minimum_gate_metrics.get(
+                        "identity_palette"
+                    )
+                    if isinstance(
+                        advisory_grooming_minimum_gate_metrics,
+                        dict,
+                    )
+                    and isinstance(
+                        advisory_grooming_minimum_gate_metrics.get(
+                            "identity_palette"
+                        ),
+                        dict,
+                    )
+                    else palette_quality
+                )
+                if (
+                    advisory_grooming_minimum_gate_required
+                    and not advisory_minimum_acceptable
+                    and attempt < GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
+                    and chroma_metrics.get("acceptable")
+                    and attempt_cutout.is_file()
+                    and isinstance(advisory_repair_palette_quality, dict)
+                    and advisory_repair_palette_quality.get("available") is True
+                    and advisory_repair_palette_quality.get("acceptable") is True
+                    and isinstance(
+                        advisory_grooming_minimum_gate_metrics,
+                        dict,
+                    )
+                ):
+                    advisory_repair_issues = [
+                        str(issue)
+                        for issue in advisory_grooming_minimum_gate_metrics.get(
+                            "issues",
+                            [],
+                        )
+                    ]
+                    advisory_repair_selection_key = (
+                        len(advisory_repair_issues),
+                        float(
+                            advisory_grooming_minimum_gate_metrics.get(
+                                "penalty",
+                                1000.0,
+                            )
+                        ),
+                        float(
+                            advisory_repair_palette_quality.get("penalty", 0.0)
+                        ),
+                        attempt,
+                    )
+                    if (
+                        grooming_foreleg_repair_source is None
+                        or advisory_repair_selection_key
+                        < tuple(grooming_foreleg_repair_source["selection_key"])
+                    ):
+                        grooming_foreleg_repair_source = {
+                            "attempt": attempt,
+                            "cutout_path": str(attempt_cutout),
+                            "cutout_sha256": file_sha256(attempt_cutout),
+                            "keyframe_path": str(attempt_keyframe),
+                            "keyframe_sha256": file_sha256(attempt_keyframe),
+                            "gate_issues": advisory_repair_issues,
+                            "fur_surface_issues": [],
+                            "identity_palette_quality": (
+                                advisory_repair_palette_quality
+                            ),
+                            "selection_key": list(advisory_repair_selection_key),
+                            "selection_policy": (
+                                "advisory_minimum_identity_safe_candidate_for_"
+                                "masked_foreleg_completion_v1"
+                            ),
+                        }
+                        update_job(
+                            job_id,
+                            grooming_foreleg_repair_candidate={
+                                "policy": (
+                                    GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
+                                ),
+                                **grooming_foreleg_repair_source,
+                            },
+                        )
                 if (
                     (
                         (
@@ -24498,7 +24575,7 @@ def health() -> dict[str, Any]:
                         "image2": (
                             "canonical_palette_soft_foreleg_depth_action_anatomy"
                         ),
-                        "image3": "uploaded_front_identity_confirmation",
+                        "image3": None,
                     },
                     "validated_action_rgb_loaded_by_qwen": False,
                     "validated_action_rgb_exposed_as_identity_authority": False,
@@ -24507,7 +24584,8 @@ def health() -> dict[str, Any]:
                     "validated_action_high_frequency_texture_loaded_by_qwen": False,
                     "public_open_channel_loaded_by_qwen": False,
                     "soft_foreleg_depth_loaded_by_qwen": True,
-                    "uploaded_front_identity_confirmation_loaded_by_qwen": True,
+                    "uploaded_front_identity_confirmation_loaded_by_qwen": False,
+                    "uploaded_identity_views_consumed_via_canonical_only": True,
                     "appearance_free_pose_seed_loaded_by_qwen": True,
                     "identity_palette_prompt_conditioning": True,
                     "maximum_attempts": (
@@ -24578,7 +24656,7 @@ def health() -> dict[str, Any]:
                     if GENERATION_VISUAL_AUDITS_BLOCKING
                     else (
                         "canonical_identity_soft_foreleg_depth_action_transfer_"
-                        "minimum_contract_v4"
+                        "minimum_contract_v5"
                     )
                 ),
                 "generated_canonical_bypassed": False,

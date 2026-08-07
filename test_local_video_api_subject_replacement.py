@@ -5384,6 +5384,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         style_strength: float = 0.15,
         pose_attempt: int = 1,
         grooming_gate_acceptable: bool = True,
+        advisory_grooming_minimum_acceptable: bool = True,
         identity_palette_guard: bool = False,
         canonical_action_palette_drift_attempts: set[int] | None = None,
         action_chroma_acceptable_attempts: set[int] | None = None,
@@ -6004,16 +6005,26 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 "policy": pipeline.GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
                 "version": pipeline.GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
                 "available": True,
-                "acceptable": True,
-                "issues": [],
+                "acceptable": advisory_grooming_minimum_acceptable,
+                "issues": (
+                    []
+                    if advisory_grooming_minimum_acceptable
+                    else [
+                        "continuous_raised_foreleg_edge_too_short",
+                        "raised_paw_too_far_from_muzzle",
+                    ]
+                ),
                 "warnings": [],
-                "penalty": 0.0,
+                "penalty": (
+                    0.0 if advisory_grooming_minimum_acceptable else 200.0
+                ),
                 "candidate_path": str(candidate),
                 "candidate_sha256": pipeline.file_sha256(candidate),
                 "identity_reference_path": str(identity_reference_path),
                 "identity_reference_sha256": pipeline.file_sha256(
                     identity_reference_path
                 ),
+                "identity_palette": identity_palette_quality,
             }
 
         with (
@@ -6452,7 +6463,11 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             "Image 2 is an appearance-free soft-depth anatomy maquette",
             prompt,
         )
-        self.assertIn("Image 3 is the original uploaded front view", prompt)
+        self.assertIn("There is deliberately no Image 3", prompt)
+        self.assertIn(
+            "Do not reconstruct the neutral two-paws-down pose",
+            prompt,
+        )
         self.assertIn(
             "no microphone, cable, cord, wire",
             prompt,
@@ -6661,10 +6676,10 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             {
                 expected_canonical,
                 expected_action_reference,
-                uploaded_input,
             },
         )
         self.assertNotIn(pose_input, load_images)
+        self.assertNotIn(uploaded_input, load_images)
         self.assertIn(
             "CRITICAL GROOMING FIRST-FRAME IDENTITY TRANSFER",
             action_prompt,
@@ -6673,9 +6688,9 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             "Image 2 is an appearance-free soft-depth anatomy maquette",
             action_prompt,
         )
-        self.assertIn("Image 3 is the original uploaded front view", action_prompt)
-        self.assertIn("image3", workflow["6"]["inputs"])
-        self.assertIn("image3", workflow["7"]["inputs"])
+        self.assertIn("There is deliberately no Image 3", action_prompt)
+        self.assertNotIn("image3", workflow["6"]["inputs"])
+        self.assertNotIn("image3", workflow["7"]["inputs"])
         self.assertIn("visible source coat is achromatic", action_prompt)
         self.assertIn("black seam, dark seam, dark contour line", negative_prompt)
         self.assertEqual(
@@ -6685,6 +6700,56 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertEqual(
             workflow["14"]["inputs"]["steps"],
             pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_STEPS,
+        )
+
+    def test_advisory_grooming_attempt3_uses_masked_foreleg_completion(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="grooming",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=3,
+                advisory_grooming_minimum_acceptable=False,
+                action_chroma_acceptable_attempts={1, 2},
+                identity_palette_guard=True,
+                visual_audits_blocking=False,
+            )
+
+        load_images = {
+            node["inputs"]["image"]
+            for node in workflow.values()
+            if node.get("class_type") == "LoadImage"
+        }
+        expected_prefix = "local_video_api/capture-grooming/"
+        self.assertEqual(
+            load_images,
+            {
+                expected_prefix + "cartoon_reference.png",
+                expected_prefix + "grooming_foreleg_repair_source.png",
+                expected_prefix + "grooming_foreleg_repair_anatomy_guide.png",
+                expected_prefix
+                + "grooming_foreleg_repair_source_noise_mask.png",
+            },
+        )
+        self.assertNotIn(uploaded_input, load_images)
+        self.assertNotIn(pose_input, load_images)
+        prompt = workflow["6"]["inputs"]["prompt"]
+        self.assertIn("CRITICAL MASKED GROOMING COMPLETION", prompt)
+        self.assertIn(
+            "Image 3 is the frozen appearance-free soft-depth action anatomy",
+            prompt,
+        )
+        self.assertIn(
+            "best identity-palette-safe normalized candidate from attempt 1",
+            prompt,
+        )
+        self.assertTrue(
+            any(
+                node.get("class_type") == "SetLatentNoiseMask"
+                for node in workflow.values()
+            )
         )
 
     def test_advisory_grooming_minimum_palette_rejects_identity_takeover(
