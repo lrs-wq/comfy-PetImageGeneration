@@ -112,6 +112,45 @@
     "audit_board": "/data/comfy-pet-pipeline/profile_assets/sleek_tabby_cat_v1/identity/main-case-20260801-v2/reference_asset_audit_board.png",
     "audit_board_sha256": "4a8c0387ee45a53f4c7d8102106fd326e8baca12cb10c006cc5237c987cf840a"
   },
+  "uploaded_identity_driving": {
+    "revision": "user-white-model-20260808-v1",
+    "role": "identity_neutral_white_maquette_action_geometry_and_motion",
+    "appearance_authority": "uploaded_qwen_canonical_only",
+    "normalization": {
+      "source_segment_start_seconds": 5.0175,
+      "source_segment_duration_seconds": 5.0625,
+      "crop": "center_720x720_from_960x720",
+      "size": [512, 512],
+      "frames": 81,
+      "fps": 16,
+      "audio_removed": true,
+      "last_frame_padding": "clone_source_endpoint_to_81_frames"
+    },
+    "actions": {
+      "eating": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/sleek_tabby_cat_v1/driving/20260808-user-white-model-v1/source/eat_white_model.mp4",
+        "source_sha256": "8cc2b4ce46b2d1f17655424b84ac1eb9b851a4790c337fcf1ee85bc51beb865d",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/sleek_tabby_cat_v1/driving/20260808-user-white-model-v1/eating_white_model_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "9ed2c13bba64964c9f7f9ff5dd7d54dc90756a0349af8e42a911fe1e487e023f",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/sleek_tabby_cat_v1/driving/20260808-user-white-model-v1/eating_white_model_reference_frame040_cutout.png",
+        "geometry_reference_sha256": "1c11cacebc9d45ff2f8ac206df8d0d6d4d79fcd2a81ca4fd9a9eab671b25dc92",
+        "selected_frame_index": 40,
+        "selected_frame_timestamp_seconds": 2.5,
+        "action_contract": "fixed_bowl_head_up_then_muzzle_in_food_then_return"
+      },
+      "grooming": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/sleek_tabby_cat_v1/driving/20260808-user-white-model-v1/source/TM_white_model.mp4",
+        "source_sha256": "d7e661745c60323fc975d1db339a00886436ea6a7346d75a97b07b29590f23d7",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/sleek_tabby_cat_v1/driving/20260808-user-white-model-v1/grooming_white_model_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "919d769f083105e6c931d91bd432e2aadac4d4b355853102bf0fb08d3ce23cbc",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/sleek_tabby_cat_v1/driving/20260808-user-white-model-v1/grooming_white_model_reference_frame040_cutout.png",
+        "geometry_reference_sha256": "967481dac877f605176a9c42dffbba03b4163959cb858c5c74150b243d63f68a",
+        "selected_frame_index": 40,
+        "selected_frame_timestamp_seconds": 2.5,
+        "action_contract": "continuous_viewer_left_foreleg_from_shoulder_to_paw_at_mouth"
+      }
+    }
+  },
   "standard_direct": {
     "enabled": true,
     "policy": "main_case_profile_standard_direct_v2",

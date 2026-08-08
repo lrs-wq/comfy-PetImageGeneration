@@ -40,7 +40,8 @@ COMFY_OUTPUT = Path("/data/comfy-pet-pipeline/comfyui/output")
 EXPERIMENT_ROOT = Path("/data/comfy-pet-pipeline/experiments/scail2_tm_test")
 SOURCE_ANIMATION = Path(
     "/data/comfy-pet-pipeline/profile_assets/sleek_tabby_cat_v1/driving/"
-    "20260731-main-case-v1/grooming_driver_512x512_81f_16fps.mp4"
+    "20260808-user-white-model-v1/"
+    "grooming_white_model_driver_512x512_81f_16fps.mp4"
 )
 REFERENCE_IMAGE = Path(
     "/data/comfy-pet-pipeline/comfyui/output/fur_lora_test/"
@@ -70,7 +71,14 @@ DEFAULT_PROMPT = (
     "reference coat colors and marking placement, compact body volume, full tail, "
     "and exact smooth rounded back silhouette. Preserve the source coat-length "
     "category without amplifying it. Fur is dense, compact, uniformly directed "
-    "and naturally close to the body with only short soft edge hairs. The cat "
+    "and naturally close to the body with only short soft edge hairs. Use the "
+    "neutral-white anatomy-maquette driving clip only for motion timing, joint "
+    "trajectories, seated pose, raised-paw path, camera and framing. The driving "
+    "maquette has no identity or appearance authority: never copy its face, "
+    "eyes, white surface, body proportions, material, lighting or texture. If "
+    "the supplied identity reference is genuinely white, preserve that white "
+    "coat because the identity reference requires it, never because the driver "
+    "does. The cat "
     "follows the supplied grooming motion, pose sequence and timing "
     "precisely, sitting and slowly licking one raised front paw and rubbing its "
     "face. Motion must never change fur length, volume, grooming direction or "
@@ -96,6 +104,8 @@ DEFAULT_NEGATIVE_PROMPT = (
     "three front legs, three forelegs, five legs, detached paw, floating paw, "
     "fused legs, malformed anatomy, retained old paw, pose ghosting, multiple "
     "cats, distorted face, changing fur markings, food, kibble, bowl, dish, "
+    "copied driving-maquette face, copied driving-maquette eyes, driver identity, "
+    "driver material, driver lighting, uniform maquette surface, "
     "fur volume expansion, puffed-up fur, raised guard hairs, bristling, spiky "
     "fur, needle-like fur, wire-like fur, rigid fur clumps, long isolated "
     "strands, dorsal ridge, mohawk, jagged back silhouette, changing back "
@@ -113,6 +123,13 @@ EATING_PROMPT = (
     "coat-length category without amplifying it. The coat is dense, compact, "
     "soft, uniformly directed and lies naturally close to the body along the "
     "spine, shoulders, flanks and chest, with only short soft edge hairs. "
+    "Use the neutral-white anatomy-maquette driving clip only for low-head "
+    "motion timing, joint trajectories, the fixed bowl, camera and framing. "
+    "Never copy the maquette's face, eyes, white surface, body proportions, "
+    "material, lighting or texture; the supplied identity reference alone "
+    "controls every appearance trait. If that identity is genuinely white, "
+    "keep it white because the identity reference requires it, never because "
+    "the driver is white. "
     "Motion may move the joints, head, neck, ears, muzzle and chest naturally "
     "but must never change fur length, fur volume, grooming direction or the "
     "back contour. Follow the supplied eating motion, pose sequence and timing "
@@ -141,7 +158,9 @@ EATING_NEGATIVE_PROMPT = (
     "replacing a paw, paw merged into bowl, duplicate bowl, extra bowl, "
     "changing bowl, deformed bowl, floating kibble, food outside bowl, food "
     "stuck to face, stretched mouth, distorted muzzle, melted face, changing "
-    "identity, changing fur markings, fur crawling, texture crawling, fur "
+    "identity, copied driving-maquette face, copied driving-maquette eyes, "
+    "driver identity, driver material, driver lighting, uniform maquette surface, "
+    "changing fur markings, fur crawling, texture crawling, fur "
     "volume expansion, puffed-up fur, raised fur, standing guard hairs, "
     "bristling, spiky fur, needle-like fur, wire-like fur, rigid fur clumps, "
     "long isolated strands, hanging tufts, dorsal ridge, mohawk, jagged fur "
@@ -2244,7 +2263,61 @@ def make_grooming_geometry_guide_from_animation(
 ) -> tuple[Image.Image, dict[str, Any]]:
     frames, durations = read_animation_frames(source)
     sampled = sample_timed_frames(frames, durations, output_count, output_fps)
-    guide, metadata = make_grooming_geometry_guide(sampled, canvas_size)
+    white_maquette_source = "white_model" in source.stem.lower()
+    white_maquette_selection: dict[str, Any] | None = None
+    if white_maquette_source:
+        midpoint = (len(sampled) - 1) / 2.0
+        candidate_indices = sorted(
+            {
+                int(round((len(sampled) - 1) * fraction))
+                for fraction in (0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80)
+            },
+            key=lambda index: (abs(index - midpoint), index),
+        )
+        rejected_candidates: list[dict[str, Any]] = []
+        selected_source_index: int | None = None
+        for candidate_index in candidate_indices:
+            # The first white-maquette frame is the neutral motion reference.
+            # Expose one candidate at its real timeline index so the existing
+            # motion and anatomy gates stay unchanged while the old
+            # whole-cycle maximum can no longer select late head-only motion
+            # instead of the complete shoulder-to-paw relation.
+            candidate_sequence = [sampled[0]] * len(sampled)
+            candidate_sequence[candidate_index] = sampled[candidate_index]
+            try:
+                guide, metadata = make_grooming_geometry_guide(
+                    candidate_sequence,
+                    canvas_size,
+                )
+            except ValueError as exc:
+                rejected_candidates.append(
+                    {
+                        "frame_index": candidate_index,
+                        "reason": str(exc),
+                    }
+                )
+                continue
+            selected_source_index = candidate_index
+            white_maquette_selection = {
+                "policy": "midcycle_relation_gated_white_maquette_v1",
+                "source_filename": source.name,
+                "candidate_indices": candidate_indices,
+                "selected_frame_index": candidate_index,
+                "rejected_candidates": rejected_candidates,
+                "reference_frame_index": 0,
+                "identity_or_color_signal_used_for_candidate_ordering": False,
+                "motion_and_muzzle_foreleg_relation_gates_reused": True,
+            }
+            break
+        if selected_source_index is None:
+            # Re-run the complete sequence to preserve the most informative
+            # historical failure when none of the white-maquette anchors pass.
+            guide, metadata = make_grooming_geometry_guide(sampled, canvas_size)
+    else:
+        guide, metadata = make_grooming_geometry_guide(sampled, canvas_size)
+    if white_maquette_selection is not None:
+        metadata["white_maquette_selection"] = white_maquette_selection
+        metadata["source_white_maquette"] = True
     metadata.update(
         {
             "source": str(source),

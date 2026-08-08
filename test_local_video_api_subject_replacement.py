@@ -222,6 +222,43 @@ def _write_fake_geometry_guide(
     }
 
 
+def _test_uploaded_identity_driving(
+    driving_animations: dict[str, str],
+    references: dict[str, str],
+    actions: tuple[str, ...],
+) -> dict[str, object]:
+    uploaded_actions: dict[str, object] = {}
+    for action in actions:
+        geometry_reference = Path(references[action]).with_name(
+            f"{action}-white-maquette-reference.png"
+        )
+        geometry_image = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        geometry_image.paste((160, 160, 160, 255), (112, 72, 400, 456))
+        geometry_image.save(geometry_reference)
+        uploaded_actions[action] = {
+            "source": driving_animations[action],
+            "source_sha256": pipeline.file_sha256(
+                Path(driving_animations[action])
+            ),
+            "runtime": driving_animations[action],
+            "runtime_sha256": pipeline.file_sha256(
+                Path(driving_animations[action])
+            ),
+            "geometry_reference": str(geometry_reference),
+            "geometry_reference_sha256": pipeline.file_sha256(
+                geometry_reference
+            ),
+            "selected_frame_index": 0,
+            "selected_frame_timestamp_seconds": 0.0,
+            "action_contract": f"test_{action}_action_contract",
+        }
+    return {
+        "revision": "test-white-maquette-v1",
+        "role": "identity_neutral_white_maquette_action_geometry_and_motion",
+        "actions": uploaded_actions,
+    }
+
+
 def _subject_profile_with_action_references(
     root: Path,
     actions: tuple[str, ...] = ("eating", "grooming"),
@@ -249,6 +286,11 @@ def _subject_profile_with_action_references(
         "schema_version": 2,
         "id": "sleek_tabby_cat_v1",
         "action_references": references,
+        "uploaded_identity_driving": _test_uploaded_identity_driving(
+            driving_animations,
+            references,
+            actions,
+        ),
         "validated_action_baselines": {
             action: {
                 "run_id": f"test-{action}-surface-baseline",
@@ -355,6 +397,11 @@ def _subject_profile_v2(root: Path) -> dict[str, object]:
         "id": "sleek_tabby_cat_v1",
         "display_name": "Sleek tabby",
         "action_references": references,
+        "uploaded_identity_driving": _test_uploaded_identity_driving(
+            driving_animations,
+            references,
+            ("eating", "grooming"),
+        ),
         "fur_constraints": {
             "positive": "frozen close-lying test coat",
             "negative": "frozen expanded test coat",
@@ -5385,10 +5432,12 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         pose_attempt: int = 1,
         grooming_gate_acceptable: bool = True,
         advisory_grooming_minimum_acceptable: bool = True,
+        advisory_grooming_minimum_issues: list[str] | None = None,
         identity_palette_guard: bool = False,
         canonical_action_palette_drift_attempts: set[int] | None = None,
         action_chroma_acceptable_attempts: set[int] | None = None,
         pose_safe_grooming_attempt4: bool = False,
+        uploaded_white_maquette: bool = False,
         main_case_raw_identity_chain: bool | None = None,
         persist_identity_digest: bool = True,
         persist_identity_source_digest: bool = True,
@@ -5644,6 +5693,8 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             fill=(190, 190, 190, 255),
         )
         action_reference_image.save(action_reference)
+        white_maquette_driver = root / "grooming-white-maquette-driver.mp4"
+        white_maquette_driver.write_bytes(b"fixture-white-maquette-frame-zero")
         original_started_at = "2026-08-03T00:00:00+00:00"
 
         photography_loras = [
@@ -5752,6 +5803,21 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                             "reference": str(action_reference),
                             "reference_sha256": pipeline.file_sha256(
                                 action_reference
+                            ),
+                            **(
+                                {
+                                    "driving_reference_kind": (
+                                        "uploaded_white_maquette"
+                                    ),
+                                    "driving_animation": str(
+                                        white_maquette_driver
+                                    ),
+                                    "driving_animation_sha256": (
+                                        pipeline.file_sha256(white_maquette_driver)
+                                    ),
+                                }
+                                if uploaded_white_maquette
+                                else {}
                             ),
                             **(
                                 {"fur_surface_gate": {"enabled": True}}
@@ -5890,6 +5956,46 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 image.paste((90, 100, 110), (8, 7, 25, 27))
             image.save(target)
 
+        def fake_prepare_white_maquette_frame0(
+            driving_animation: Path,
+            action_cutout_target: Path,
+            geometry_guide_target: Path,
+            *,
+            expected_sha256: str,
+        ) -> dict[str, object]:
+            self.assertEqual(driving_animation, white_maquette_driver)
+            self.assertEqual(
+                expected_sha256,
+                pipeline.file_sha256(white_maquette_driver),
+            )
+            with Image.open(action_reference) as loaded:
+                action_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+            Image.fromarray(action_rgba, mode="RGBA").save(action_cutout_target)
+            foreground = action_rgba[:, :, 3] >= 64
+            distance = cv2.distanceTransform(
+                foreground.astype(np.uint8),
+                cv2.DIST_L2,
+                5,
+            )
+            distance /= max(float(distance.max()), 1.0)
+            guide = np.full((512, 512, 3), (0, 255, 0), dtype=np.uint8)
+            guide_luma = np.rint(96.0 + distance * 80.0).astype(np.uint8)
+            for channel in range(3):
+                guide[:, :, channel][foreground] = guide_luma[foreground]
+            Image.fromarray(guide, mode="RGB").save(geometry_guide_target)
+            return {
+                "policy": "fixture_white_maquette_frame000",
+                "decoded_frame_index": 0,
+                "head_identity_signal_removed": True,
+                "raw_frame_loaded_by_qwen": False,
+                "action_cutout_path": str(action_cutout_target),
+                "action_cutout_sha256": pipeline.file_sha256(action_cutout_target),
+                "geometry_guide_path": str(geometry_guide_target),
+                "geometry_guide_sha256": pipeline.file_sha256(
+                    geometry_guide_target
+                ),
+            }
+
         def fake_grooming_candidate(
             source: Path,
             *,
@@ -6009,10 +6115,13 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 "issues": (
                     []
                     if advisory_grooming_minimum_acceptable
-                    else [
-                        "continuous_raised_foreleg_edge_too_short",
-                        "raised_paw_too_far_from_muzzle",
-                    ]
+                    else (
+                        advisory_grooming_minimum_issues
+                        or [
+                            "continuous_raised_foreleg_edge_too_short",
+                            "raised_paw_too_far_from_muzzle",
+                        ]
+                    )
                 ),
                 "warnings": [],
                 "penalty": (
@@ -6105,6 +6214,11 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 pipeline,
                 "prepare_landscape_keyframe",
                 side_effect=fake_prepare_landscape,
+            ),
+            patch.object(
+                pipeline,
+                "prepare_grooming_white_maquette_frame0_pose_inputs",
+                side_effect=fake_prepare_white_maquette_frame0,
             ),
             patch.object(
                 pipeline,
@@ -6405,7 +6519,8 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         )
         self.assertIn(
             "Image 2 is an appearance-free action-layout silhouette derived "
-            "directly from the frozen Main_case driving video",
+            "directly from the digest-locked neutral-white anatomy-maquette "
+            "driving video",
             prompt,
         )
         self.assertIn("same artificial RGB(144,144,144)", prompt)
@@ -6414,7 +6529,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             prompt,
         )
         self.assertIn("Copy Image 2's seated grooming joint geometry", prompt)
-        self.assertIn("Do not mirror the Main_case limb relationship", prompt)
+        self.assertIn("Do not mirror the white-maquette limb relationship", prompt)
         self.assertIn("only the foreleg on the viewer's left rises", prompt)
         self.assertIn("near (38% width, 67% height)", prompt)
         self.assertIn("centered near (37% width, 51% height)", prompt)
@@ -6436,7 +6551,10 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         )
         self.assertNotIn("or other vertical item at the mouth", prompt)
         self.assertIn("natural coat-length, coat-volume, outer-silhouette", prompt)
-        self.assertIn("Main_case profile never control any appearance trait", prompt)
+        self.assertIn(
+            "Image 2 and the white-maquette driver never control any appearance trait",
+            prompt,
+        )
         self.assertIn(
             "hind legs remain anatomically attached and may be naturally tucked",
             prompt,
@@ -6456,23 +6574,67 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "Image 1 is the approved Qwen full-body canonical",
+            "IMAGE 1 is the approved Qwen full-body canonical",
             prompt,
         )
         self.assertIn(
-            "Image 2 is an appearance-free soft-depth anatomy maquette",
+            "IMAGE 2 is a canonical-palette neutral anatomy render",
             prompt,
         )
-        self.assertIn("There is deliberately no Image 3", prompt)
+        self.assertIn("derived only from frame 0", prompt)
+        self.assertIn("entire head interior was replaced", prompt)
+        self.assertIn("IMAGE 3 is a deterministic enlarged head crop", prompt)
+        self.assertIn("exact recognizable face", prompt)
         self.assertIn(
-            "Do not reconstruct the neutral two-paws-down pose",
+            "soft high-contrast volume rising along the viewer-left chest",
             prompt,
         )
         self.assertIn(
-            "no microphone, cable, cord, wire",
+            "The raised viewer-left foreleg replaces its former planted position",
             prompt,
         )
+        for forbidden_token in ("microphone", "zipper", "spring", "pendant", "cable"):
+            self.assertNotIn(forbidden_token, prompt.lower())
         self.assertIn("an unstriped region remains unstriped", prompt)
+
+        retry_anatomy = pipeline.advisory_grooming_retry_anatomy_prompt(
+            ["raised_paw_hard_object_texture_signature"]
+        )
+        self.assertIn("one connected shoulder", retry_anatomy)
+        self.assertIn("a softly bent elbow", retry_anatomy)
+        self.assertIn("one rounded furry paw", retry_anatomy)
+        for forbidden_token in ("microphone", "zipper", "spring", "pendant"):
+            self.assertNotIn(forbidden_token, retry_anatomy.lower())
+        self.assertFalse(
+            pipeline.advisory_grooming_candidate_safe_for_masked_repair(
+                {"issues": ["raised_paw_hard_object_texture_signature"]}
+            )
+        )
+        self.assertTrue(
+            pipeline.advisory_grooming_candidate_safe_for_masked_repair(
+                {"issues": ["raised_paw_too_far_from_muzzle"]}
+            )
+        )
+        self.assertFalse(
+            pipeline.advisory_grooming_candidate_safe_for_masked_repair(
+                {"issues": ["grooming_face_eye_hue_replacement"]}
+            )
+        )
+        face_retry = pipeline.advisory_grooming_retry_anatomy_prompt(
+            ["grooming_face_dark_marking_drift"]
+        )
+        self.assertIn("enlarged Image 3 crop", face_retry)
+        self.assertIn("same cheek width", face_retry)
+        self.assertTrue(
+            pipeline.advisory_grooming_retry_requires_palette_correction(
+                ["gross_chromatic_coat_fraction_drift"]
+            )
+        )
+        self.assertFalse(
+            pipeline.advisory_grooming_retry_requires_palette_correction(
+                ["raised_paw_hard_object_texture_signature"]
+            )
+        )
 
         retry_prompt = pipeline.build_qwen_prompt(
             "",
@@ -6493,11 +6655,11 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             )
         )
         self.assertIn(
-            "Image 3 is the frozen appearance-free soft-depth action anatomy",
+            "Image 3 is the frozen normalized neutral-depth action anatomy",
             soft_completion_prompt,
         )
         self.assertIn(
-            "complete silhouette has no internal green hole",
+            "one living cat from head through torso and limbs",
             soft_completion_prompt,
         )
         self.assertNotIn(
@@ -6548,7 +6710,8 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         )
         self.assertIn(
             "Image 2 is the texture-free action-layout guide derived directly "
-            "from the frozen Main_case driving video and is authoritative only for "
+            "from the digest-locked neutral-white anatomy-maquette driving video "
+            "and is authoritative only for "
             "joint placement, the exact pose, the action-required prop layout, "
             "framing, subject scale, and pure-green background",
             action_prompt,
@@ -6656,6 +6819,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 action="grooming",
                 action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
                 identity_palette_guard=True,
+                uploaded_white_maquette=True,
                 visual_audits_blocking=False,
             )
 
@@ -6669,13 +6833,18 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         expected_canonical = "local_video_api/capture-grooming/cartoon_reference.png"
         expected_action_reference = (
             "local_video_api/capture-grooming/"
-            "grooming_soft_foreleg_depth_action_reference.png"
+            "grooming_white_maquette_frame000_body_pose_action_reference.png"
+        )
+        expected_face_reference = (
+            "local_video_api/capture-grooming/"
+            "grooming_canonical_face_identity_reference.png"
         )
         self.assertEqual(
             load_images,
             {
                 expected_canonical,
                 expected_action_reference,
+                expected_face_reference,
             },
         )
         self.assertNotIn(pose_input, load_images)
@@ -6684,13 +6853,15 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             "CRITICAL GROOMING FIRST-FRAME IDENTITY TRANSFER",
             action_prompt,
         )
+        self.assertIn("derived only from frame 0", action_prompt)
+        self.assertIn("IMAGE 3 is a deterministic enlarged head crop", action_prompt)
         self.assertIn(
-            "Image 2 is an appearance-free soft-depth anatomy maquette",
+            "IMAGE 2 is a canonical-palette neutral anatomy render",
             action_prompt,
         )
-        self.assertIn("There is deliberately no Image 3", action_prompt)
-        self.assertNotIn("image3", workflow["6"]["inputs"])
-        self.assertNotIn("image3", workflow["7"]["inputs"])
+        self.assertIn("entire head interior was replaced", action_prompt)
+        self.assertIn("image3", workflow["6"]["inputs"])
+        self.assertIn("image3", workflow["7"]["inputs"])
         self.assertIn("visible source coat is achromatic", action_prompt)
         self.assertIn("black seam, dark seam, dark contour line", negative_prompt)
         self.assertEqual(
@@ -6714,6 +6885,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 advisory_grooming_minimum_acceptable=False,
                 action_chroma_acceptable_attempts={1, 2},
                 identity_palette_guard=True,
+                uploaded_white_maquette=True,
                 visual_audits_blocking=False,
             )
 
@@ -6738,7 +6910,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         prompt = workflow["6"]["inputs"]["prompt"]
         self.assertIn("CRITICAL MASKED GROOMING COMPLETION", prompt)
         self.assertIn(
-            "Image 3 is the frozen appearance-free soft-depth action anatomy",
+            "Image 3 is the frozen normalized neutral-depth action anatomy",
             prompt,
         )
         self.assertIn(
@@ -6751,6 +6923,53 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 for node in workflow.values()
             )
         )
+
+    def test_advisory_grooming_hard_object_attempt3_restarts_from_clean_canonical(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="grooming",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=3,
+                advisory_grooming_minimum_acceptable=False,
+                advisory_grooming_minimum_issues=[
+                    "raised_paw_hard_object_texture_signature"
+                ],
+                action_chroma_acceptable_attempts={1, 2},
+                identity_palette_guard=True,
+                uploaded_white_maquette=True,
+                visual_audits_blocking=False,
+            )
+
+        expected_prefix = "local_video_api/capture-grooming/"
+        load_images = {
+            node["inputs"]["image"]
+            for node in workflow.values()
+            if node.get("class_type") == "LoadImage"
+        }
+        self.assertEqual(
+            load_images,
+            {
+                expected_prefix + "cartoon_reference.png",
+                expected_prefix
+                + "grooming_white_maquette_frame000_body_pose_action_reference.png",
+                expected_prefix + "grooming_canonical_face_identity_reference.png",
+            },
+        )
+        self.assertNotIn(uploaded_input, load_images)
+        self.assertNotIn(pose_input, load_images)
+        self.assertFalse(
+            any(
+                node.get("class_type") == "SetLatentNoiseMask"
+                for node in workflow.values()
+            )
+        )
+        prompt = workflow["6"]["inputs"]["prompt"]
+        self.assertIn("CRITICAL GROOMING FIRST-FRAME IDENTITY TRANSFER", prompt)
+        self.assertIn("GROOMING RETRY CORRECTION", prompt)
+        self.assertNotIn("Previous output recolored the cat", prompt)
 
     def test_advisory_grooming_minimum_palette_rejects_identity_takeover(
         self,
@@ -6833,6 +7052,61 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertTrue(quality["acceptable"])
         self.assertEqual(quality["issues"], [])
 
+    def test_advisory_grooming_face_gate_blocks_severe_stripes_and_eye_recolor(
+        self,
+    ) -> None:
+        source = {
+            "available": True,
+            "fractions": {
+                "black": 0.03,
+                "white": 0.86,
+                "gray": 0.08,
+                "chromatic": 0.03,
+                "yellow_or_gold": 0.0,
+                "green": 0.02,
+                "warm_brown_or_yellow": 0.0,
+            },
+        }
+        severe_drift = {
+            "available": True,
+            "fractions": {
+                "black": 0.25,
+                "white": 0.60,
+                "gray": 0.09,
+                "chromatic": 0.06,
+                "yellow_or_gold": 0.035,
+                "green": 0.001,
+                "warm_brown_or_yellow": 0.04,
+            },
+        }
+        normal_lighting = {
+            "available": True,
+            "fractions": {
+                "black": 0.08,
+                "white": 0.78,
+                "gray": 0.10,
+                "chromatic": 0.04,
+                "yellow_or_gold": 0.004,
+                "green": 0.014,
+                "warm_brown_or_yellow": 0.006,
+            },
+        }
+
+        rejected = pipeline.advisory_grooming_face_identity_quality(
+            source,
+            severe_drift,
+        )
+        accepted = pipeline.advisory_grooming_face_identity_quality(
+            source,
+            normal_lighting,
+        )
+
+        self.assertFalse(rejected["acceptable"])
+        self.assertIn("grooming_face_dark_marking_drift", rejected["issues"])
+        self.assertIn("grooming_face_eye_hue_replacement", rejected["issues"])
+        self.assertTrue(accepted["acceptable"])
+        self.assertEqual(accepted["issues"], [])
+
     def test_advisory_grooming_minimum_palette_rejects_observed_white_to_tabby_drift(
         self,
     ) -> None:
@@ -6892,8 +7166,15 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 "available": True,
                 "issues": [
                     "raised_paw_color_inconsistent_with_planted_paw",
+                    "continuous_raised_foreleg_edge_too_short",
                     "raised_paw_too_far_from_muzzle",
                 ],
+            }
+        )
+        unavailable_contact = pipeline.advisory_grooming_minimum_pose_quality(
+            {
+                "available": True,
+                "issues": ["paw_muzzle_gap_unavailable"],
             }
         )
         hard_object = pipeline.advisory_grooming_minimum_pose_quality(
@@ -6929,10 +7210,20 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             "raised_paw_color_inconsistent_with_planted_paw",
             appearance_only["warnings"],
         )
-        self.assertFalse(missing_contact["acceptable"])
+        self.assertTrue(missing_contact["acceptable"])
+        self.assertEqual(missing_contact["issues"], [])
+        self.assertIn(
+            "raised_paw_too_far_from_muzzle",
+            missing_contact["warnings"],
+        )
+        self.assertIn(
+            "continuous_raised_foreleg_edge_too_short",
+            missing_contact["warnings"],
+        )
+        self.assertFalse(unavailable_contact["acceptable"])
         self.assertEqual(
-            missing_contact["issues"],
-            ["raised_paw_too_far_from_muzzle"],
+            unavailable_contact["issues"],
+            ["paw_muzzle_gap_unavailable"],
         )
         self.assertFalse(hard_object["acceptable"])
         self.assertEqual(
@@ -7653,7 +7944,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             prompt,
         )
         self.assertIn("viewer-left shoulder-to-elbow-to-wrist-to-paw", prompt)
-        self.assertIn("No Pet3D or other style adapter", prompt)
+        self.assertIn("Image 2 remains the sole appearance authority", prompt)
         self.assertEqual(
             workflow["14"]["inputs"]["denoise"],
             pipeline.GROOMING_QWEN_FORELEG_REPAIR_DENOISE,
@@ -8182,6 +8473,39 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             self.assertEqual(audit["target_sha256"], pipeline.file_sha256(target))
             self.assertEqual(audit["source_foreground_bbox"], [120, 72, 392, 440])
 
+    def test_canonical_grooming_face_reference_is_derived_from_same_identity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            canonical = root / "canonical.png"
+            target = root / "canonical-face.png"
+            image = Image.new("RGB", (512, 512), (0, 255, 0))
+            draw = ImageDraw.Draw(image)
+            draw.ellipse((126, 58, 386, 452), fill=(232, 232, 232))
+            draw.ellipse((164, 84, 348, 250), fill=(244, 244, 244))
+            draw.ellipse((205, 145, 225, 170), fill=(30, 120, 45))
+            draw.ellipse((285, 145, 305, 170), fill=(30, 120, 45))
+            image.save(canonical)
+
+            audit = pipeline.prepare_canonical_grooming_face_identity_reference(
+                canonical,
+                target,
+            )
+
+            with Image.open(target) as loaded:
+                face = loaded.convert("RGB")
+            self.assertEqual(face.size, (512, 512))
+            self.assertEqual(face.getpixel((0, 0)), (0, 255, 0))
+            self.assertNotEqual(face.getpixel((256, 256)), (0, 255, 0))
+            self.assertTrue(audit["derived_from_same_canonical_identity"])
+            self.assertTrue(audit["face_detail_authority"])
+            self.assertFalse(audit["pose_authority"])
+            self.assertEqual(
+                audit["canonical_reference_sha256"],
+                pipeline.file_sha256(canonical),
+            )
+
     def test_grooming_pose_transfer_seed_keeps_alpha_geometry_but_removes_appearance(
         self,
     ) -> None:
@@ -8297,6 +8621,115 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 inverse_audit["action_reference_sha256"],
             )
             self.assertEqual(audit["target_sha256"], pipeline.file_sha256(target))
+
+            depth_geometry = root / "grooming-white-depth.png"
+            depth_target = root / "pose-transfer-white-depth.png"
+            depth_inverse_target = root / "pose-transfer-white-depth-inverse.png"
+            depth_geometry_array = np.full(
+                (512, 512, 3),
+                (0, 255, 0),
+                dtype=np.uint8,
+            )
+            depth_distance = cv2.distanceTransform(
+                geometry_foreground.astype(np.uint8),
+                cv2.DIST_L2,
+                5,
+            )
+            depth_values = 104.0 + 72.0 * np.clip(
+                depth_distance / max(float(depth_distance.max()), 1.0),
+                0.0,
+                1.0,
+            )
+            for channel in range(3):
+                depth_geometry_array[:, :, channel][geometry_foreground] = (
+                    np.rint(depth_values[geometry_foreground]).astype(np.uint8)
+                )
+            Image.fromarray(depth_geometry_array, mode="RGB").save(depth_geometry)
+
+            depth_audit = pipeline.prepare_canonical_grooming_pose_transfer_seed(
+                action,
+                canonical,
+                depth_target,
+                geometry_guide=depth_geometry,
+                foreleg_guide=foreleg,
+                preserve_normalized_geometry_luma=True,
+            )
+            pipeline.prepare_canonical_grooming_pose_transfer_seed(
+                action_inverse,
+                canonical,
+                depth_inverse_target,
+                geometry_guide=depth_geometry,
+                foreleg_guide=foreleg,
+                preserve_normalized_geometry_luma=True,
+            )
+
+            self.assertTrue(depth_audit["normalized_geometry_luma_exposed"])
+            self.assertTrue(
+                depth_audit["source_normalized_low_frequency_geometry_exposed"]
+            )
+            self.assertTrue(depth_audit["normalized_geometry_luma_used_for_shading"])
+            self.assertTrue(
+                depth_audit["normalized_white_maquette_depth_anatomy_only"]
+            )
+            self.assertFalse(depth_audit["soft_foreleg_depth_semantic_exposed"])
+            self.assertEqual(depth_audit["foreleg_luma_lift"], 0.0)
+            self.assertGreater(
+                depth_audit["geometry_guide_unique_foreground_rgb_count"],
+                2,
+            )
+            self.assertGreaterEqual(depth_audit["target_luma_range"], 24)
+            self.assertEqual(
+                depth_audit["sampler_role"],
+                "canonical_palette_normalized_white_maquette_depth_anatomy",
+            )
+            self.assertEqual(
+                depth_target.read_bytes(),
+                depth_inverse_target.read_bytes(),
+            )
+            self.assertNotEqual(target.read_bytes(), depth_target.read_bytes())
+
+            frame0_geometry = root / "grooming-frame000-body-pose.png"
+            frame0_target = root / "pose-transfer-frame000.png"
+            frame0_array = np.full(
+                (512, 512, 3),
+                (0, 255, 0),
+                dtype=np.uint8,
+            )
+            frame0_distance = cv2.distanceTransform(
+                foreground.astype(np.uint8),
+                cv2.DIST_L2,
+                5,
+            )
+            frame0_values = 96.0 + 80.0 * np.clip(
+                frame0_distance / max(float(frame0_distance.max()), 1.0),
+                0.0,
+                1.0,
+            )
+            for channel in range(3):
+                frame0_array[:, :, channel][foreground] = np.rint(
+                    frame0_values[foreground]
+                ).astype(np.uint8)
+            Image.fromarray(frame0_array, mode="RGB").save(frame0_geometry)
+
+            frame0_audit = pipeline.prepare_canonical_grooming_pose_transfer_seed(
+                action,
+                canonical,
+                frame0_target,
+                geometry_guide=frame0_geometry,
+                foreleg_guide=None,
+                preserve_normalized_geometry_luma=True,
+                complete_geometry_guide=True,
+            )
+
+            self.assertTrue(frame0_audit["complete_geometry_guide"])
+            self.assertIsNone(frame0_audit["foreleg_guide_path"])
+            self.assertEqual(frame0_audit["semantic_foreleg_pixels"], 0)
+            self.assertEqual(frame0_audit["public_internal_channel_pixels_filled"], 0)
+            self.assertEqual(
+                frame0_audit["sampler_role"],
+                "canonical_palette_white_maquette_frame000_body_pose_anatomy",
+            )
+            self.assertFalse(frame0_audit["soft_foreleg_depth_semantic_exposed"])
 
     def test_grooming_seed_bound_matte_unions_alpha_without_copying_seed_rgb(
         self,
@@ -9282,7 +9715,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             final_job["pose_reference_guide_styles"],
             {
                 "eating": (
-                    "texture_free_low_frequency_main_case_geometry_with_explicit_"
+                    "texture_free_low_frequency_white_maquette_geometry_with_explicit_"
                     "muzzle_overlap_on_pure_green"
                 ),
                 "grooming": (pipeline.GROOMING_QWEN_GUIDE_STYLE),
@@ -9308,7 +9741,8 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertFalse(eating_metadata["source_rgb_preserved"])
         self.assertTrue(eating_metadata["driver_silhouette_used"])
         self.assertFalse(eating_metadata["reference_space_motion"])
-        self.assertTrue(eating_metadata["main_case_driver_used"])
+        self.assertFalse(eating_metadata["main_case_driver_used"])
+        self.assertTrue(eating_metadata["uploaded_white_maquette_driver_used"])
         self.assertEqual(
             eating_metadata["palette_audit_role"],
             "qwen_full_body_canonical",
@@ -9340,6 +9774,9 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             pipeline.GROOMING_QWEN_NEGATIVE_SPACE_METHOD,
         )
         self.assertFalse(grooming_metadata["main_case_appearance_exposed_to_qwen"])
+        self.assertTrue(
+            grooming_metadata["uploaded_white_maquette_driver_used"]
+        )
         self.assertFalse(grooming_metadata["qwen_guide_internal_luma_variation"])
         self.assertEqual(
             grooming_metadata["qwen_guide_internal_luma_variation_role"],
