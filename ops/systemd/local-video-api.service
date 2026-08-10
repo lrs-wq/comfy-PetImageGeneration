@@ -1,0 +1,20 @@
+[Unit]
+Description=Local multi-pose 5-second video generation API
+After=network-online.target comfyui.service
+Wants=network-online.target
+Requires=comfyui.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/comfy-pet-pipeline
+EnvironmentFile=/etc/comfy-pet-pipeline/api.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/comfy-pet-pipeline/.venv/bin/uvicorn src.comfy_pet_pipeline.api.local_video:app --host 127.0.0.1 --port 8770 --proxy-headers
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

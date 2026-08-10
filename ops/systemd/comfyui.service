@@ -1,0 +1,19 @@
+[Unit]
+Description=ComfyUI GPU service
+After=network-online.target nvidia-persistenced.service
+Wants=network-online.target nvidia-persistenced.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/comfyui/current
+EnvironmentFile=/etc/comfy-pet-pipeline/common.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/miniconda3/envs/comfyui/bin/python main.py --listen 127.0.0.1 --port 8188 --disable-auto-launch --preview-method auto
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

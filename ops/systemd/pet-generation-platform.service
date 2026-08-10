@@ -1,0 +1,22 @@
+[Unit]
+Description=Pet image and video generation test platform
+After=network-online.target comfyui.service local-video-api.service
+Wants=network-online.target comfyui.service local-video-api.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/comfy-pet-pipeline
+EnvironmentFile=/etc/comfy-pet-pipeline/api.env
+EnvironmentFile=/etc/comfy-pet-pipeline/fun-control.env
+EnvironmentFile=/etc/comfy-pet-pipeline/wan.env
+EnvironmentFile=/etc/comfy-pet-pipeline/platform.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/comfy-pet-pipeline/.venv/bin/uvicorn src.comfy_pet_pipeline.api.platform:app --host 127.0.0.1 --port 8050 --proxy-headers
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

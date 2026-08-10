@@ -13,9 +13,9 @@ apikey.txt
 *.pfx
 
 # Python environments and caches
-.venv/
-venv/
-env/
+/.venv/
+/venv/
+/env/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -46,7 +46,7 @@ temp/
 /input/
 /results/
 /generated/
-pet_dressup_mvp/outputs/
+/apps/dressup/outputs/
 
 # Generated media and 3D artifacts
 *.png
@@ -100,11 +100,10 @@ pet_dressup_mvp/outputs/
 # Backups and editor artifacts
 /backups/
 /.codex-backups/
+/.codex-deploy/
 /.codex-staging/
 /.codex-validation/
-/diagnostics/
-/deploy/backups/
-/deploy/staging/
+/deploy/
 *.bak
 *.bak.*
 *.bak-*
@@ -120,11 +119,15 @@ pet_dressup_mvp/outputs/
 Thumbs.db
 
 # Downloaded upstream projects and runtime dependencies
-/ComfyUI/
+/ComfyUI
 /comfyui_custom_nodes/
 /vendor/
 /experiments/
 /ffmpeg
+
+# Machine-local operations configuration; commit examples only
+/ops/env/*.env
+!/ops/env/*.env.example
 
 # Build artifacts
 build/
