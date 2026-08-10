@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.5"
+API_VERSION = "2.24.6"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -245,9 +245,9 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.4"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.5"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
-    "main_case_grooming_canonical_open_channel_then_masked_face_refine_v30"
+    "main_case_grooming_canonical_open_channel_then_masked_face_refine_v31"
 )
 GROOMING_QWEN_GEOMETRY_GUIDE_POLICY = "driving_grooming_geometry_image2_v8"
 GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY = "driving_grooming_geometry_image1_v3"
@@ -351,13 +351,24 @@ GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
     "canonical_image1_headless_white_maquette_body_pose_image2_"
-    "canonical_face_image3_then_masked_face_refine_v14"
+    "canonical_face_image3_then_masked_face_refine_v15"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
-GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = 1.0
-GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = 3
+GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT = (
+    0.88,
+    0.94,
+    1.0,
+    0.90,
+    0.97,
+)
+GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = (
+    GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT[0]
+)
+GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = len(
+    GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT
+)
 GROOMING_ADVISORY_IDENTITY_REFINE_POLICY = (
-    "pose_locked_draft_image1_canonical_image2_face_image3_masked_v5"
+    "pose_locked_draft_image1_canonical_image2_face_image3_masked_v6"
 )
 GROOMING_ADVISORY_IDENTITY_REFINE_STEPS = 12
 GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE = 1.0
@@ -4291,6 +4302,8 @@ IMAGE 3 is a deterministic enlarged head crop made from Image 1. It adds no seco
 GEOMETRY READ: Image 2 deliberately stops at the neck while retaining the raised paw beside the lower muzzle location. Treat its connected neutral body pixels as one living cat body. Its depth changes describe the chest, shoulders, torso and limbs together. The localized volume rising along the viewer-left chest is the raised foreleg and furry paw, not cheek shading and not a separate object. Rebuild it continuously from shoulder through elbow and wrist into one rounded paw touching the underside of Image 1's preserved muzzle. The viewer-right foreleg continues into the only planted front paw. Preserve both attached hind legs and one complete tail.
 
 ACTION TRANSFER: keep Image 1's head, face, ears and upper-neck identity in place. Repose its body into Image 2's seated anatomy and raise only the viewer-left foreleg to the preserved muzzle. The raised viewer-left foreleg replaces its former planted position, so that same foreleg has no second paw on the ground. A single small pink tongue touches the raised paw. The mouth and paw are empty. Keep natural feline joint taper, soft fur continuity and readable paw digits from shoulder to muzzle.
+
+SPECIES AND SUPPORT LOCK: the result is exactly one domestic cat from Image 1, never an elephant, dog, hybrid animal or anatomy-model creature. Preserve two upright feline ears and a short feline nose and muzzle; never create a trunk, tusk, floppy fan-shaped ear, elongated face or non-cat skin folds. The cat floats only against flat green negative space: no pedestal, plinth, display base, circular platform, stage, floor disc, floor plane or cast shadow beneath any paw.
 
 IDENTITY LOCK: preserve the face directly from Image 1 and its digest-bound Image 3 crop; do not regenerate a generic face. Repaint every edited body pixel from Image 1, including the raised paw, wrist, foreleg, shoulder, chest, torso, planted paw, hind legs and tail. Preserve Image 1's roundness or slenderness, cheek width, eye color and exact localized markings; an unstriped region remains unstriped, including every unstriped facial or body region. Both front paws share Image 1's palette, fur length, texture scale, lighting and toe treatment. A genuinely white uploaded pet remains white only because Image 1 requires it. {fur_lock}
 
@@ -20381,7 +20394,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "microphone, flashlight, battery, lipstick, bottle, capsule, handle, "
                     "green internal mark, gray guide material, black seam, dark seam, dark contour line, "
                     "continuous ink stroke, guide-shaped stripe, outlined foreleg, invented dark stripe, "
-                    "sleeve, hoodie, hood, jacket, sweater, shirt, cuff, fabric fold, garment seam"
+                    "sleeve, hoodie, hood, jacket, sweater, shirt, cuff, fabric fold, garment seam, "
+                    "elephant, elephant head, elephant ears, trunk, tusk, dog head, non-cat species, hybrid animal, "
+                    "pedestal, plinth, display stand, display base, circular platform, stage, floor disc"
                 )
         keyframe = job_dir / f"pose_{index:02d}_keyframe.png"
         if transparent_gif:
@@ -21935,7 +21950,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                 if advisory_grooming_action_transfer_active:
                     effective_pose_denoise = (
-                        GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE
+                        GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT[
+                            min(
+                                attempt - 1,
+                                len(
+                                    GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT
+                                )
+                                - 1,
+                            )
+                        ]
                     )
                 if advisory_grooming_identity_refine_active:
                     effective_pose_denoise = (
@@ -26818,6 +26841,9 @@ def health() -> dict[str, Any]:
                     "policy": GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY,
                     "steps": GROOMING_ADVISORY_ACTION_TRANSFER_STEPS,
                     "denoise": GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE,
+                    "denoise_by_action_attempt": list(
+                        GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT
+                    ),
                     "image_roles": {
                         "image1": "approved_canonical_identity_sampler",
                         "image2": (

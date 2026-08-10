@@ -5444,8 +5444,8 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         persist_identity_source_digest: bool = True,
         visual_audits_blocking: bool = True,
     ) -> tuple[dict[str, object], str, str]:
-        if pose_attempt not in {1, 2, 3, 4, 5}:
-            raise ValueError("pose_attempt must be between 1 and 5")
+        if pose_attempt not in {1, 2, 3, 4, 5, 6}:
+            raise ValueError("pose_attempt must be between 1 and 6")
         if main_case_raw_identity_chain is None:
             main_case_raw_identity_chain = (
                 action_identity_policy
@@ -6031,7 +6031,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             attempt_number = next(
                 (
                     value
-                    for value in range(1, 6)
+                    for value in range(1, 7)
                     if f"attempt_{value:02d}" in source.name
                 ),
                 0,
@@ -6111,7 +6111,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             attempt_number = next(
                 (
                     value
-                    for value in range(1, 6)
+                    for value in range(1, 7)
                     if f"attempt_{value:02d}" in candidate.name
                 ),
                 0,
@@ -6611,6 +6611,8 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         for forbidden_token in ("microphone", "zipper", "spring", "pendant", "cable"):
             self.assertNotIn(forbidden_token, prompt.lower())
         self.assertIn("an unstriped region remains unstriped", prompt)
+        self.assertIn("never an elephant", prompt)
+        self.assertIn("no pedestal, plinth, display base, circular platform", prompt)
 
         refine_prompt = pipeline.build_advisory_grooming_identity_refine_prompt(
             pipeline.subject_replacement_pose_prompt("grooming"),
@@ -7059,10 +7061,10 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 Path(temporary),
                 action="grooming",
                 action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
-                pose_attempt=4,
+                pose_attempt=6,
                 advisory_grooming_minimum_acceptable=False,
                 advisory_grooming_minimum_issues=["new_dominant_dark_markings"],
-                action_chroma_acceptable_attempts={1, 2, 3},
+                action_chroma_acceptable_attempts={1, 2, 3, 4, 5},
                 identity_palette_guard=True,
                 uploaded_white_maquette=True,
                 visual_audits_blocking=False,
@@ -7084,7 +7086,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertTrue(
             any(
                 image.endswith(
-                    "grooming_advisory_identity_refine_source_attempt_03.png"
+                    "grooming_advisory_identity_refine_source_attempt_05.png"
                 )
                 for image in load_images
             )
@@ -7117,6 +7119,18 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertEqual(
             len(selected),
             pipeline.GROOMING_ADVISORY_TOTAL_ATTEMPTS,
+        )
+        self.assertEqual(
+            len(pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT),
+            pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS,
+        )
+        self.assertLess(
+            pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT[0],
+            1.0,
+        )
+        self.assertIn(
+            1.0,
+            pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT,
         )
         self.assertEqual(selected[-1]["name"], "grooming_mandatory_identity_refine")
         self.assertEqual(
