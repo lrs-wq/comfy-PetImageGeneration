@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.0"
+API_VERSION = "2.24.1"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -361,6 +361,11 @@ GROOMING_ADVISORY_IDENTITY_REFINE_POLICY = (
 )
 GROOMING_ADVISORY_IDENTITY_REFINE_STEPS = 12
 GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE = 0.86
+GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS = 1
+GROOMING_ADVISORY_TOTAL_ATTEMPTS = (
+    GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+    + GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS
+)
 GROOMING_ADVISORY_MINIMUM_GATE_POLICY = (
     "grooming_action_identity_minimum_contract_v5"
 )
@@ -4790,6 +4795,59 @@ def canonical_grooming_generation_profiles(
             ),
         )
         selected.append(repeated)
+    return selected
+
+
+def advisory_grooming_generation_profiles(
+    pose: str,
+    profiles: list[dict[str, Any]],
+    *,
+    enabled: bool,
+) -> list[dict[str, Any]]:
+    """Reserve one Qwen call after the three action-draft attempts."""
+
+    selected = [
+        {
+            **profile,
+            "user_loras": [dict(item) for item in profile.get("user_loras", [])],
+        }
+        for profile in profiles[:GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS]
+    ]
+    if not enabled or action_key(pose) != "grooming" or not selected:
+        return selected
+    retry_source = selected[-1]
+    while len(selected) < GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS:
+        repeated = {
+            **retry_source,
+            "user_loras": [dict(item) for item in retry_source.get("user_loras", [])],
+        }
+        repeated["name"] = f"grooming_action_draft_seed_retry_{len(selected) + 1}"
+        repeated["quality_retry"] = len(selected) + 1
+        repeated["steps"] = max(
+            GROOMING_ADVISORY_ACTION_TRANSFER_STEPS,
+            int(repeated["steps"]),
+        )
+        selected.append(repeated)
+    identity_refine_profile = {
+        **selected[-1],
+        "user_loras": [
+            dict(item) for item in selected[-1].get("user_loras", [])
+        ],
+    }
+    identity_refine_profile.update(
+        name="grooming_mandatory_identity_refine",
+        quality_retry=GROOMING_ADVISORY_TOTAL_ATTEMPTS,
+        steps=max(
+            GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
+            int(identity_refine_profile["steps"]),
+        ),
+        denoise=GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
+    )
+    selected.append(identity_refine_profile)
+    if len(selected) != GROOMING_ADVISORY_TOTAL_ATTEMPTS:
+        raise RuntimeError(
+            "Advisory grooming must reserve exactly one identity-refine attempt."
+        )
     return selected
 
 
@@ -19765,7 +19823,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 grooming_advisory_minimum_gate_status="running",
                 grooming_advisory_minimum_gate_blocking=True,
                 grooming_advisory_minimum_gate_max_attempts=(
+                    GROOMING_ADVISORY_TOTAL_ATTEMPTS
+                ),
+                grooming_advisory_action_draft_max_attempts=(
                     GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                ),
+                grooming_advisory_identity_refine_max_attempts=(
+                    GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS
                 ),
             )
         fur_surface_rejection_streak = 0
@@ -19896,13 +19960,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         if transparent_gif:
             active_pose_profiles = pose_generation_profiles(pose, pose_profiles)
             if not GENERATION_VISUAL_AUDITS_BLOCKING:
-                active_pose_profiles = active_pose_profiles[
-                    : (
-                        GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
-                        if action_key(pose) == "grooming"
-                        else 1
+                if advisory_grooming_minimum_gate_required:
+                    active_pose_profiles = advisory_grooming_generation_profiles(
+                        pose,
+                        active_pose_profiles,
+                        enabled=True,
                     )
-                ]
+                else:
+                    active_pose_profiles = active_pose_profiles[:1]
             negative_prompt += ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
             if source_palette_negative:
                 negative_prompt += ", " + source_palette_negative
@@ -20379,6 +20444,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     pose_candidate_matte_policy=(QWEN_ACTION_CANDIDATE_MATTE_POLICY),
                 )
             for attempt, profile in enumerate(active_pose_profiles, start=1):
+                if (
+                    advisory_grooming_action_transfer_active
+                    and attempt
+                    > GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                    and not isinstance(
+                        grooming_advisory_identity_refine_source,
+                        dict,
+                    )
+                ):
+                    break
                 raise_if_cancelled(job_id)
                 if attempt > 1:
                     update_job(
@@ -20438,10 +20513,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 canonical_grooming_full_pose_rescue_active = bool(
                     canonical_grooming_completion_capable
                     and attempt == GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
+                    and not advisory_grooming_identity_refine_active
                 )
                 canonical_grooming_full_pose_refine_active = bool(
                     canonical_grooming_completion_capable
                     and attempt == GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT
+                    and not advisory_grooming_identity_refine_active
                 )
                 canonical_grooming_full_pose_recovery_active = bool(
                     canonical_grooming_full_pose_rescue_active
@@ -23518,6 +23595,23 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         else None
                     ),
                 )
+                if advisory_grooming_identity_refine_active:
+                    update_job(
+                        job_id,
+                        grooming_advisory_identity_refine_status=(
+                            "failed_fallback_to_accepted_action_draft"
+                        ),
+                        grooming_advisory_identity_refine_failed_attempt=attempt,
+                        grooming_advisory_identity_refine_failure_issues=(
+                            advisory_grooming_minimum_gate_metrics.get("issues", [])
+                            if isinstance(
+                                advisory_grooming_minimum_gate_metrics,
+                                dict,
+                            )
+                            else ["identity_refine_candidate_unavailable"]
+                        ),
+                    )
+                    break
             if (
                 advisory_grooming_minimum_gate_required
                 and best_attempt is not None
@@ -23634,7 +23728,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
                 raise RuntimeError(
                     "Grooming minimum action/identity contract rejected every "
-                    f"Qwen candidate after {len(active_pose_profiles)} attempts: "
+                    "Qwen action draft after "
+                    f"{GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS} attempts: "
                     + pose_attempt_failure_summary(attempts)
                 )
             if best_attempt is None and image_request and best_raw_attempt is not None:
@@ -26250,7 +26345,13 @@ def health() -> dict[str, Any]:
                     "appearance_free_pose_seed_loaded_by_qwen": True,
                     "identity_palette_prompt_conditioning": True,
                     "maximum_attempts": (
+                        GROOMING_ADVISORY_TOTAL_ATTEMPTS
+                    ),
+                    "action_draft_maximum_attempts": (
                         GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                    ),
+                    "identity_refine_maximum_attempts": (
+                        GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS
                     ),
                     "mandatory_identity_refine": {
                         "policy": GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,

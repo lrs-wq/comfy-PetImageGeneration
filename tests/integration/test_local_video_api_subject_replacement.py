@@ -5432,6 +5432,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         pose_attempt: int = 1,
         grooming_gate_acceptable: bool = True,
         advisory_grooming_minimum_acceptable: bool = True,
+        advisory_grooming_minimum_acceptable_attempts: set[int] | None = None,
         advisory_grooming_minimum_issues: list[str] | None = None,
         identity_palette_guard: bool = False,
         canonical_action_palette_drift_attempts: set[int] | None = None,
@@ -6107,14 +6108,27 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             identity_reference_path: Path,
             **_kwargs: object,
         ) -> dict[str, object]:
+            attempt_number = next(
+                (
+                    value
+                    for value in range(1, 6)
+                    if f"attempt_{value:02d}" in candidate.name
+                ),
+                0,
+            )
+            acceptable = (
+                attempt_number in advisory_grooming_minimum_acceptable_attempts
+                if advisory_grooming_minimum_acceptable_attempts is not None
+                else advisory_grooming_minimum_acceptable
+            )
             return {
                 "policy": pipeline.GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
                 "version": pipeline.GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
                 "available": True,
-                "acceptable": advisory_grooming_minimum_acceptable,
+                "acceptable": acceptable,
                 "issues": (
                     []
-                    if advisory_grooming_minimum_acceptable
+                    if acceptable
                     else (
                         advisory_grooming_minimum_issues
                         or [
@@ -6125,7 +6139,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 ),
                 "warnings": [],
                 "penalty": (
-                    0.0 if advisory_grooming_minimum_acceptable else 200.0
+                    0.0 if acceptable else 200.0
                 ),
                 "candidate_path": str(candidate),
                 "candidate_sha256": pipeline.file_sha256(candidate),
@@ -6945,6 +6959,74 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 node.get("class_type") == "SetLatentNoiseMask"
                 for node in workflow.values()
             )
+        )
+
+    def test_advisory_grooming_reserves_attempt4_for_identity_refine(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="grooming",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=4,
+                advisory_grooming_minimum_acceptable=False,
+                advisory_grooming_minimum_acceptable_attempts={3},
+                action_chroma_acceptable_attempts={1, 2, 3},
+                identity_palette_guard=True,
+                uploaded_white_maquette=True,
+                visual_audits_blocking=False,
+            )
+
+        expected_prefix = "local_video_api/capture-grooming/"
+        load_images = {
+            node["inputs"]["image"]
+            for node in workflow.values()
+            if node.get("class_type") == "LoadImage"
+        }
+        self.assertEqual(
+            load_images,
+            {
+                expected_prefix
+                + "grooming_advisory_identity_refine_source_attempt_03.png",
+                expected_prefix + "cartoon_reference.png",
+                expected_prefix + "grooming_canonical_face_identity_reference.png",
+            },
+        )
+        self.assertNotIn(uploaded_input, load_images)
+        self.assertNotIn(pose_input, load_images)
+        self.assertFalse(any("white_maquette" in image for image in load_images))
+        self.assertIn(
+            "action draft from attempt 3",
+            workflow["6"]["inputs"]["prompt"],
+        )
+
+    def test_advisory_grooming_profile_budget_includes_identity_refine(self) -> None:
+        profiles = [
+            {
+                "name": f"draft-{index}",
+                "user_loras": [],
+                "steps": 10,
+                "quality_retry": index,
+                "denoise": 1.0,
+            }
+            for index in range(1, 4)
+        ]
+
+        selected = pipeline.advisory_grooming_generation_profiles(
+            "grooming",
+            profiles,
+            enabled=True,
+        )
+
+        self.assertEqual(
+            len(selected),
+            pipeline.GROOMING_ADVISORY_TOTAL_ATTEMPTS,
+        )
+        self.assertEqual(selected[-1]["name"], "grooming_mandatory_identity_refine")
+        self.assertEqual(
+            selected[-1]["denoise"],
+            pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
         )
 
     def test_advisory_grooming_attempt3_uses_masked_foreleg_completion(
