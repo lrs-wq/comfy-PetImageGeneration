@@ -6651,6 +6651,36 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 {"issues": ["grooming_face_eye_hue_replacement"]}
             )
         )
+        self.assertTrue(
+            pipeline.advisory_grooming_candidate_safe_for_identity_refine(
+                {
+                    "available": True,
+                    "acceptable": False,
+                    "issues": ["new_dominant_dark_markings"],
+                    "pose": {"acceptable": True},
+                }
+            )
+        )
+        self.assertFalse(
+            pipeline.advisory_grooming_candidate_safe_for_identity_refine(
+                {
+                    "available": True,
+                    "acceptable": False,
+                    "issues": ["gross_identity_palette_l1_drift"],
+                    "pose": {"acceptable": True},
+                }
+            )
+        )
+        self.assertFalse(
+            pipeline.advisory_grooming_candidate_safe_for_identity_refine(
+                {
+                    "available": True,
+                    "acceptable": False,
+                    "issues": ["new_dominant_dark_markings"],
+                    "pose": {"acceptable": False},
+                }
+            )
+        )
         face_retry = pipeline.advisory_grooming_retry_anatomy_prompt(
             ["grooming_face_dark_marking_drift"]
         )
@@ -7013,6 +7043,38 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertIn(
             "action draft from attempt 3",
             workflow["6"]["inputs"]["prompt"],
+        )
+        self.assertTrue(
+            any(
+                node.get("class_type") == "SetLatentNoiseMask"
+                for node in workflow.values()
+            )
+        )
+
+    def test_advisory_grooming_repairs_action_safe_dark_identity_drift(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, _, _ = self._capture_action_workflow(
+                Path(temporary),
+                action="grooming",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=2,
+                advisory_grooming_minimum_acceptable=False,
+                advisory_grooming_minimum_issues=["new_dominant_dark_markings"],
+                action_chroma_acceptable_attempts={1},
+                identity_palette_guard=True,
+                uploaded_white_maquette=True,
+                visual_audits_blocking=False,
+            )
+
+        self.assertIn(
+            "MASKED UPPER-HEAD PASS",
+            workflow["6"]["inputs"]["prompt"],
+        )
+        self.assertEqual(
+            workflow["14"]["inputs"]["denoise"],
+            pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
         )
         self.assertTrue(
             any(
@@ -9155,6 +9217,10 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 (178, 232, 220, 270),
                 fill=(220, 224, 228, 255),
             )
+            source_draw.rectangle(
+                (60, 300, 145, 440),
+                fill=(4, 8, 6, 255),
+            )
             source_image.save(source)
             Image.new("RGB", (1024, 1024), (210, 80, 96)).save(generated)
 
@@ -9163,11 +9229,14 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                     source,
                     canvas,
                     noise_mask,
+                    identity_reference_palette={
+                        "fractions": {"black": 0.01},
+                    },
                 )
             )
             composite_audit = (
                 pipeline.finalize_advisory_grooming_identity_refine_candidate(
-                    source,
+                    Path(canvas_audit["sanitized_source_path"]),
                     generated,
                     noise_mask,
                     target,
@@ -9185,6 +9254,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_EXPANSION_PX,
             )
             self.assertGreater(canvas_audit["editable_background_pixels"], 0)
+            self.assertGreater(canvas_audit["dark_artifact_removed_pixels"], 2048)
             self.assertEqual(
                 composite_audit["protected_action_pixels_changed"],
                 0,
@@ -9199,6 +9269,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             with Image.open(target) as loaded:
                 result = loaded.convert("RGB")
             self.assertEqual(result.getpixel((0, 0)), (0, 255, 0))
+            self.assertEqual(result.getpixel((80, 350)), (0, 255, 0))
             self.assertEqual(result.getpixel((198, 250)), (220, 224, 228))
             self.assertEqual(result.getpixel((256, 380)), (96, 104, 112))
             self.assertEqual(result.getpixel((256, 100)), (210, 80, 96))

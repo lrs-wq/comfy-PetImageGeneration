@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.3"
+API_VERSION = "2.24.4"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -245,9 +245,9 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.2"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.3"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
-    "main_case_grooming_canonical_open_channel_then_masked_face_refine_v28"
+    "main_case_grooming_canonical_open_channel_then_masked_face_refine_v29"
 )
 GROOMING_QWEN_GEOMETRY_GUIDE_POLICY = "driving_grooming_geometry_image2_v8"
 GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY = "driving_grooming_geometry_image1_v3"
@@ -351,13 +351,13 @@ GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
     "canonical_image1_headless_white_maquette_body_pose_image2_"
-    "canonical_face_image3_then_masked_face_refine_v12"
+    "canonical_face_image3_then_masked_face_refine_v13"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = 1.0
 GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = 3
 GROOMING_ADVISORY_IDENTITY_REFINE_POLICY = (
-    "pose_locked_draft_image1_canonical_image2_face_image3_masked_v3"
+    "pose_locked_draft_image1_canonical_image2_face_image3_masked_v4"
 )
 GROOMING_ADVISORY_IDENTITY_REFINE_STEPS = 12
 GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE = 1.0
@@ -365,6 +365,20 @@ GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS = 1
 GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_HEIGHT_FRACTION = 0.44
 GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_EXPANSION_PX = 12
 GROOMING_ADVISORY_IDENTITY_REFINE_MASK_FEATHER_SIGMA_PX = 4.0
+GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_ALLOWED_ISSUES = frozenset(
+    {
+        "new_dominant_dark_markings",
+        "grooming_face_dark_marking_drift",
+        "grooming_face_gross_chromatic_drift",
+        "grooming_face_eye_hue_replacement",
+    }
+)
+GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_BLACK_FRACTION_MAX = 0.05
+GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_VALUE_MAX = 70
+GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_MIN_FRACTION = 0.035
+GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_EDGE_VALUE_MAX = 112
+GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_EDGE_DILATION_PX = 2
+GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_SUBJECT_SUPPORT_PX = 8
 GROOMING_ADVISORY_TOTAL_ATTEMPTS = (
     GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
     + GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS
@@ -4377,6 +4391,28 @@ def advisory_grooming_candidate_safe_for_masked_repair(
     return not bool(issues & GROOMING_ADVISORY_MASKED_REPAIR_UNSAFE_ISSUES)
 
 
+def advisory_grooming_candidate_safe_for_identity_refine(
+    minimum_gate: dict[str, Any] | None,
+) -> bool:
+    """Allow an action-safe draft whose remaining drift is head-repairable."""
+
+    if not isinstance(minimum_gate, dict):
+        return False
+    if minimum_gate.get("available") is not True:
+        return False
+    issues = {str(issue) for issue in minimum_gate.get("issues", [])}
+    if not issues:
+        return bool(minimum_gate.get("acceptable") is True)
+    if not issues.issubset(
+        GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_ALLOWED_ISSUES
+    ):
+        return False
+    pose_quality = minimum_gate.get("pose")
+    if isinstance(pose_quality, dict) and pose_quality.get("acceptable") is not True:
+        return False
+    return True
+
+
 def build_canonical_grooming_full_pose_identity_refine_prompt(
     pose: str,
     *,
@@ -6168,18 +6204,122 @@ def prepare_advisory_grooming_identity_refine_canvas(
     source: Path,
     target: Path,
     noise_mask_target: Path,
+    *,
+    identity_reference_palette: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Lock the accepted action and expose only its upper head to Qwen."""
 
+    with Image.open(source) as loaded:
+        if "A" not in loaded.getbands():
+            raise ValueError("Grooming identity-refine source has no alpha channel")
+        source_image = loaded.convert("RGBA")
+    if source_image.size != (512, 512):
+        raise ValueError("Grooming identity-refine source must be 512x512")
+    original_source_rgba = np.asarray(source_image, dtype=np.uint8)
+    source_rgba = original_source_rgba.copy()
+    foreground = source_rgba[:, :, 3] >= 64
+    foreground_pixels_before = int(np.count_nonzero(foreground))
+    reference_fractions = (
+        identity_reference_palette.get("fractions")
+        if isinstance(identity_reference_palette, dict)
+        and isinstance(identity_reference_palette.get("fractions"), dict)
+        else {}
+    )
+    reference_black_fraction = (
+        float(reference_fractions.get("black"))
+        if "black" in reference_fractions
+        else None
+    )
+    artifact_removed = np.zeros(foreground.shape, dtype=bool)
+    dark_component_min_pixels = max(
+        2048,
+        int(
+            round(
+                foreground_pixels_before
+                * GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_MIN_FRACTION
+            )
+        ),
+    )
+    if (
+        reference_black_fraction is not None
+        and reference_black_fraction
+        <= GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_BLACK_FRACTION_MAX
+    ):
+        source_value = source_rgba[:, :, :3].max(axis=2)
+        dark_pixels = foreground & (
+            source_value
+            < GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_VALUE_MAX
+        )
+        component_count, component_labels, component_stats, _ = (
+            cv2.connectedComponentsWithStats(
+                dark_pixels.astype(np.uint8),
+                connectivity=8,
+            )
+        )
+        artifact_core = np.zeros(foreground.shape, dtype=bool)
+        for component_index in range(1, component_count):
+            component_pixels = int(
+                component_stats[component_index, cv2.CC_STAT_AREA]
+            )
+            if component_pixels >= dark_component_min_pixels:
+                artifact_core |= component_labels == component_index
+        if np.any(artifact_core):
+            subject_support_px = int(
+                GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_SUBJECT_SUPPORT_PX
+            )
+            subject_support_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (subject_support_px * 2 + 1, subject_support_px * 2 + 1),
+            )
+            non_dark_subject = foreground & (
+                source_value
+                >= GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_VALUE_MAX
+            )
+            subject_support = cv2.dilate(
+                non_dark_subject.astype(np.uint8),
+                subject_support_kernel,
+                iterations=1,
+            ).astype(bool)
+            artifact_core_to_remove = artifact_core & ~subject_support
+            edge_dilation = int(
+                GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_EDGE_DILATION_PX
+            )
+            edge_kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (edge_dilation * 2 + 1, edge_dilation * 2 + 1),
+            )
+            artifact_edge = cv2.dilate(
+                artifact_core_to_remove.astype(np.uint8),
+                edge_kernel,
+                iterations=1,
+            ).astype(bool)
+            artifact_removed = artifact_core_to_remove | (
+                artifact_edge
+                & foreground
+                & ~subject_support
+                & (
+                    source_value
+                    < GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_EDGE_VALUE_MAX
+                )
+            )
+            source_rgba[artifact_removed] = np.asarray(
+                (0, 0, 0, 0),
+                dtype=np.uint8,
+            )
+            foreground = source_rgba[:, :, 3] >= 64
+    sanitized_source = target.with_name(f"{target.stem}_sanitized_cutout.png")
+    sanitized_source.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(source_rgba, mode="RGBA").save(
+        sanitized_source,
+        format="PNG",
+        optimize=True,
+    )
     audit = prepare_canonical_action_identity_refine_canvas(
-        source,
+        sanitized_source,
         target,
         action="grooming",
         policy=GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,
     )
-    with Image.open(source) as loaded:
-        source_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
-    foreground = source_rgba[:, :, 3] >= 64
     ys, xs = np.nonzero(foreground)
     x0, y0 = int(xs.min()), int(ys.min())
     x1, y1 = int(xs.max()) + 1, int(ys.max()) + 1
@@ -6250,6 +6390,24 @@ def prepare_advisory_grooming_identity_refine_canvas(
     )
     return {
         **audit,
+        "original_source_path": str(source),
+        "original_source_sha256": file_sha256(source),
+        "sanitized_source_path": str(sanitized_source),
+        "sanitized_source_sha256": file_sha256(sanitized_source),
+        "source_artifact_cleanup_policy": (
+            "unexpected_large_near_black_component_removal_v1"
+        ),
+        "identity_reference_black_fraction": reference_black_fraction,
+        "identity_reference_black_fraction_max_for_cleanup": (
+            GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_BLACK_FRACTION_MAX
+        ),
+        "dark_artifact_component_min_pixels": dark_component_min_pixels,
+        "dark_artifact_subject_support_dilation_px": (
+            GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_SUBJECT_SUPPORT_PX
+        ),
+        "dark_artifact_removed_pixels": int(np.count_nonzero(artifact_removed)),
+        "foreground_pixels_before_cleanup": foreground_pixels_before,
+        "foreground_pixels_after_cleanup": int(np.count_nonzero(foreground)),
         "sampler_canvas_scope": "upper_head_mask_only_action_pixels_locked",
         "head_height_fraction": (
             GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_HEIGHT_FRACTION
@@ -20904,6 +21062,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             refine_source_path,
                             refine_input_path,
                             grooming_advisory_identity_refine_noise_mask_path,
+                            identity_reference_palette=(
+                                advisory_grooming_identity_palette_reference
+                            ),
                         )
                     )
                     refine_input_name = (
@@ -20936,8 +21097,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     grooming_advisory_identity_refine_audit = {
                         "policy": GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,
                         "source_attempt": refine_source_attempt,
-                        "source_path": str(refine_source_path),
-                        "source_sha256": expected_refine_source_sha256,
+                        "source_path": refine_canvas_audit[
+                            "sanitized_source_path"
+                        ],
+                        "source_sha256": refine_canvas_audit[
+                            "sanitized_source_sha256"
+                        ],
+                        "original_source_path": str(refine_source_path),
+                        "original_source_sha256": expected_refine_source_sha256,
                         "refine_canvas": refine_canvas_audit,
                         "image1_role": (
                             "accepted_grooming_pose_sampler_no_identity_authority"
@@ -23685,10 +23852,24 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                 ):
                     best_attempt = record
+                advisory_identity_refine_source_eligible = bool(
+                    advisory_grooming_minimum_gate_required
+                    and not advisory_grooming_identity_refine_active
+                    and attempt
+                    <= GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                    and chroma_metrics.get("acceptable") is True
+                    and attempt_cutout.is_file()
+                    and advisory_grooming_candidate_safe_for_identity_refine(
+                        advisory_grooming_minimum_gate_metrics
+                    )
+                )
                 candidate_acceptable = bool(
                     (
                         not GENERATION_VISUAL_AUDITS_BLOCKING
-                        and advisory_minimum_acceptable
+                        and (
+                            advisory_minimum_acceptable
+                            or advisory_identity_refine_source_eligible
+                        )
                     )
                     or (
                         GENERATION_VISUAL_AUDITS_BLOCKING
@@ -23735,9 +23916,19 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 advisory_grooming_minimum_gate_metrics
                             ),
                             "identity_palette_quality": palette_quality,
+                            "minimum_gate_acceptable": (
+                                advisory_minimum_acceptable
+                            ),
+                            "identity_refine_source_eligible": (
+                                advisory_identity_refine_source_eligible
+                            ),
+                            "identity_refine_source_allowed_issues": sorted(
+                                GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_ALLOWED_ISSUES
+                            ),
+                            "fallback_eligible": advisory_minimum_acceptable,
                             "selection_role": (
-                                "accepted_action_draft_for_mandatory_"
-                                "canonical_identity_restoration"
+                                "action_safe_draft_for_mandatory_canonical_"
+                                "face_restoration"
                             ),
                         }
                         best_attempt = record
@@ -23890,10 +24081,19 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                 )
                 if advisory_grooming_identity_refine_active:
+                    identity_refine_fallback_eligible = bool(
+                        isinstance(grooming_advisory_identity_refine_source, dict)
+                        and grooming_advisory_identity_refine_source.get(
+                            "fallback_eligible"
+                        )
+                        is True
+                    )
                     update_job(
                         job_id,
                         grooming_advisory_identity_refine_status=(
                             "failed_fallback_to_accepted_action_draft"
+                            if identity_refine_fallback_eligible
+                            else "failed_without_acceptable_action_draft_fallback"
                         ),
                         grooming_advisory_identity_refine_failed_attempt=attempt,
                         grooming_advisory_identity_refine_failure_issues=(
@@ -23905,6 +24105,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             else ["identity_refine_candidate_unavailable"]
                         ),
                     )
+                    if not identity_refine_fallback_eligible:
+                        best_attempt = None
                     break
             if (
                 advisory_grooming_minimum_gate_required
@@ -26668,6 +26870,23 @@ def health() -> dict[str, Any]:
                             "refined_head_over_accepted_action_draft"
                         ),
                         "body_and_raised_paw_pixel_lock": True,
+                        "action_safe_source_allowed_identity_issues": sorted(
+                            GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_ALLOWED_ISSUES
+                        ),
+                        "unexpected_dark_artifact_cleanup": {
+                            "enabled_when_identity_black_fraction_lte": (
+                                GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_BLACK_FRACTION_MAX
+                            ),
+                            "dark_value_max": (
+                                GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_VALUE_MAX
+                            ),
+                            "minimum_component_fraction": (
+                                GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_MIN_FRACTION
+                            ),
+                            "subject_support_dilation_px": (
+                                GROOMING_ADVISORY_IDENTITY_REFINE_DARK_ARTIFACT_SUBJECT_SUPPORT_PX
+                            ),
+                        },
                         "white_maquette_loaded": False,
                         "fallback": "accepted_action_draft",
                     },
