@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.1"
+API_VERSION = "2.24.2"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -245,9 +245,9 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.0"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.1"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
-    "main_case_grooming_canonical_open_channel_then_identity_refine_v26"
+    "main_case_grooming_canonical_open_channel_then_masked_face_refine_v27"
 )
 GROOMING_QWEN_GEOMETRY_GUIDE_POLICY = "driving_grooming_geometry_image2_v8"
 GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY = "driving_grooming_geometry_image1_v3"
@@ -351,17 +351,19 @@ GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
     "canonical_image1_headless_white_maquette_body_pose_image2_"
-    "canonical_face_image3_then_identity_refine_v10"
+    "canonical_face_image3_then_masked_face_refine_v11"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = 1.0
 GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = 3
 GROOMING_ADVISORY_IDENTITY_REFINE_POLICY = (
-    "pose_draft_image1_canonical_image2_canonical_face_image3_v1"
+    "pose_locked_draft_image1_canonical_image2_face_image3_masked_v2"
 )
 GROOMING_ADVISORY_IDENTITY_REFINE_STEPS = 12
-GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE = 0.86
+GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE = 0.72
 GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS = 1
+GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_HEIGHT_FRACTION = 0.40
+GROOMING_ADVISORY_IDENTITY_REFINE_MASK_FEATHER_SIGMA_PX = 4.0
 GROOMING_ADVISORY_TOTAL_ATTEMPTS = (
     GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
     + GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS
@@ -4288,26 +4290,26 @@ def build_advisory_grooming_identity_refine_prompt(
     source_attempt: int,
     profile_fur_lock: str = "",
 ) -> str:
-    """Repaint an accepted grooming action draft without maquette conditioning."""
+    """Restore only the face while keeping an accepted grooming pose pixel-locked."""
 
     fur_lock = profile_fur_lock.strip() or (
         "Preserve Image 2's exact natural coat length, visible volume, strand "
         "direction, genuine tufts, and source-bounded silhouette."
     )
-    return f"""MANDATORY GROOMING IDENTITY RESTORATION - the white maquette is absent from this pass:
-IMAGE 1 is the normalized grooming action draft from attempt {source_attempt} and is the sampler canvas. It controls only the already accepted seated pose, camera, framing, body placement, viewer-left shoulder-to-raised-paw path, paw-to-muzzle contact, viewer-right planted foreleg, attached hind legs and one tail. Its face, head shape, ear shape, eye treatment, nose, coat surface, fur detail, body proportions, material, lighting and background color are not identity authorities.
-IMAGE 2 is the approved Qwen full-body canonical produced from the uploaded front and optional side identity views. It is the sole whole-pet identity and target-rendering authority. Restore its exact recognizable face, head silhouette, cheek width, eyes and eye color, ears, nose, muzzle, localized markings, coat length, coat volume, fur texture, body build, paws and tail across every animal pixel.
-IMAGE 3 is an enlarged crop derived deterministically from the same Image 2 canonical. It is the strongest face-detail authority. Match its eye size and spacing, cheek contour, forehead width, ear proportions, nose and muzzle. It introduces no second pet and no pose.
+    return f"""MANDATORY GROOMING IDENTITY RESTORATION - MASKED UPPER-HEAD PASS; the white maquette is absent from this pass:
+IMAGE 1 is the normalized grooming action draft from attempt {source_attempt} and is the sampler canvas. Its complete seated pose, camera, framing, body placement, viewer-left shoulder-to-raised-paw path, paw-to-muzzle contact, viewer-right planted foreleg, attached hind legs, tail, body coat and every pixel outside the supplied upper-head edit mask are already accepted and must remain unchanged.
+IMAGE 2 is the approved Qwen full-body canonical produced from the uploaded front and optional side identity views. It is the sole pet-identity authority. Use it only to restore the masked head and face: recognizable head silhouette, cheek width, eyes and eye color, ears, nose, muzzle, forehead fur and localized facial markings.
+IMAGE 3 is an enlarged crop derived deterministically from the same Image 2 canonical. It is the strongest face-detail authority. Match its eye size and spacing, cheek contour, forehead width, ear proportions, nose and muzzle inside the mask. It introduces no second pet and no pose.
 
-NO-MAQUETTE CONTRACT: no white-model, anatomy-maquette, profile animal, action-reference face, plastic surface or generic cat identity is present or permitted in this pass. Remove the draft's smooth white-model face, pointed generic head, black oval toy nose, bead eyes, plastic body and blurred maquette surface wherever they conflict with Images 2 and 3. Do not average the draft identity with the canonical identity.
+NO-MAQUETTE CONTRACT: no white-model, anatomy-maquette, profile animal, action-reference face, plastic surface or generic cat identity is present or permitted in this pass. Inside the masked head only, remove a smooth white-model face, pointed generic head, black oval toy nose, bead eyes or blurred maquette surface wherever they conflict with Images 2 and 3. Do not average the draft face with the canonical face.
 
-ACTION FREEZE: repaint Image 1 in place without returning to a neutral two-paws-down sit, mirroring the action, adding a limb, moving the bowl-free mouth contact, changing the camera, or changing the crop. Exactly one viewer-left foreleg remains continuously attached from shoulder through elbow and wrist to one rounded furry paw touching the underside of the muzzle. Exactly one viewer-right front paw remains planted. Keep both attached hind legs and one complete tail. A single tiny pink tongue may touch the raised paw; there is no object in the mouth or paw.
+MASKED ACTION FREEZE: edit only pixels enabled by the sampler's upper-head noise mask. Do not repaint, erase, move or reinterpret the neck, chest, shoulder, raised foreleg, raised paw, planted foreleg, planted paw, hind legs, torso or tail. Never return to a neutral two-paws-down sit. Exactly one viewer-left foreleg remains continuously attached from shoulder through elbow and wrist to one rounded furry paw touching the underside of the muzzle. Exactly one viewer-right front paw remains planted. A single tiny pink tongue may touch the raised paw; there is no object in the mouth or paw.
 
-IDENTITY RESTORE: the final animal must be immediately recognizable as Image 2, especially through the face. Preserve Image 2's natural head-to-body ratio, coat category and localized markings. The raised paw and planted paw must share Image 2's coat, fur, lighting and toe treatment. Join the restored head, neck, chest, shoulder and raised foreleg as one coherent furry surface. {fur_lock}
+FACE RESTORE: make the final animal immediately recognizable as Image 2 through the masked face. Preserve Image 2's cheek fullness, eye geometry and color, forehead, ears, nose, muzzle, facial markings and natural face fur. Blend the repaired head seamlessly into Image 1 at the mask edge; the accepted body and both paws remain Image 1 pixels. {fur_lock}
 
 POSE CONTRACT: {qwen_first_frame_spec(pose)}
 
-OUTPUT CONTRACT: return exactly one clean 512x512 grooming first frame. Every non-cat pixel is flat pure #00FF00. No beige, white, gray or photographic background; no floor, floor line, shadow, reflection, text, logo, watermark, prop, duplicate limb or extra subject. Preserve the accepted action geometry while restoring the exact canonical pet identity."""
+OUTPUT CONTRACT: return exactly one clean grooming first frame at the sampler size. Every non-cat pixel is flat pure #00FF00. No beige, white, gray or photographic background; no floor, floor line, shadow, reflection, text, logo, watermark, prop, duplicate limb or extra subject. Preserve every unmasked action pixel while restoring the canonical face inside the mask."""
 
 
 def advisory_grooming_retry_anatomy_prompt(previous_issues: Iterable[str]) -> str:
@@ -6156,6 +6158,210 @@ def prepare_canonical_action_identity_refine_canvas(
         "source_rgba_pixels_modified_before_composite": False,
         "transparent_background_composited_to_pure_green": True,
         "sampler_canvas_scope": "full_frame_identity_repaint_pose_preserved",
+        "target_path": str(target),
+        "target_sha256": file_sha256(target),
+    }
+
+
+def prepare_advisory_grooming_identity_refine_canvas(
+    source: Path,
+    target: Path,
+    noise_mask_target: Path,
+) -> dict[str, Any]:
+    """Lock the accepted action and expose only its upper head to Qwen."""
+
+    audit = prepare_canonical_action_identity_refine_canvas(
+        source,
+        target,
+        action="grooming",
+        policy=GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,
+    )
+    with Image.open(source) as loaded:
+        source_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+    foreground = source_rgba[:, :, 3] >= 64
+    ys, xs = np.nonzero(foreground)
+    x0, y0 = int(xs.min()), int(ys.min())
+    x1, y1 = int(xs.max()) + 1, int(ys.max()) + 1
+    head_cutoff_y = min(
+        y1 - 1,
+        y0
+        + int(
+            round(
+                (y1 - y0)
+                * GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_HEIGHT_FRACTION
+            )
+        ),
+    )
+    row_grid = np.indices(foreground.shape)[0]
+    head_core = foreground & (row_grid <= head_cutoff_y)
+    head_core_pixels = int(np.count_nonzero(head_core))
+    if head_core_pixels < 1024:
+        raise RuntimeError(
+            "Grooming identity-refine head mask contains too few source pixels."
+        )
+    feather_sigma = float(
+        GROOMING_ADVISORY_IDENTITY_REFINE_MASK_FEATHER_SIGMA_PX
+    )
+    edit_strength = cv2.GaussianBlur(
+        head_core.astype(np.float32),
+        (0, 0),
+        sigmaX=feather_sigma,
+        sigmaY=feather_sigma,
+    ).clip(0.0, 1.0)
+    # The mask may soften inward at the head edge, but it must never unlock
+    # green background, the mouth-contact paw, forelegs, torso, hind legs or tail.
+    edit_strength *= foreground.astype(np.float32)
+    edit_strength[row_grid > head_cutoff_y] = 0.0
+    edit_strength[edit_strength < 0.01] = 0.0
+    edit_strength[edit_strength > 0.99] = 1.0
+    editable_pixels = int(np.count_nonzero(edit_strength > 0.0))
+    full_strength_pixels = int(np.count_nonzero(edit_strength >= 1.0))
+    protected_body = foreground & (row_grid > head_cutoff_y)
+    protected_body_pixels = int(np.count_nonzero(protected_body))
+    if editable_pixels < 1024 or full_strength_pixels < 512:
+        raise RuntimeError(
+            "Grooming identity-refine noise mask lacks a usable head-edit core."
+        )
+    if protected_body_pixels < 2048:
+        raise RuntimeError(
+            "Grooming identity-refine mask did not preserve enough action pixels."
+        )
+
+    noise_mask_alpha = np.rint((1.0 - edit_strength) * 255.0).astype(np.uint8)
+    noise_mask_rgba = np.zeros((512, 512, 4), dtype=np.uint8)
+    noise_mask_rgba[:, :, 3] = noise_mask_alpha
+    noise_mask_target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(noise_mask_rgba, mode="RGBA").save(
+        noise_mask_target,
+        format="PNG",
+        optimize=True,
+    )
+    return {
+        **audit,
+        "sampler_canvas_scope": "upper_head_mask_only_action_pixels_locked",
+        "head_height_fraction": (
+            GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_HEIGHT_FRACTION
+        ),
+        "head_cutoff_y": head_cutoff_y,
+        "head_core_pixels": head_core_pixels,
+        "editable_pixels": editable_pixels,
+        "full_strength_pixels": full_strength_pixels,
+        "protected_body_pixels": protected_body_pixels,
+        "raised_paw_editing_forbidden": True,
+        "body_pose_editing_forbidden": True,
+        "noise_mask_policy": "source_foreground_upper_head_feathered_v1",
+        "noise_mask_feather_sigma_px": feather_sigma,
+        "noise_mask_loadimage_contract": "mask_equals_one_minus_alpha",
+        "noise_mask_target_path": str(noise_mask_target),
+        "noise_mask_target_sha256": file_sha256(noise_mask_target),
+        "edit_strength_sha256": hashlib.sha256(
+            edit_strength.tobytes()
+        ).hexdigest(),
+    }
+
+
+def finalize_advisory_grooming_identity_refine_candidate(
+    source: Path,
+    generated: Path,
+    noise_mask: Path,
+    target: Path,
+) -> dict[str, Any]:
+    """Composite only the refined face over the accepted action draft."""
+
+    with Image.open(source) as loaded:
+        if "A" not in loaded.getbands():
+            raise ValueError("Grooming identity-refine source has no alpha channel")
+        source_image = loaded.convert("RGBA")
+    if source_image.size != (512, 512):
+        raise ValueError("Grooming identity-refine source must be 512x512")
+    with Image.open(generated) as loaded:
+        generated_image = loaded.convert("RGB")
+    generated_original_size = list(generated_image.size)
+    if generated_image.size != source_image.size:
+        generated_image = generated_image.resize(
+            source_image.size,
+            Image.Resampling.LANCZOS,
+        )
+    with Image.open(noise_mask) as loaded:
+        if "A" not in loaded.getbands():
+            raise ValueError("Grooming identity-refine noise mask has no alpha")
+        noise_mask_image = loaded.convert("RGBA")
+    if noise_mask_image.size != source_image.size:
+        raise ValueError("Grooming identity-refine noise mask must be 512x512")
+
+    source_rgba = np.asarray(source_image, dtype=np.uint8)
+    generated_rgb = np.asarray(generated_image, dtype=np.uint8)
+    mask_rgba = np.asarray(noise_mask_image, dtype=np.uint8)
+    edit_strength = 1.0 - mask_rgba[:, :, 3].astype(np.float32) / 255.0
+    foreground = source_rgba[:, :, 3] >= 64
+    edit_strength *= foreground.astype(np.float32)
+    generated_green = (
+        (generated_rgb[:, :, 0] < 96)
+        & (generated_rgb[:, :, 1] > 150)
+        & (generated_rgb[:, :, 2] < 112)
+        & (
+            generated_rgb[:, :, 1].astype(np.int16)
+            - generated_rgb[:, :, 0].astype(np.int16)
+            > 64
+        )
+        & (
+            generated_rgb[:, :, 1].astype(np.int16)
+            - generated_rgb[:, :, 2].astype(np.int16)
+            > 48
+        )
+    )
+    # Never punch a green hole into the accepted head if the generative pass
+    # shifts the silhouette despite the mask.
+    edit_strength[generated_green] = 0.0
+
+    source_composite = Image.new("RGBA", (512, 512), (0, 255, 0, 255))
+    source_composite.alpha_composite(source_image)
+    source_rgb = np.asarray(source_composite.convert("RGB"), dtype=np.uint8)
+    weights = edit_strength[:, :, None]
+    output_rgb = np.rint(
+        source_rgb.astype(np.float32) * (1.0 - weights)
+        + generated_rgb.astype(np.float32) * weights
+    ).clip(0.0, 255.0).astype(np.uint8)
+    protected = edit_strength <= 0.0
+    protected_changed_pixels = int(
+        np.count_nonzero(np.any(output_rgb[protected] != source_rgb[protected], axis=1))
+    )
+    if protected_changed_pixels:
+        raise RuntimeError(
+            "Grooming identity refinement changed protected action pixels."
+        )
+    transparent_background = source_rgba[:, :, 3] == 0
+    if not np.all(
+        output_rgb[transparent_background]
+        == np.asarray((0, 255, 0), dtype=np.uint8)
+    ):
+        raise RuntimeError(
+            "Grooming identity refinement changed the pure-green background."
+        )
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(output_rgb, mode="RGB").save(
+        target,
+        format="PNG",
+        optimize=True,
+    )
+    return {
+        "policy": GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,
+        "source_path": str(source),
+        "source_sha256": file_sha256(source),
+        "generated_path": str(generated),
+        "generated_sha256": file_sha256(generated),
+        "generated_original_size": generated_original_size,
+        "noise_mask_path": str(noise_mask),
+        "noise_mask_sha256": file_sha256(noise_mask),
+        "editable_pixels": int(np.count_nonzero(edit_strength > 0.0)),
+        "green_generated_pixels_skipped": int(
+            np.count_nonzero(generated_green & foreground)
+        ),
+        "protected_pixels": int(np.count_nonzero(protected)),
+        "protected_action_pixels_changed": protected_changed_pixels,
+        "body_and_raised_paw_pixel_lock_passed": True,
+        "background_pixel_lock_passed": True,
         "target_path": str(target),
         "target_sha256": file_sha256(target),
     }
@@ -20545,6 +20751,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 grooming_advisory_identity_refine_audit: (
                     dict[str, Any] | None
                 ) = None
+                grooming_advisory_identity_refine_noise_mask_path: Path | None = None
                 eating_identity_refine_audit: dict[str, Any] | None = None
                 pose_transfer_seed_path: Path | None = None
                 grooming_advisory_action_transfer_attempt: (
@@ -20662,12 +20869,18 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             f"attempt_{refine_source_attempt:02d}.png"
                         )
                     )
+                    grooming_advisory_identity_refine_noise_mask_path = (
+                        comfy_input_dir
+                        / (
+                            "grooming_advisory_identity_refine_face_noise_mask_"
+                            f"attempt_{refine_source_attempt:02d}.png"
+                        )
+                    )
                     refine_canvas_audit = (
-                        prepare_canonical_action_identity_refine_canvas(
+                        prepare_advisory_grooming_identity_refine_canvas(
                             refine_source_path,
                             refine_input_path,
-                            action="grooming",
-                            policy=GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,
+                            grooming_advisory_identity_refine_noise_mask_path,
                         )
                     )
                     refine_input_name = (
@@ -20682,7 +20895,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         attempt_secondary_input_name,
                         attempt_tertiary_input_name,
                     ]
-                    attempt_noise_mask_input_name = None
+                    attempt_noise_mask_input_name = (
+                        comfy_relative_dir
+                        / grooming_advisory_identity_refine_noise_mask_path.name
+                    ).as_posix()
                     attempt_geometry_input_name = refine_input_name
                     attempt_prompt = build_advisory_grooming_identity_refine_prompt(
                         pose,
@@ -20711,8 +20927,18 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         ),
                         "white_maquette_loaded": False,
                         "action_geometry_source": "accepted_pose_draft_only",
-                        "sampler_noise_mask": None,
-                        "full_frame_sampling": True,
+                        "sampler_noise_mask": {
+                            "input_name": attempt_noise_mask_input_name,
+                            "path": str(
+                                grooming_advisory_identity_refine_noise_mask_path
+                            ),
+                            "sha256": refine_canvas_audit[
+                                "noise_mask_target_sha256"
+                            ],
+                            "policy": refine_canvas_audit["noise_mask_policy"],
+                        },
+                        "full_frame_sampling": False,
+                        "body_and_raised_paw_pixel_lock_required": True,
                     }
                     update_job(
                         job_id,
@@ -21661,10 +21887,55 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 attempt_keyframe = (
                     job_dir / f"pose_{index:02d}_keyframe_attempt_{attempt:02d}.png"
                 )
-                with Image.open(source_output) as generated:
-                    generated.convert("RGB").save(
-                        attempt_keyframe, format="PNG", optimize=True
+                if advisory_grooming_identity_refine_active:
+                    if (
+                        not isinstance(grooming_advisory_identity_refine_audit, dict)
+                        or grooming_advisory_identity_refine_noise_mask_path is None
+                    ):
+                        raise RuntimeError(
+                            "Grooming identity refinement lost its action-lock audit."
+                        )
+                    raw_identity_refine_keyframe = (
+                        job_dir
+                        / (
+                            f"pose_{index:02d}_keyframe_attempt_{attempt:02d}_"
+                            "raw_qwen.png"
+                        )
                     )
+                    with Image.open(source_output) as generated:
+                        generated.convert("RGB").save(
+                            raw_identity_refine_keyframe,
+                            format="PNG",
+                            optimize=True,
+                        )
+                    identity_refine_composite_audit = (
+                        finalize_advisory_grooming_identity_refine_candidate(
+                            Path(
+                                str(
+                                    grooming_advisory_identity_refine_audit[
+                                        "source_path"
+                                    ]
+                                )
+                            ),
+                            raw_identity_refine_keyframe,
+                            grooming_advisory_identity_refine_noise_mask_path,
+                            attempt_keyframe,
+                        )
+                    )
+                    grooming_advisory_identity_refine_audit[
+                        "candidate_composite"
+                    ] = identity_refine_composite_audit
+                    update_job(
+                        job_id,
+                        grooming_advisory_identity_refine_action_lock=(
+                            identity_refine_composite_audit
+                        ),
+                    )
+                else:
+                    with Image.open(source_output) as generated:
+                        generated.convert("RGB").save(
+                            attempt_keyframe, format="PNG", optimize=True
+                        )
                 candidate_identity_palette = (
                     identity_palette_signature(
                         attempt_keyframe,
@@ -26357,9 +26628,20 @@ def health() -> dict[str, Any]:
                         "policy": GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,
                         "steps": GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
                         "denoise": GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
-                        "image1": "accepted_action_draft_sampler",
-                        "image2": "approved_canonical_whole_pet_identity",
+                        "image1": "accepted_action_draft_pose_locked_sampler",
+                        "image2": "approved_canonical_face_identity_authority",
                         "image3": "same_canonical_enlarged_face_identity",
+                        "noise_mask": "upper_head_only_set_latent_noise_mask",
+                        "head_height_fraction": (
+                            GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_HEIGHT_FRACTION
+                        ),
+                        "mask_feather_sigma_px": (
+                            GROOMING_ADVISORY_IDENTITY_REFINE_MASK_FEATHER_SIGMA_PX
+                        ),
+                        "deterministic_post_composite": (
+                            "refined_head_over_accepted_action_draft"
+                        ),
+                        "body_and_raised_paw_pixel_lock": True,
                         "white_maquette_loaded": False,
                         "fallback": "accepted_action_draft",
                     },

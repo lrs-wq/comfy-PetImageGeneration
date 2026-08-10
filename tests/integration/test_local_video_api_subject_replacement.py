@@ -6618,12 +6618,15 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
         )
         self.assertIn("MANDATORY GROOMING IDENTITY RESTORATION", refine_prompt)
+        self.assertIn("MASKED UPPER-HEAD PASS", refine_prompt)
         self.assertIn("white maquette is absent from this pass", refine_prompt)
         self.assertIn("action draft from attempt 1", refine_prompt)
         self.assertIn("IMAGE 2 is the approved Qwen full-body canonical", refine_prompt)
         self.assertIn("IMAGE 3 is an enlarged crop", refine_prompt)
         self.assertIn("smooth white-model face", refine_prompt)
         self.assertIn("black oval toy nose", refine_prompt)
+        self.assertIn("edit only pixels enabled", refine_prompt)
+        self.assertIn("raised paw", refine_prompt)
 
         retry_anatomy = pipeline.advisory_grooming_retry_anatomy_prompt(
             ["raised_paw_hard_object_texture_signature"]
@@ -6927,6 +6930,10 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             expected_prefix
             + "grooming_advisory_identity_refine_source_attempt_01.png"
         )
+        expected_face_mask = (
+            expected_prefix
+            + "grooming_advisory_identity_refine_face_noise_mask_attempt_01.png"
+        )
         load_images = {
             node["inputs"]["image"]
             for node in workflow.values()
@@ -6934,7 +6941,12 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         }
         self.assertEqual(
             load_images,
-            {expected_pose_draft, expected_canonical, expected_face},
+            {
+                expected_pose_draft,
+                expected_canonical,
+                expected_face,
+                expected_face_mask,
+            },
         )
         self.assertNotIn(uploaded_input, load_images)
         self.assertNotIn(pose_input, load_images)
@@ -6954,7 +6966,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             workflow["14"]["inputs"]["steps"],
             pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
         )
-        self.assertFalse(
+        self.assertTrue(
             any(
                 node.get("class_type") == "SetLatentNoiseMask"
                 for node in workflow.values()
@@ -6991,6 +7003,8 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 + "grooming_advisory_identity_refine_source_attempt_03.png",
                 expected_prefix + "cartoon_reference.png",
                 expected_prefix + "grooming_canonical_face_identity_reference.png",
+                expected_prefix
+                + "grooming_advisory_identity_refine_face_noise_mask_attempt_03.png",
             },
         )
         self.assertNotIn(uploaded_input, load_images)
@@ -6999,6 +7013,12 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertIn(
             "action draft from attempt 3",
             workflow["6"]["inputs"]["prompt"],
+        )
+        self.assertTrue(
+            any(
+                node.get("class_type") == "SetLatentNoiseMask"
+                for node in workflow.values()
+            )
         )
 
     def test_advisory_grooming_profile_budget_includes_identity_refine(self) -> None:
@@ -9107,6 +9127,72 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 "identity_gate_failed_only_for_repaintable_palette_drift"
             ]
         )
+
+    def test_advisory_grooming_identity_refine_locks_body_and_raised_paw(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "accepted-grooming-action.png"
+            canvas = root / "masked-refine-canvas.png"
+            noise_mask = root / "masked-refine-noise.png"
+            generated = root / "raw-qwen-refine.png"
+            target = root / "locked-refine-result.png"
+
+            source_image = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            source_draw = ImageDraw.Draw(source_image)
+            source_draw.ellipse(
+                (112, 48, 400, 464),
+                fill=(96, 104, 112, 255),
+            )
+            # A raised foreleg and paw deliberately sit below the head-edit cutoff.
+            source_draw.line(
+                [(190, 372), (178, 300), (198, 250)],
+                fill=(210, 214, 218, 255),
+                width=42,
+            )
+            source_draw.ellipse(
+                (178, 232, 220, 270),
+                fill=(220, 224, 228, 255),
+            )
+            source_image.save(source)
+            Image.new("RGB", (1024, 1024), (210, 80, 96)).save(generated)
+
+            canvas_audit = (
+                pipeline.prepare_advisory_grooming_identity_refine_canvas(
+                    source,
+                    canvas,
+                    noise_mask,
+                )
+            )
+            composite_audit = (
+                pipeline.finalize_advisory_grooming_identity_refine_candidate(
+                    source,
+                    generated,
+                    noise_mask,
+                    target,
+                )
+            )
+
+            self.assertEqual(
+                canvas_audit["sampler_canvas_scope"],
+                "upper_head_mask_only_action_pixels_locked",
+            )
+            self.assertTrue(canvas_audit["raised_paw_editing_forbidden"])
+            self.assertGreater(canvas_audit["protected_body_pixels"], 2048)
+            self.assertEqual(
+                composite_audit["protected_action_pixels_changed"],
+                0,
+            )
+            self.assertTrue(
+                composite_audit["body_and_raised_paw_pixel_lock_passed"]
+            )
+            with Image.open(target) as loaded:
+                result = loaded.convert("RGB")
+            self.assertEqual(result.getpixel((0, 0)), (0, 255, 0))
+            self.assertEqual(result.getpixel((198, 250)), (220, 224, 228))
+            self.assertEqual(result.getpixel((256, 380)), (96, 104, 112))
+            self.assertEqual(result.getpixel((256, 100)), (210, 80, 96))
 
     def test_eating_identity_refine_canvas_uses_action_specific_policy(
         self,
