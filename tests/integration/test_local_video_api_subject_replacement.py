@@ -6625,7 +6625,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertIn("IMAGE 3 is an enlarged crop", refine_prompt)
         self.assertIn("smooth white-model face", refine_prompt)
         self.assertIn("black oval toy nose", refine_prompt)
-        self.assertIn("edit only pixels enabled", refine_prompt)
+        self.assertIn("only pixels enabled", refine_prompt)
         self.assertIn("raised paw", refine_prompt)
 
         retry_anatomy = pipeline.advisory_grooming_retry_anatomy_prompt(
@@ -9181,11 +9181,20 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             self.assertTrue(canvas_audit["raised_paw_editing_forbidden"])
             self.assertGreater(canvas_audit["protected_body_pixels"], 2048)
             self.assertEqual(
+                canvas_audit["head_silhouette_expansion_px"],
+                pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_EXPANSION_PX,
+            )
+            self.assertGreater(canvas_audit["editable_background_pixels"], 0)
+            self.assertEqual(
                 composite_audit["protected_action_pixels_changed"],
                 0,
             )
             self.assertTrue(
                 composite_audit["body_and_raised_paw_pixel_lock_passed"]
+            )
+            self.assertGreater(
+                composite_audit["head_silhouette_expansion_pixels"],
+                0,
             )
             with Image.open(target) as loaded:
                 result = loaded.convert("RGB")

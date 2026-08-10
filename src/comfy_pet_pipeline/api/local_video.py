@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.2"
+API_VERSION = "2.24.3"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -245,9 +245,9 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.1"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.2"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
-    "main_case_grooming_canonical_open_channel_then_masked_face_refine_v27"
+    "main_case_grooming_canonical_open_channel_then_masked_face_refine_v28"
 )
 GROOMING_QWEN_GEOMETRY_GUIDE_POLICY = "driving_grooming_geometry_image2_v8"
 GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY = "driving_grooming_geometry_image1_v3"
@@ -351,18 +351,19 @@ GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
     "canonical_image1_headless_white_maquette_body_pose_image2_"
-    "canonical_face_image3_then_masked_face_refine_v11"
+    "canonical_face_image3_then_masked_face_refine_v12"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = 1.0
 GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = 3
 GROOMING_ADVISORY_IDENTITY_REFINE_POLICY = (
-    "pose_locked_draft_image1_canonical_image2_face_image3_masked_v2"
+    "pose_locked_draft_image1_canonical_image2_face_image3_masked_v3"
 )
 GROOMING_ADVISORY_IDENTITY_REFINE_STEPS = 12
-GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE = 0.72
+GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE = 1.0
 GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS = 1
-GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_HEIGHT_FRACTION = 0.40
+GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_HEIGHT_FRACTION = 0.44
+GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_EXPANSION_PX = 12
 GROOMING_ADVISORY_IDENTITY_REFINE_MASK_FEATHER_SIGMA_PX = 4.0
 GROOMING_ADVISORY_TOTAL_ATTEMPTS = (
     GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
@@ -4297,13 +4298,13 @@ def build_advisory_grooming_identity_refine_prompt(
         "direction, genuine tufts, and source-bounded silhouette."
     )
     return f"""MANDATORY GROOMING IDENTITY RESTORATION - MASKED UPPER-HEAD PASS; the white maquette is absent from this pass:
-IMAGE 1 is the normalized grooming action draft from attempt {source_attempt} and is the sampler canvas. Its complete seated pose, camera, framing, body placement, viewer-left shoulder-to-raised-paw path, paw-to-muzzle contact, viewer-right planted foreleg, attached hind legs, tail, body coat and every pixel outside the supplied upper-head edit mask are already accepted and must remain unchanged.
+IMAGE 1 is the normalized grooming action draft from attempt {source_attempt} and is the sampler canvas. Its complete seated pose, camera, framing, body placement, viewer-left shoulder-to-raised-paw path, paw-to-muzzle contact, viewer-right planted foreleg, attached hind legs, tail, body coat and every pixel outside the supplied upper-head edit mask are already accepted and must remain unchanged. The mask contains only the upper head plus a small surrounding green margin so the canonical cheek and ear silhouette can replace the draft silhouette.
 IMAGE 2 is the approved Qwen full-body canonical produced from the uploaded front and optional side identity views. It is the sole pet-identity authority. Use it only to restore the masked head and face: recognizable head silhouette, cheek width, eyes and eye color, ears, nose, muzzle, forehead fur and localized facial markings.
 IMAGE 3 is an enlarged crop derived deterministically from the same Image 2 canonical. It is the strongest face-detail authority. Match its eye size and spacing, cheek contour, forehead width, ear proportions, nose and muzzle inside the mask. It introduces no second pet and no pose.
 
 NO-MAQUETTE CONTRACT: no white-model, anatomy-maquette, profile animal, action-reference face, plastic surface or generic cat identity is present or permitted in this pass. Inside the masked head only, remove a smooth white-model face, pointed generic head, black oval toy nose, bead eyes or blurred maquette surface wherever they conflict with Images 2 and 3. Do not average the draft face with the canonical face.
 
-MASKED ACTION FREEZE: edit only pixels enabled by the sampler's upper-head noise mask. Do not repaint, erase, move or reinterpret the neck, chest, shoulder, raised foreleg, raised paw, planted foreleg, planted paw, hind legs, torso or tail. Never return to a neutral two-paws-down sit. Exactly one viewer-left foreleg remains continuously attached from shoulder through elbow and wrist to one rounded furry paw touching the underside of the muzzle. Exactly one viewer-right front paw remains planted. A single tiny pink tongue may touch the raised paw; there is no object in the mouth or paw.
+MASKED ACTION FREEZE: fully regenerate only pixels enabled by the sampler's upper-head noise mask. Use the canonical references decisively instead of retaining the draft's eyes or muzzle. Do not repaint, erase, move or reinterpret the neck, chest, shoulder, raised foreleg, raised paw, planted foreleg, planted paw, hind legs, torso or tail. Never return to a neutral two-paws-down sit. Exactly one viewer-left foreleg remains continuously attached from shoulder through elbow and wrist to one rounded furry paw touching the underside of the muzzle. Exactly one viewer-right front paw remains planted. A single tiny pink tongue may touch the raised paw; there is no object in the mouth or paw.
 
 FACE RESTORE: make the final animal immediately recognizable as Image 2 through the masked face. Preserve Image 2's cheek fullness, eye geometry and color, forehead, ears, nose, muzzle, facial markings and natural face fur. Blend the repaired head seamlessly into Image 1 at the mask edge; the accepted body and both paws remain Image 1 pixels. {fur_lock}
 
@@ -6199,18 +6200,29 @@ def prepare_advisory_grooming_identity_refine_canvas(
         raise RuntimeError(
             "Grooming identity-refine head mask contains too few source pixels."
         )
+    expansion_px = int(GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_EXPANSION_PX)
+    expansion_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (expansion_px * 2 + 1, expansion_px * 2 + 1),
+    )
+    head_edit_support = cv2.dilate(
+        head_core.astype(np.uint8),
+        expansion_kernel,
+        iterations=1,
+    ).astype(bool)
+    head_edit_support[row_grid > head_cutoff_y] = False
     feather_sigma = float(
         GROOMING_ADVISORY_IDENTITY_REFINE_MASK_FEATHER_SIGMA_PX
     )
     edit_strength = cv2.GaussianBlur(
-        head_core.astype(np.float32),
+        head_edit_support.astype(np.float32),
         (0, 0),
         sigmaX=feather_sigma,
         sigmaY=feather_sigma,
     ).clip(0.0, 1.0)
-    # The mask may soften inward at the head edge, but it must never unlock
-    # green background, the mouth-contact paw, forelegs, torso, hind legs or tail.
-    edit_strength *= foreground.astype(np.float32)
+    # A small green margin permits a rounder canonical cheek/ear silhouette.
+    # The hard vertical cutoff remains above the mouth-contact paw, so the
+    # forelegs, torso, hind legs and tail stay outside the edit window.
     edit_strength[row_grid > head_cutoff_y] = 0.0
     edit_strength[edit_strength < 0.01] = 0.0
     edit_strength[edit_strength > 0.99] = 1.0
@@ -6244,6 +6256,11 @@ def prepare_advisory_grooming_identity_refine_canvas(
         ),
         "head_cutoff_y": head_cutoff_y,
         "head_core_pixels": head_core_pixels,
+        "head_silhouette_expansion_px": expansion_px,
+        "head_edit_support_pixels": int(np.count_nonzero(head_edit_support)),
+        "editable_background_pixels": int(
+            np.count_nonzero((edit_strength > 0.0) & ~foreground)
+        ),
         "editable_pixels": editable_pixels,
         "full_strength_pixels": full_strength_pixels,
         "protected_body_pixels": protected_body_pixels,
@@ -6294,7 +6311,7 @@ def finalize_advisory_grooming_identity_refine_candidate(
     mask_rgba = np.asarray(noise_mask_image, dtype=np.uint8)
     edit_strength = 1.0 - mask_rgba[:, :, 3].astype(np.float32) / 255.0
     foreground = source_rgba[:, :, 3] >= 64
-    edit_strength *= foreground.astype(np.float32)
+    requested_editable = edit_strength > 0.0
     generated_green = (
         (generated_rgb[:, :, 0] < 96)
         & (generated_rgb[:, :, 1] > 150)
@@ -6312,6 +6329,7 @@ def finalize_advisory_grooming_identity_refine_candidate(
     )
     # Never punch a green hole into the accepted head if the generative pass
     # shifts the silhouette despite the mask.
+    generated_green_skipped = generated_green & requested_editable
     edit_strength[generated_green] = 0.0
 
     source_composite = Image.new("RGBA", (512, 512), (0, 255, 0, 255))
@@ -6331,12 +6349,13 @@ def finalize_advisory_grooming_identity_refine_candidate(
             "Grooming identity refinement changed protected action pixels."
         )
     transparent_background = source_rgba[:, :, 3] == 0
+    protected_background = transparent_background & (edit_strength <= 0.0)
     if not np.all(
-        output_rgb[transparent_background]
+        output_rgb[protected_background]
         == np.asarray((0, 255, 0), dtype=np.uint8)
     ):
         raise RuntimeError(
-            "Grooming identity refinement changed the pure-green background."
+            "Grooming identity refinement changed protected green background."
         )
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -6355,10 +6374,14 @@ def finalize_advisory_grooming_identity_refine_candidate(
         "noise_mask_path": str(noise_mask),
         "noise_mask_sha256": file_sha256(noise_mask),
         "editable_pixels": int(np.count_nonzero(edit_strength > 0.0)),
+        "head_silhouette_expansion_pixels": int(
+            np.count_nonzero(transparent_background & (edit_strength > 0.0))
+        ),
         "green_generated_pixels_skipped": int(
-            np.count_nonzero(generated_green & foreground)
+            np.count_nonzero(generated_green_skipped)
         ),
         "protected_pixels": int(np.count_nonzero(protected)),
+        "protected_background_pixels": int(np.count_nonzero(protected_background)),
         "protected_action_pixels_changed": protected_changed_pixels,
         "body_and_raised_paw_pixel_lock_passed": True,
         "background_pixel_lock_passed": True,
@@ -26634,6 +26657,9 @@ def health() -> dict[str, Any]:
                         "noise_mask": "upper_head_only_set_latent_noise_mask",
                         "head_height_fraction": (
                             GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_HEIGHT_FRACTION
+                        ),
+                        "head_silhouette_expansion_px": (
+                            GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_EXPANSION_PX
                         ),
                         "mask_feather_sigma_px": (
                             GROOMING_ADVISORY_IDENTITY_REFINE_MASK_FEATHER_SIGMA_PX
