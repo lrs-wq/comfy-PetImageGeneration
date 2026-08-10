@@ -7051,7 +7051,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             )
         )
 
-    def test_advisory_grooming_repairs_action_safe_dark_identity_drift(
+    def test_advisory_grooming_repairs_final_action_safe_dark_identity_drift(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -7059,10 +7059,10 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 Path(temporary),
                 action="grooming",
                 action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
-                pose_attempt=2,
+                pose_attempt=4,
                 advisory_grooming_minimum_acceptable=False,
                 advisory_grooming_minimum_issues=["new_dominant_dark_markings"],
-                action_chroma_acceptable_attempts={1},
+                action_chroma_acceptable_attempts={1, 2, 3},
                 identity_palette_guard=True,
                 uploaded_white_maquette=True,
                 visual_audits_blocking=False,
@@ -7075,6 +7075,19 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertEqual(
             workflow["14"]["inputs"]["denoise"],
             pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
+        )
+        load_images = {
+            node["inputs"]["image"]
+            for node in workflow.values()
+            if node.get("class_type") == "LoadImage"
+        }
+        self.assertTrue(
+            any(
+                image.endswith(
+                    "grooming_advisory_identity_refine_source_attempt_03.png"
+                )
+                for image in load_images
+            )
         )
         self.assertTrue(
             any(

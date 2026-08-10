@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.4"
+API_VERSION = "2.24.5"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -245,9 +245,9 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.3"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.4"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
-    "main_case_grooming_canonical_open_channel_then_masked_face_refine_v29"
+    "main_case_grooming_canonical_open_channel_then_masked_face_refine_v30"
 )
 GROOMING_QWEN_GEOMETRY_GUIDE_POLICY = "driving_grooming_geometry_image2_v8"
 GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY = "driving_grooming_geometry_image1_v3"
@@ -351,13 +351,13 @@ GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
     "canonical_image1_headless_white_maquette_body_pose_image2_"
-    "canonical_face_image3_then_masked_face_refine_v13"
+    "canonical_face_image3_then_masked_face_refine_v14"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = 1.0
 GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = 3
 GROOMING_ADVISORY_IDENTITY_REFINE_POLICY = (
-    "pose_locked_draft_image1_canonical_image2_face_image3_masked_v4"
+    "pose_locked_draft_image1_canonical_image2_face_image3_masked_v5"
 )
 GROOMING_ADVISORY_IDENTITY_REFINE_STEPS = 12
 GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE = 1.0
@@ -23857,6 +23857,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     and not advisory_grooming_identity_refine_active
                     and attempt
                     <= GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                    and (
+                        advisory_minimum_acceptable
+                        or attempt
+                        == GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                    )
                     and chroma_metrics.get("acceptable") is True
                     and attempt_cutout.is_file()
                     and advisory_grooming_candidate_safe_for_identity_refine(
@@ -26873,6 +26878,10 @@ def health() -> dict[str, Any]:
                         "action_safe_source_allowed_identity_issues": sorted(
                             GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_ALLOWED_ISSUES
                         ),
+                        "repairable_identity_issue_source_attempt": (
+                            GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                        ),
+                        "earlier_action_drafts_must_pass_minimum_contract": True,
                         "unexpected_dark_artifact_cleanup": {
                             "enabled_when_identity_black_fraction_lte": (
                                 GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_BLACK_FRACTION_MAX
