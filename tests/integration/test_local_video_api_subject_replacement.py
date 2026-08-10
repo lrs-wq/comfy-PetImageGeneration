@@ -6578,15 +6578,16 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
-            "IMAGE 2 is a canonical-palette neutral anatomy render",
+            "IMAGE 2 is a deliberately HEADLESS neutral body-and-raised-foreleg",
             prompt,
         )
         self.assertIn("derived only from frame 0", prompt)
-        self.assertIn("entire head interior was replaced", prompt)
+        self.assertIn("complete maquette head and both maquette ears", prompt)
+        self.assertIn("green opening above the neck", prompt)
         self.assertIn("IMAGE 3 is a deterministic enlarged head crop", prompt)
         self.assertIn("exact recognizable face", prompt)
         self.assertIn(
-            "soft high-contrast volume rising along the viewer-left chest",
+            "Image 2 deliberately stops at the neck",
             prompt,
         )
         self.assertIn(
@@ -6596,6 +6597,19 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         for forbidden_token in ("microphone", "zipper", "spring", "pendant", "cable"):
             self.assertNotIn(forbidden_token, prompt.lower())
         self.assertIn("an unstriped region remains unstriped", prompt)
+
+        refine_prompt = pipeline.build_advisory_grooming_identity_refine_prompt(
+            pipeline.subject_replacement_pose_prompt("grooming"),
+            source_attempt=1,
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+        )
+        self.assertIn("MANDATORY GROOMING IDENTITY RESTORATION", refine_prompt)
+        self.assertIn("white maquette is absent from this pass", refine_prompt)
+        self.assertIn("action draft from attempt 1", refine_prompt)
+        self.assertIn("IMAGE 2 is the approved Qwen full-body canonical", refine_prompt)
+        self.assertIn("IMAGE 3 is an enlarged crop", refine_prompt)
+        self.assertIn("smooth white-model face", refine_prompt)
+        self.assertIn("black oval toy nose", refine_prompt)
 
         retry_anatomy = pipeline.advisory_grooming_retry_anatomy_prompt(
             ["raised_paw_hard_object_texture_signature"]
@@ -6856,10 +6870,11 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertIn("derived only from frame 0", action_prompt)
         self.assertIn("IMAGE 3 is a deterministic enlarged head crop", action_prompt)
         self.assertIn(
-            "IMAGE 2 is a canonical-palette neutral anatomy render",
+            "IMAGE 2 is a deliberately HEADLESS neutral body-and-raised-foreleg",
             action_prompt,
         )
-        self.assertIn("entire head interior was replaced", action_prompt)
+        self.assertIn("complete maquette head and both maquette ears", action_prompt)
+        self.assertIn("green opening above the neck", action_prompt)
         self.assertIn("image3", workflow["6"]["inputs"])
         self.assertIn("image3", workflow["7"]["inputs"])
         self.assertIn("visible source coat is achromatic", action_prompt)
@@ -6871,6 +6886,65 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertEqual(
             workflow["14"]["inputs"]["steps"],
             pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_STEPS,
+        )
+
+    def test_advisory_grooming_attempt2_restores_canonical_identity_without_maquette(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="grooming",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=2,
+                advisory_grooming_minimum_acceptable=True,
+                action_chroma_acceptable_attempts={1},
+                identity_palette_guard=True,
+                uploaded_white_maquette=True,
+                visual_audits_blocking=False,
+            )
+
+        expected_prefix = "local_video_api/capture-grooming/"
+        expected_canonical = expected_prefix + "cartoon_reference.png"
+        expected_face = (
+            expected_prefix + "grooming_canonical_face_identity_reference.png"
+        )
+        expected_pose_draft = (
+            expected_prefix
+            + "grooming_advisory_identity_refine_source_attempt_01.png"
+        )
+        load_images = {
+            node["inputs"]["image"]
+            for node in workflow.values()
+            if node.get("class_type") == "LoadImage"
+        }
+        self.assertEqual(
+            load_images,
+            {expected_pose_draft, expected_canonical, expected_face},
+        )
+        self.assertNotIn(uploaded_input, load_images)
+        self.assertNotIn(pose_input, load_images)
+        self.assertFalse(
+            any("white_maquette" in image for image in load_images)
+        )
+        prompt = workflow["6"]["inputs"]["prompt"]
+        self.assertIn("MANDATORY GROOMING IDENTITY RESTORATION", prompt)
+        self.assertIn("white maquette is absent from this pass", prompt)
+        self.assertIn("smooth white-model face", prompt)
+        self.assertIn("IMAGE 2 is the approved Qwen full-body canonical", prompt)
+        self.assertEqual(
+            workflow["14"]["inputs"]["denoise"],
+            pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
+        )
+        self.assertEqual(
+            workflow["14"]["inputs"]["steps"],
+            pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
+        )
+        self.assertFalse(
+            any(
+                node.get("class_type") == "SetLatentNoiseMask"
+                for node in workflow.values()
+            )
         )
 
     def test_advisory_grooming_attempt3_uses_masked_foreleg_completion(
@@ -8719,6 +8793,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 foreleg_guide=None,
                 preserve_normalized_geometry_luma=True,
                 complete_geometry_guide=True,
+                remove_head_identity_silhouette=True,
             )
 
             self.assertTrue(frame0_audit["complete_geometry_guide"])
@@ -8727,7 +8802,20 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             self.assertEqual(frame0_audit["public_internal_channel_pixels_filled"], 0)
             self.assertEqual(
                 frame0_audit["sampler_role"],
-                "canonical_palette_white_maquette_frame000_body_pose_anatomy",
+                "canonical_palette_headless_white_maquette_frame000_body_pose_anatomy",
+            )
+            self.assertTrue(frame0_audit["head_identity_silhouette_removed"])
+            self.assertGreater(
+                frame0_audit["head_identity_silhouette_removed_pixels"],
+                4096,
+            )
+            self.assertGreater(
+                frame0_audit["qwen_visible_internal_green_channel_pixels"],
+                4096,
+            )
+            self.assertGreater(
+                frame0_audit["raised_paw_geometry_retained_pixels"],
+                512,
             )
             self.assertFalse(frame0_audit["soft_foreleg_depth_semantic_exposed"])
 
