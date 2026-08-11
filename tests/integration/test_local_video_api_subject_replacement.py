@@ -6609,6 +6609,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             prompt,
         )
         self.assertIn("NEUTRAL PAW DEPTH", prompt)
+        self.assertIn("aligned to Image 1's lower muzzle", prompt)
         self.assertIn("no fur marking, toe line, hole, loop", prompt)
         self.assertIn("Never turn any gentle gray depth transition", prompt)
         for forbidden_token in ("microphone", "zipper", "spring", "pendant", "cable"):
@@ -6723,6 +6724,27 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertLessEqual(float(paw_depth[paw_mask].max()), 0.60)
         self.assertGreater(float(paw_depth[paw_mask].std()), 0.0)
         self.assertTrue(np.allclose(paw_depth[~paw_mask], 0.48))
+
+        retry_guidance = pipeline.advisory_grooming_action_retry_guidance(
+            {
+                "warnings": [
+                    "raised_foreleg_structural_edge_density_too_low",
+                    "unrelated_visual_observation",
+                ]
+            },
+            attempt=1,
+        )
+        self.assertTrue(retry_guidance["requested"])
+        self.assertEqual(
+            retry_guidance["warnings"],
+            ["raised_foreleg_structural_edge_density_too_low"],
+        )
+        final_guidance = pipeline.advisory_grooming_action_retry_guidance(
+            {"warnings": ["raised_paw_too_far_from_muzzle"]},
+            attempt=pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS,
+        )
+        self.assertFalse(final_guidance["requested"])
+        self.assertTrue(final_guidance["never_blocks_final_attempt"])
 
         retry_prompt = pipeline.build_qwen_prompt(
             "",
@@ -8972,6 +8994,28 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 frame0_audit["raised_paw_geometry_retained_pixels"],
                 512,
             )
+            self.assertEqual(
+                frame0_audit["raised_paw_geometry_policy"],
+                "canonical_muzzle_aligned_tapered_neutral_foreleg_v1",
+            )
+            foreleg_audit = frame0_audit["raised_paw_geometry_audit"]
+            self.assertLess(
+                foreleg_audit["paw_center"][1],
+                foreleg_audit["head_cutoff_y"],
+            )
+            self.assertGreater(
+                foreleg_audit["shoulder_anchor"][1],
+                foreleg_audit["head_cutoff_y"],
+            )
+            self.assertGreater(
+                foreleg_audit["pixels_above_head_cutoff"],
+                256,
+            )
+            self.assertGreater(
+                foreleg_audit["pixels_below_head_cutoff"],
+                256,
+            )
+            self.assertFalse(foreleg_audit["source_rgb_or_luma_used"])
             self.assertFalse(frame0_audit["soft_foreleg_depth_semantic_exposed"])
 
     def test_grooming_seed_bound_matte_unions_alpha_without_copying_seed_rgb(
