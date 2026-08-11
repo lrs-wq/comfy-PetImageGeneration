@@ -6608,6 +6608,9 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             "The raised viewer-left foreleg replaces its former planted position",
             prompt,
         )
+        self.assertIn("NEUTRAL PAW DEPTH", prompt)
+        self.assertIn("no fur marking, toe line, hole, loop", prompt)
+        self.assertIn("Never turn any gentle gray depth transition", prompt)
         for forbidden_token in ("microphone", "zipper", "spring", "pendant", "cable"):
             self.assertNotIn(forbidden_token, prompt.lower())
         self.assertIn("an unstriped region remains unstriped", prompt)
@@ -6708,6 +6711,18 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 ["raised_paw_hard_object_texture_signature"]
             )
         )
+
+        paw_mask = np.zeros((96, 96), dtype=np.uint8)
+        cv2.ellipse(paw_mask, (48, 48), (24, 30), 0, 0, 360, 1, -1)
+        paw_mask = paw_mask.astype(bool)
+        paw_depth, distance_p95 = pipeline._identity_free_grooming_paw_depth(
+            paw_mask
+        )
+        self.assertGreater(distance_p95, 1.0)
+        self.assertGreaterEqual(float(paw_depth[paw_mask].min()), 0.48)
+        self.assertLessEqual(float(paw_depth[paw_mask].max()), 0.60)
+        self.assertGreater(float(paw_depth[paw_mask].std()), 0.0)
+        self.assertTrue(np.allclose(paw_depth[~paw_mask], 0.48))
 
         retry_prompt = pipeline.build_qwen_prompt(
             "",

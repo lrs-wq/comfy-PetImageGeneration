@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.7"
+API_VERSION = "2.24.8"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -245,9 +245,9 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.6"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.7"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
-    "main_case_grooming_canonical_open_channel_then_conditional_face_refine_v32"
+    "main_case_grooming_canonical_open_channel_then_neutral_paw_depth_v33"
 )
 GROOMING_QWEN_GEOMETRY_GUIDE_POLICY = "driving_grooming_geometry_image2_v8"
 GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY = "driving_grooming_geometry_image1_v3"
@@ -347,11 +347,12 @@ GROOMING_CANONICAL_FULL_POSE_REFINE_POLICY = (
     "canonical_seed_bound_pose_safe_identity_refine_v6"
 )
 GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
-    "canonical_palette_white_maquette_frame000_body_pose_transfer_seed_v6"
+    "canonical_palette_white_maquette_frame000_body_pose_transfer_seed_v7"
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
     "canonical_image1_headless_white_maquette_body_pose_image2_"
-    "canonical_face_image3_then_conditional_masked_face_refine_v16"
+    "neutral_paw_depth_image2_canonical_face_image3_then_"
+    "conditional_masked_face_refine_v17"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT = (
@@ -4301,6 +4302,8 @@ IMAGE 3 is a deterministic enlarged head crop made from Image 1. It adds no seco
 
 GEOMETRY READ: Image 2 deliberately stops at the neck while retaining the raised paw beside the lower muzzle location. Treat its connected neutral body pixels as one living cat body. Its depth changes describe the chest, shoulders, torso and limbs together. The localized volume rising along the viewer-left chest is the raised foreleg and furry paw, not cheek shading and not a separate object. Rebuild it continuously from shoulder through elbow and wrist into one rounded paw touching the underside of Image 1's preserved muzzle. The viewer-right foreleg continues into the only planted front paw. Preserve both attached hind legs and one complete tail.
 
+NEUTRAL PAW DEPTH: Image 2's raised-paw interior is deliberately rebuilt from a smooth silhouette-distance volume. It contains no fur marking, toe line, hole, loop, letter, object edge or dark material. Render the raised paw only with Image 1's coat and natural soft paw anatomy. Never turn any gentle gray depth transition into a black curl, ring, seam, stripe, symbol or held object.
+
 ACTION TRANSFER: keep Image 1's head, face, ears and upper-neck identity in place. Repose its body into Image 2's seated anatomy and raise only the viewer-left foreleg to the preserved muzzle. The raised viewer-left foreleg replaces its former planted position, so that same foreleg has no second paw on the ground. A single small pink tongue touches the raised paw. The mouth and paw are empty. Keep natural feline joint taper, soft fur continuity and readable paw digits from shoulder to muzzle.
 
 SPECIES AND SUPPORT LOCK: the result is exactly one domestic cat from Image 1, never an elephant, dog, hybrid animal or anatomy-model creature. Preserve two upright feline ears and a short feline nose and muzzle; never create a trunk, tusk, floppy fan-shaped ear, elongated face or non-cat skin folds. The cat floats only against flat green negative space: no pedestal, plinth, display base, circular platform, stage, floor disc, floor plane or cast shadow beneath any paw.
@@ -6645,6 +6648,31 @@ def _largest_green_or_alpha_foreground(
     return largest, method
 
 
+def _identity_free_grooming_paw_depth(
+    paw_mask: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Build smooth paw volume from silhouette distance, never source luma."""
+
+    paw_mask = np.asarray(paw_mask, dtype=bool)
+    if paw_mask.ndim != 2 or int(np.count_nonzero(paw_mask)) < 64:
+        raise ValueError("Grooming identity-free paw mask is too small.")
+    distance = cv2.distanceTransform(
+        paw_mask.astype(np.uint8),
+        cv2.DIST_L2,
+        5,
+    )
+    distance_p95 = max(
+        float(np.percentile(distance[paw_mask], 95.0)),
+        1.0,
+    )
+    normalized = np.sqrt(np.clip(distance / distance_p95, 0.0, 1.0))
+    # Keep the entire paw in a narrow neutral midtone range. Its silhouette and
+    # smooth radial volume remain usable geometry, while no white-maquette eye,
+    # mouth, toe crease, dark patch, or lighting trough can become pet markings.
+    depth = 0.48 + normalized * 0.12
+    return depth.astype(np.float32), distance_p95
+
+
 def prepare_grooming_white_maquette_frame0_pose_inputs(
     driving_animation: Path,
     action_cutout_target: Path,
@@ -6728,21 +6756,6 @@ def prepare_grooming_white_maquette_frame0_pose_inputs(
     )
     normalized_distance = np.clip(subject_distance / distance_p95, 0.0, 1.0)
     anatomy_depth = normalized_luma * 0.82 + normalized_distance * 0.18
-    action_volume_luma = cv2.GaussianBlur(
-        filled_luma,
-        (0, 0),
-        sigmaX=7.0,
-        sigmaY=7.0,
-    )
-    normalized_action_volume = np.clip(
-        (action_volume_luma - luma_p05) / luma_span,
-        0.0,
-        1.0,
-    )
-    action_volume_depth = (
-        normalized_action_volume * 0.82 + normalized_distance * 0.18
-    )
-
     head_cutoff = y0 + int(round((y1 - y0) * 0.45))
     row_grid = np.indices(subject_mask.shape)[0]
     head_mask = subject_mask & (row_grid <= head_cutoff)
@@ -6819,20 +6832,25 @@ def prepare_grooming_white_maquette_frame0_pose_inputs(
         255,
         -1,
     )
-    raised_paw_volume = (
-        (raised_paw_volume > 0) & head_mask & subject_mask
-    ).astype(np.float32)
+    # Do not clip this volume at ``head_cutoff``.  That former hard horizontal
+    # boundary was visible in Image 2 and could be interpreted by Qwen as a
+    # dark chest seam.  The ellipse already scopes the lifted foreleg; the
+    # true subject silhouette is the only safe geometric boundary here.
+    raised_paw_volume = (raised_paw_volume > 0) & subject_mask
+    identity_free_paw_depth, raised_paw_distance_p95 = (
+        _identity_free_grooming_paw_depth(raised_paw_volume)
+    )
     raised_paw_weight = cv2.GaussianBlur(
-        raised_paw_volume,
+        raised_paw_volume.astype(np.float32),
         (0, 0),
         sigmaX=6.0,
         sigmaY=6.0,
     )
     raised_paw_weight = np.clip(raised_paw_weight, 0.0, 1.0)
-    raised_paw_weight *= head_mask.astype(np.float32)
+    raised_paw_weight *= subject_mask.astype(np.float32)
     anatomy_depth = (
         anatomy_depth * (1.0 - raised_paw_weight)
-        + action_volume_depth * raised_paw_weight
+        + identity_free_paw_depth * raised_paw_weight
     )
     guide_luma = np.rint(96.0 + anatomy_depth * 80.0).astype(np.uint8)
     guide_rgb = np.empty((512, 512, 3), dtype=np.uint8)
@@ -6852,7 +6870,7 @@ def prepare_grooming_white_maquette_frame0_pose_inputs(
     if guide_neutral_fraction < 0.999:
         raise RuntimeError("Grooming frame 0 pose guide retained source chroma.")
     return {
-        "policy": "white_maquette_frame000_body_pose_head_identity_removed_v1",
+        "policy": "white_maquette_frame000_body_pose_identity_free_paw_depth_v3",
         "driving_animation_path": str(driving_animation),
         "driving_animation_sha256": expected_sha256,
         "decoded_frame_index": 0,
@@ -6868,12 +6886,22 @@ def prepare_grooming_white_maquette_frame0_pose_inputs(
         "head_identity_signal_removed": True,
         "head_identity_removal_method": (
             "silhouette_bounded_elliptical_distance_volume_with_radial_feather_"
-            "and_blurred_raised_paw_action_channel"
+            "and_identity_free_raised_paw_distance_volume"
         ),
         "head_identity_radial_feather_sigma_px": 12.0,
         "raised_paw_action_volume_preserved": True,
-        "raised_paw_action_volume_luma_blur_sigma_px": 7.0,
+        "raised_paw_action_volume_source_luma_preserved": False,
+        "raised_paw_action_volume_source_rgb_preserved": False,
+        "raised_paw_action_volume_depth_policy": (
+            "silhouette_distance_neutral_midtone_v1"
+        ),
+        "raised_paw_action_volume_depth_range": [0.48, 0.60],
+        "raised_paw_action_volume_distance_p95": round(
+            raised_paw_distance_p95,
+            6,
+        ),
         "raised_paw_action_volume_weight_blur_sigma_px": 6.0,
+        "raised_paw_action_volume_hard_head_cutoff_applied": False,
         "raw_frame_loaded_by_qwen": False,
         "raw_frame_rgb_conditioning_exposed": False,
         "raw_frame_chroma_conditioning_exposed": False,
