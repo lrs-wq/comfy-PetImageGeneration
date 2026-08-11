@@ -26902,7 +26902,7 @@ def health() -> dict[str, Any]:
                     "identity_refine_maximum_attempts": (
                         GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS
                     ),
-                    "mandatory_identity_refine": {
+                    "conditional_identity_refine": {
                         "policy": GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,
                         "steps": GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
                         "denoise": GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,

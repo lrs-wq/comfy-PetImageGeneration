@@ -7080,6 +7080,13 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
         )
 
+        health_payload = pipeline.health()
+        grooming_health = health_payload["qwen_style"]["pose_guard"][
+            "grooming_advisory_first_frame"
+        ]
+        self.assertIn("conditional_identity_refine", grooming_health)
+        self.assertNotIn("mandatory_identity_refine", grooming_health)
+
     def test_advisory_grooming_attempt3_uses_masked_foreleg_completion(
         self,
     ) -> None:
