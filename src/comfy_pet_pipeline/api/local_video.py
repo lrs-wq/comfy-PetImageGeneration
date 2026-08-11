@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.9"
+API_VERSION = "2.24.10"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -245,9 +245,9 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.8"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.9"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
-    "main_case_grooming_canonical_muzzle_aligned_neutral_paw_depth_v34"
+    "main_case_grooming_canonical_muzzle_aligned_bounded_retry_v35"
 )
 GROOMING_QWEN_GEOMETRY_GUIDE_POLICY = "driving_grooming_geometry_image2_v8"
 GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY = "driving_grooming_geometry_image1_v3"
@@ -352,7 +352,8 @@ GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
     "canonical_image1_headless_white_maquette_body_pose_image2_"
     "canonical_muzzle_aligned_neutral_paw_depth_image2_"
-    "canonical_face_image3_then_conditional_masked_face_refine_v18"
+    "canonical_face_image3_then_bounded_action_retry_and_"
+    "conditional_masked_face_refine_v19"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT = (
@@ -424,6 +425,7 @@ GROOMING_ADVISORY_ACTION_RETRY_WARNINGS = frozenset(
         "raised_paw_too_far_from_muzzle",
     }
 )
+GROOMING_ADVISORY_ACTION_RETRY_BEFORE_ATTEMPT = 3
 GROOMING_ADVISORY_MASKED_REPAIR_UNSAFE_ISSUES = frozenset(
     {
         "raised_paw_hard_object_texture_signature",
@@ -9803,7 +9805,7 @@ def advisory_grooming_action_retry_guidance(
         "warnings": warnings,
         "requested": bool(
             warnings
-            and int(attempt) < GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+            and int(attempt) < GROOMING_ADVISORY_ACTION_RETRY_BEFORE_ATTEMPT
         ),
         "never_blocks_final_attempt": True,
     }
@@ -27208,6 +27210,9 @@ def health() -> dict[str, Any]:
                         ],
                         "action_retry_guidance": sorted(
                             GROOMING_ADVISORY_ACTION_RETRY_WARNINGS
+                        ),
+                        "action_retry_guidance_before_attempt": (
+                            GROOMING_ADVISORY_ACTION_RETRY_BEFORE_ATTEMPT
                         ),
                         "action_retry_guidance_never_blocks_final_attempt": True,
                         "thresholds": {

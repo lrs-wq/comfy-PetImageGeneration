@@ -6741,7 +6741,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         )
         final_guidance = pipeline.advisory_grooming_action_retry_guidance(
             {"warnings": ["raised_paw_too_far_from_muzzle"]},
-            attempt=pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS,
+            attempt=pipeline.GROOMING_ADVISORY_ACTION_RETRY_BEFORE_ATTEMPT,
         )
         self.assertFalse(final_guidance["requested"])
         self.assertTrue(final_guidance["never_blocks_final_attempt"])
