@@ -6619,7 +6619,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             source_attempt=1,
             profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
         )
-        self.assertIn("MANDATORY GROOMING IDENTITY RESTORATION", refine_prompt)
+        self.assertIn("CONDITIONAL GROOMING IDENTITY REPAIR", refine_prompt)
         self.assertIn("MASKED UPPER-HEAD PASS", refine_prompt)
         self.assertIn("white maquette is absent from this pass", refine_prompt)
         self.assertIn("action draft from attempt 1", refine_prompt)
@@ -6669,6 +6669,16 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                     "available": True,
                     "acceptable": False,
                     "issues": ["gross_identity_palette_l1_drift"],
+                    "pose": {"acceptable": True},
+                }
+            )
+        )
+        self.assertFalse(
+            pipeline.advisory_grooming_candidate_safe_for_identity_refine(
+                {
+                    "available": True,
+                    "acceptable": True,
+                    "issues": [],
                     "pose": {"acceptable": True},
                 }
             )
@@ -6937,119 +6947,51 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_STEPS,
         )
 
-    def test_advisory_grooming_attempt2_restores_canonical_identity_without_maquette(
+    def test_advisory_grooming_identity_safe_draft_skips_generative_face_refine(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            workflow, uploaded_input, pose_input = self._capture_action_workflow(
-                Path(temporary),
-                action="grooming",
-                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
-                pose_attempt=2,
-                advisory_grooming_minimum_acceptable=True,
-                action_chroma_acceptable_attempts={1},
-                identity_palette_guard=True,
-                uploaded_white_maquette=True,
-                visual_audits_blocking=False,
-            )
-
-        expected_prefix = "local_video_api/capture-grooming/"
-        expected_canonical = expected_prefix + "cartoon_reference.png"
-        expected_face = (
-            expected_prefix + "grooming_canonical_face_identity_reference.png"
-        )
-        expected_pose_draft = (
-            expected_prefix
-            + "grooming_advisory_identity_refine_source_attempt_01.png"
-        )
-        expected_face_mask = (
-            expected_prefix
-            + "grooming_advisory_identity_refine_face_noise_mask_attempt_01.png"
-        )
-        load_images = {
-            node["inputs"]["image"]
-            for node in workflow.values()
-            if node.get("class_type") == "LoadImage"
+        minimum_gate = {
+            "available": True,
+            "acceptable": True,
+            "issues": [],
+            "pose": {"acceptable": True},
         }
-        self.assertEqual(
-            load_images,
-            {
-                expected_pose_draft,
-                expected_canonical,
-                expected_face,
-                expected_face_mask,
-            },
-        )
-        self.assertNotIn(uploaded_input, load_images)
-        self.assertNotIn(pose_input, load_images)
+
         self.assertFalse(
-            any("white_maquette" in image for image in load_images)
-        )
-        prompt = workflow["6"]["inputs"]["prompt"]
-        self.assertIn("MANDATORY GROOMING IDENTITY RESTORATION", prompt)
-        self.assertIn("white maquette is absent from this pass", prompt)
-        self.assertIn("smooth white-model face", prompt)
-        self.assertIn("IMAGE 2 is the approved Qwen full-body canonical", prompt)
-        self.assertEqual(
-            workflow["14"]["inputs"]["denoise"],
-            pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
-        )
-        self.assertEqual(
-            workflow["14"]["inputs"]["steps"],
-            pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
-        )
-        self.assertTrue(
-            any(
-                node.get("class_type") == "SetLatentNoiseMask"
-                for node in workflow.values()
+            pipeline.advisory_grooming_candidate_safe_for_identity_refine(
+                minimum_gate
             )
         )
+        self.assertLess(
+            pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
+            1.0,
+        )
+        self.assertEqual(
+            pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_EXPANSION_PX,
+            0,
+        )
 
-    def test_advisory_grooming_reserves_attempt4_for_identity_refine(
+    def test_advisory_grooming_identity_refine_requires_reported_face_drift(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            workflow, uploaded_input, pose_input = self._capture_action_workflow(
-                Path(temporary),
-                action="grooming",
-                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
-                pose_attempt=4,
-                advisory_grooming_minimum_acceptable=False,
-                advisory_grooming_minimum_acceptable_attempts={3},
-                action_chroma_acceptable_attempts={1, 2, 3},
-                identity_palette_guard=True,
-                uploaded_white_maquette=True,
-                visual_audits_blocking=False,
-            )
-
-        expected_prefix = "local_video_api/capture-grooming/"
-        load_images = {
-            node["inputs"]["image"]
-            for node in workflow.values()
-            if node.get("class_type") == "LoadImage"
-        }
-        self.assertEqual(
-            load_images,
-            {
-                expected_prefix
-                + "grooming_advisory_identity_refine_source_attempt_03.png",
-                expected_prefix + "cartoon_reference.png",
-                expected_prefix + "grooming_canonical_face_identity_reference.png",
-                expected_prefix
-                + "grooming_advisory_identity_refine_face_noise_mask_attempt_03.png",
-            },
-        )
-        self.assertNotIn(uploaded_input, load_images)
-        self.assertNotIn(pose_input, load_images)
-        self.assertFalse(any("white_maquette" in image for image in load_images))
-        self.assertIn(
-            "action draft from attempt 3",
-            workflow["6"]["inputs"]["prompt"],
-        )
         self.assertTrue(
-            any(
-                node.get("class_type") == "SetLatentNoiseMask"
-                for node in workflow.values()
+            pipeline.advisory_grooming_candidate_safe_for_identity_refine(
+                {
+                    "available": True,
+                    "acceptable": False,
+                    "issues": ["grooming_face_dark_marking_drift"],
+                    "pose": {"acceptable": True},
+                }
+            )
+        )
+        self.assertFalse(
+            pipeline.advisory_grooming_candidate_safe_for_identity_refine(
+                {
+                    "available": True,
+                    "acceptable": False,
+                    "issues": ["raised_paw_too_far_from_muzzle"],
+                    "pose": {"acceptable": False},
+                }
             )
         )
 
@@ -7132,7 +7074,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             1.0,
             pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT,
         )
-        self.assertEqual(selected[-1]["name"], "grooming_mandatory_identity_refine")
+        self.assertEqual(selected[-1]["name"], "grooming_conditional_identity_refine")
         self.assertEqual(
             selected[-1]["denoise"],
             pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
@@ -9280,7 +9222,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 canvas_audit["head_silhouette_expansion_px"],
                 pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_EXPANSION_PX,
             )
-            self.assertGreater(canvas_audit["editable_background_pixels"], 0)
+            self.assertEqual(canvas_audit["editable_background_pixels"], 0)
             self.assertGreater(canvas_audit["dark_artifact_removed_pixels"], 2048)
             self.assertEqual(
                 composite_audit["protected_action_pixels_changed"],
@@ -9289,7 +9231,7 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             self.assertTrue(
                 composite_audit["body_and_raised_paw_pixel_lock_passed"]
             )
-            self.assertGreater(
+            self.assertEqual(
                 composite_audit["head_silhouette_expansion_pixels"],
                 0,
             )
