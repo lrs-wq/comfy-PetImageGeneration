@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.10"
+API_VERSION = "2.24.11"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -245,9 +245,9 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.9"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.10"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
-    "main_case_grooming_canonical_muzzle_aligned_bounded_retry_v35"
+    "main_case_grooming_full_neutral_pose_head_locked_raw_qwen_v36"
 )
 GROOMING_QWEN_GEOMETRY_GUIDE_POLICY = "driving_grooming_geometry_image2_v8"
 GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY = "driving_grooming_geometry_image1_v3"
@@ -347,13 +347,13 @@ GROOMING_CANONICAL_FULL_POSE_REFINE_POLICY = (
     "canonical_seed_bound_pose_safe_identity_refine_v6"
 )
 GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
-    "canonical_palette_white_maquette_frame000_body_pose_transfer_seed_v8"
+    "canonical_palette_white_maquette_frame000_full_pose_transfer_seed_v9"
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
-    "canonical_image1_headless_white_maquette_body_pose_image2_"
-    "canonical_muzzle_aligned_neutral_paw_depth_image2_"
-    "canonical_face_image3_then_bounded_action_retry_and_"
-    "conditional_masked_face_refine_v19"
+    "canonical_image1_head_locked_white_maquette_full_pose_image2_"
+    "face_erased_canonical_muzzle_aligned_neutral_paw_depth_image2_"
+    "canonical_face_image3_then_bounded_action_retry_"
+    "raw_qwen_output_without_postprocess_v20"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 10
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT = (
@@ -374,7 +374,7 @@ GROOMING_ADVISORY_IDENTITY_REFINE_POLICY = (
 )
 GROOMING_ADVISORY_IDENTITY_REFINE_STEPS = 12
 GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE = 0.86
-GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS = 1
+GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS = 0
 GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_HEIGHT_FRACTION = 0.42
 GROOMING_ADVISORY_IDENTITY_REFINE_HEAD_EXPANSION_PX = 0
 GROOMING_ADVISORY_IDENTITY_REFINE_MASK_FEATHER_SIGMA_PX = 4.0
@@ -426,6 +426,9 @@ GROOMING_ADVISORY_ACTION_RETRY_WARNINGS = frozenset(
     }
 )
 GROOMING_ADVISORY_ACTION_RETRY_BEFORE_ATTEMPT = 3
+GROOMING_ADVISORY_ACTION_HEAD_LOCK_HEIGHT_FRACTION = 0.35
+GROOMING_ADVISORY_ACTION_HEAD_LOCK_DILATION_PX = 6
+GROOMING_ADVISORY_ACTION_HEAD_LOCK_FEATHER_SIGMA_PX = 6.0
 GROOMING_ADVISORY_MASKED_REPAIR_UNSAFE_ISSUES = frozenset(
     {
         "raised_paw_hard_object_texture_signature",
@@ -4306,12 +4309,12 @@ def build_advisory_grooming_action_transfer_prompt(
     )
     return f"""CRITICAL GROOMING FIRST-FRAME IDENTITY TRANSFER:
 IMAGE 1 is the approved Qwen full-body canonical produced from the uploaded identity views. It is the sampler canvas and the only whole-pet identity, coat, body-proportion, fur, material, lighting and rendering authority.
-IMAGE 2 is a deliberately HEADLESS neutral body-and-raised-foreleg anatomy render derived only from frame 0 of the digest-locked white-maquette grooming video. It controls the seated torso, shoulder, raised foreleg, planted foreleg, hind legs, tail, camera and broad low-frequency body depth only. Before conditioning, its raw RGB, chroma, material, texture and exact luma were discarded; the complete maquette head and both maquette ears were then removed to pure green. The green opening above the neck is an intentionally absent conditioning region, not a request for a headless animal. Never erase, replace, resize, sharpen, tilt, or reconstruct Image 1's head from Image 2.
+IMAGE 2 is a FACE-ERASED neutral complete-pose anatomy render derived only from frame 0 of the digest-locked white-maquette grooming video. It controls the seated torso, shoulder, raised foreleg, planted foreleg, hind legs, tail, camera and broad low-frequency body depth only. Its raw RGB, chroma, material, texture and exact luma were discarded. Its smooth gray head and ears remain only so the paw-to-muzzle contact is readable without any cut edge; they contain no face identity and never override Image 1. Image 1's upper head is protected by the sampler noise mask and must remain unchanged in the raw Qwen result.
 IMAGE 3 is a deterministic enlarged head crop made from Image 1. It adds no second pet and no action geometry. Use it only to preserve Image 1's exact recognizable face: head silhouette and cheek width, eye size, eye color and spacing, ear shape, nose, muzzle, localized facial markings and natural fur around the face.
 
-GEOMETRY READ: Image 2 deliberately stops at the neck while retaining the raised paw beside the lower muzzle location. Treat its connected neutral body pixels as one living cat body. Its depth changes describe the chest, shoulders, torso and limbs together. The localized volume rising along the viewer-left chest is the raised foreleg and furry paw, not cheek shading and not a separate object. Rebuild it continuously from shoulder through elbow and wrist into one rounded paw touching the underside of Image 1's preserved muzzle. The viewer-right foreleg continues into the only planted front paw. Preserve both attached hind legs and one complete tail.
+GEOMETRY READ: Image 2 is one continuous neutral cat silhouette with no head/body cut boundary. Treat its connected neutral pixels as one living cat body. Its depth changes describe the chest, shoulders, torso and limbs together. The localized volume rising along the viewer-left chest is the raised foreleg and furry paw, not cheek shading and not a separate object. Rebuild it continuously from shoulder through elbow and wrist into one rounded paw touching the underside of Image 1's protected muzzle. The viewer-right foreleg continues into the only planted front paw. Preserve both attached hind legs and one complete tail.
 
-NEUTRAL PAW DEPTH: Image 2's raised-paw interior is deliberately rebuilt from a smooth silhouette-distance volume. Its continuous shoulder-to-paw centerline is aligned to Image 1's lower muzzle instead of the removed maquette face, so the top of the rounded paw must reach and touch the underside of Image 1's muzzle. It contains no fur marking, toe line, hole, loop, letter, object edge or dark material. Render the raised paw only with Image 1's coat and natural soft paw anatomy. Never turn any gentle gray depth transition into a black curl, ring, seam, stripe, symbol or held object.
+NEUTRAL PAW DEPTH: Image 2's raised-paw interior is deliberately rebuilt from a smooth silhouette-distance volume. Its continuous shoulder-to-paw centerline is aligned to Image 1's lower muzzle, so the top of the rounded paw must reach and touch the underside of Image 1's muzzle. It contains no fur marking, toe line, hole, loop, letter, object edge or dark material. Render the raised paw only with Image 1's coat and natural soft paw anatomy. Never turn any gentle gray depth transition into a black curl, ring, seam, stripe, symbol or held object.
 
 ACTION TRANSFER: keep Image 1's head, face, ears and upper-neck identity in place. Repose its body into Image 2's seated anatomy and raise only the viewer-left foreleg to the preserved muzzle. The raised viewer-left foreleg replaces its former planted position, so that same foreleg has no second paw on the ground. A single small pink tongue touches the raised paw. The mouth and paw are empty. Keep natural feline joint taper, soft fur continuity and readable paw digits from shoulder to muzzle.
 
@@ -4321,7 +4324,7 @@ IDENTITY LOCK: preserve the face directly from Image 1 and its digest-bound Imag
 
 POSE CONTRACT: {qwen_first_frame_spec(pose)}
 
-OUTPUT CONTRACT: return one clean static grooming first frame containing only the complete cat and flat pure #00FF00 negative space. Keep the cat within 72% of canvas width and height with at least 12% clear margin on every edge. Preserve exactly one raised front paw, one planted front paw, both attached hind legs and one tail. No prop, floor, shadow, reflection, scenery, text, logo, watermark, motion blur, duplicate limb or extra subject."""
+OUTPUT CONTRACT: return the complete correct image directly from Qwen with no later patching required. The neck, chest and torso are one uninterrupted furry surface: no horizontal seam, straight crop edge, cut-and-paste boundary, detached upper body or hanging duplicate foreleg. Keep only the complete cat and flat pure #00FF00 negative space, within 72% of canvas width and height and with at least 12% clear margin on every edge. Preserve exactly one raised front paw, one planted front paw, both attached hind legs and one tail. No prop, floor, shadow, reflection, scenery, text, logo, watermark, motion blur, duplicate limb or extra subject."""
 
 
 def build_advisory_grooming_identity_refine_prompt(
@@ -4871,7 +4874,12 @@ def advisory_grooming_generation_profiles(
     *,
     enabled: bool,
 ) -> list[dict[str, Any]]:
-    """Reserve one conditional Qwen face-repair call after action drafts."""
+    """Build the finite raw-Qwen action-draft budget.
+
+    A conditional generative identity-refine profile is appended only when its
+    explicitly configured budget is non-zero.  Production keeps that budget at
+    zero so the selected first frame is an untouched Qwen action-pass output.
+    """
 
     selected = [
         {
@@ -4895,25 +4903,31 @@ def advisory_grooming_generation_profiles(
             int(repeated["steps"]),
         )
         selected.append(repeated)
-    identity_refine_profile = {
-        **selected[-1],
-        "user_loras": [
-            dict(item) for item in selected[-1].get("user_loras", [])
-        ],
-    }
-    identity_refine_profile.update(
-        name="grooming_conditional_identity_refine",
-        quality_retry=GROOMING_ADVISORY_TOTAL_ATTEMPTS,
-        steps=max(
-            GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
-            int(identity_refine_profile["steps"]),
-        ),
-        denoise=GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
-    )
-    selected.append(identity_refine_profile)
+    for refine_index in range(GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS):
+        identity_refine_profile = {
+            **selected[-1],
+            "user_loras": [
+                dict(item) for item in selected[-1].get("user_loras", [])
+            ],
+        }
+        identity_refine_profile.update(
+            name="grooming_conditional_identity_refine",
+            quality_retry=(
+                GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                + refine_index
+                + 1
+            ),
+            steps=max(
+                GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
+                int(identity_refine_profile["steps"]),
+            ),
+            denoise=GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
+        )
+        selected.append(identity_refine_profile)
     if len(selected) != GROOMING_ADVISORY_TOTAL_ATTEMPTS:
         raise RuntimeError(
-            "Advisory grooming must reserve exactly one identity-refine attempt."
+            "Advisory grooming profile count does not match the configured raw "
+            "action and identity-refine budgets."
         )
     return selected
 
@@ -6991,6 +7005,107 @@ def prepare_canonical_grooming_face_identity_reference(
     }
 
 
+def prepare_advisory_grooming_action_head_lock_mask(
+    canonical_reference: Path,
+    target: Path,
+) -> dict[str, Any]:
+    """Protect canonical upper-head latents while Qwen redraws the action body."""
+
+    with Image.open(canonical_reference) as loaded:
+        canonical = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+    if canonical.shape != (512, 512, 4):
+        raise ValueError("Grooming action head-lock canonical must be 512x512.")
+    foreground, mask_method = _largest_green_or_alpha_foreground(canonical)
+    ys, xs = np.nonzero(foreground)
+    x0, y0 = int(xs.min()), int(ys.min())
+    x1, y1 = int(xs.max()) + 1, int(ys.max()) + 1
+    row_grid = np.indices(foreground.shape)[0]
+    head_cutoff_y = min(
+        y1 - 1,
+        y0
+        + int(
+            round(
+                (y1 - y0)
+                * GROOMING_ADVISORY_ACTION_HEAD_LOCK_HEIGHT_FRACTION
+            )
+        ),
+    )
+    head_core = foreground & (row_grid <= head_cutoff_y)
+    if int(np.count_nonzero(head_core)) < 1024:
+        raise RuntimeError("Grooming action head-lock core is too small.")
+    dilation_px = int(GROOMING_ADVISORY_ACTION_HEAD_LOCK_DILATION_PX)
+    dilation_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (dilation_px * 2 + 1, dilation_px * 2 + 1),
+    )
+    protection_support = cv2.dilate(
+        head_core.astype(np.uint8),
+        dilation_kernel,
+        iterations=1,
+    ).astype(bool)
+    feather_sigma = float(
+        GROOMING_ADVISORY_ACTION_HEAD_LOCK_FEATHER_SIGMA_PX
+    )
+    protection_strength = cv2.GaussianBlur(
+        protection_support.astype(np.float32),
+        (0, 0),
+        sigmaX=feather_sigma,
+        sigmaY=feather_sigma,
+    ).clip(0.0, 1.0)
+    protection_strength[protection_strength < 0.01] = 0.0
+    protection_strength[protection_strength > 0.99] = 1.0
+    protected_pixels = int(np.count_nonzero(protection_strength > 0.0))
+    full_strength_pixels = int(np.count_nonzero(protection_strength >= 1.0))
+    editable_pixels = int(np.count_nonzero(protection_strength < 1.0))
+    protected_head_pixels = int(
+        np.count_nonzero(foreground & (protection_strength >= 0.99))
+    )
+    if (
+        protected_pixels < 2048
+        or full_strength_pixels < 1024
+        or protected_head_pixels < 1024
+        or editable_pixels < 4096
+    ):
+        raise RuntimeError("Grooming action head-lock mask is not usable.")
+
+    # ComfyUI LoadImage emits MASK = 1 - alpha.  Opaque alpha therefore locks
+    # Image 1's head latents, while transparent body/background pixels remain
+    # editable by the Qwen action pass.  This is generation conditioning only;
+    # no pixels are composited or replaced after Qwen returns its image.
+    mask_rgba = np.zeros((512, 512, 4), dtype=np.uint8)
+    mask_rgba[:, :, 3] = np.rint(protection_strength * 255.0).astype(np.uint8)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(mask_rgba, mode="RGBA").save(
+        target,
+        format="PNG",
+        optimize=True,
+    )
+    return {
+        "policy": "canonical_upper_head_latent_lock_raw_qwen_action_v1",
+        "canonical_reference_path": str(canonical_reference),
+        "canonical_reference_sha256": file_sha256(canonical_reference),
+        "canonical_mask_method": mask_method,
+        "canonical_foreground_bbox": [x0, y0, x1, y1],
+        "head_height_fraction": (
+            GROOMING_ADVISORY_ACTION_HEAD_LOCK_HEIGHT_FRACTION
+        ),
+        "head_cutoff_y": head_cutoff_y,
+        "head_core_pixels": int(np.count_nonzero(head_core)),
+        "dilation_px": dilation_px,
+        "feather_sigma_px": feather_sigma,
+        "protected_pixels": protected_pixels,
+        "full_strength_pixels": full_strength_pixels,
+        "protected_head_foreground_pixels": protected_head_pixels,
+        "editable_pixels": editable_pixels,
+        "noise_mask_loadimage_contract": "mask_equals_one_minus_alpha",
+        "qwen_body_edit_strength_equals_one_minus_protection": True,
+        "post_qwen_pixel_composite_enabled": False,
+        "raw_qwen_output_required": True,
+        "target_path": str(target),
+        "target_sha256": file_sha256(target),
+    }
+
+
 def _canonical_aligned_grooming_foreleg_geometry(
     geometry_mask: np.ndarray,
     canonical_mask: np.ndarray,
@@ -7532,13 +7647,73 @@ def prepare_canonical_grooming_pose_transfer_seed(
         if preserve_normalized_geometry_luma or not semantic_foreleg_pixels
         else float(GROOMING_CANONICAL_POSE_TRANSFER_FORELEG_LUMA_LIFT)
     )
-    remapped_luma = np.rint(
-        np.clip(
-            remapped_luma_base + foreleg_depth * foreleg_luma_lift,
-            8.0,
-            247.0,
+    remapped_luma_float = np.clip(
+        remapped_luma_base + foreleg_depth * foreleg_luma_lift,
+        8.0,
+        247.0,
+    )
+    canonical_aligned_foreleg_audit: dict[str, Any] | None = None
+    raised_paw_geometry = np.zeros(geometry_mask.shape, dtype=bool)
+    raised_paw_geometry_retained_pixels = 0
+    raised_paw_volume_distance_p95: float | None = None
+    raised_paw_volume_weight_sigma_px: float | None = None
+    raised_paw_volume_luma_range: list[float] | None = None
+    if preserve_normalized_geometry_luma and complete_geometry_guide:
+        raised_paw_geometry, canonical_aligned_foreleg_audit = (
+            _canonical_aligned_grooming_foreleg_geometry(
+                geometry_mask,
+                canonical_mask,
+            )
         )
-    ).astype(np.uint8)
+        raised_paw_geometry_retained_pixels = int(
+            np.count_nonzero(raised_paw_geometry)
+        )
+        raised_paw_distance = cv2.distanceTransform(
+            raised_paw_geometry.astype(np.uint8),
+            cv2.DIST_L2,
+            5,
+        )
+        raised_paw_volume_distance_p95 = max(
+            float(
+                np.percentile(
+                    raised_paw_distance[raised_paw_geometry],
+                    95.0,
+                )
+            ),
+            1.0,
+        )
+        raised_paw_depth = np.sqrt(
+            np.clip(
+                raised_paw_distance / raised_paw_volume_distance_p95,
+                0.0,
+                1.0,
+            )
+        )
+        luma_span = target_luma_high - target_luma_low
+        raised_paw_luma_low = target_luma_low + luma_span * 0.56
+        raised_paw_luma_high = target_luma_low + luma_span * 0.72
+        raised_paw_volume = (
+            raised_paw_luma_low
+            + raised_paw_depth
+            * (raised_paw_luma_high - raised_paw_luma_low)
+        )
+        raised_paw_volume_weight_sigma_px = 5.0
+        raised_paw_weight = cv2.GaussianBlur(
+            raised_paw_geometry.astype(np.float32),
+            (0, 0),
+            sigmaX=raised_paw_volume_weight_sigma_px,
+            sigmaY=raised_paw_volume_weight_sigma_px,
+        ).clip(0.0, 1.0)
+        raised_paw_weight *= geometry_mask.astype(np.float32)
+        remapped_luma_float = (
+            remapped_luma_float * (1.0 - raised_paw_weight)
+            + raised_paw_volume * raised_paw_weight
+        )
+        raised_paw_volume_luma_range = [
+            round(float(raised_paw_luma_low), 6),
+            round(float(raised_paw_luma_high), 6),
+        ]
+    remapped_luma = np.rint(remapped_luma_float).astype(np.uint8)
     canonical_ab = np.rint(
         np.median(canonical_values[:, 1:3].astype(np.float32), axis=0)
     ).astype(np.uint8)
@@ -7550,8 +7725,6 @@ def prepare_canonical_grooming_pose_transfer_seed(
     qwen_visible_geometry_mask = geometry_mask.copy()
     head_silhouette_removed_pixels = 0
     head_silhouette_cutoff_y: int | None = None
-    raised_paw_geometry_retained_pixels = 0
-    canonical_aligned_foreleg_audit: dict[str, Any] | None = None
     if remove_head_identity_silhouette:
         geometry_ys, geometry_xs = np.nonzero(geometry_mask)
         geometry_x0 = int(geometry_xs.min())
@@ -7565,12 +7738,6 @@ def prepare_canonical_grooming_pose_transfer_seed(
         )
         row_grid = np.indices(geometry_mask.shape)[0]
         head_region = geometry_mask & (row_grid < head_silhouette_cutoff_y)
-        raised_paw_geometry, canonical_aligned_foreleg_audit = (
-            _canonical_aligned_grooming_foreleg_geometry(
-                geometry_mask,
-                canonical_mask,
-            )
-        )
         qwen_visible_geometry_mask = geometry_mask & (
             ~head_region | raised_paw_geometry
         )
@@ -7672,6 +7839,16 @@ def prepare_canonical_grooming_pose_transfer_seed(
             else None
         ),
         "raised_paw_geometry_audit": canonical_aligned_foreleg_audit,
+        "raised_paw_volume_source_rgb_or_luma_used": False,
+        "raised_paw_volume_distance_p95": (
+            round(raised_paw_volume_distance_p95, 6)
+            if raised_paw_volume_distance_p95 is not None
+            else None
+        ),
+        "raised_paw_volume_weight_sigma_px": (
+            raised_paw_volume_weight_sigma_px
+        ),
+        "raised_paw_volume_luma_range": raised_paw_volume_luma_range,
         "public_internal_channel_pixels_filled": filled_internal_channel_pixels,
         "qwen_visible_internal_green_channel_pixels": (
             head_silhouette_removed_pixels
@@ -20746,6 +20923,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             advisory_grooming_face_identity_path: Path | None = None
             advisory_grooming_face_identity_input_name: str | None = None
             advisory_grooming_face_identity_audit: dict[str, Any] | None = None
+            advisory_grooming_action_head_lock_mask_path: Path | None = None
+            advisory_grooming_action_head_lock_input_name: str | None = None
+            advisory_grooming_action_head_lock_audit: dict[str, Any] | None = None
             advisory_grooming_white_frame0_audit: dict[str, Any] | None = None
             advisory_grooming_normalized_white_depth = False
             if advisory_grooming_action_transfer_active:
@@ -20771,6 +20951,20 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
                 advisory_grooming_face_identity_input_name = (
                     comfy_relative_dir / advisory_grooming_face_identity_path.name
+                ).as_posix()
+                advisory_grooming_action_head_lock_mask_path = (
+                    comfy_input_dir
+                    / "grooming_canonical_action_head_lock_noise_mask.png"
+                )
+                advisory_grooming_action_head_lock_audit = (
+                    prepare_advisory_grooming_action_head_lock_mask(
+                        canonical_action_identity_reference,
+                        advisory_grooming_action_head_lock_mask_path,
+                    )
+                )
+                advisory_grooming_action_head_lock_input_name = (
+                    comfy_relative_dir
+                    / advisory_grooming_action_head_lock_mask_path.name
                 ).as_posix()
                 action_reference_path: Path | None = None
                 action_reference_sha256 = ""
@@ -20895,9 +21089,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         complete_geometry_guide=(
                             advisory_grooming_normalized_white_depth
                         ),
-                        remove_head_identity_silhouette=(
-                            advisory_grooming_normalized_white_depth
-                        ),
+                        remove_head_identity_silhouette=False,
                     )
                 )
                 advisory_grooming_action_canvas_audit[
@@ -20909,6 +21101,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 advisory_grooming_action_canvas_audit[
                     "canonical_face_identity_reference"
                 ] = advisory_grooming_face_identity_audit
+                advisory_grooming_action_canvas_audit[
+                    "canonical_action_head_lock"
+                ] = advisory_grooming_action_head_lock_audit
                 advisory_grooming_action_input_name = (
                     comfy_relative_dir / advisory_grooming_action_canvas_path.name
                 ).as_posix()
@@ -20943,8 +21138,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     grooming_action_first_frame_image_roles={
                         "image1": "approved_canonical_identity_sampler",
                         "image2": (
-                            "canonical_palette_headless_white_maquette_frame000_"
-                            "body_and_raised_foreleg_pose_anatomy"
+                            "canonical_palette_face_erased_white_maquette_"
+                            "frame000_complete_pose_anatomy"
                             if advisory_grooming_normalized_white_depth
                             else "canonical_palette_soft_foreleg_depth_action_anatomy"
                         ),
@@ -20963,8 +21158,18 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         advisory_grooming_normalized_white_depth
                     ),
                     grooming_action_first_frame_white_maquette_head_silhouette_removed=(
-                        advisory_grooming_normalized_white_depth
+                        False
                     ),
+                    grooming_action_first_frame_canonical_head_lock_input=(
+                        advisory_grooming_action_head_lock_input_name
+                    ),
+                    grooming_action_first_frame_canonical_head_lock=(
+                        advisory_grooming_action_head_lock_audit
+                    ),
+                    grooming_action_first_frame_post_qwen_pixel_composite_enabled=(
+                        False
+                    ),
+                    grooming_action_first_frame_raw_qwen_output_required=True,
                     grooming_action_first_frame_raw_white_maquette_frame_loaded_by_qwen=(
                         False
                     ),
@@ -21169,6 +21374,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     if (
                         advisory_grooming_action_input_name is None
                         or advisory_grooming_face_identity_input_name is None
+                        or advisory_grooming_action_head_lock_input_name is None
+                        or not isinstance(
+                            advisory_grooming_action_head_lock_audit,
+                            dict,
+                        )
                         or not isinstance(
                             advisory_grooming_action_canvas_audit,
                             dict,
@@ -21186,6 +21396,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         attempt_secondary_input_name,
                         attempt_tertiary_input_name,
                     ]
+                    attempt_noise_mask_input_name = (
+                        advisory_grooming_action_head_lock_input_name
+                    )
                     attempt_geometry_input_name = advisory_grooming_action_input_name
                     attempt_prompt = build_advisory_grooming_action_transfer_prompt(
                         pose,
@@ -21204,8 +21417,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "policy": GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY,
                         "image1_role": "approved_canonical_identity_sampler",
                         "image2_role": (
-                            "canonical_palette_headless_white_maquette_frame000_"
-                            "body_and_raised_foreleg_pose_anatomy"
+                            "canonical_palette_face_erased_white_maquette_"
+                            "frame000_complete_pose_anatomy"
                             if advisory_grooming_normalized_white_depth
                             else "canonical_palette_soft_foreleg_depth_action_anatomy"
                         ),
@@ -21229,8 +21442,17 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             advisory_grooming_normalized_white_depth
                         ),
                         "white_maquette_head_silhouette_removed": (
-                            advisory_grooming_normalized_white_depth
+                            False
                         ),
+                        "canonical_head_latent_lock": (
+                            advisory_grooming_action_head_lock_audit
+                        ),
+                        "sampler_noise_mask_input_name": (
+                            attempt_noise_mask_input_name
+                        ),
+                        "post_qwen_pixel_composite_enabled": False,
+                        "raw_qwen_output_required": True,
+                        "raw_qwen_selection_byte_preserving": True,
                         "canonical_face_identity_reference": (
                             advisory_grooming_face_identity_audit
                         ),
@@ -22309,53 +22531,28 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     {".png", ".jpg", ".jpeg", ".webp"},
                     "Qwen keyframe",
                 )
+                source_output_sha256 = file_sha256(source_output)
+                raw_qwen_byte_preserved = False
                 attempt_keyframe = (
                     job_dir / f"pose_{index:02d}_keyframe_attempt_{attempt:02d}.png"
                 )
                 if advisory_grooming_identity_refine_active:
-                    if (
-                        not isinstance(grooming_advisory_identity_refine_audit, dict)
-                        or grooming_advisory_identity_refine_noise_mask_path is None
-                    ):
+                    raise RuntimeError(
+                        "Post-Qwen grooming identity refinement is disabled: the "
+                        "first frame must be an untouched raw Qwen action output."
+                    )
+                elif advisory_grooming_action_transfer_active:
+                    if source_output.suffix.lower() != ".png":
                         raise RuntimeError(
-                            "Grooming identity refinement lost its action-lock audit."
+                            "Raw Qwen grooming output must be a PNG before exact "
+                            "byte-preserving selection."
                         )
-                    raw_identity_refine_keyframe = (
-                        job_dir
-                        / (
-                            f"pose_{index:02d}_keyframe_attempt_{attempt:02d}_"
-                            "raw_qwen.png"
+                    shutil.copy2(source_output, attempt_keyframe)
+                    if file_sha256(attempt_keyframe) != source_output_sha256:
+                        raise RuntimeError(
+                            "Raw Qwen grooming output changed while being selected."
                         )
-                    )
-                    with Image.open(source_output) as generated:
-                        generated.convert("RGB").save(
-                            raw_identity_refine_keyframe,
-                            format="PNG",
-                            optimize=True,
-                        )
-                    identity_refine_composite_audit = (
-                        finalize_advisory_grooming_identity_refine_candidate(
-                            Path(
-                                str(
-                                    grooming_advisory_identity_refine_audit[
-                                        "source_path"
-                                    ]
-                                )
-                            ),
-                            raw_identity_refine_keyframe,
-                            grooming_advisory_identity_refine_noise_mask_path,
-                            attempt_keyframe,
-                        )
-                    )
-                    grooming_advisory_identity_refine_audit[
-                        "candidate_composite"
-                    ] = identity_refine_composite_audit
-                    update_job(
-                        job_id,
-                        grooming_advisory_identity_refine_action_lock=(
-                            identity_refine_composite_audit
-                        ),
-                    )
+                    raw_qwen_byte_preserved = True
                 else:
                     with Image.open(source_output) as generated:
                         generated.convert("RGB").save(
@@ -23381,7 +23578,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "grooming_foreleg_repair": (grooming_foreleg_repair_audit),
                     "grooming_full_pose_recovery": (grooming_full_pose_recovery_audit),
                     "eating_identity_refine": eating_identity_refine_audit,
+                    "raw_qwen_source_path": str(source_output),
+                    "raw_qwen_source_sha256": source_output_sha256,
+                    "raw_qwen_byte_preserved": raw_qwen_byte_preserved,
                     "keyframe": attempt_keyframe.name,
+                    "keyframe_sha256": file_sha256(attempt_keyframe),
                     "cutout": attempt_cutout.name
                     if chroma_metrics["acceptable"]
                     else None,
@@ -27099,8 +27300,8 @@ def health() -> dict[str, Any]:
                         "image2_main_case_driver_geometry_guide"
                         if GENERATION_VISUAL_AUDITS_BLOCKING
                         else (
-                            "image2_canonical_palette_headless_white_maquette_"
-                            "frame000_body_and_raised_foreleg_pose_anatomy"
+                            "image2_canonical_palette_face_erased_white_maquette_"
+                            "frame000_complete_pose_anatomy"
                         )
                     ),
                 },
@@ -27115,12 +27316,13 @@ def health() -> dict[str, Any]:
                     "image_roles": {
                         "image1": "approved_canonical_identity_sampler",
                         "image2": (
-                            "canonical_palette_headless_white_maquette_frame000_"
-                            "body_and_raised_foreleg_pose_anatomy"
+                            "canonical_palette_face_erased_white_maquette_"
+                            "frame000_complete_pose_anatomy"
                         ),
                         "image3": "same_canonical_enlarged_face_identity_detail",
                     },
-                    "white_maquette_head_and_ear_silhouette_removed": True,
+                    "white_maquette_head_and_ear_silhouette_removed": False,
+                    "white_maquette_complete_pose_silhouette_retained": True,
                     "validated_action_rgb_loaded_by_qwen": False,
                     "validated_action_rgb_exposed_as_identity_authority": False,
                     "validated_action_chroma_loaded_by_qwen": False,
@@ -27134,6 +27336,25 @@ def health() -> dict[str, Any]:
                     "raw_white_maquette_luma_loaded_by_qwen": False,
                     "white_maquette_frame_index": 0,
                     "white_maquette_head_identity_removed": True,
+                    "canonical_upper_head_latent_lock": {
+                        "enabled": True,
+                        "policy": (
+                            "canonical_upper_head_latent_lock_raw_qwen_action_v1"
+                        ),
+                        "head_height_fraction": (
+                            GROOMING_ADVISORY_ACTION_HEAD_LOCK_HEIGHT_FRACTION
+                        ),
+                        "dilation_px": (
+                            GROOMING_ADVISORY_ACTION_HEAD_LOCK_DILATION_PX
+                        ),
+                        "feather_sigma_px": (
+                            GROOMING_ADVISORY_ACTION_HEAD_LOCK_FEATHER_SIGMA_PX
+                        ),
+                        "generation_conditioning_only": True,
+                    },
+                    "post_qwen_pixel_composite_enabled": False,
+                    "raw_qwen_output_required": True,
+                    "raw_qwen_selection_byte_preserving": True,
                     "uploaded_front_identity_confirmation_loaded_by_qwen": False,
                     "same_canonical_face_identity_reference_loaded_by_qwen": True,
                     "uploaded_identity_views_consumed_via_canonical_only": True,
@@ -27149,6 +27370,11 @@ def health() -> dict[str, Any]:
                         GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS
                     ),
                     "conditional_identity_refine": {
+                        "enabled": False,
+                        "disabled_reason": (
+                            "raw_qwen_action_output_required_no_post_generation_"
+                            "pixel_composite"
+                        ),
                         "policy": GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,
                         "steps": GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
                         "denoise": GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,

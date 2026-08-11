@@ -6592,16 +6592,16 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
-            "IMAGE 2 is a deliberately HEADLESS neutral body-and-raised-foreleg",
+            "IMAGE 2 is a FACE-ERASED neutral complete-pose anatomy render",
             prompt,
         )
         self.assertIn("derived only from frame 0", prompt)
-        self.assertIn("complete maquette head and both maquette ears", prompt)
-        self.assertIn("green opening above the neck", prompt)
+        self.assertIn("smooth gray head and ears remain only", prompt)
+        self.assertIn("protected by the sampler noise mask", prompt)
         self.assertIn("IMAGE 3 is a deterministic enlarged head crop", prompt)
         self.assertIn("exact recognizable face", prompt)
         self.assertIn(
-            "Image 2 deliberately stops at the neck",
+            "one continuous neutral cat silhouette with no head/body cut boundary",
             prompt,
         )
         self.assertIn(
@@ -6617,6 +6617,8 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertIn("an unstriped region remains unstriped", prompt)
         self.assertIn("never an elephant", prompt)
         self.assertIn("no pedestal, plinth, display base, circular platform", prompt)
+        self.assertIn("return the complete correct image directly from Qwen", prompt)
+        self.assertIn("no horizontal seam, straight crop edge", prompt)
 
         refine_prompt = pipeline.build_advisory_grooming_identity_refine_prompt(
             pipeline.subject_replacement_pose_prompt("grooming"),
@@ -6949,12 +6951,17 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             "local_video_api/capture-grooming/"
             "grooming_canonical_face_identity_reference.png"
         )
+        expected_head_lock_mask = (
+            "local_video_api/capture-grooming/"
+            "grooming_canonical_action_head_lock_noise_mask.png"
+        )
         self.assertEqual(
             load_images,
             {
                 expected_canonical,
                 expected_action_reference,
                 expected_face_reference,
+                expected_head_lock_mask,
             },
         )
         self.assertNotIn(pose_input, load_images)
@@ -6966,11 +6973,13 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertIn("derived only from frame 0", action_prompt)
         self.assertIn("IMAGE 3 is a deterministic enlarged head crop", action_prompt)
         self.assertIn(
-            "IMAGE 2 is a deliberately HEADLESS neutral body-and-raised-foreleg",
+            "IMAGE 2 is a FACE-ERASED neutral complete-pose anatomy render",
             action_prompt,
         )
-        self.assertIn("complete maquette head and both maquette ears", action_prompt)
-        self.assertIn("green opening above the neck", action_prompt)
+        self.assertIn("smooth gray head and ears remain only", action_prompt)
+        self.assertIn("protected by the sampler noise mask", action_prompt)
+        self.assertIn("no horizontal seam, straight crop edge", action_prompt)
+        self.assertIn("no later patching required", action_prompt)
         self.assertIn("image3", workflow["6"]["inputs"])
         self.assertIn("image3", workflow["7"]["inputs"])
         self.assertIn("visible source coat is achromatic", action_prompt)
@@ -6982,6 +6991,25 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         self.assertEqual(
             workflow["14"]["inputs"]["steps"],
             pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_STEPS,
+        )
+        mask_load_node = next(
+            node_id
+            for node_id, node in workflow.items()
+            if node.get("class_type") == "LoadImage"
+            and node["inputs"]["image"] == expected_head_lock_mask
+        )
+        latent_mask_node = next(
+            node_id
+            for node_id, node in workflow.items()
+            if node.get("class_type") == "SetLatentNoiseMask"
+        )
+        self.assertEqual(
+            workflow[latent_mask_node]["inputs"]["mask"],
+            [mask_load_node, 1],
+        )
+        self.assertEqual(
+            workflow["14"]["inputs"]["latent_image"],
+            [latent_mask_node, 0],
         )
 
     def test_advisory_grooming_identity_safe_draft_skips_generative_face_refine(
@@ -7032,52 +7060,15 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             )
         )
 
-    def test_advisory_grooming_repairs_final_action_safe_dark_identity_drift(
+    def test_advisory_grooming_does_not_schedule_post_action_identity_repair(
         self,
     ) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            workflow, _, _ = self._capture_action_workflow(
-                Path(temporary),
-                action="grooming",
-                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
-                pose_attempt=6,
-                advisory_grooming_minimum_acceptable=False,
-                advisory_grooming_minimum_issues=["new_dominant_dark_markings"],
-                action_chroma_acceptable_attempts={1, 2, 3, 4, 5},
-                identity_palette_guard=True,
-                uploaded_white_maquette=True,
-                visual_audits_blocking=False,
-            )
-
-        self.assertIn(
-            "MASKED UPPER-HEAD PASS",
-            workflow["6"]["inputs"]["prompt"],
-        )
         self.assertEqual(
-            workflow["14"]["inputs"]["denoise"],
-            pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
-        )
-        load_images = {
-            node["inputs"]["image"]
-            for node in workflow.values()
-            if node.get("class_type") == "LoadImage"
-        }
-        self.assertTrue(
-            any(
-                image.endswith(
-                    "grooming_advisory_identity_refine_source_attempt_05.png"
-                )
-                for image in load_images
-            )
-        )
-        self.assertTrue(
-            any(
-                node.get("class_type") == "SetLatentNoiseMask"
-                for node in workflow.values()
-            )
+            pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS,
+            0,
         )
 
-    def test_advisory_grooming_profile_budget_includes_identity_refine(self) -> None:
+    def test_advisory_grooming_profile_budget_is_raw_action_only(self) -> None:
         profiles = [
             {
                 "name": f"draft-{index}",
@@ -7111,10 +7102,13 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             1.0,
             pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT,
         )
-        self.assertEqual(selected[-1]["name"], "grooming_conditional_identity_refine")
         self.assertEqual(
-            selected[-1]["denoise"],
-            pipeline.GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE,
+            len(selected),
+            pipeline.GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS,
+        )
+        self.assertNotIn(
+            "grooming_conditional_identity_refine",
+            {profile["name"] for profile in selected},
         )
 
         health_payload = pipeline.health()
@@ -7123,6 +7117,10 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
         ]
         self.assertIn("conditional_identity_refine", grooming_health)
         self.assertNotIn("mandatory_identity_refine", grooming_health)
+        self.assertFalse(grooming_health["conditional_identity_refine"]["enabled"])
+        self.assertFalse(grooming_health["post_qwen_pixel_composite_enabled"])
+        self.assertTrue(grooming_health["raw_qwen_output_required"])
+        self.assertTrue(grooming_health["raw_qwen_selection_byte_preserving"])
 
     def test_advisory_grooming_attempt3_uses_masked_foreleg_completion(
         self,
@@ -7207,11 +7205,13 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 expected_prefix
                 + "grooming_white_maquette_frame000_body_pose_action_reference.png",
                 expected_prefix + "grooming_canonical_face_identity_reference.png",
+                expected_prefix
+                + "grooming_canonical_action_head_lock_noise_mask.png",
             },
         )
         self.assertNotIn(uploaded_input, load_images)
         self.assertNotIn(pose_input, load_images)
-        self.assertFalse(
+        self.assertTrue(
             any(
                 node.get("class_type") == "SetLatentNoiseMask"
                 for node in workflow.values()
@@ -9017,6 +9017,67 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
             )
             self.assertFalse(foreleg_audit["source_rgb_or_luma_used"])
             self.assertFalse(frame0_audit["soft_foreleg_depth_semantic_exposed"])
+
+            full_pose_target = root / "pose-transfer-frame000-full-pose.png"
+            full_pose_audit = (
+                pipeline.prepare_canonical_grooming_pose_transfer_seed(
+                    action,
+                    canonical,
+                    full_pose_target,
+                    geometry_guide=frame0_geometry,
+                    foreleg_guide=None,
+                    preserve_normalized_geometry_luma=True,
+                    complete_geometry_guide=True,
+                    remove_head_identity_silhouette=False,
+                )
+            )
+            self.assertFalse(full_pose_audit["head_identity_silhouette_removed"])
+            self.assertEqual(
+                full_pose_audit["head_identity_silhouette_removed_pixels"],
+                0,
+            )
+            self.assertEqual(
+                full_pose_audit["qwen_visible_internal_green_channel_pixels"],
+                0,
+            )
+            self.assertEqual(
+                full_pose_audit["qwen_visible_geometry_foreground_bbox"],
+                full_pose_audit["geometry_foreground_bbox"],
+            )
+            self.assertEqual(
+                full_pose_audit["raised_paw_geometry_policy"],
+                "canonical_muzzle_aligned_tapered_neutral_foreleg_v1",
+            )
+            self.assertFalse(
+                full_pose_audit["raised_paw_volume_source_rgb_or_luma_used"]
+            )
+            self.assertEqual(
+                full_pose_audit["sampler_role"],
+                "canonical_palette_white_maquette_frame000_body_pose_anatomy",
+            )
+
+            head_lock_target = root / "grooming-action-head-lock-mask.png"
+            head_lock_audit = (
+                pipeline.prepare_advisory_grooming_action_head_lock_mask(
+                    canonical,
+                    head_lock_target,
+                )
+            )
+            with Image.open(head_lock_target) as loaded:
+                head_lock_alpha = np.asarray(
+                    loaded.convert("RGBA"),
+                    dtype=np.uint8,
+                )[:, :, 3]
+            self.assertGreater(int(head_lock_alpha[96, 256]), 250)
+            self.assertLess(int(head_lock_alpha[400, 256]), 5)
+            self.assertFalse(
+                head_lock_audit["post_qwen_pixel_composite_enabled"]
+            )
+            self.assertTrue(head_lock_audit["raw_qwen_output_required"])
+            self.assertEqual(
+                head_lock_audit["noise_mask_loadimage_contract"],
+                "mask_equals_one_minus_alpha",
+            )
 
     def test_grooming_seed_bound_matte_unions_alpha_without_copying_seed_rgb(
         self,
