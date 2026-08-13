@@ -2858,10 +2858,10 @@ def make_eating_reference_aligned_pose_frames(
     return pose_frames, mask_frames, metadata
 
 
-def make_eating_reference_identity_mask(
+def _make_eating_reference_identity_mask_strict(
     normalized: Image.Image,
 ) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
-    """Map the action-compatible cat to blue and its bowl to red."""
+    """Map the cat to blue and its bowl to red using strict visual anchors."""
     rgba = np.asarray(normalized.convert("RGBA"), dtype=np.uint8)
     rgb = rgba[..., :3]
     alpha = rgba[..., 3] >= 16
@@ -2921,6 +2921,11 @@ def make_eating_reference_identity_mask(
         connectivity=8,
     )
     candidates: list[int] = []
+    component_bottom_tolerance = max(
+        2,
+        int(round(subject_height * 0.01)),
+    )
+    component_bottom_min = top + int(round(subject_height * 0.76))
     for label in range(1, count):
         area = int(stats[label, cv2.CC_STAT_AREA])
         center_x, center_y = centroids[label]
@@ -2933,7 +2938,8 @@ def make_eating_reference_identity_mask(
         # paw accents remain outside this lower band or fail the area floor.
         if (
             area >= 6
-            and component_bottom >= top + int(round(subject_height * 0.76))
+            and component_bottom + component_bottom_tolerance
+            >= component_bottom_min
             and center_y >= zone_y0
             and abs(center_x - subject_center_x) <= subject_width * 0.36
         ):
@@ -3217,6 +3223,9 @@ def make_eating_reference_identity_mask(
     )
     metadata = {
         "policy": "eating_reference_cat_blue_bowl_red_v1",
+        "split_status": "strict",
+        "fallback_used": False,
+        "fallback_reason": None,
         "subject_bbox": list((left, top, right, bottom)),
         "bowl_zone_bbox": list(binary_bbox(bowl_zone)),
         "warm_seed_pixels": definite_pixels,
@@ -3229,6 +3238,8 @@ def make_eating_reference_identity_mask(
         ],
         "food_core_pixels": food_area,
         "food_core_components": len(candidates),
+        "food_component_bottom_min": component_bottom_min,
+        "food_component_bottom_tolerance": component_bottom_tolerance,
         "warm_component_initially_classified_as_bowl": (
             warm_component_initially_classified_as_bowl
         ),
@@ -3251,6 +3262,229 @@ def make_eating_reference_identity_mask(
         "right_paw_identity_support": right_support,
     }
     return colored_image, exclusion_image, metadata
+
+
+def _make_eating_reference_identity_mask_fallback(
+    normalized: Image.Image,
+    *,
+    strict_error: ValueError,
+) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
+    """Build a conservative lower-centre prop mask after strict split failure.
+
+    This fallback deliberately prefers a usable SCAIL reference over rejecting
+    the complete video job because a generated bowl or food uses an unexpected
+    colour.  A relaxed warm-food anchor is used when available.  Otherwise the
+    mask reserves a narrow lower-centre corridor where the eating prompt and
+    driver place the bowl, leaving the lateral planted-paw regions as identity.
+    """
+
+    rgba = np.asarray(normalized.convert("RGBA"), dtype=np.uint8)
+    rgb = rgba[..., :3]
+    alpha = rgba[..., 3] >= 16
+    if not np.any(alpha):
+        raise ValueError("eating_reference_prop_split_unreliable: empty_alpha")
+
+    left, top, right, bottom = binary_bbox(alpha)
+    subject_width = right - left
+    subject_height = bottom - top
+    if subject_width < 8 or subject_height < 8:
+        raise ValueError("eating_reference_prop_split_unreliable: tiny_subject")
+
+    row_indices, column_indices = np.indices(alpha.shape)
+    red = rgb[..., 0].astype(np.int16)
+    green = rgb[..., 1].astype(np.int16)
+    blue = rgb[..., 2].astype(np.int16)
+    channel_max = np.maximum(np.maximum(red, green), blue)
+    channel_min = np.minimum(np.minimum(red, green), blue)
+    subject_center_x = (left + right) / 2.0
+
+    search_y0 = top + int(round(subject_height * 0.60))
+    search_x0 = left + int(round(subject_width * 0.12))
+    search_x1 = right - int(round(subject_width * 0.12))
+    relaxed_warm = (
+        alpha
+        & (column_indices >= search_x0)
+        & (column_indices < search_x1)
+        & (row_indices >= search_y0)
+        & (row_indices < bottom)
+        & (red >= 40)
+        & (red - green >= 8)
+        & (red - blue >= 18)
+        & ((channel_max - channel_min) >= 18)
+    )
+    relaxed_warm = cv2.morphologyEx(
+        relaxed_warm.astype(np.uint8),
+        cv2.MORPH_CLOSE,
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+
+    anchor_method = "lower_center_geometry"
+    anchor_pixels = int(np.count_nonzero(relaxed_warm))
+    anchor_bbox: tuple[int, int, int, int] | None = None
+    if anchor_pixels >= max(20, int(round(np.count_nonzero(alpha) * 0.0002))):
+        warm_count, warm_labels, warm_stats, warm_centroids = (
+            cv2.connectedComponentsWithStats(
+                relaxed_warm.astype(np.uint8),
+                connectivity=8,
+            )
+        )
+        warm_candidates: list[tuple[int, float, int]] = []
+        for label in range(1, warm_count):
+            area = int(warm_stats[label, cv2.CC_STAT_AREA])
+            center_x, center_y = warm_centroids[label]
+            if (
+                area >= 6
+                and center_y >= search_y0
+                and abs(center_x - subject_center_x) <= subject_width * 0.40
+            ):
+                warm_candidates.append(
+                    (area, -abs(float(center_x) - subject_center_x), label)
+                )
+        if warm_candidates:
+            selected_labels = [item[2] for item in warm_candidates]
+            anchor = np.isin(
+                warm_labels,
+                np.asarray(selected_labels, dtype=warm_labels.dtype),
+            )
+            anchor_bbox = binary_bbox(anchor)
+            anchor_pixels = int(np.count_nonzero(anchor))
+            anchor_method = "relaxed_warm_food_geometry"
+
+    minimum_prop_width = max(24, int(round(subject_width * 0.30)))
+    maximum_prop_width = max(minimum_prop_width, int(round(subject_width * 0.48)))
+    if anchor_bbox is not None:
+        anchor_left, anchor_top, anchor_right, anchor_bottom = anchor_bbox
+        anchor_width = anchor_right - anchor_left
+        prop_width = min(
+            maximum_prop_width,
+            max(minimum_prop_width, anchor_width + int(round(subject_width * 0.08))),
+        )
+        prop_center_x = (anchor_left + anchor_right) / 2.0
+        prop_y0 = max(
+            search_y0,
+            anchor_top - max(2, int(round(subject_height * 0.015))),
+        )
+    else:
+        prop_width = minimum_prop_width
+        prop_center_x = subject_center_x
+        prop_y0 = top + int(round(subject_height * 0.70))
+        anchor_bottom = prop_y0
+
+    prop_x0 = max(left, int(round(prop_center_x - prop_width / 2.0)))
+    prop_x1 = min(right, prop_x0 + prop_width)
+    if prop_x1 - prop_x0 < prop_width:
+        prop_x0 = max(left, prop_x1 - prop_width)
+    # The food anchor normally sits at the rim while the neutral bowl body
+    # continues to the subject baseline.  Keep the conservative horizontal
+    # corridor narrow, but reserve it through the bottom so the bowl base does
+    # not become part of the pet identity merely because its colour is neutral.
+    prop_y1 = bottom
+
+    fallback_zone = (
+        (column_indices >= prop_x0)
+        & (column_indices < prop_x1)
+        & (row_indices >= prop_y0)
+        & (row_indices < prop_y1)
+    )
+    hard_alpha = cv2.dilate(
+        alpha.astype(np.uint8),
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    prop_exclusion = fallback_zone & hard_alpha
+    prop_exclusion = cv2.morphologyEx(
+        prop_exclusion.astype(np.uint8),
+        cv2.MORPH_CLOSE,
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    if not np.any(prop_exclusion):
+        # A visible alpha subject always has a lower-central support region in
+        # this action.  If antialiasing left the first corridor empty, expand
+        # vertically but retain the same paw-safe horizontal bounds.
+        prop_exclusion = (
+            (column_indices >= prop_x0)
+            & (column_indices < prop_x1)
+            & (row_indices >= search_y0)
+            & (row_indices < bottom)
+            & hard_alpha
+        )
+
+    identity = hard_alpha & ~prop_exclusion
+    if not np.any(identity):
+        # Preserve the upper subject as identity even for an unusually small
+        # or tightly cropped input.  This is a runtime-safety guard, not a
+        # visual quality gate.
+        identity = hard_alpha & (row_indices < prop_y0)
+    if not np.any(identity):
+        identity = hard_alpha.copy()
+
+    prop_pixels = int(np.count_nonzero(prop_exclusion))
+    identity_pixels = int(np.count_nonzero(identity))
+    hard_alpha_pixels = int(np.count_nonzero(hard_alpha))
+    colored = np.zeros((*alpha.shape, 3), dtype=np.uint8)
+    colored[identity] = (0, 0, 255)
+    colored[prop_exclusion] = (255, 0, 0)
+    colored_image = Image.fromarray(colored, mode="RGB")
+    exclusion_image = Image.fromarray(
+        prop_exclusion.astype(np.uint8) * 255,
+        mode="L",
+    )
+    metadata = {
+        "policy": "eating_reference_cat_blue_bowl_red_v1",
+        "split_status": "degraded_nonblocking_fallback",
+        "fallback_used": True,
+        "fallback_reason": str(strict_error)[:1000],
+        "fallback_policy": "lower_center_prop_geometry_v1",
+        "subject_bbox": [left, top, right, bottom],
+        "bowl_zone_bbox": [prop_x0, prop_y0, prop_x1, prop_y1],
+        "warm_seed_pixels": anchor_pixels,
+        "minimum_warm_seed_pixels": None,
+        "food_core_bbox": list(anchor_bbox) if anchor_bbox is not None else None,
+        "food_core_pixels": anchor_pixels,
+        "food_core_components": None,
+        "warm_component_initially_classified_as_bowl": False,
+        "warm_bowl_core_fallback_to_beige": False,
+        "deep_body_bbox": [prop_x0, prop_y0, prop_x1, prop_y1],
+        "deep_body_pixels": prop_pixels,
+        "bowl_body_method": f"nonblocking_{anchor_method}_v1",
+        "food_anchored_search_width_min_fraction": 0.30,
+        "safe_x_range": [prop_x0, prop_x1],
+        "safe_width_fraction": (prop_x1 - prop_x0) / float(subject_width),
+        "paw_identity_y0": top + int(round(subject_height * 0.72)),
+        "prop_exclusion_bbox": (
+            list(binary_bbox(prop_exclusion)) if np.any(prop_exclusion) else None
+        ),
+        "prop_fraction": prop_pixels / float(max(1, hard_alpha_pixels)),
+        "left_paw_identity_support": None,
+        "right_paw_identity_support": None,
+        "identity_pixels": identity_pixels,
+    }
+    return colored_image, exclusion_image, metadata
+
+
+def make_eating_reference_identity_mask(
+    normalized: Image.Image,
+    *,
+    allow_fallback: bool = True,
+) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
+    """Map cat/bowl identities without letting visual uncertainty stop a job."""
+
+    try:
+        return _make_eating_reference_identity_mask_strict(normalized)
+    except ValueError as exc:
+        if not allow_fallback:
+            raise
+        error = str(exc)
+        if not error.startswith("eating_reference_prop_split_unreliable:"):
+            raise
+        if error.endswith((": empty_alpha", ": tiny_subject")):
+            raise
+        return _make_eating_reference_identity_mask_fallback(
+            normalized,
+            strict_error=exc,
+        )
 
 
 def make_reference_assets(

@@ -853,6 +853,85 @@ class EatingScenePropMaskTests(unittest.TestCase):
         self.assertEqual(tuple(mask[380, 175]), (0, 0, 255))
         self.assertEqual(tuple(mask[380, 400]), (0, 0, 255))
 
+    def test_kibble_one_pixel_above_old_bottom_cutoff_remains_strict(self) -> None:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(reference)
+        draw.ellipse((57, 127, 456, 385), fill=(224, 224, 220, 255))
+        draw.ellipse((72, 312, 145, 385), fill=(230, 230, 226, 255))
+        draw.ellipse((330, 312, 409, 385), fill=(230, 230, 226, 255))
+        draw.rectangle((154, 307, 282, 385), fill=(218, 216, 210, 255))
+        # This reproduces job 20260812T085706Z-296d1f3e5d after reference
+        # normalization: the warm food bbox ends at y=322 while the rounded
+        # 76% cutoff is y=323.  Scale rounding must not turn real food into a
+        # hard no_warm_food_component failure.
+        draw.rectangle((166, 310, 268, 321), fill=(166, 94, 35, 255))
+
+        colored, exclusion, metadata = scail.make_eating_reference_identity_mask(
+            reference
+        )
+        mask = np.asarray(colored, dtype=np.uint8)
+        excluded = np.asarray(exclusion, dtype=np.uint8)
+
+        self.assertEqual(metadata["split_status"], "strict")
+        self.assertFalse(metadata["fallback_used"])
+        self.assertGreaterEqual(metadata["food_component_bottom_tolerance"], 2)
+        self.assertEqual(tuple(mask[360, 220]), (255, 0, 0))
+        self.assertEqual(int(excluded[360, 220]), 255)
+        self.assertEqual(tuple(mask[360, 105]), (0, 0, 255))
+        self.assertEqual(tuple(mask[360, 370]), (0, 0, 255))
+
+    def test_neutral_food_and_bowl_use_nonblocking_geometry_fallback(self) -> None:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(reference)
+        draw.ellipse((57, 112, 455, 399), fill=(92, 102, 112, 255))
+        draw.ellipse((145, 342, 207, 399), fill=(220, 220, 216, 255))
+        draw.ellipse((365, 342, 430, 399), fill=(220, 220, 216, 255))
+        # A fully achromatic bowl and food intentionally provide no warm
+        # colour anchor.  Visual uncertainty must be recorded and degraded,
+        # never raised as an exception that terminates the video job.
+        draw.rectangle((205, 342, 365, 399), fill=(170, 170, 170, 255))
+        draw.ellipse((235, 330, 335, 349), fill=(120, 120, 120, 255))
+
+        colored, exclusion, metadata = scail.make_eating_reference_identity_mask(
+            reference
+        )
+        mask = np.asarray(colored, dtype=np.uint8)
+        excluded = np.asarray(exclusion, dtype=np.uint8)
+
+        self.assertEqual(
+            metadata["split_status"],
+            "degraded_nonblocking_fallback",
+        )
+        self.assertTrue(metadata["fallback_used"])
+        self.assertIn("warm_seed_pixels", metadata["fallback_reason"])
+        self.assertEqual(
+            metadata["fallback_policy"],
+            "lower_center_prop_geometry_v1",
+        )
+        self.assertGreater(int(np.count_nonzero(excluded)), 0)
+        self.assertEqual(tuple(mask[370, 285]), (255, 0, 0))
+        self.assertEqual(tuple(mask[370, 175]), (0, 0, 255))
+        self.assertEqual(tuple(mask[370, 400]), (0, 0, 255))
+
+    def test_empty_reference_remains_a_runtime_integrity_error(self) -> None:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+
+        with self.assertRaisesRegex(ValueError, "empty_alpha"):
+            scail.make_eating_reference_identity_mask(reference)
+
+    def test_strict_scoring_mode_can_reject_visual_uncertainty(self) -> None:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        ImageDraw.Draw(reference).ellipse(
+            (57, 112, 455, 399),
+            fill=(128, 128, 128, 255),
+        )
+
+        with self.assertRaisesRegex(ValueError, "warm_seed_pixels"):
+            scail.make_eating_reference_identity_mask(
+                reference,
+                allow_fallback=False,
+            )
+
     def test_eating_model_reference_maps_bowl_as_second_object(self) -> None:
         reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
         draw = ImageDraw.Draw(reference)
