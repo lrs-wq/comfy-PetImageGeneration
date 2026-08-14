@@ -95,6 +95,39 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 | `left` | `input.png`，编号 3 的侧面图 |
 | `right` | `input_left.png`，编号 2 的侧面图 |
 
+#### 三视图错误返回
+
+8051 当前只同步校验字段是否齐全，不会在上传接口中阻断“图片内容与字段角色不一致”的情况。
+
+未上传 `front` 时返回 HTTP `422`：
+
+```json
+{
+  "detail": "front is required for type=upload."
+}
+```
+
+只上传 `left` 或只上传 `right` 时返回 HTTP `422`：
+
+```json
+{
+  "detail": "left and right must be uploaded together."
+}
+```
+
+如果三个字段都存在，但 `front`、`left`、`right` 的实际画面发生错位，例如把侧面图放入 `front`，上传请求仍会返回 HTTP `202`：
+
+```json
+{
+  "key": "20260813T091107Z-a272f25801",
+  "status": "queued"
+}
+```
+
+当前正面视角识别属于非阻断内部审核。检测到 `front` 可能不是正面时，任务仍会继续生成，而且 8051 查询响应目前不返回该内部告警。因此，错位任务如果最终生成成功，仍可能返回 `status=completed`、`error=null`；如果后续 Qwen 或 SCAIL 因参考图异常而失败，只会返回对应的下游生成错误，不保证错误文本中包含“三视图错位”。
+
+调用方不能依赖服务端错误来发现视角错位，必须在提交前检查字段映射。如果需要由 API 稳定返回类似 `front_view_not_reliably_frontal` 的错误码，需要另行改造接口校验及查询响应结构；这不是当前 8051 API 的既有行为。
+
 ## 2. 查询进度和结果
 
 请求：`POST /api`，类型：`multipart/form-data`
