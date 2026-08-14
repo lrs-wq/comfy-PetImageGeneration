@@ -222,16 +222,13 @@ class SimplePetGifApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["stage"], "output_contract_failed")
         self.assertIn("grooming", result["error"])
 
-    async def test_query_preserves_nonfrontal_front_failure_stage(self):
+    async def test_query_preserves_nonfrontal_front_warning_while_running(self):
         payload = {
-            "status": "failed",
-            "progress": 0,
+            "status": "running",
+            "progress": 26.5,
             "stage": "front_view_not_reliably_frontal",
             "current_action": None,
-            "error": (
-                "front_view_not_reliably_frontal: front must contain a reliable "
-                "frontal pet image."
-            ),
+            "error": None,
             "outputs": [],
         }
         with (
@@ -248,9 +245,10 @@ class SimplePetGifApiTests(unittest.IsolatedAsyncioTestCase):
                 _auth=None,
             )
 
-        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["progress"], 26.5)
         self.assertEqual(result["stage"], "front_view_not_reliably_frontal")
-        self.assertIn("front_view_not_reliably_frontal", result["error"])
+        self.assertIsNone(result["error"])
         self.assertEqual(result["gifs"], {"eating": None, "grooming": None})
 
     async def test_query_rejects_invalid_key(self):

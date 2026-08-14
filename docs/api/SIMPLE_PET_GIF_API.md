@@ -124,16 +124,16 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 }
 ```
 
-后台检测到 `front` 不是可靠正面图时，任务不会进入 Qwen 或 SCAIL，查询接口稳定返回：
+后台检测到 `front` 不是可靠正面图时，只记录非阻断告警；任务仍会继续进入 Qwen 和 SCAIL。生成期间查询接口稳定返回告警码：
 
 ```json
 {
   "key": "20260813T091107Z-a272f25801",
-  "status": "failed",
-  "progress": 0.0,
+  "status": "running",
+  "progress": 26.5,
   "stage": "front_view_not_reliably_frontal",
   "action": null,
-  "error": "front_view_not_reliably_frontal: front must contain a reliable frontal pet image.",
+  "error": null,
   "gifs": {
     "eating": null,
     "grooming": null
@@ -141,7 +141,9 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 }
 ```
 
-调用方应以 `status=failed` 结束轮询，并以 `stage=front_view_not_reliably_frontal` 作为稳定、可编程判断的错误码。任务 `20260813T091107Z-a272f25801` 中的编号 3 侧面图被放入 `front`；在本规则生效后，按原字段重新提交会得到上述失败结果。
+调用方应继续轮询，不能因为 `stage=front_view_not_reliably_frontal` 而结束任务；只有 `status` 进入 `completed`、`failed` 或 `cancelled` 才停止轮询。若两个 GIF 最终正常生成，返回 `status=completed`，`stage` 仍保持该告警码，`gifs.eating` 和 `gifs.grooming` 均有下载地址；此时 `error` 可能携带同一条非阻断告警说明。若后续生成环节发生真实错误，才返回 `status=failed`，并以真实失败阶段覆盖该告警。
+
+任务 `20260813T091107Z-a272f25801` 中的编号 3 侧面图被放入 `front`；按原字段重新提交时会得到上述非阻断告警，但任务仍继续运行。
 
 当前错误码只保证识别 `front` 槽位不可靠，不保证判断 `left` 与 `right` 是否互换。调用方仍需在提交前正确映射两张侧面图。
 
@@ -192,14 +194,14 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 
 ### `stage` 字段枚举
 
-`stage` 表示任务当前执行到的具体步骤，主要用于展示详细进度；业务逻辑应以 `status` 判断任务是否完成或失败。8051 服务通常会原样返回底层生成服务的阶段名称。
+`stage` 通常表示任务当前执行到的具体步骤，主要用于展示详细进度；业务逻辑应以 `status` 判断任务是否完成或失败。8051 服务通常会原样返回底层生成服务的阶段名称。唯一的持久告警例外是 `front_view_not_reliably_frontal`：它出现后会覆盖普通执行阶段，但不会阻止任务继续运行；此时通过 `status`、`progress` 和 `action` 判断实际进度。
 
 当前 8051 双 GIF 链路可能返回以下值：
 
 | `stage` | 含义 |
 | --- | --- |
 | `queued` | 任务已进入队列，尚未开始处理 |
-| `front_view_not_reliably_frontal` | `front` 槽位未检测到可靠宠物正面图；任务终止，`status` 为 `failed` |
+| `front_view_not_reliably_frontal` | `front` 槽位未检测到可靠宠物正面图；非阻断持久告警，任务继续运行，最终可为 `completed`；仅后续真实生成错误才会变为 `failed` |
 | `waiting_for_gpu` | 正在等待 GPU 或 ComfyUI 空闲；Qwen 和 SCAIL 开始前都可能出现 |
 | `generating_cartoon_reference` | Qwen 正在根据上传视图生成宠物全身基准图 |
 | `retrying_cartoon_reference` | 全身基准图未满足要求，正在重新生成；仅特定审核配置下出现 |
