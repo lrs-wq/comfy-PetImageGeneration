@@ -62,6 +62,7 @@ class SimplePetGifApiTests(unittest.IsolatedAsyncioTestCase):
         def fake_post(url, **kwargs):
             captured["url"] = url
             captured["data"] = kwargs["data"]
+            captured["headers"] = kwargs["headers"]
             captured["file_keys"] = set(kwargs["files"])
             captured["front"] = kwargs["files"]["image"][1].read()
             return FakeResponse(
@@ -90,6 +91,7 @@ class SimplePetGifApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(captured["file_keys"], {"image"})
         self.assertEqual(captured["front"], b"front")
+        self.assertEqual(captured["headers"]["X-Pet-Gif-Callback"], "1")
         self.assertEqual(json.loads(captured["data"]["actions"]), ["eating", "grooming"])
         self.assertEqual(captured["data"]["output_format"], "transparent_gif")
         self.assertEqual(captured["data"]["resolution"], "512x512")

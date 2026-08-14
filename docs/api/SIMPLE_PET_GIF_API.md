@@ -295,3 +295,63 @@ curl \
 - Swagger UI：`http://39.106.120.253:8051/docs`
 - OpenAPI JSON：`http://39.106.120.253:8051/openapi.json`
 - 健康检查：`http://39.106.120.253:8051/health`
+
+## 任务状态回调
+
+仅通过 8051 公共 GIF API 的 `type=upload` 提交的任务会把生命周期变化主动回调到业务系统。测试台或其他调用方直接提交到内部 8770 服务的任务不会触发该回调：
+
+```text
+POST https://app.hzzootech.com/api/open/gifCallback
+Content-Type: application/json
+X-API-Key: <CALLBACK_API_KEY>
+```
+
+回调密钥只配置在服务器环境变量 `PET_GIF_CALLBACK_API_KEY` 中，不写入代码或本文档。回调地址通过 `PET_GIF_CALLBACK_URL` 配置，GIF 下载地址前缀通过 `PET_GIF_PUBLIC_BASE_URL` 配置。
+
+回调时机：
+
+- 任务创建并持久化后立即发送一次；此时 `status=queued`、`stage=queued`、`progress=0.0`。
+- 等待 GPU 时发送 `status=running`、`stage=waiting_for_gpu`、`progress=0.0`。
+- 此后仅当 `status`、`stage` 或当前动作发生变化时发送；同一阶段内的普通进度刷新不会重复发送。
+- `completed`、`failed`、`cancelled` 均会发送终态回调。
+- `status=completed` 时携带 `gifs`；非完成状态不发送 `gifs`。
+
+8051 转发任务时会附加仅供内部识别的来源标记，8770 会将 `callback_enabled=true` 和 `callback_source=pet_gif_api` 固化到任务状态。未携带来源标记时默认关闭回调，因此测试台任务、历史任务和其他内部生成任务不会误报。
+
+为表达创建、排队和运行阶段，回调接收端除了原终态枚举，还必须接受 `queued` 和 `running`：
+
+| `status` | 含义 |
+| --- | --- |
+| `queued` | 已创建并进入 API 队列 |
+| `running` | 正在执行当前 `stage` |
+| `completed` | 已完成，`gifs` 必传 |
+| `failed` | 生成失败 |
+| `cancelled` | 已取消 |
+
+非终态示例：
+
+```json
+{
+  "key": "20260807T120000Z-abcd1234",
+  "status": "running",
+  "progress": 26.5,
+  "stage": "generating_cartoon_keyframes"
+}
+```
+
+完成示例：
+
+```json
+{
+  "key": "20260807T120000Z-abcd1234",
+  "status": "completed",
+  "progress": 100.0,
+  "stage": "completed",
+  "gifs": {
+    "eating": "http://39.106.120.253:8051/file/20260807T120000Z-abcd1234/eating_subject_replacement_transparent_512.gif",
+    "grooming": "http://39.106.120.253:8051/file/20260807T120000Z-abcd1234/grooming_subject_replacement_transparent_512.gif"
+  }
+}
+```
+
+回调采用独立单线程发送，不阻塞生成链路。每个阶段事件会先写入任务目录的持久化 outbox，再发起网络请求；网络错误和 HTTP `408/429/5xx` 会按顺序持续重试，服务重启后也会恢复未发送事件。接收端返回 HTTP `401/403` 时，事件保留在 outbox，等待修正密钥并重启服务后补发；其他永久性 HTTP `4xx` 会转入 dead-letter 并记录日志。任何回调错误都不会把生成任务改为失败。

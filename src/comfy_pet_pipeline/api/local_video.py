@@ -92,11 +92,7 @@ from ..identity.uploaded_identity import (
     VERSION as UPLOADED_IDENTITY_SCAIL_REFERENCE_VERSION,
     build_uploaded_identity_scail_references,
 )
-from .uploaded_identity_front_view import (
-    FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE,
-    UPLOADED_FRONT_VIEW_AUDIT_POLICY,
-    audit_uploaded_front_identity_view,
-)
+from .job_callback import JobCallbackReporter
 from .local_video_parts import (
     generation_quality as _local_video_generation_quality,
     geometry_guides as _local_video_geometry_guides,
@@ -109,6 +105,11 @@ from .local_video_parts import (
     uploaded_identity_audit as _local_video_uploaded_identity_audit,
     uploaded_references as _local_video_uploaded_references,
 )
+from .uploaded_identity_front_view import (
+    FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE,
+    UPLOADED_FRONT_VIEW_AUDIT_POLICY,
+    audit_uploaded_front_identity_view,
+)
 
 
 LOGGER = logging.getLogger("local_video_api")
@@ -118,7 +119,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.18"
+API_VERSION = "2.24.19"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -134,6 +135,10 @@ COMFY_OUTPUT = DATA_ROOT / "comfyui" / "output"
 MODEL_ROOT = DATA_ROOT / "models" / "comfyui"
 OUTPUT_ROOT = DATA_ROOT / "outputs" / "local_video_api"
 USER_LORA_DIR = MODEL_ROOT / "loras" / "user_uploads"
+JOB_CALLBACK_REPORTER = JobCallbackReporter.from_environment(
+    output_root=OUTPUT_ROOT,
+    logger=LOGGER,
+)
 
 API_KEY = os.environ.get("LOCAL_VIDEO_API_KEY", "").strip()
 PROMPT_TRANSLATION_ENABLED = os.environ.get(
@@ -2819,6 +2824,22 @@ def persist_job(job_id: str) -> None:
     with JOBS_LOCK:
         job = dict(JOBS[job_id])
     write_json_atomic(status_path(job_id), job)
+    report_job_callback(job, force=True)
+
+
+def report_job_callback(job: dict[str, Any], *, force: bool = False) -> bool:
+    """Queue a callback without ever allowing notification failure to fail a job."""
+
+    if not bool(job.get("callback_enabled")):
+        return False
+    try:
+        return JOB_CALLBACK_REPORTER.enqueue(job, force=force)
+    except Exception:  # noqa: BLE001 - generation must not depend on callback uptime
+        LOGGER.exception(
+            "Could not enqueue GIF callback for job %s",
+            job.get("job_id"),
+        )
+        return False
 
 
 def update_job(job_id: str, **changes: Any) -> dict[str, Any]:
@@ -2828,6 +2849,7 @@ def update_job(job_id: str, **changes: Any) -> dict[str, Any]:
         job["updated_at"] = utc_now()
         snapshot = dict(job)
     write_json_atomic(status_path(job_id), snapshot)
+    report_job_callback(snapshot)
     return snapshot
 
 
@@ -6150,6 +6172,7 @@ def restore_jobs() -> None:
         try:
             job = json.loads(path.read_text(encoding="utf-8"))
             job_id = str(job["job_id"])
+            callback_changed = False
             if (
                 job.get("cancel_requested")
                 and job.get("status") not in TERMINAL_JOB_STATUSES
@@ -6163,6 +6186,7 @@ def restore_jobs() -> None:
                     updated_at=utc_now(),
                 )
                 write_json_atomic(path, job)
+                callback_changed = True
             elif job.get("status") == "running":
                 if job.get("reference_generation_status") == "running":
                     job.update(
@@ -6177,9 +6201,12 @@ def restore_jobs() -> None:
                     updated_at=utc_now(),
                 )
                 write_json_atomic(path, job)
+                callback_changed = True
             elif job.get("status") == "queued":
                 queued.append(job_id)
             JOBS[job_id] = job
+            if callback_changed:
+                report_job_callback(job)
         except (OSError, KeyError, json.JSONDecodeError):
             LOGGER.exception("Could not restore job status from %s", path)
     for job_id in queued[:MAX_QUEUE_SIZE]:
@@ -6215,6 +6242,7 @@ def startup() -> None:
         LOGGER.warning(
             "LOCAL_VIDEO_API_KEY is not configured; protected endpoints will return 503"
         )
+    JOB_CALLBACK_REPORTER.start()
     restore_jobs()
     STOP_EVENT.clear()
     WORKER_THREAD = threading.Thread(
@@ -6228,6 +6256,7 @@ def shutdown() -> None:
     STOP_EVENT.set()
     if WORKER_THREAD and WORKER_THREAD.is_alive():
         WORKER_THREAD.join(timeout=5)
+    JOB_CALLBACK_REPORTER.stop(timeout=5)
 
 
 @app.get(f"{API_PREFIX}/health")
@@ -6351,6 +6380,7 @@ async def create_subject_replacement_api_job(
     seed: int | None,
     image_left: UploadFile | None = None,
     image_right: UploadFile | None = None,
+    callback_enabled: bool = False,
 ) -> dict[str, Any]:
     try:
         actions = parse_subject_actions(actions_raw)
@@ -6488,6 +6518,8 @@ async def create_subject_replacement_api_job(
         )
         job = {
             "job_id": job_id,
+            "callback_enabled": callback_enabled,
+            "callback_source": "pet_gif_api" if callback_enabled else None,
             "status": "queued",
             "stage": "queued",
             "progress": 0,
@@ -6808,8 +6840,17 @@ async def create_job(
     wan_cfg: float = Form(default=WAN_CFG, ge=1.0, le=8.0),
     wan_shift: float = Form(default=WAN_SHIFT, ge=1.0, le=12.0),
     seed: int | None = Form(default=None, ge=0, le=2**63 - 1),
+    x_pet_gif_callback: str | None = Header(
+        default=None,
+        alias="X-Pet-Gif-Callback",
+        include_in_schema=False,
+    ),
     _: None = Depends(require_api_key),
 ) -> dict[str, Any]:
+    callback_enabled = secrets.compare_digest(
+        (x_pet_gif_callback or "").strip(),
+        "1",
+    )
     normalized_generation_mode = generation_mode.strip().lower().replace("-", "_")
     generation_mode_aliases = {
         "subject_replacement": "subject_replacement",
@@ -6840,6 +6881,7 @@ async def create_job(
             scail_steps=scail_steps,
             pose_strength=pose_strength,
             seed=seed,
+            callback_enabled=callback_enabled,
         )
     if image_left is not None or image_right is not None:
         await close_uploaded_identity_uploads(image, image_left, image_right)
@@ -7013,6 +7055,8 @@ async def create_job(
         )
         job = {
             "job_id": job_id,
+            "callback_enabled": callback_enabled,
+            "callback_source": "pet_gif_api" if callback_enabled else None,
             "status": "queued",
             "stage": "queued",
             "progress": 0,
@@ -7209,6 +7253,7 @@ def cancel_job(job_id: str, _: None = Depends(require_api_key)) -> dict[str, Any
             )
         snapshot = dict(job)
     write_json_atomic(status_path(job_id), snapshot)
+    report_job_callback(snapshot)
     interrupt_comfy_prompt(active_prompt_id)
     return public_job(snapshot)
 

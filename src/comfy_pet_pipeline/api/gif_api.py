@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 INTERNAL_API_URL = os.getenv(
     "LOCAL_VIDEO_INTERNAL_URL", "http://127.0.0.1:8770"
 ).rstrip("/")
@@ -259,7 +259,10 @@ async def api_gateway(
                 response = await asyncio.to_thread(
                     requests.post,
                     INTERNAL_JOBS_URL,
-                    headers=internal_headers(),
+                    headers={
+                        **internal_headers(),
+                        "X-Pet-Gif-Callback": "1",
+                    },
                     data=data,
                     files=files,
                     timeout=(10, 120),
