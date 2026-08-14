@@ -81,6 +81,18 @@ def _write_test_upload_identity(job_dir: Path) -> dict[str, str]:
     }
 
 
+def _passed_uploaded_front_view_audit() -> dict[str, object]:
+    return {
+        "policy": pipeline.UPLOADED_FRONT_VIEW_AUDIT_POLICY,
+        "role": "front",
+        "blocking": True,
+        "acceptable": True,
+        "status": "passed",
+        "issues": [],
+        "qualified_detections": [{"qualified": True}],
+    }
+
+
 def _write_eating_contact_fixture(
     root: Path,
     *,
@@ -1937,7 +1949,7 @@ class SubjectReplacementJobCreationTests(unittest.TestCase):
         )
 
 
-class UploadedFrontViewAdvisoryAuditTests(unittest.TestCase):
+class UploadedFrontViewValidationTests(unittest.TestCase):
     class _Cascade:
         def __init__(self, boxes: list[tuple[int, int, int, int]]) -> None:
             self.boxes = np.asarray(boxes, dtype=np.int32).reshape((-1, 4))
@@ -1961,12 +1973,12 @@ class UploadedFrontViewAdvisoryAuditTests(unittest.TestCase):
                 audit = pipeline.audit_uploaded_front_identity_view(image_path)
 
         self.assertTrue(audit["acceptable"])
-        self.assertEqual(audit["status"], "passed_advisory")
+        self.assertEqual(audit["status"], "passed")
         self.assertEqual(audit["issues"], [])
         self.assertEqual(len(audit["qualified_detections"]), 2)
-        self.assertFalse(audit["blocking"])
+        self.assertTrue(audit["blocking"])
 
-    def test_missing_frontal_cat_face_is_a_nonblocking_warning(self) -> None:
+    def test_missing_frontal_cat_face_is_a_blocking_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             image_path = Path(temporary) / "front.png"
             Image.new("RGB", (400, 500), "white").save(image_path)
@@ -1979,9 +1991,12 @@ class UploadedFrontViewAdvisoryAuditTests(unittest.TestCase):
                 audit = pipeline.audit_uploaded_front_identity_view(image_path)
 
         self.assertFalse(audit["acceptable"])
-        self.assertEqual(audit["status"], "warning_advisory")
-        self.assertEqual(audit["issues"], ["front_view_not_reliably_frontal"])
-        self.assertFalse(audit["blocking"])
+        self.assertEqual(audit["status"], "failed")
+        self.assertEqual(
+            audit["issues"],
+            [pipeline.FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE],
+        )
+        self.assertTrue(audit["blocking"])
 
     def test_audit_internal_error_is_reported_and_generation_can_continue(self) -> None:
         with patch.object(
@@ -1996,40 +2011,41 @@ class UploadedFrontViewAdvisoryAuditTests(unittest.TestCase):
         self.assertEqual(audit["status"], "unavailable_advisory")
         self.assertEqual(audit["issues"], ["front_view_audit_internal_error"])
 
-    def test_front_warning_never_becomes_a_blocking_view_set_failure(self) -> None:
+    def test_front_failure_is_blocking_even_when_other_audits_are_advisory(self) -> None:
         integrity = {
             "view_mode": "single_view",
             "view_roles": ["front"],
             "views": {"front": {"input_path": Path("front.png")}},
         }
-        front_warning = {
+        front_failure = {
             "policy": pipeline.UPLOADED_FRONT_VIEW_AUDIT_POLICY,
             "role": "front",
-            "blocking": False,
+            "blocking": True,
             "acceptable": False,
-            "status": "warning_advisory",
-            "issues": ["front_view_not_reliably_frontal"],
+            "status": "failed",
+            "issues": [pipeline.FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE],
         }
         with (
-            patch.object(pipeline, "GENERATION_VISUAL_AUDITS_BLOCKING", True),
+            patch.object(pipeline, "GENERATION_VISUAL_AUDITS_BLOCKING", False),
             patch.object(
                 pipeline,
                 "audit_uploaded_front_identity_view",
-                return_value=front_warning,
+                return_value=front_failure,
             ),
         ):
             audit = pipeline.compose_uploaded_identity_view_audit(integrity)
 
         self.assertFalse(audit["acceptable"])
-        self.assertTrue(audit["blocking_acceptable"])
-        self.assertEqual(audit["blocking_issues"], [])
+        self.assertFalse(audit["blocking_acceptable"])
         self.assertEqual(
-            audit["advisory_issues"],
-            ["front_view_not_reliably_frontal"],
+            audit["blocking_issues"],
+            [pipeline.FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE],
         )
-        self.assertEqual(audit["status"], "warning_advisory")
+        self.assertEqual(audit["advisory_issues"], [])
+        self.assertEqual(audit["status"], "failed")
+        self.assertTrue(audit["front_view_audit_blocking"])
 
-    def test_completed_job_can_return_error_without_becoming_failed(self) -> None:
+    def test_audit_unavailable_can_return_error_without_becoming_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             job_id = "front-audit-result-anomaly"
             output_root = Path(temporary)
@@ -2044,8 +2060,8 @@ class UploadedFrontViewAdvisoryAuditTests(unittest.TestCase):
             with patch.multiple(pipeline, OUTPUT_ROOT=output_root, JOBS=jobs):
                 pipeline.record_nonblocking_job_anomaly(
                     job_id,
-                    code="uploaded_front_view_not_frontal",
-                    message="front audit warning",
+                    code="uploaded_front_view_audit_unavailable",
+                    message="front audit unavailable",
                     stage="uploaded_identity_front_view_audit",
                 )
                 pipeline.update_job(
@@ -2056,10 +2072,73 @@ class UploadedFrontViewAdvisoryAuditTests(unittest.TestCase):
                 )
 
         self.assertEqual(jobs[job_id]["status"], "completed")
-        self.assertEqual(jobs[job_id]["error"], "front audit warning")
+        self.assertEqual(jobs[job_id]["error"], "front audit unavailable")
         self.assertTrue(jobs[job_id]["result_has_anomalies"])
         self.assertEqual(jobs[job_id]["result_anomaly_count"], 1)
         self.assertFalse(jobs[job_id]["result_anomalies"][0]["blocking"])
+
+    def test_prepare_rejects_nonfrontal_front_with_stable_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary)
+            job_id = "nonfrontal-front"
+            (output_root / job_id).mkdir()
+            jobs = {
+                job_id: {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "stage": "queued",
+                }
+            }
+            front_failure = {
+                "policy": pipeline.UPLOADED_IDENTITY_VIEW_POLICY,
+                "status": "failed",
+                "acceptable": False,
+                "blocking_acceptable": False,
+                "issues": [pipeline.FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE],
+                "front_view_audit": {
+                    "acceptable": False,
+                    "blocking": True,
+                    "status": "failed",
+                    "issues": [
+                        pipeline.FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE
+                    ],
+                },
+            }
+            with (
+                patch.multiple(pipeline, OUTPUT_ROOT=output_root, JOBS=jobs),
+                patch.object(
+                    pipeline,
+                    "verify_uploaded_identity_submission",
+                    return_value={"views": {"front": {}}},
+                ),
+                patch.object(
+                    pipeline,
+                    "compose_uploaded_identity_view_audit",
+                    return_value=front_failure,
+                ),
+            ):
+                with self.assertRaises(pipeline.JobStageFailure) as caught:
+                    pipeline.prepare_uploaded_subject_qwen_references(
+                        job_id,
+                        ["eating", "grooming"],
+                    )
+
+        self.assertEqual(
+            caught.exception.stage,
+            pipeline.FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE,
+        )
+        self.assertIn(
+            pipeline.FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE,
+            str(caught.exception),
+        )
+        self.assertEqual(
+            pipeline.failure_stage_for_exception(caught.exception),
+            pipeline.FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE,
+        )
+        self.assertEqual(
+            pipeline.failure_stage_for_exception(RuntimeError("generic")),
+            "failed",
+        )
 
 
 class SubjectReplacementQwenReferenceTests(unittest.TestCase):
@@ -10178,6 +10257,11 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 ),
                 patch.object(
                     pipeline,
+                    "audit_uploaded_front_identity_view",
+                    return_value=_passed_uploaded_front_view_audit(),
+                ),
+                patch.object(
+                    pipeline,
                     "merge_image_profile_loras",
                     return_value=(expected_loras, "replace", "image_profile"),
                 ),
@@ -11059,6 +11143,11 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                 ),
                 patch.object(
                     pipeline,
+                    "audit_uploaded_front_identity_view",
+                    return_value=_passed_uploaded_front_view_audit(),
+                ),
+                patch.object(
+                    pipeline,
                     "merge_image_profile_loras",
                     return_value=(profile_loras, "replace", "image_profile"),
                 ),
@@ -11176,6 +11265,11 @@ class SubjectReplacementQwenReferenceTests(unittest.TestCase):
                     OUTPUT_ROOT=output_root,
                     COMFY_INPUT=comfy_input,
                     JOBS=jobs,
+                ),
+                patch.object(
+                    pipeline,
+                    "audit_uploaded_front_identity_view",
+                    return_value=_passed_uploaded_front_view_audit(),
                 ),
                 patch.object(
                     pipeline,

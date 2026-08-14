@@ -542,7 +542,8 @@ GROOMING_QWEN_FORELEG_REPAIR_ANATOMY_POLICY = (
     "frozen_single_tone_open_channel_grooming_anatomy_image3_v2"
 )
 UPLOADED_IDENTITY_VIEW_POLICY = "front_left_right_qwen_canonical_identity_v1"
-UPLOADED_FRONT_VIEW_AUDIT_POLICY = "opencv_frontal_cat_face_advisory_v1"
+UPLOADED_FRONT_VIEW_AUDIT_POLICY = "opencv_frontal_cat_face_required_v2"
+FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE = "front_view_not_reliably_frontal"
 UPLOADED_FRONT_VIEW_AUDIT_MAX_DIMENSION = 1280
 UPLOADED_FRONT_VIEW_AUDIT_MIN_FACE_AREA_FRACTION = 0.0125
 UPLOADED_FRONT_VIEW_AUDIT_MIN_FACE_WIDTH_FRACTION = 0.10
@@ -1290,6 +1291,22 @@ TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 
 class JobCancelled(RuntimeError):
     """Raised when a user requests cancellation of a generation job."""
+
+
+class JobStageFailure(RuntimeError):
+    """Fail a job while preserving a stable public stage code."""
+
+    def __init__(self, stage: str, message: str) -> None:
+        super().__init__(message)
+        self.stage = stage
+
+
+def failure_stage_for_exception(exc: BaseException) -> str:
+    """Return the stable terminal stage associated with a worker failure."""
+
+    if isinstance(exc, JobStageFailure):
+        return exc.stage
+    return "failed"
 
 
 Image.MAX_IMAGE_PIXELS = 40_000_000
@@ -16323,7 +16340,7 @@ def canonical_upper_body_palette_reference(
 
 
 def _audit_uploaded_front_identity_view(image_path: Path) -> dict[str, Any]:
-    """Run the detector behind the nonblocking uploaded-front audit."""
+    """Run the detector used by the required uploaded-front validation."""
 
     audit: dict[str, Any] = {
         "policy": UPLOADED_FRONT_VIEW_AUDIT_POLICY,
@@ -16443,16 +16460,18 @@ def _audit_uploaded_front_identity_view(image_path: Path) -> dict[str, Any]:
         audit["issues"] = ["front_view_audit_classifier_unavailable"]
         return audit
     if audit["qualified_detections"]:
+        audit["blocking"] = True
         audit["acceptable"] = True
-        audit["status"] = "passed_advisory"
+        audit["status"] = "passed"
         return audit
-    audit["status"] = "warning_advisory"
-    audit["issues"] = ["front_view_not_reliably_frontal"]
+    audit["blocking"] = True
+    audit["status"] = "failed"
+    audit["issues"] = [FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE]
     return audit
 
 
 def audit_uploaded_front_identity_view(image_path: Path) -> dict[str, Any]:
-    """Advisorially confirm the front role without ever blocking generation."""
+    """Require a frontal result while failing open on detector infrastructure."""
 
     try:
         return _audit_uploaded_front_identity_view(image_path)
@@ -16476,7 +16495,7 @@ def audit_uploaded_front_identity_view(image_path: Path) -> dict[str, Any]:
 def compose_uploaded_identity_view_audit(
     upload_integrity: dict[str, Any],
 ) -> dict[str, Any]:
-    """Combine existing optional checks with the always-on nonblocking front audit."""
+    """Combine optional view-set checks with required front-view validation."""
 
     views = upload_integrity.get("views")
     if not isinstance(views, dict) or not isinstance(views.get("front"), dict):
@@ -16486,9 +16505,9 @@ def compose_uploaded_identity_view_audit(
     )
     if GENERATION_VISUAL_AUDITS_BLOCKING:
         audit = audit_uploaded_identity_view_set(upload_integrity)
-        blocking_acceptable = bool(audit.get("acceptable"))
-        blocking_issues = list(audit.get("issues") or [])
-        structural_status = "passed" if blocking_acceptable else "failed"
+        structural_acceptable = bool(audit.get("acceptable"))
+        structural_issues = list(audit.get("issues") or [])
+        structural_status = "passed" if structural_acceptable else "failed"
     else:
         audit = {
             "policy": UPLOADED_IDENTITY_VIEW_POLICY,
@@ -16504,10 +16523,21 @@ def compose_uploaded_identity_view_audit(
             "palettes": {},
             "upper_body_palettes": {},
         }
-        blocking_acceptable = True
-        blocking_issues = []
+        structural_acceptable = True
+        structural_issues = []
         structural_status = "skipped_advisory"
-    advisory_issues = list(front_view_audit.get("issues") or [])
+    front_issues = list(front_view_audit.get("issues") or [])
+    front_blocking = bool(front_view_audit.get("blocking"))
+    front_blocking_issues = (
+        front_issues
+        if front_blocking and not front_view_audit.get("acceptable")
+        else []
+    )
+    blocking_issues = list(
+        dict.fromkeys(structural_issues + front_blocking_issues)
+    )
+    blocking_acceptable = structural_acceptable and not front_blocking_issues
+    advisory_issues = [] if front_blocking else front_issues
     overall_acceptable = blocking_acceptable and bool(
         front_view_audit.get("acceptable")
     )
@@ -16532,7 +16562,7 @@ def compose_uploaded_identity_view_audit(
             "structural_audit_status": structural_status,
             "front_view_audit": front_view_audit,
             "front_view_audit_required": True,
-            "front_view_audit_blocking": False,
+            "front_view_audit_blocking": front_blocking,
         }
     )
     return audit
@@ -16708,11 +16738,11 @@ def prepare_uploaded_subject_qwen_references(
                 "front_view_audit_unavailable",
             )
         )
-        if front_issue == "front_view_not_reliably_frontal":
-            anomaly_code = "uploaded_front_view_not_frontal"
-            anomaly_message = (
-                "上传图片正面审核异常：front 槽位未检测到可靠的正面猫脸；"
-                "任务已按非阻断策略继续执行。"
+        if front_issue == FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE:
+            raise JobStageFailure(
+                FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE,
+                "front_view_not_reliably_frontal: front must contain a reliable "
+                "frontal pet image.",
             )
         else:
             anomaly_code = "uploaded_front_view_audit_unavailable"
@@ -26738,7 +26768,7 @@ def worker_loop() -> None:
             update_job(
                 job_id,
                 status="failed",
-                stage="failed",
+                stage=failure_stage_for_exception(exc),
                 error=str(exc)[:4000],
                 recovery_active=False,
                 recovery_attempt=None,

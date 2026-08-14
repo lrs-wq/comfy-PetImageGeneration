@@ -222,6 +222,37 @@ class SimplePetGifApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["stage"], "output_contract_failed")
         self.assertIn("grooming", result["error"])
 
+    async def test_query_preserves_nonfrontal_front_failure_stage(self):
+        payload = {
+            "status": "failed",
+            "progress": 0,
+            "stage": "front_view_not_reliably_frontal",
+            "current_action": None,
+            "error": (
+                "front_view_not_reliably_frontal: front must contain a reliable "
+                "frontal pet image."
+            ),
+            "outputs": [],
+        }
+        with (
+            patch.object(api.asyncio, "to_thread", new=immediate_to_thread),
+            patch.object(api.requests, "get", return_value=FakeResponse(200, payload)),
+        ):
+            result = await api.api_gateway(
+                make_request(),
+                operation="query",
+                key="nonfrontal-front-key",
+                front=None,
+                left=None,
+                right=None,
+                _auth=None,
+            )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["stage"], "front_view_not_reliably_frontal")
+        self.assertIn("front_view_not_reliably_frontal", result["error"])
+        self.assertEqual(result["gifs"], {"eating": None, "grooming": None})
+
     async def test_query_rejects_invalid_key(self):
         with self.assertRaises(HTTPException) as caught:
             await api.api_gateway(
@@ -251,6 +282,7 @@ class SimplePetGifApiTests(unittest.IsolatedAsyncioTestCase):
             '"eating"',
             '"grooming"',
             "X-API-Key",
+            "front_view_not_reliably_frontal",
         ):
             self.assertIn(required, documentation)
 

@@ -97,7 +97,7 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 
 #### 三视图错误返回
 
-8051 当前只同步校验字段是否齐全，不会在上传接口中阻断“图片内容与字段角色不一致”的情况。
+8051 会同步校验字段是否齐全，并在任务进入后台处理后校验 `front` 槽位是否包含可靠的宠物正面图。由于正面识别是异步执行的，上传接口先返回任务 key，调用方需要通过查询接口取得最终校验结果。
 
 未上传 `front` 时返回 HTTP `422`：
 
@@ -115,7 +115,7 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 }
 ```
 
-如果三个字段都存在，但 `front`、`left`、`right` 的实际画面发生错位，例如把侧面图放入 `front`，上传请求仍会返回 HTTP `202`：
+如果三个字段都存在，上传请求先返回 HTTP `202`：
 
 ```json
 {
@@ -124,9 +124,26 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 }
 ```
 
-当前正面视角识别属于非阻断内部审核。检测到 `front` 可能不是正面时，任务仍会继续生成，而且 8051 查询响应目前不返回该内部告警。因此，错位任务如果最终生成成功，仍可能返回 `status=completed`、`error=null`；如果后续 Qwen 或 SCAIL 因参考图异常而失败，只会返回对应的下游生成错误，不保证错误文本中包含“三视图错位”。
+后台检测到 `front` 不是可靠正面图时，任务不会进入 Qwen 或 SCAIL，查询接口稳定返回：
 
-调用方不能依赖服务端错误来发现视角错位，必须在提交前检查字段映射。如果需要由 API 稳定返回类似 `front_view_not_reliably_frontal` 的错误码，需要另行改造接口校验及查询响应结构；这不是当前 8051 API 的既有行为。
+```json
+{
+  "key": "20260813T091107Z-a272f25801",
+  "status": "failed",
+  "progress": 0.0,
+  "stage": "front_view_not_reliably_frontal",
+  "action": null,
+  "error": "front_view_not_reliably_frontal: front must contain a reliable frontal pet image.",
+  "gifs": {
+    "eating": null,
+    "grooming": null
+  }
+}
+```
+
+调用方应以 `status=failed` 结束轮询，并以 `stage=front_view_not_reliably_frontal` 作为稳定、可编程判断的错误码。任务 `20260813T091107Z-a272f25801` 中的编号 3 侧面图被放入 `front`；在本规则生效后，按原字段重新提交会得到上述失败结果。
+
+当前错误码只保证识别 `front` 槽位不可靠，不保证判断 `left` 与 `right` 是否互换。调用方仍需在提交前正确映射两张侧面图。
 
 ## 2. 查询进度和结果
 
@@ -182,6 +199,7 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 | `stage` | 含义 |
 | --- | --- |
 | `queued` | 任务已进入队列，尚未开始处理 |
+| `front_view_not_reliably_frontal` | `front` 槽位未检测到可靠宠物正面图；任务终止，`status` 为 `failed` |
 | `waiting_for_gpu` | 正在等待 GPU 或 ComfyUI 空闲；Qwen 和 SCAIL 开始前都可能出现 |
 | `generating_cartoon_reference` | Qwen 正在根据上传视图生成宠物全身基准图 |
 | `retrying_cartoon_reference` | 全身基准图未满足要求，正在重新生成；仅特定审核配置下出现 |
