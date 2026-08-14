@@ -1937,6 +1937,131 @@ class SubjectReplacementJobCreationTests(unittest.TestCase):
         )
 
 
+class UploadedFrontViewAdvisoryAuditTests(unittest.TestCase):
+    class _Cascade:
+        def __init__(self, boxes: list[tuple[int, int, int, int]]) -> None:
+            self.boxes = np.asarray(boxes, dtype=np.int32).reshape((-1, 4))
+
+        def empty(self) -> bool:
+            return False
+
+        def detectMultiScale(self, *_args: object, **_kwargs: object) -> np.ndarray:
+            return self.boxes
+
+    def test_qualified_frontal_cat_face_detection_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image_path = Path(temporary) / "front.png"
+            Image.new("RGB", (400, 500), "white").save(image_path)
+            classifier = self._Cascade([(120, 60, 150, 150)])
+            with patch.object(
+                pipeline.cv2,
+                "CascadeClassifier",
+                return_value=classifier,
+            ):
+                audit = pipeline.audit_uploaded_front_identity_view(image_path)
+
+        self.assertTrue(audit["acceptable"])
+        self.assertEqual(audit["status"], "passed_advisory")
+        self.assertEqual(audit["issues"], [])
+        self.assertEqual(len(audit["qualified_detections"]), 2)
+        self.assertFalse(audit["blocking"])
+
+    def test_missing_frontal_cat_face_is_a_nonblocking_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image_path = Path(temporary) / "front.png"
+            Image.new("RGB", (400, 500), "white").save(image_path)
+            classifier = self._Cascade([])
+            with patch.object(
+                pipeline.cv2,
+                "CascadeClassifier",
+                return_value=classifier,
+            ):
+                audit = pipeline.audit_uploaded_front_identity_view(image_path)
+
+        self.assertFalse(audit["acceptable"])
+        self.assertEqual(audit["status"], "warning_advisory")
+        self.assertEqual(audit["issues"], ["front_view_not_reliably_frontal"])
+        self.assertFalse(audit["blocking"])
+
+    def test_audit_internal_error_is_reported_and_generation_can_continue(self) -> None:
+        with patch.object(
+            pipeline,
+            "_audit_uploaded_front_identity_view",
+            side_effect=RuntimeError("detector unavailable"),
+        ):
+            audit = pipeline.audit_uploaded_front_identity_view(Path("front.png"))
+
+        self.assertFalse(audit["acceptable"])
+        self.assertFalse(audit["blocking"])
+        self.assertEqual(audit["status"], "unavailable_advisory")
+        self.assertEqual(audit["issues"], ["front_view_audit_internal_error"])
+
+    def test_front_warning_never_becomes_a_blocking_view_set_failure(self) -> None:
+        integrity = {
+            "view_mode": "single_view",
+            "view_roles": ["front"],
+            "views": {"front": {"input_path": Path("front.png")}},
+        }
+        front_warning = {
+            "policy": pipeline.UPLOADED_FRONT_VIEW_AUDIT_POLICY,
+            "role": "front",
+            "blocking": False,
+            "acceptable": False,
+            "status": "warning_advisory",
+            "issues": ["front_view_not_reliably_frontal"],
+        }
+        with (
+            patch.object(pipeline, "GENERATION_VISUAL_AUDITS_BLOCKING", True),
+            patch.object(
+                pipeline,
+                "audit_uploaded_front_identity_view",
+                return_value=front_warning,
+            ),
+        ):
+            audit = pipeline.compose_uploaded_identity_view_audit(integrity)
+
+        self.assertFalse(audit["acceptable"])
+        self.assertTrue(audit["blocking_acceptable"])
+        self.assertEqual(audit["blocking_issues"], [])
+        self.assertEqual(
+            audit["advisory_issues"],
+            ["front_view_not_reliably_frontal"],
+        )
+        self.assertEqual(audit["status"], "warning_advisory")
+
+    def test_completed_job_can_return_error_without_becoming_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_id = "front-audit-result-anomaly"
+            output_root = Path(temporary)
+            (output_root / job_id).mkdir()
+            jobs = {
+                job_id: {
+                    "job_id": job_id,
+                    "status": "running",
+                    "stage": "uploaded_identity_front_view_audit",
+                }
+            }
+            with patch.multiple(pipeline, OUTPUT_ROOT=output_root, JOBS=jobs):
+                pipeline.record_nonblocking_job_anomaly(
+                    job_id,
+                    code="uploaded_front_view_not_frontal",
+                    message="front audit warning",
+                    stage="uploaded_identity_front_view_audit",
+                )
+                pipeline.update_job(
+                    job_id,
+                    status="completed",
+                    stage="completed",
+                    error=pipeline.nonblocking_result_error(job_id),
+                )
+
+        self.assertEqual(jobs[job_id]["status"], "completed")
+        self.assertEqual(jobs[job_id]["error"], "front audit warning")
+        self.assertTrue(jobs[job_id]["result_has_anomalies"])
+        self.assertEqual(jobs[job_id]["result_anomaly_count"], 1)
+        self.assertFalse(jobs[job_id]["result_anomalies"][0]["blocking"])
+
+
 class SubjectReplacementQwenReferenceTests(unittest.TestCase):
     TEST_QWEN_STYLE_LORA = "pet3d-cat-test.safetensors"
 

@@ -101,7 +101,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.16"
+API_VERSION = "2.24.17"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -542,6 +542,14 @@ GROOMING_QWEN_FORELEG_REPAIR_ANATOMY_POLICY = (
     "frozen_single_tone_open_channel_grooming_anatomy_image3_v2"
 )
 UPLOADED_IDENTITY_VIEW_POLICY = "front_left_right_qwen_canonical_identity_v1"
+UPLOADED_FRONT_VIEW_AUDIT_POLICY = "opencv_frontal_cat_face_advisory_v1"
+UPLOADED_FRONT_VIEW_AUDIT_MAX_DIMENSION = 1280
+UPLOADED_FRONT_VIEW_AUDIT_MIN_FACE_AREA_FRACTION = 0.0125
+UPLOADED_FRONT_VIEW_AUDIT_MIN_FACE_WIDTH_FRACTION = 0.10
+UPLOADED_FRONT_VIEW_AUDIT_CASCADES = (
+    "haarcascade_frontalcatface.xml",
+    "haarcascade_frontalcatface_extended.xml",
+)
 CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY = (
     "front_view_for_front_three_quarter_canonical_v1"
 )
@@ -2806,6 +2814,54 @@ def update_job(job_id: str, **changes: Any) -> dict[str, Any]:
         snapshot = dict(job)
     write_json_atomic(status_path(job_id), snapshot)
     return snapshot
+
+
+def record_nonblocking_job_anomaly(
+    job_id: str,
+    *,
+    code: str,
+    message: str,
+    stage: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist a result anomaly without changing the job's execution status."""
+
+    anomaly = {
+        "code": code,
+        "message": message,
+        "stage": stage,
+        "blocking": False,
+        "created_at": utc_now(),
+        "details": dict(details or {}),
+    }
+    with JOBS_LOCK:
+        job = JOBS[job_id]
+        anomalies = [
+            dict(item)
+            for item in list(job.get("result_anomalies") or [])
+            if isinstance(item, dict) and item.get("code") != code
+        ]
+        anomalies.append(anomaly)
+        job["result_anomalies"] = anomalies
+        job["result_has_anomalies"] = True
+        job["result_anomaly_count"] = len(anomalies)
+        job["updated_at"] = utc_now()
+        snapshot = dict(job)
+    write_json_atomic(status_path(job_id), snapshot)
+    return anomaly
+
+
+def nonblocking_result_error(job_id: str) -> str | None:
+    """Return the user-facing error text for a successfully completed job."""
+
+    with JOBS_LOCK:
+        anomalies = list(JOBS[job_id].get("result_anomalies") or [])
+    messages = [
+        str(item.get("message") or "").strip()
+        for item in anomalies
+        if isinstance(item, dict) and str(item.get("message") or "").strip()
+    ]
+    return "\n".join(dict.fromkeys(messages)) or None
 
 
 def append_output(job_id: str, output: dict[str, Any]) -> None:
@@ -16266,6 +16322,222 @@ def canonical_upper_body_palette_reference(
     return selected
 
 
+def _audit_uploaded_front_identity_view(image_path: Path) -> dict[str, Any]:
+    """Run the detector behind the nonblocking uploaded-front audit."""
+
+    audit: dict[str, Any] = {
+        "policy": UPLOADED_FRONT_VIEW_AUDIT_POLICY,
+        "role": "front",
+        "blocking": False,
+        "acceptable": False,
+        "status": "unavailable_advisory",
+        "issues": [],
+        "image_path": str(image_path),
+        "classifiers_requested": list(UPLOADED_FRONT_VIEW_AUDIT_CASCADES),
+        "classifiers_loaded": [],
+        "detections": [],
+        "qualified_detections": [],
+        "thresholds": {
+            "min_face_area_fraction": (
+                UPLOADED_FRONT_VIEW_AUDIT_MIN_FACE_AREA_FRACTION
+            ),
+            "min_face_width_fraction": (
+                UPLOADED_FRONT_VIEW_AUDIT_MIN_FACE_WIDTH_FRACTION
+            ),
+            "max_audit_dimension": UPLOADED_FRONT_VIEW_AUDIT_MAX_DIMENSION,
+            "scale_factor": 1.05,
+            "min_neighbors": 3,
+        },
+    }
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        audit["issues"] = ["front_view_audit_image_unreadable"]
+        return audit
+    original_height, original_width = image.shape[:2]
+    scale = min(
+        1.0,
+        UPLOADED_FRONT_VIEW_AUDIT_MAX_DIMENSION
+        / float(max(original_height, original_width)),
+    )
+    if scale < 1.0:
+        image = cv2.resize(
+            image,
+            None,
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_AREA,
+        )
+    gray = cv2.equalizeHist(cv2.cvtColor(image, cv2.COLOR_BGR2GRAY))
+    height, width = gray.shape[:2]
+    min_face_size = max(32, int(round(min(height, width) * 0.08)))
+    cascade_root = Path(cv2.data.haarcascades)
+    detections: list[dict[str, Any]] = []
+    loaded: list[str] = []
+    for cascade_name in UPLOADED_FRONT_VIEW_AUDIT_CASCADES:
+        cascade_path = cascade_root / cascade_name
+        if not cascade_path.is_file():
+            continue
+        try:
+            classifier = cv2.CascadeClassifier(str(cascade_path))
+            if classifier.empty():
+                continue
+            loaded.append(cascade_name)
+            boxes = classifier.detectMultiScale(
+                gray,
+                scaleFactor=1.05,
+                minNeighbors=3,
+                minSize=(min_face_size, min_face_size),
+            )
+        except cv2.error:
+            LOGGER.exception(
+                "Uploaded front-view classifier %s failed for %s",
+                cascade_name,
+                image_path,
+            )
+            continue
+        for raw_x, raw_y, raw_width, raw_height in boxes:
+            x = int(raw_x)
+            y = int(raw_y)
+            face_width = int(raw_width)
+            face_height = int(raw_height)
+            area_fraction = (face_width * face_height) / float(width * height)
+            width_fraction = face_width / float(min(width, height))
+            center_x_fraction = (x + face_width / 2.0) / float(width)
+            center_y_fraction = (y + face_height / 2.0) / float(height)
+            qualified = bool(
+                area_fraction
+                >= UPLOADED_FRONT_VIEW_AUDIT_MIN_FACE_AREA_FRACTION
+                and width_fraction
+                >= UPLOADED_FRONT_VIEW_AUDIT_MIN_FACE_WIDTH_FRACTION
+                and 0.08 <= center_x_fraction <= 0.92
+                and 0.03 <= center_y_fraction <= 0.80
+            )
+            detections.append(
+                {
+                    "classifier": cascade_name,
+                    "x": x,
+                    "y": y,
+                    "width": face_width,
+                    "height": face_height,
+                    "area_fraction": round(area_fraction, 6),
+                    "width_fraction": round(width_fraction, 6),
+                    "center_x_fraction": round(center_x_fraction, 6),
+                    "center_y_fraction": round(center_y_fraction, 6),
+                    "qualified": qualified,
+                }
+            )
+    audit.update(
+        {
+            "image_width": original_width,
+            "image_height": original_height,
+            "audit_width": width,
+            "audit_height": height,
+            "classifiers_loaded": loaded,
+            "detections": detections,
+            "qualified_detections": [
+                detection for detection in detections if detection["qualified"]
+            ],
+        }
+    )
+    if not loaded:
+        audit["issues"] = ["front_view_audit_classifier_unavailable"]
+        return audit
+    if audit["qualified_detections"]:
+        audit["acceptable"] = True
+        audit["status"] = "passed_advisory"
+        return audit
+    audit["status"] = "warning_advisory"
+    audit["issues"] = ["front_view_not_reliably_frontal"]
+    return audit
+
+
+def audit_uploaded_front_identity_view(image_path: Path) -> dict[str, Any]:
+    """Advisorially confirm the front role without ever blocking generation."""
+
+    try:
+        return _audit_uploaded_front_identity_view(image_path)
+    except Exception:  # noqa: BLE001 - this audit is deliberately fail-open
+        LOGGER.exception("Uploaded front-view audit failed for %s", image_path)
+        return {
+            "policy": UPLOADED_FRONT_VIEW_AUDIT_POLICY,
+            "role": "front",
+            "blocking": False,
+            "acceptable": False,
+            "status": "unavailable_advisory",
+            "issues": ["front_view_audit_internal_error"],
+            "image_path": str(image_path),
+            "classifiers_requested": list(UPLOADED_FRONT_VIEW_AUDIT_CASCADES),
+            "classifiers_loaded": [],
+            "detections": [],
+            "qualified_detections": [],
+        }
+
+
+def compose_uploaded_identity_view_audit(
+    upload_integrity: dict[str, Any],
+) -> dict[str, Any]:
+    """Combine existing optional checks with the always-on nonblocking front audit."""
+
+    views = upload_integrity.get("views")
+    if not isinstance(views, dict) or not isinstance(views.get("front"), dict):
+        raise RuntimeError("Uploaded identity front view integrity is invalid.")
+    front_view_audit = audit_uploaded_front_identity_view(
+        Path(views["front"]["input_path"])
+    )
+    if GENERATION_VISUAL_AUDITS_BLOCKING:
+        audit = audit_uploaded_identity_view_set(upload_integrity)
+        blocking_acceptable = bool(audit.get("acceptable"))
+        blocking_issues = list(audit.get("issues") or [])
+        structural_status = "passed" if blocking_acceptable else "failed"
+    else:
+        audit = {
+            "policy": UPLOADED_IDENTITY_VIEW_POLICY,
+            "blocking": False,
+            "fail_closed": False,
+            "generation_audit_policy": GENERATION_AUDIT_POLICY,
+            "view_mode": upload_integrity.get("view_mode"),
+            "roles": list(upload_integrity.get("view_roles") or []),
+            "view_count": len(upload_integrity.get("view_roles") or []),
+            "duplicate_pairs": [],
+            "view_angle_comparisons": {},
+            "pairwise_palette_observations": {},
+            "palettes": {},
+            "upper_body_palettes": {},
+        }
+        blocking_acceptable = True
+        blocking_issues = []
+        structural_status = "skipped_advisory"
+    advisory_issues = list(front_view_audit.get("issues") or [])
+    overall_acceptable = blocking_acceptable and bool(
+        front_view_audit.get("acceptable")
+    )
+    status = (
+        "failed"
+        if not blocking_acceptable
+        else "warning_advisory"
+        if advisory_issues
+        else "passed"
+        if GENERATION_VISUAL_AUDITS_BLOCKING
+        else "passed_advisory"
+    )
+    audit.update(
+        {
+            "status": status,
+            "acceptable": overall_acceptable,
+            "blocking_acceptable": blocking_acceptable,
+            "blocking_issues": blocking_issues,
+            "advisory_issues": advisory_issues,
+            "issues": list(dict.fromkeys(blocking_issues + advisory_issues)),
+            "warnings": advisory_issues,
+            "structural_audit_status": structural_status,
+            "front_view_audit": front_view_audit,
+            "front_view_audit_required": True,
+            "front_view_audit_blocking": False,
+        }
+    )
+    return audit
+
+
 def audit_uploaded_identity_view_set(
     upload_integrity: dict[str, Any],
 ) -> dict[str, Any]:
@@ -16417,25 +16689,7 @@ def prepare_uploaded_subject_qwen_references(
         job = dict(JOBS[job_id])
     job_dir = OUTPUT_ROOT / job_id
     upload_integrity = verify_uploaded_identity_submission(job, job_dir)
-    identity_view_audit = (
-        audit_uploaded_identity_view_set(upload_integrity)
-        if GENERATION_VISUAL_AUDITS_BLOCKING
-        else {
-            "policy": UPLOADED_IDENTITY_VIEW_POLICY,
-            "status": "skipped_advisory",
-            "acceptable": True,
-            "blocking": False,
-            "fail_closed": False,
-            "generation_audit_policy": GENERATION_AUDIT_POLICY,
-            "view_mode": upload_integrity.get("view_mode"),
-            "roles": list(upload_integrity.get("view_roles") or []),
-            "view_count": len(upload_integrity.get("view_roles") or []),
-            "issues": [],
-            "warnings": [],
-            "palettes": {},
-            "upper_body_palettes": {},
-        }
-    )
+    identity_view_audit = compose_uploaded_identity_view_audit(upload_integrity)
     write_json_atomic(
         job_dir / "workflows" / "uploaded_identity_view_set_audit.json",
         identity_view_audit,
@@ -16443,23 +16697,43 @@ def prepare_uploaded_subject_qwen_references(
     update_job(
         job_id,
         uploaded_identity_view_audit=identity_view_audit,
-        uploaded_identity_view_verdict=(
-            "skipped_advisory"
-            if identity_view_audit.get("status") == "skipped_advisory"
-            else (
-                "passed"
-                if identity_view_audit["acceptable"]
-                else (
-                    "failed"
-                    if GENERATION_VISUAL_AUDITS_BLOCKING
-                    else "warning_advisory"
-                )
-            )
-        ),
+        uploaded_identity_front_view_audit=identity_view_audit["front_view_audit"],
+        uploaded_identity_view_verdict=identity_view_audit["status"],
     )
+    front_view_audit = identity_view_audit["front_view_audit"]
+    if not front_view_audit["acceptable"]:
+        front_issue = str(
+            next(
+                iter(front_view_audit.get("issues") or []),
+                "front_view_audit_unavailable",
+            )
+        )
+        if front_issue == "front_view_not_reliably_frontal":
+            anomaly_code = "uploaded_front_view_not_frontal"
+            anomaly_message = (
+                "上传图片正面审核异常：front 槽位未检测到可靠的正面猫脸；"
+                "任务已按非阻断策略继续执行。"
+            )
+        else:
+            anomaly_code = "uploaded_front_view_audit_unavailable"
+            anomaly_message = (
+                "上传图片正面审核异常：无法完成 front 槽位的正面审核；"
+                "任务已按非阻断策略继续执行。"
+            )
+        record_nonblocking_job_anomaly(
+            job_id,
+            code=anomaly_code,
+            message=anomaly_message,
+            stage="uploaded_identity_front_view_audit",
+            details={
+                "audit_policy": UPLOADED_FRONT_VIEW_AUDIT_POLICY,
+                "issues": list(front_view_audit.get("issues") or []),
+                "view_role": "front",
+            },
+        )
     if (
         GENERATION_VISUAL_AUDITS_BLOCKING
-        and not identity_view_audit["acceptable"]
+        and not identity_view_audit["blocking_acceptable"]
     ):
         update_job(
             job_id,
@@ -19456,6 +19730,7 @@ def run_subject_replacement_job(job_id: str) -> None:
         current_action_label=None,
         current_action_index=None,
         subject_replacement_results=results,
+        error=nonblocking_result_error(job_id),
         finished_at=utc_now(),
     )
 
