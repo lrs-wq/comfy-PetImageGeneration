@@ -63,6 +63,38 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 
 `key` 是后续查询任务的唯一凭据。侧面图为可选；如使用侧面图，`left` 和 `right` 必须成对提交。
 
+### 三视图字段对应关系
+
+服务严格按照 multipart 字段名保存并传递图片，不会根据画面内容自动识别或交换 `front`、`left`、`right`。调用方必须在提交前完成视角对应：
+
+| 字段 | 应上传的画面 | 识别要点 |
+| --- | --- | --- |
+| `front` | 宠物正面图 | 正脸朝向镜头，双眼、鼻部和两侧耳朵基本同时可见 |
+| `left` | 宠物左侧视图 | 主要展示宠物左侧身体；通常宠物头部朝画面右侧 |
+| `right` | 宠物右侧视图 | 主要展示宠物右侧身体；通常宠物头部朝画面左侧 |
+
+如果只有一张可靠的正面图，只提交 `front`。不要为了凑齐三张图，把侧面图填入 `front`，也不要把正面图填入 `left` 或 `right`。
+
+#### 错位案例：`20260813T091107Z-a272f25801`
+
+该任务虽然被记录为 `front_left_right` 三视图模式，但实际提交内容如下：
+
+| 接口字段 | 服务端文件 | 实际画面 | 尺寸 |
+| --- | --- | --- | --- |
+| `front` | `input.png` | 编号 3、头部朝画面右侧的侧面图 | 563×416 |
+| `left` | `input_left.png` | 编号 2、头部朝画面左侧的侧面图 | 560×407 |
+| `right` | `input_right.png` | 真正的正面图 | 514×584 |
+
+任务目录中的三张输入图与送入 ComfyUI/Qwen 的副本 SHA-256 完全一致，因此错位发生在接口提交字段映射阶段，不是后续生成链路重新排序导致的。该任务的视图审核状态为 `skipped_advisory`，只记录了三个字段角色，没有对“正面图是否确实为正面”进行阻塞校验。
+
+针对该案例，正确字段映射应为：
+
+| 正确字段 | 应使用的原任务文件 |
+| --- | --- |
+| `front` | `input_right.png`，真正的正面图 |
+| `left` | `input.png`，编号 3 的侧面图 |
+| `right` | `input_left.png`，编号 2 的侧面图 |
+
 ## 2. 查询进度和结果
 
 请求：`POST /api`，类型：`multipart/form-data`
@@ -107,6 +139,76 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 | `completed` | 两个 GIF 均已生成 |
 | `failed` | 生成失败，原因见 `error` |
 | `cancelled` | 任务已取消 |
+
+### `stage` 字段枚举
+
+`stage` 表示任务当前执行到的具体步骤，主要用于展示详细进度；业务逻辑应以 `status` 判断任务是否完成或失败。8051 服务通常会原样返回底层生成服务的阶段名称。
+
+当前 8051 双 GIF 链路可能返回以下值：
+
+| `stage` | 含义 |
+| --- | --- |
+| `queued` | 任务已进入队列，尚未开始处理 |
+| `waiting_for_gpu` | 正在等待 GPU 或 ComfyUI 空闲；Qwen 和 SCAIL 开始前都可能出现 |
+| `generating_cartoon_reference` | Qwen 正在根据上传视图生成宠物全身基准图 |
+| `retrying_cartoon_reference` | 全身基准图未满足要求，正在重新生成；仅特定审核配置下出现 |
+| `generating_cartoon_keyframes` | Qwen 正在生成吃饭或舔毛动作首帧 |
+| `retrying_cartoon_keyframe` | 动作首帧未满足最低要求，正在重新生成 |
+| `restoring_grooming_identity` | 正在恢复舔毛首帧的面部及身份一致性 |
+| `finalizing_keyframes` | 正在对 Qwen 首帧进行抠图、归一化和结果固化 |
+| `subject_references_ready` | 两个动作的参考首帧已准备完成，可以进入视频生成 |
+| `preparing_subject_replacement` | 正在准备 SCAIL 输入、动作视频和参考图 |
+| `generating_subject_replacement` | SCAIL 正在生成当前动作视频 |
+| `auditing_final_video_fur_surface` | 正在检查最终视频的毛发表面；当前线上为非阻塞审核，通常不会出现 |
+| `extracting_transparent_animation` | 正在从动作视频提取透明背景 GIF |
+| `completed` | 吃饭和舔毛两个 GIF 均已生成 |
+| `failed` | 任务失败，具体原因见 `error` |
+| `cancel_requested` | 底层已收到取消请求，正在停止任务 |
+| `cancelled` | 任务已取消 |
+| `output_contract_failed` | 8051 专用阶段：底层报告完成，但缺少 `eating` 或 `grooming` GIF，8051 将任务改判为失败 |
+
+正常情况下，阶段顺序大致如下：
+
+```text
+queued
+→ waiting_for_gpu
+→ generating_cartoon_reference
+→ generating_cartoon_keyframes
+→ finalizing_keyframes
+→ subject_references_ready
+→ waiting_for_gpu
+→ eating: preparing_subject_replacement
+→ eating: generating_subject_replacement
+→ eating: extracting_transparent_animation
+→ grooming: preparing_subject_replacement
+→ grooming: generating_subject_replacement
+→ grooming: extracting_transparent_animation
+→ completed
+```
+
+重试、舔毛身份恢复和审核均为条件阶段。某些阶段持续时间很短，因此客户端轮询时可能观察不到。`action` 在 SCAIL 阶段通常为 `eating` 或 `grooming`，在 Qwen 首帧阶段可能为 `null`。
+
+底层 8770 服务还保留以下兼容阶段。当前 8051 的“上传宠物图并生成两个 GIF”链路正常情况下不会进入这些阶段，但调用方应允许服务返回未知的 `stage` 字符串，以便兼容后续升级。
+
+| `stage` | 含义 |
+| --- | --- |
+| `preparing_uploaded_identity_references` | 已退役的上传图直接构造 SCAIL 参考图线路 |
+| `verifying_profile_standard_direct` | 校验预置宠物档案的直接输出资源 |
+| `copying_profile_standard_direct` | 复制预置档案动作结果 |
+| `matting_profile_standard_direct_outputs` | 对预置结果进行抠图 |
+| `publishing_profile_standard_transparency` | 发布预置透明动画 |
+| `generating_keyframes` | 旧版普通关键帧生成 |
+| `completed_keyframes_only` | 只生成关键帧，不生成视频 |
+| `switching_to_video_model` | 从 Qwen 图像模型切换到视频模型 |
+| `generating_videos` | 旧版 Wan 视频生成 |
+| `generating_controlled_running_video` | 旧版受控跑步视频生成 |
+| `stabilizing_transparent_animation` | 旧版透明动画稳定处理 |
+
+客户端接入建议：
+
+- 以 `status` 判断任务生命周期，使用 `stage` 展示细分进度。
+- 遇到未知 `stage` 时直接展示原值并继续轮询，不要将其自动判定为失败。
+- 当 `status=failed` 时读取 `error`；当 `status=completed` 时确认 `gifs.eating` 和 `gifs.grooming` 均不为 `null`。
 
 生成期间尚未产出的 GIF URL 为 `null`。建议每 10～20 秒查询一次。
 
