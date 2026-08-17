@@ -224,6 +224,56 @@ class SimplePetGifApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["stage"], "output_contract_failed")
         self.assertIn("grooming", result["error"])
 
+    async def test_dog_query_exposes_standing_and_grooming_alias(self):
+        payload = {
+            "status": "completed",
+            "progress": 100,
+            "stage": "completed",
+            "species": "dog",
+            "outputs": [
+                {
+                    "type": "transparent_gif",
+                    "action": "eating",
+                    "filename": "dog-eating.gif",
+                    "primary": True,
+                },
+                {
+                    "type": "transparent_gif",
+                    "action": "standing",
+                    "filename": "dog-standing.gif",
+                    "primary": True,
+                },
+            ],
+        }
+        with (
+            patch.object(api, "PUBLIC_BASE_URL", "http://39.106.120.253:8051"),
+            patch.object(api.asyncio, "to_thread", new=immediate_to_thread),
+            patch.object(api.requests, "get", return_value=FakeResponse(200, payload)),
+        ):
+            result = await api.api_gateway(
+                make_request(),
+                operation="query",
+                key="dog-task",
+                front=None,
+                left=None,
+                right=None,
+                _auth=None,
+            )
+
+        standing = "http://39.106.120.253:8051/file/dog-task/dog-standing.gif"
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["species"], "dog")
+        self.assertEqual(
+            result["gifs"],
+            {
+                "eating": (
+                    "http://39.106.120.253:8051/file/dog-task/dog-eating.gif"
+                ),
+                "standing": standing,
+                "grooming": standing,
+            },
+        )
+
     async def test_query_preserves_nonfrontal_front_warning_while_running(self):
         payload = {
             "status": "running",

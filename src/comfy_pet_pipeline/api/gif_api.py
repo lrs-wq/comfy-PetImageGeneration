@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 INTERNAL_API_URL = os.getenv(
     "LOCAL_VIDEO_INTERNAL_URL", "http://127.0.0.1:8770"
 ).rstrip("/")
@@ -23,16 +23,21 @@ INTERNAL_API_KEY = os.getenv("LOCAL_VIDEO_API_KEY", "").strip()
 PUBLIC_API_KEY = os.getenv("PET_GIF_API_KEY", INTERNAL_API_KEY).strip()
 PUBLIC_BASE_URL = os.getenv("PET_GIF_PUBLIC_BASE_URL", "").strip().rstrip("/")
 INTERNAL_JOBS_URL = f"{INTERNAL_API_URL}/api/local-video/jobs"
-EXPECTED_ACTIONS = ("eating", "grooming")
+CAT_ACTIONS = ("eating", "grooming")
+DOG_ACTIONS = ("eating", "standing")
+ALL_ACTIONS = ("eating", "grooming", "standing")
+# Upload keeps the legacy request payload; the internal binary classifier maps
+# dog grooming to the formal standing action before the job is queued.
+UPLOAD_ACTIONS = CAT_ACTIONS
 KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,96}$")
 
 
 app = FastAPI(
-    title="Pet Eating and Grooming GIF API",
+    title="Cat and Dog Action GIF API",
     version=APP_VERSION,
     description=(
-        "Submit one pet identity and query the two fixed transparent GIF outputs: "
-        "eating and grooming."
+        "Submit one pet identity for forced cat/dog routing. Cats return eating and "
+        "grooming; dogs return eating and standing with a temporary grooming alias."
     ),
 )
 
@@ -101,9 +106,23 @@ def request_base_url(request: Request) -> str:
     return PUBLIC_BASE_URL or str(request.base_url).rstrip("/")
 
 
+def job_species(job: dict[str, Any]) -> str:
+    species = str(job.get("species") or "").strip().lower()
+    if species in {"cat", "dog"}:
+        return species
+    for output in job.get("outputs") or []:
+        if isinstance(output, dict) and str(output.get("action") or "").lower() == "standing":
+            return "dog"
+    return "cat"
+
+
+def required_actions(job: dict[str, Any]) -> tuple[str, ...]:
+    return DOG_ACTIONS if job_species(job) == "dog" else CAT_ACTIONS
+
+
 def output_gifs(job: dict[str, Any], base_url: str, key: str) -> dict[str, str | None]:
     candidates: dict[str, list[dict[str, Any]]] = {
-        action: [] for action in EXPECTED_ACTIONS
+        action: [] for action in ALL_ACTIONS
     }
     for output in job.get("outputs") or []:
         if not isinstance(output, dict):
@@ -119,21 +138,28 @@ def output_gifs(job: dict[str, Any], base_url: str, key: str) -> dict[str, str |
             continue
         candidates[action].append(output)
 
-    result: dict[str, str | None] = {}
-    for action in EXPECTED_ACTIONS:
+    urls: dict[str, str | None] = {}
+    for action in ALL_ACTIONS:
         records = sorted(
             candidates[action],
             key=lambda item: bool(item.get("primary")),
             reverse=True,
         )
         if not records:
-            result[action] = None
+            urls[action] = None
             continue
         filename = str(records[0]["filename"])
-        result[action] = (
+        urls[action] = (
             f"{base_url}/file/{quote(key, safe='')}/{quote(filename, safe='')}"
         )
-    return result
+    if job_species(job) == "dog":
+        standing_url = urls["standing"]
+        return {
+            "eating": urls["eating"],
+            "standing": standing_url,
+            "grooming": standing_url,
+        }
+    return {"eating": urls["eating"], "grooming": urls["grooming"]}
 
 
 def public_job(job: dict[str, Any], request: Request, key: str) -> dict[str, Any]:
@@ -159,7 +185,14 @@ def public_job(job: dict[str, Any], request: Request, key: str) -> dict[str, Any
     error = job.get("error")
     stage = str(job.get("stage") or normalized_status)
     if normalized_status == "completed":
-        missing = [action for action, url in gifs.items() if not url]
+        missing = [
+            action
+            for action in required_actions(job)
+            if not (
+                gifs.get(action)
+                or (action == "standing" and gifs.get("grooming"))
+            )
+        ]
         if missing:
             normalized_status = "failed"
             stage = "output_contract_failed"
@@ -173,6 +206,7 @@ def public_job(job: dict[str, Any], request: Request, key: str) -> dict[str, Any
         "progress": progress,
         "stage": stage,
         "action": job.get("current_action"),
+        "species": job_species(job),
         "error": str(error) if error else None,
         "gifs": gifs,
     }
@@ -250,7 +284,7 @@ async def api_gateway(
             data = {
                 "generation_mode": "subject_replacement",
                 "request_kind": "video",
-                "actions": json.dumps(list(EXPECTED_ACTIONS)),
+                "actions": json.dumps(list(UPLOAD_ACTIONS)),
                 "resolution": "512x512",
                 "output_format": "transparent_gif",
                 "prompt": "",
@@ -364,7 +398,7 @@ def download_gif(
         for output in job.get("outputs") or []
         if isinstance(output, dict)
         and output.get("type") == "transparent_gif"
-        and str(output.get("action") or "").lower() in EXPECTED_ACTIONS
+        and str(output.get("action") or "").lower() in ALL_ACTIONS
         and Path(str(output.get("filename") or "")).name
         == str(output.get("filename") or "")
     }

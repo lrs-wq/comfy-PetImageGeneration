@@ -199,6 +199,39 @@ class SubjectReplacementParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Only eating and grooming"):
             pipeline.parse_subject_actions('["running"]')
 
+    def test_dog_actions_use_standing_and_map_legacy_grooming_alias(self) -> None:
+        self.assertEqual(
+            pipeline.parse_subject_actions('["eating", "standing"]'),
+            ["eating", "standing"],
+        )
+        self.assertEqual(
+            pipeline.normalize_subject_actions_for_species(
+                ["eating", "grooming"],
+                "dog",
+            ),
+            ["eating", "standing"],
+        )
+        with self.assertRaisesRegex(ValueError, "cat subject replacement"):
+            pipeline.normalize_subject_actions_for_species(["standing"], "cat")
+
+    def test_dog_profile_exposes_digest_bound_eating_and_standing_assets(self) -> None:
+        profile = pipeline.load_subject_profile("dog_white_model_v1")
+        runtime = pipeline.subject_profile_runtime(profile)
+
+        self.assertEqual(profile["species"], "dog")
+        self.assertEqual(
+            list(pipeline.subject_profile_actions(profile)),
+            ["eating", "standing"],
+        )
+        self.assertEqual(set(runtime["actions"]), {"eating", "standing"})
+        for action in ("eating", "standing"):
+            action_runtime = runtime["actions"][action]
+            self.assertTrue(Path(action_runtime["driving_animation"]).is_file())
+            self.assertRegex(
+                action_runtime["driving_animation_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
+
     def test_profile_exposes_action_specific_references(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

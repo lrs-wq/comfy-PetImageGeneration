@@ -903,6 +903,8 @@ def run_subject_replacement_job(job_id: str) -> None:
             str(reference_path),
             "--action",
             action,
+            "--species",
+            str(job.get("species") or "cat"),
             "--width",
             "512",
             "--height",

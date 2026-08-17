@@ -108,7 +108,7 @@ API Key 不应提交到代码仓库或放入公开网页前端。当前接口为
 
 ## 当前生产链路：`subject_replacement`
 
-当前只开放 `eating`（吃饭）和 `grooming`（舔毛）两个动作。上传图片后的固定顺序为：
+上传主体现在先经过强制 `cat/dog` 二分类。猫继续使用 `sleek_tabby_cat_v1` 和 `eating/grooming`，原链路不变；狗自动切换到 `dog_white_model_v1` 和 `eating/standing`。为兼容旧的 8051 请求，分类为狗时，入参动作 `grooming` 会在入队前归一为正式动作 `standing`。分类没有 `unknown` 分支，分类器异常时回退到猫，因此有效图片即使不是动物也不会仅因分类而被拒绝。上传图片后的固定顺序为：
 
 `v2.21.0` 接受两种上传集合：仅 `image`，或完整的 `image`（正面）+ `image_left`（左侧）+ `image_right`（右侧）。不接受只传一个侧面或缺少任一视角。三视角逐张规范化并锁定原始/规范化 SHA-256，在 GPU 前检查角色集合、文件完整性、完全或近重复视角、可用主体分割和明显毛色类别冲突。三张图仅接入 Qwen 全身 canonical 的 `image1/image2/image3`；动作 Qwen 不读取原始三视角，只读取归一化 canonical 与 Main_case 几何，并按动作分配 Image 1/Image 2 角色。
 

@@ -1,0 +1,88 @@
+{
+  "schema_version": 2,
+  "id": "dog_white_model_v1",
+  "species": "dog",
+  "supported_actions": ["eating", "standing"],
+  "display_name": "狗狗白模（eat.mp4 / stand.mp4 动作标准）",
+  "status": "active",
+  "preview_action": "eating",
+  "canonical_source_image": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/eating_white_model_reference_frame040_cutout.png",
+  "action_references": {
+    "eating": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/eating_white_model_reference_frame040_cutout.png",
+    "standing": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/standing_white_model_reference_frame040_cutout.png"
+  },
+  "reference_preparation": {
+    "method": "deterministic_green_screen_chromakey_frame040_rgba",
+    "runner": "/root/comfy-pet-pipeline/tools/assets/build_dog_white_model_driving_assets.py",
+    "role": "identity_neutral_dog_action_geometry_only"
+  },
+  "profile_asset_manifest": {
+    "path": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/manifest.json",
+    "sha256": "ba0e523a1027eb8ba9fe57a1ea436e6af1556730fa72d73d5314d3574c7239b8",
+    "validation_scope": "deterministic_cpu_driver_and_rgba_geometry_assets",
+    "full_gpu_generation_validation": "pending",
+    "end_to_end_api_validation": "pending"
+  },
+  "uploaded_identity_driving": {
+    "revision": "dog-user-white-model-20260817-v1",
+    "role": "identity_neutral_dog_action_geometry_and_motion",
+    "appearance_authority": "uploaded_qwen_canonical_only",
+    "normalization": {
+      "source_segment_start_seconds": 5.0175,
+      "source_segment_duration_seconds": 5.0625,
+      "crop": "center_720x720_from_960x720",
+      "size": [512, 512],
+      "frames": 81,
+      "fps": 16,
+      "audio_removed": true,
+      "last_frame_padding": "clone_source_endpoint_to_81_frames"
+    },
+    "actions": {
+      "eating": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/source/eat.mp4",
+        "source_sha256": "2a4a2571aa1c8fd3f9e65c8f84c5d69205cedc366947d60b1f9144296bd3d7f4",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/eating_white_model_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "8116838aa689ae3bb6232c0b500c0822a5ab1335d319acbbc2cafe2d8586c69a",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/eating_white_model_reference_frame040_cutout.png",
+        "geometry_reference_sha256": "38d1c8b217c1462184c0b8ec6e0f7529576937770bdd853ec2ba5053a472192a",
+        "selected_frame_index": 40,
+        "selected_frame_timestamp_seconds": 2.5,
+        "action_contract": "dog_low_head_eating_with_one_fixed_shallow_kibble_bowl"
+      },
+      "standing": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/source/stand.mp4",
+        "source_sha256": "7af21bd55744a11f6106aa735a6dbb18e8113671c881af2bb4951855ab9e0913",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/standing_white_model_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "2ab451bda6afd9475c58fed0156c9a8970e05d699857647ec5246784b3251a79",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/standing_white_model_reference_frame040_cutout.png",
+        "geometry_reference_sha256": "5cd38547cbac2be8c7e75ec1730489c4ebc9b5e0efe14b810f85ebd45f3bce41",
+        "selected_frame_index": 40,
+        "selected_frame_timestamp_seconds": 2.5,
+        "action_contract": "stable_upright_dog_idle_pose_with_gentle_tail_motion"
+      }
+    }
+  },
+  "runtime": {
+    "engine_profile": "scail2-14b-fp8-v1",
+    "prompt_profile": "uploaded-dog-white-model-v1",
+    "default_base_seed": 20260817,
+    "steps": 6,
+    "frames": 81,
+    "fps": 16,
+    "actions": {
+      "eating": {
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/eating_white_model_driver_512x512_81f_16fps.mp4",
+        "driving_animation_sha256": "8116838aa689ae3bb6232c0b500c0822a5ab1335d319acbbc2cafe2d8586c69a",
+        "pose_strength": 1.1,
+        "seed_offset": 0
+      },
+      "standing": {
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/standing_white_model_driver_512x512_81f_16fps.mp4",
+        "driving_animation_sha256": "2ab451bda6afd9475c58fed0156c9a8970e05d699857647ec5246784b3251a79",
+        "pose_strength": 1.05,
+        "seed_offset": 2
+      }
+    }
+  },
+  "usage_note": "仅用于分类为 dog 的上传主体。白模只提供 eating / standing 的动作几何与时序，上传图片始终是身份、犬种、脸部、毛色、花纹、毛长和体型的唯一外观标准。"
+}

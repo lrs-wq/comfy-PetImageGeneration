@@ -75,12 +75,27 @@ def action_key(pose: str) -> str:
     return pose.split("|", 1)[0].strip().lower()
 
 
-def subject_replacement_pose_prompt(action: str) -> str:
+def subject_replacement_pose_prompt(action: str, *, species: str = "cat") -> str:
     _sync_local_video_runtime(globals(), {"subject_replacement_pose_prompt"})
     if action == "eating":
+        if species == "dog":
+            return (
+                "eating | A complete full-body dog in a natural low-head eating "
+                "pose at a three-quarter front angle. Exactly one shallow food bowl "
+                "contains visible brown kibble. The lower muzzle enters and overlaps "
+                "the kibble while all four anatomically attached legs remain stable "
+                "and the complete tail stays visible."
+            )
         return f"eating | {MULTIPOSE_PRESET_BY_ACTION['eating']['prompt_en']}"
     if action == "grooming":
         return SUBJECT_REPLACEMENT_GROOMING_POSE_PROMPT
+    if action == "standing" and species == "dog":
+        return (
+            "standing | A complete full-body dog in the stable upright idle pose "
+            "shown by the action geometry. Keep the chest lifted, all visible legs "
+            "anatomically attached and grounded, both ears and the complete tail "
+            "readable. No prop, clothing, collar, harness, floor, or extra subject."
+        )
     raise ValueError(f"Unsupported subject-replacement action: {action}")
 
 
@@ -118,9 +133,26 @@ def qwen_first_frame_spec(pose: str) -> str:
     return detail or pose.strip()
 
 
-def action_first_frame_rules(pose: str) -> str:
+def action_first_frame_rules(pose: str, *, species: str = "cat") -> str:
     _sync_local_video_runtime(globals(), {"action_first_frame_rules"})
     action = action_key(pose)
+    if species == "dog" and action == "eating":
+        return (
+            "Include exactly one small shallow matte food bowl with clearly visible "
+            "brown kibble. Keep all four dog legs anatomically attached and stable. "
+            "Lower the head until the dog's lower muzzle physically enters and "
+            "overlaps the kibble and near rim; a gap between mouth and food is "
+            "invalid. Keep both ears, the upper face, body and complete tail readable. "
+            "The bowl is the only prop."
+        )
+    if species == "dog" and action == "standing":
+        return (
+            "No prop. Match Image 2's stable upright dog idle geometry exactly, "
+            "including torso height, leg placement, head angle, camera, subject scale "
+            "and tail layout. Keep every visible paw grounded and every leg attached. "
+            "Show one complete natural dog with both ears and the tail from base to "
+            "tip; no sitting redesign, extra limb, collar, harness, clothing or object."
+        )
     if action == "running":
         return (
             "No prop. This still image is a calm static pre-run standing pose for later animation, not an illustrated "
@@ -192,12 +224,30 @@ def build_cartoon_reference_prompt(
     *,
     palette_lock: str = "",
     fur_lock: str = "",
+    species: str = "cat",
 ) -> str:
     _sync_local_video_runtime(globals(), {"build_cartoon_reference_prompt"})
     creative_direction = (
         base_prompt.strip() or "identity-faithful restrained stylized 3D digital double"
     )
     palette_section = f"\n\n{palette_lock.strip()}" if palette_lock.strip() else ""
+    if species == "dog":
+        fur_section = f"\n\n{fur_lock.strip()}" if fur_lock.strip() else ""
+        return f"""Use case: identity-preserving stylized 3D dog character design.
+BACKGROUND RULE — non-negotiable: every pixel outside the dog must be one perfectly flat uniform pure #00FF00 green. No floor, shadow, gradient, scenery, text, logo, watermark, border, or halo.
+
+The uploaded identity image, or the role-labeled uploaded identity image set when multiple views are supplied, is the only identity and appearance authority. Create a canonical identity-faithful restrained semi-realistic stylized 3D digital double of this exact same dog. Never copy identity, breed, proportions, face, coat, color, markings, ears, eyes, muzzle, tail, material, or lighting from an action profile or white model.
+
+User creative direction: {creative_direction}
+Apply it only to restrained rendering quality and expression. It cannot override identity, anatomy, full-body framing, natural coat, clothing, or background rules.
+
+Identity lock: preserve the uploaded dog's exact apparent age, breed traits, head and muzzle silhouette, eye color and spacing, ear shape and carriage, nose color, coat base colors, localized markings, natural coat length and volume, body proportions, leg length, paws, and complete tail. Preserve natural asymmetry and never invent markings.{palette_section}{fur_section}
+
+Target style: a polished restrained semi-realistic stylized 3D digital double under neutral-white high-key character lighting. Identity outranks stylization. Do not make the dog younger, chibi, toy-like, feline, or generic. The dog is completely natural and unclothed: no collar, harness, glasses, bow, shirt, costume, shoes, jewelry, or accessory.
+
+Composition lock: one complete dog in a neutral stable upright four-paw pose at a slight three-quarter front angle. Show both ear tips, the full torso, exactly four anatomically attached legs and complete paws, and the tail continuously from base to tip. Keep at least 15% clear green margin on every edge and keep the dog within 68% of canvas width and height. Nothing may be cropped, fused, hidden behind the torso, or outside the canvas.
+
+{CHROMA_BACKGROUND_PROMPT} No floor, floor line, shadow, reflection, text, logo, or watermark."""
     fur_section = ""
     if fur_lock.strip():
         fur_section = f"""

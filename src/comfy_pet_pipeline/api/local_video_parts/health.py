@@ -55,6 +55,37 @@ def health() -> dict[str, Any]:
     translator_ok = not PROMPT_TRANSLATION_ENABLED or not translator_missing
     subject_profile_items: list[dict[str, Any]] = []
     subject_replacement_missing: list[str] = []
+    dog_profile_health: dict[str, Any] = {"status": "unavailable"}
+    classifier_paths = {
+        "python": Path(
+            os.environ.get(
+                "PET_SPECIES_CLASSIFIER_PYTHON",
+                "/opt/miniconda3/envs/yolo/bin/python",
+            )
+        ),
+        "model": Path(
+            os.environ.get("PET_SPECIES_CLASSIFIER_MODEL", "/root/yolo26n.pt")
+        ),
+        "runner": (
+            PROJECT_ROOT / "tools" / "classification" / "classify_pet_species.py"
+        ),
+    }
+    classifier_missing = [
+        str(path) for path in classifier_paths.values() if not path.is_file()
+    ]
+    species_classifier_health = {
+        "status": "ready" if not classifier_missing else "fallback_cat",
+        "policy": "yolo_coco_cat_dog_forced_argmax_v1",
+        "forced_binary": True,
+        "unknown_class": False,
+        "fallback_species": "cat",
+        "missing": classifier_missing,
+    }
+    if classifier_missing:
+        subject_replacement_missing.extend(
+            f"species classifier asset is missing: {path}"
+            for path in classifier_missing
+        )
     default_effective_subject_config: dict[str, Any] | None = None
     standard_direct_health: dict[str, Any] = {
         "enabled": False,
@@ -491,6 +522,40 @@ def health() -> dict[str, Any]:
                 }
             )
         subject_replacement_missing.append(str(exc))
+    try:
+        dog_subject_profile = load_subject_profile(DOG_SUBJECT_PROFILE)
+        dog_effective_config = resolve_effective_subject_config(
+            dog_subject_profile,
+            list(DOG_SUBJECT_REPLACEMENT_ACTIONS),
+            seed=None,
+            scail_steps=None,
+            pose_strength=None,
+        )
+        dog_upload_config, dog_pose_policies = configure_uploaded_subject_validation(
+            dog_effective_config,
+            list(DOG_SUBJECT_REPLACEMENT_ACTIONS),
+        )
+        require_subject_replacement_assets(
+            dog_subject_profile,
+            list(DOG_SUBJECT_REPLACEMENT_ACTIONS),
+            effective_config=dog_upload_config,
+            expected_pose_policies=dog_pose_policies,
+        )
+        subject_profile_items.append(subject_profile_public(dog_subject_profile))
+        dog_profile_health = {
+            "status": "ready",
+            "profile_id": DOG_SUBJECT_PROFILE,
+            "species": "dog",
+            "actions": list(DOG_SUBJECT_REPLACEMENT_ACTIONS),
+            "legacy_alias": {"grooming": "standing"},
+        }
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        dog_profile_health = {
+            "status": "failed",
+            "profile_id": DOG_SUBJECT_PROFILE,
+            "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+        }
+        subject_replacement_missing.append(f"dog profile health failed: {exc}")
     subject_replacement_ok = not subject_replacement_missing
     return {
         "status": (
@@ -557,6 +622,19 @@ def health() -> dict[str, Any]:
             "default": True,
             "enabled": subject_replacement_ok,
             "ok": subject_replacement_ok,
+            "species_classifier": species_classifier_health,
+            "dog_profile": dog_profile_health,
+            "species_routes": {
+                "cat": {
+                    "profile": CAT_SUBJECT_PROFILE,
+                    "actions": list(CAT_SUBJECT_REPLACEMENT_ACTIONS),
+                },
+                "dog": {
+                    "profile": DOG_SUBJECT_PROFILE,
+                    "actions": list(DOG_SUBJECT_REPLACEMENT_ACTIONS),
+                    "legacy_alias": {"grooming": "standing"},
+                },
+            },
             "engine": "scail2-14b-fp8",
             "engine_profile": (
                 default_effective_subject_config["engine_profile"]

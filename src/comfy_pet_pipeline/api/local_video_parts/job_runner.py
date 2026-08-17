@@ -13,6 +13,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
     raise_if_cancelled(job_id)
     with JOBS_LOCK:
         job = dict(JOBS[job_id])
+    species = str(job.get("species") or "cat").strip().lower()
     if job.get("generation_mode") == "subject_replacement" and not force_qwen_reference:
         run_subject_replacement_job(job_id)
         return
@@ -625,7 +626,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             current_pose=None,
         )
         cartoon_negative_prompt = (
-            QWEN_NEGATIVE + ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
+            QWEN_NEGATIVE
+            + ", "
+            + (DOG_CARTOON_NEGATIVE if species == "dog" else CARTOON_NEGATIVE)
+            + ", "
+            + CHROMA_NEGATIVE
         )
         if profile_fur_negative:
             cartoon_negative_prompt += ", " + profile_fur_negative
@@ -662,6 +667,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 prompt_source,
                 palette_lock=palette_lock,
                 fur_lock=profile_fur_lock,
+                species=species,
             )
             if (
                 canonical_identity_reference_input_names
@@ -1755,6 +1761,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             pose_reference_available=pose_reference_input_name is not None,
             profile_fur_lock=profile_fur_lock,
             pose_identity_input_policy=effective_pose_identity_input_policy,
+            species=species,
         )
         negative_prompt = QWEN_NEGATIVE
         if transparent_gif:
@@ -1768,7 +1775,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                 else:
                     active_pose_profiles = active_pose_profiles[:1]
-            negative_prompt += ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
+            negative_prompt += (
+                ", "
+                + (DOG_CARTOON_NEGATIVE if species == "dog" else CARTOON_NEGATIVE)
+                + ", "
+                + CHROMA_NEGATIVE
+            )
             if source_palette_negative:
                 negative_prompt += ", " + source_palette_negative
             if profile_fur_negative:
@@ -2117,6 +2129,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     pose_reference_available=pose_reference_input_name is not None,
                     profile_fur_lock=profile_fur_lock,
                     pose_identity_input_policy=(effective_pose_identity_input_policy),
+                    species=species,
                 )
                 if pose_identity_palette_prompt_signature is not None:
                     attempt_prompt += "\n\n" + identity_palette_prompt(
@@ -6768,7 +6781,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         )
         negative_prompt = WAN_NEGATIVE
         if transparent_gif:
-            negative_prompt += ", " + CARTOON_WAN_NEGATIVE + ", " + CHROMA_NEGATIVE
+            negative_prompt += (
+                ", "
+                + (
+                    DOG_CARTOON_WAN_NEGATIVE
+                    if species == "dog"
+                    else CARTOON_WAN_NEGATIVE
+                )
+                + ", "
+                + CHROMA_NEGATIVE
+            )
         source_output: Path | None = None
         video_engine = WAN_ENGINE
         video_engine_metadata: dict[str, Any] = wan_engine_metadata(

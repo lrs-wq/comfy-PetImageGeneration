@@ -170,6 +170,44 @@ EATING_NEGATIVE_PROMPT = (
     "green background, floor, shadow, gradient, texture, text, watermark"
 )
 
+DOG_EATING_PROMPT = (
+    "A complete full-body restrained stylized 3D dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve the exact "
+    "breed traits, apparent age, head and muzzle silhouette, eye color and spacing, "
+    "ear shape and carriage, nose, coat colors, localized markings, natural coat "
+    "length and volume, body proportions, paws, and complete tail. Use the "
+    "neutral-white dog anatomy driver only for eating motion timing, joint "
+    "trajectories, the fixed shallow kibble bowl, camera and framing. Never copy "
+    "the driver's white coat, face, eyes, proportions, smooth material, or lighting. "
+    "Follow the supplied eating sequence precisely: lower the dog's muzzle naturally "
+    "into exactly one fixed shallow bowl and raise it again while keeping all four "
+    "legs anatomically attached and stable. Keep identity, coat markings, scale, "
+    "camera and background temporally stable with the complete dog uncropped."
+)
+
+DOG_STANDING_PROMPT = (
+    "A complete full-body restrained stylized 3D dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve the exact "
+    "breed traits, apparent age, face, muzzle, eyes, ears, nose, coat colors and "
+    "markings, natural coat length and volume, body proportions, paws, and complete "
+    "tail. Use the neutral-white dog anatomy driver only for the standing action's "
+    "joint trajectories, stable upright idle geometry, gentle tail motion, camera, "
+    "scale and framing. Never copy the driver's white coat, face, eyes, body "
+    "proportions, material, or lighting. Keep one complete unclothed dog, stable "
+    "identity, coherent anatomy and a static camera. No prop, collar, harness, "
+    "clothing, floor, shadow, text, logo, or extra subject."
+)
+
+DOG_NEGATIVE_PROMPT = (
+    "cat, feline, kitten, different dog, different breed, generic dog, copied "
+    "white-model identity, white-model face, white-model coat, changed face, changed "
+    "muzzle, changed ears, changed eye color, changed coat color, changed markings, "
+    "changed coat length, changed body proportions, extra limb, missing limb, "
+    "duplicated limb, detached paw, fused legs, extra tail, duplicate subject, "
+    "collar, harness, clothing, accessory, camera movement, zoom, scene cut, flicker, "
+    "floor, shadow, text, logo, watermark"
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -187,9 +225,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--action",
-        choices=("grooming", "eating"),
+        choices=("grooming", "eating", "standing"),
         default="grooming",
     )
+    parser.add_argument("--species", choices=("cat", "dog"), default="cat")
     parser.add_argument("--prompt")
     parser.add_argument("--negative-prompt")
     parser.add_argument(
@@ -236,13 +275,23 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     if args.prompt is None:
-        args.prompt = EATING_PROMPT if args.action == "eating" else DEFAULT_PROMPT
+        if args.species == "dog":
+            args.prompt = (
+                DOG_EATING_PROMPT
+                if args.action == "eating"
+                else DOG_STANDING_PROMPT
+            )
+        else:
+            args.prompt = EATING_PROMPT if args.action == "eating" else DEFAULT_PROMPT
     if args.negative_prompt is None:
-        args.negative_prompt = (
-            EATING_NEGATIVE_PROMPT
-            if args.action == "eating"
-            else DEFAULT_NEGATIVE_PROMPT
-        )
+        if args.species == "dog":
+            args.negative_prompt = DOG_NEGATIVE_PROMPT
+        else:
+            args.negative_prompt = (
+                EATING_NEGATIVE_PROMPT
+                if args.action == "eating"
+                else DEFAULT_NEGATIVE_PROMPT
+            )
     if args.prompt_suffix and args.prompt_suffix.strip():
         args.prompt += (
             "\n\nAdditional user constraint. This may refine mood or secondary "
@@ -4878,6 +4927,14 @@ def gpu_snapshot() -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
+    supported_actions = {
+        "cat": {"eating", "grooming"},
+        "dog": {"eating", "standing"},
+    }
+    if args.action not in supported_actions[args.species]:
+        raise ValueError(
+            f"{args.species} does not support the {args.action} action"
+        )
     if args.width % 32 or args.height % 32:
         raise ValueError("SCAIL width and height must be multiples of 32")
     if args.frames < 1 or (args.frames - 1) % 4:
@@ -4994,7 +5051,7 @@ def main() -> int:
         args.reference,
         (args.width, args.height),
         separate_eating_prop=args.action == "eating",
-        contain_fraction=0.88 if args.action == "grooming" else 0.84,
+        contain_fraction=0.88 if args.action in {"grooming", "standing"} else 0.84,
     )
     if args.action == "eating":
         pose_frames, pose_masks, pose_metadata = (
@@ -5049,6 +5106,7 @@ def main() -> int:
         "steps": args.steps,
         "seed": args.seed,
         "action": args.action,
+        "species": args.species,
         "prompt": args.prompt,
         "negative_prompt": args.negative_prompt,
         "pose_strength": args.pose_strength,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -92,6 +93,7 @@ from ..identity.uploaded_identity import (
     VERSION as UPLOADED_IDENTITY_SCAIL_REFERENCE_VERSION,
     build_uploaded_identity_scail_references,
 )
+from ..identity.species_classifier import classify_pet_species
 from .job_callback import JobCallbackReporter
 from .local_video_parts import (
     generation_quality as _local_video_generation_quality,
@@ -119,7 +121,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.19"
+API_VERSION = "2.25.0"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -736,12 +738,22 @@ DEFAULT_SUBJECT_PROFILE = (
     os.environ.get("DEFAULT_SUBJECT_PROFILE", "sleek_tabby_cat_v1").strip()
     or "sleek_tabby_cat_v1"
 )
-SUBJECT_REPLACEMENT_ACTIONS = ("eating", "grooming")
+CAT_SUBJECT_PROFILE = "sleek_tabby_cat_v1"
+DOG_SUBJECT_PROFILE = "dog_white_model_v1"
+CAT_SUBJECT_REPLACEMENT_ACTIONS = ("eating", "grooming")
+DOG_SUBJECT_REPLACEMENT_ACTIONS = ("eating", "standing")
+# Existing imports and the default profile UI continue to use the cat contract.
+SUBJECT_REPLACEMENT_ACTIONS = CAT_SUBJECT_REPLACEMENT_ACTIONS
+ALL_SUBJECT_REPLACEMENT_ACTIONS = tuple(
+    dict.fromkeys((*CAT_SUBJECT_REPLACEMENT_ACTIONS, *DOG_SUBJECT_REPLACEMENT_ACTIONS))
+)
 SUBJECT_REPLACEMENT_ACTION_LABELS = {
     "eating": "吃饭",
     "grooming": "舔毛",
+    "standing": "站立",
 }
 SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE = "pet-multipose-20260717-v2"
+DOG_SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE = "pet-dog-multipose-20260817-v1"
 SCAIL_PYTHON = Path(
     os.environ.get(
         "SCAIL_PYTHON",
@@ -1183,6 +1195,37 @@ IMAGE_PROFILES: dict[str, dict[str, Any]] = {
         "user_loras": [dict(item) for item in BASELINE_IMAGE_USER_LORAS],
         **BASELINE_IMAGE_GENERATION_SETTINGS,
     },
+    DOG_SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE: {
+        "id": DOG_SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE,
+        "revision": "dog-multipose-v1",
+        "label": "20260817 狗狗上传主体动作基准 v1",
+        "source_job_id": None,
+        "source_prompt": "",
+        "source_prompt_en": "",
+        "default_prompt": "保持上传狗狗身份的克制半写实 3D 数字分身",
+        "default_prompt_en": (
+            "Create an identity-faithful restrained semi-realistic stylized 3D "
+            "digital double of the exact uploaded dog."
+        ),
+        "pose_prompt_source": "dog_white_model_profile_actions",
+        "pose_presets": [],
+        "pose_seed_offsets": {"eating": 0, "standing": 2},
+        "default_poses": ["eating", "standing"],
+        "identity_palette_guard": True,
+        "identity_palette_policy": "source_palette_guard_v2",
+        # Cat/kitten photography LoRAs must never enter the dog route.
+        "user_loras": [],
+        "user_lora_mode": "replace",
+        "qwen_steps": 6,
+        "qwen_cfg": 1.0,
+        "qwen_denoise": 1.0,
+        "seed": 20260817,
+        "canonical_total_cap": 0.0,
+        "canonical_per_lora_cap": 0.0,
+        "pose_first_total_cap": 0.0,
+        "pose_first_per_lora_cap": 0.0,
+        "lock_retry_lora_strengths": True,
+    },
 }
 DEFAULT_IMAGE_PROFILE = os.environ.get(
     "DEFAULT_IMAGE_PROFILE", BASELINE_IMAGE_PROFILE_ID
@@ -1267,6 +1310,15 @@ CARTOON_NEGATIVE = (
     "extreme caricature, extreme chibi distortion, oversized head, oversized eyes, enlarged irises, "
     "oversized ears, disproportionately enlarged inner-ear panels, altered facial proportions"
 )
+DOG_CARTOON_NEGATIVE = (
+    "flat 2D drawing, anime, comic, watercolor, low-poly, hard plastic toy, "
+    "generic dog, different breed, cat, feline, kitten, changed coat color, "
+    "changed marking placement, changed face shape, changed eye color, changed "
+    "ear shape, changed muzzle, changed body proportions, changed tail, invented "
+    "stripes, invented spots, clothes, collar, harness, glasses, hat, shoes, "
+    "jewelry, accessory, costume, deformed anatomy, extra limb, missing limb, "
+    "duplicate subject, white border, halo, floor, shadow, text, logo, watermark"
+)
 
 QWEN_NEGATIVE = (
     "different identity, changed face, changed fur, changed clothing, duplicate subject, extra subject, "
@@ -1289,6 +1341,13 @@ CARTOON_WAN_NEGATIVE = (
     "needle-like fur, wire-like fur, rigid fur clumps, long isolated strands, dorsal ridge, mohawk, "
     "jagged fur silhouette, changing back contour, "
     "changed fur markings, changed eye color, generic cat"
+)
+DOG_CARTOON_WAN_NEGATIVE = (
+    "flat 2D style, style drift, face distortion, changing dog identity, different "
+    "breed, cat, feline, kitten, changing coat color or markings, changing ears, "
+    "muzzle or tail, clothes appearing, collar, harness, accessories, duplicate "
+    "subject, extra limbs, missing limbs, deformed anatomy, camera movement, zoom, "
+    "scene cut, scale drift, flicker, text, logo, watermark"
 )
 
 JOB_QUEUE: queue.Queue[str] = queue.Queue(maxsize=MAX_QUEUE_SIZE)
@@ -1533,9 +1592,49 @@ def _runtime_path(value: Any, *, field: str) -> str:
     return str(path)
 
 
+def subject_profile_species(profile: dict[str, Any]) -> str:
+    species = str(profile.get("species") or "cat").strip().lower()
+    if species not in {"cat", "dog"}:
+        raise ValueError(f"Subject profile species must be cat or dog: {species!r}")
+    return species
+
+
+def subject_profile_actions(profile: dict[str, Any]) -> tuple[str, ...]:
+    species = subject_profile_species(profile)
+    raw_actions = profile.get("supported_actions")
+    if raw_actions is None:
+        return (
+            CAT_SUBJECT_REPLACEMENT_ACTIONS
+            if species == "cat"
+            else DOG_SUBJECT_REPLACEMENT_ACTIONS
+        )
+    if not isinstance(raw_actions, list) or not raw_actions:
+        raise ValueError("Subject profile supported_actions must be a non-empty array")
+    actions = tuple(str(action).strip().lower() for action in raw_actions)
+    expected = (
+        CAT_SUBJECT_REPLACEMENT_ACTIONS
+        if species == "cat"
+        else DOG_SUBJECT_REPLACEMENT_ACTIONS
+    )
+    if actions != expected:
+        raise ValueError(
+            f"Subject profile {species} actions must be {list(expected)!r}"
+        )
+    return actions
+
+
+def subject_profile_for_species(species: str) -> str:
+    if species == "dog":
+        return DOG_SUBJECT_PROFILE
+    return CAT_SUBJECT_PROFILE
+
+
 def subject_profile_runtime(profile: dict[str, Any]) -> dict[str, Any]:
+    profile_actions = subject_profile_actions(profile)
     runtime = profile.get("runtime")
     if runtime is None:
+        if subject_profile_species(profile) != "cat":
+            raise ValueError("Dog subject profiles require an explicit runtime")
         return {
             "schema_version": int(profile.get("schema_version") or 1),
             "source": "legacy_defaults",
@@ -1555,7 +1654,7 @@ def subject_profile_runtime(profile: dict[str, Any]) -> dict[str, Any]:
                     ),
                     "seed_offset": int(SCAIL_ACTION_CONFIG[action]["seed_offset"]),
                 }
-                for action in SUBJECT_REPLACEMENT_ACTIONS
+                for action in profile_actions
             },
         }
     if profile.get("schema_version") != 2 or not isinstance(runtime, dict):
@@ -1591,7 +1690,7 @@ def subject_profile_runtime(profile: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_actions, dict):
         raise ValueError("Subject profile runtime lacks actions")
     resolved_actions: dict[str, dict[str, Any]] = {}
-    for action in SUBJECT_REPLACEMENT_ACTIONS:
+    for action in profile_actions:
         raw_action = raw_actions.get(action)
         if not isinstance(raw_action, dict):
             raise ValueError(f"Subject profile runtime lacks the {action} action")
@@ -1903,43 +2002,49 @@ def configure_uploaded_subject_validation(
     face, eyes, material, or style.
     """
 
-    if effective_config.get("profile_id") != "sleek_tabby_cat_v1":
+    profile_id = str(effective_config.get("profile_id") or "")
+    species = str(effective_config.get("species") or "cat")
+    cat_profile = profile_id == CAT_SUBJECT_PROFILE and species == "cat"
+    dog_profile = profile_id == DOG_SUBJECT_PROFILE and species == "dog"
+    if not cat_profile and not dog_profile:
         raise RuntimeError(
-            "Uploaded full-driver validation requires sleek_tabby_cat_v1."
+            "Uploaded full-driver validation requires a routed cat or dog profile."
         )
     standard_direct = effective_config.get("standard_direct")
-    if (
-        not isinstance(standard_direct, dict)
-        or standard_direct.get("enabled") is not True
-        or standard_direct.get("policy") != PROFILE_STANDARD_DIRECT_POLICY
-    ):
-        raise RuntimeError(
-            "Uploaded full-driver validation requires the frozen Main_case standard."
-        )
-    verify_profile_standard_direct_assets(standard_direct, actions)
+    if cat_profile:
+        if (
+            not isinstance(standard_direct, dict)
+            or standard_direct.get("enabled") is not True
+            or standard_direct.get("policy") != PROFILE_STANDARD_DIRECT_POLICY
+        ):
+            raise RuntimeError(
+                "Uploaded cat validation requires the frozen Main_case standard."
+            )
+        verify_profile_standard_direct_assets(standard_direct, actions)
 
     frozen = json.loads(json.dumps(effective_config))
     expected_pose_policies: dict[str, str] = {}
     expected_surface_gate_actions: list[str] = []
     for action in actions:
         action_config = frozen["actions"][action]
-        direct_action = standard_direct.get("actions", {}).get(action)
-        if not isinstance(direct_action, dict):
-            raise RuntimeError(
-                f"Uploaded full-driver validation lacks {action} standard metadata."
-            )
         runtime_path = str(action_config.get("driving_animation") or "")
         runtime_sha256 = str(
             action_config.get("driving_animation_sha256") or ""
         ).strip()
-        if (
-            runtime_path != str(direct_action.get("runtime") or "")
-            or not runtime_sha256
-            or runtime_sha256 != str(direct_action.get("runtime_sha256") or "")
-        ):
-            raise RuntimeError(
-                f"Uploaded {action} driver is not the frozen Main_case runtime."
-            )
+        if cat_profile:
+            direct_action = standard_direct.get("actions", {}).get(action)
+            if not isinstance(direct_action, dict):
+                raise RuntimeError(
+                    f"Uploaded cat validation lacks {action} standard metadata."
+                )
+            if (
+                runtime_path != str(direct_action.get("runtime") or "")
+                or not runtime_sha256
+                or runtime_sha256 != str(direct_action.get("runtime_sha256") or "")
+            ):
+                raise RuntimeError(
+                    f"Uploaded {action} driver is not the frozen Main_case runtime."
+                )
         uploaded_driver = action_config.get("uploaded_identity_driving")
         if not isinstance(uploaded_driver, dict):
             raise RuntimeError(
@@ -2011,7 +2116,7 @@ def configure_uploaded_subject_validation(
         action_config["geometry_reference_kind"] = (
             "uploaded_white_maquette_frame040_rgba"
         )
-        if GENERATION_VISUAL_AUDITS_BLOCKING:
+        if GENERATION_VISUAL_AUDITS_BLOCKING and cat_profile:
             require_uploaded_fur_surface_gate(action_config, action)
             action_config["fur_surface_gate"]["candidate_comparison_mode"] = (
                 UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
@@ -2026,9 +2131,14 @@ def configure_uploaded_subject_validation(
                     FULL_DRIVER_EATING_POSE_POLICY
                 )
 
-    frozen["prompt_profile"] = "uploaded-white-maquette-v1"
+    frozen["prompt_profile"] = (
+        "uploaded-dog-white-model-v1"
+        if dog_profile
+        else "uploaded-white-maquette-v1"
+    )
     frozen["upload_validation"] = {
         "policy": QWEN_FULL_BODY_FIRST_FRAME_PIPELINE,
+        "species": species,
         "scope": "qwen_full_body_and_action_keyframes_then_scail",
         "qwen_full_body_required": True,
         "qwen_action_keyframes_required": True,
@@ -2070,7 +2180,7 @@ def configure_uploaded_subject_validation(
             GENERATION_VISUAL_AUDITS_BLOCKING
         ),
         "profile_relative_surface_gate_used": False,
-        "uploaded_identity_absolute_surface_gate_used": True,
+        "uploaded_identity_absolute_surface_gate_used": cat_profile,
         "surface_candidate_comparison_mode": (
             UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE
         ),
@@ -2096,6 +2206,14 @@ def resolve_effective_subject_config(
     pose_strength: float | None,
 ) -> dict[str, Any]:
     runtime = subject_profile_runtime(profile)
+    species = subject_profile_species(profile)
+    supported_actions = subject_profile_actions(profile)
+    unsupported_actions = [action for action in actions if action not in supported_actions]
+    if unsupported_actions:
+        raise ValueError(
+            f"Subject profile {profile['id']} does not support actions: "
+            + ", ".join(unsupported_actions)
+        )
     base_seed = int(seed if seed is not None else runtime["default_base_seed"])
     if base_seed < 0:
         raise ValueError("seed must be non-negative")
@@ -2320,6 +2438,8 @@ def resolve_effective_subject_config(
         "schema_version": 1,
         "profile_schema_version": runtime["schema_version"],
         "profile_id": profile["id"],
+        "species": species,
+        "supported_actions": list(supported_actions),
         "profile_path": str(profile.get("_path") or ""),
         "profile_sha256": subject_profile_sha256(profile),
         "profile_fur_constraints": fur_constraints,
@@ -2463,7 +2583,7 @@ def load_subject_profile(profile_id: str | None) -> dict[str, Any]:
     action_references = profile.get("action_references")
     if not isinstance(action_references, dict):
         raise ValueError(f"Subject profile lacks action_references: {normalized}")
-    for action in SUBJECT_REPLACEMENT_ACTIONS:
+    for action in subject_profile_actions(profile):
         reference = action_references.get(action)
         if not isinstance(reference, str) or not reference.strip():
             raise ValueError(
@@ -2498,6 +2618,7 @@ def subject_profile_fur_guard(profile: dict[str, Any]) -> tuple[str, str]:
 
 
 def subject_profile_public(profile: dict[str, Any]) -> dict[str, Any]:
+    profile_actions = subject_profile_actions(profile)
     action_references = profile.get("action_references", {})
     driving_standards = profile.get("driving_standards")
     raw_standard_direct = profile.get("standard_direct")
@@ -2508,7 +2629,7 @@ def subject_profile_public(profile: dict[str, Any]) -> dict[str, Any]:
         raw_reference_actions = reference_assets.get("actions")
         reference_actions: dict[str, Any] = {}
         if isinstance(raw_reference_actions, dict):
-            for action in SUBJECT_REPLACEMENT_ACTIONS:
+            for action in profile_actions:
                 record = raw_reference_actions.get(action)
                 if not isinstance(record, dict):
                     continue
@@ -2557,7 +2678,7 @@ def subject_profile_public(profile: dict[str, Any]) -> dict[str, Any]:
         raw_actions = driving_standards.get("actions")
         standard_actions: dict[str, Any] = {}
         if isinstance(raw_actions, dict):
-            for action in SUBJECT_REPLACEMENT_ACTIONS:
+            for action in profile_actions:
                 record = raw_actions.get(action)
                 if not isinstance(record, dict):
                     continue
@@ -2596,7 +2717,7 @@ def subject_profile_public(profile: dict[str, Any]) -> dict[str, Any]:
     if isinstance(raw_standard_direct, dict):
         raw_direct_actions = raw_standard_direct.get("actions")
         if isinstance(raw_direct_actions, dict):
-            for action in SUBJECT_REPLACEMENT_ACTIONS:
+            for action in profile_actions:
                 record = raw_direct_actions.get(action)
                 if not isinstance(record, dict):
                     continue
@@ -2613,6 +2734,7 @@ def subject_profile_public(profile: dict[str, Any]) -> dict[str, Any]:
                 }
     return {
         "id": profile["id"],
+        "species": subject_profile_species(profile),
         "display_name": profile.get("display_name") or profile["id"],
         "status": profile.get("status"),
         "preview_action": profile.get("preview_action", "eating"),
@@ -2658,7 +2780,7 @@ def subject_profile_public(profile: dict[str, Any]) -> dict[str, Any]:
                     and Path(action_references[action]).is_file()
                 ),
             }
-            for action in SUBJECT_REPLACEMENT_ACTIONS
+            for action in profile_actions
         ],
     }
 
@@ -2688,19 +2810,50 @@ def parse_subject_actions(raw: str | None) -> list[str]:
         "grooming": "grooming",
         "licking": "grooming",
         "舔毛": "grooming",
+        "stand": "standing",
+        "standing": "standing",
+        "站立": "standing",
     }
     actions: list[str] = []
     for value in values:
         key = aliases.get(value.strip().lower()) or aliases.get(value.strip())
         if key is None:
             raise ValueError(
-                "Only eating and grooming subject-replacement actions are available."
+                "Only eating and grooming subject-replacement actions are available "
+                "for cats; standing is additionally available for dogs."
             )
         if key not in actions:
             actions.append(key)
     if not actions:
         raise ValueError("At least one subject-replacement action is required.")
     return actions
+
+
+def normalize_subject_actions_for_species(
+    actions: list[str],
+    species: str,
+) -> list[str]:
+    """Apply the temporary dog grooming alias without changing the cat route."""
+
+    if species == "dog":
+        supported = DOG_SUBJECT_REPLACEMENT_ACTIONS
+        aliases = {"grooming": "standing"}
+    elif species == "cat":
+        supported = CAT_SUBJECT_REPLACEMENT_ACTIONS
+        aliases = {}
+    else:
+        raise ValueError(f"Unsupported subject species: {species!r}")
+    normalized: list[str] = []
+    for action in actions:
+        mapped = aliases.get(action, action)
+        if mapped not in supported:
+            raise ValueError(
+                f"{species} subject replacement supports only: "
+                + ", ".join(supported)
+            )
+        if mapped not in normalized:
+            normalized.append(mapped)
+    return normalized
 
 
 def require_subject_replacement_assets(
@@ -3664,6 +3817,71 @@ action_video_rules = _local_video_prompting_workflows.action_video_rules
 build_cartoon_reference_prompt = _local_video_prompting_workflows.build_cartoon_reference_prompt
 
 
+def build_dog_qwen_prompt(
+    pose: str,
+    *,
+    transparent_gif: bool,
+    quality_retry: int,
+    pose_reference_available: bool,
+    profile_fur_lock: str,
+) -> str:
+    """Build a dog-only action prompt with no feline appearance leakage."""
+
+    background_prompt = (
+        CHROMA_BACKGROUND_PROMPT
+        if transparent_gif
+        else "Use a clean, simple, evenly lit background."
+    )
+    action = action_key(pose)
+    action_rules = action_first_frame_rules(pose, species="dog")
+    geometry_role = (
+        "Image 2 is the digest-bound appearance-free action geometry guide. It "
+        "controls only joint placement, pose, action prop placement, camera, "
+        "framing, subject scale and pure-green negative space. It never controls "
+        "identity, breed, face, coat, markings, natural body proportions, material "
+        "or lighting."
+        if pose_reference_available
+        else "Use the written action contract as the pose authority."
+    )
+    retry = ""
+    if quality_retry >= 2:
+        retry = (
+            "VALIDATION RETRY: correct the action geometry, full-body framing, "
+            "identity, anatomy and green background while keeping Image 1 unchanged "
+            "as the sole appearance authority."
+        )
+    if quality_retry >= 3:
+        retry += (
+            " Keep at least 12% pure-green clearance on all sides. Remove every "
+            "floor, shadow, accessory, extra prop, duplicate limb and extra subject."
+        )
+    foreground = (
+        "the dog and exactly one shallow food bowl"
+        if action == "eating"
+        else "the dog"
+    )
+    fur_contract = profile_fur_lock.strip() or (
+        "Preserve Image 1's exact natural coat length, volume, strand direction, "
+        "genuine tufts and source-bounded outer silhouette."
+    )
+    return f"""CRITICAL DOG ACTION TRANSFER CONTRACT:
+Image 1 is the approved canonical dog and the only identity and appearance authority. Preserve its exact apparent age, breed traits, head and muzzle silhouette, eyes, ears, nose, coat base colors, localized markings, natural coat length and volume, body proportions, paws, complete tail, and restrained stylized 3D material.
+{geometry_role}
+
+Repose the exact dog from Image 1 into Image 2's action layout without copying any white-model or guide appearance. Never turn the dog into a cat, feline, kitten, different breed, generic mascot, plastic toy, or white maquette. The dog remains completely natural and unclothed: no collar, harness, clothing, glasses, hat, shoes, jewelry, or accessory.
+
+Required action: {qwen_first_frame_spec(pose)}
+Action rules: {action_rules}
+
+Anatomy contract: exactly one complete dog with four anatomically attached legs, complete visible paws appropriate to the geometry, both ears, and one tail continuous from base to tip. No duplicate, fused, detached, hidden, humanlike, or extra limb. Preserve Image 1's body proportions while articulating them around Image 2's joints.
+
+Coat contract: {fur_contract} Never import the white model's white coat, face, eyes, proportions, smooth material, or lighting. Do not invent colors or markings absent from Image 1.
+
+Output exactly one clean static 512x512 first frame. Every pixel outside {foreground} must be flat uniform pure #00FF00 green. Keep at least 12% green clearance on every edge and keep the complete foreground within 72% of canvas width and height. No floor, floor line, shadow, reflection, scenery, text, logo, watermark, border, or halo.
+{retry}
+{background_prompt}"""
+
+
 def build_qwen_prompt(
     base_prompt: str,
     pose: str,
@@ -3672,6 +3890,7 @@ def build_qwen_prompt(
     pose_reference_available: bool = False,
     profile_fur_lock: str = "",
     pose_identity_input_policy: str = POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+    species: str = "cat",
 ) -> str:
     if pose_identity_input_policy not in {
         POSE_IDENTITY_INPUT_POLICY_CANONICAL,
@@ -3682,6 +3901,16 @@ def build_qwen_prompt(
         raise ValueError(
             f"Unsupported pose identity input policy: {pose_identity_input_policy}"
         )
+    if species == "dog":
+        return build_dog_qwen_prompt(
+            pose,
+            transparent_gif=transparent_gif,
+            quality_retry=quality_retry,
+            pose_reference_available=pose_reference_available,
+            profile_fur_lock=profile_fur_lock,
+        )
+    if species != "cat":
+        raise ValueError(f"Unsupported prompt species: {species!r}")
     direct_uploaded_identity = (
         pose_identity_input_policy == POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD
     )
@@ -5733,7 +5962,7 @@ def prepare_pose_input(
                 "pose": pose,
                 "action": (
                     action_key(pose)
-                    if action_key(pose) in SUBJECT_REPLACEMENT_ACTIONS
+                    if action_key(pose) in ALL_SUBJECT_REPLACEMENT_ACTIONS
                     else None
                 ),
                 "action_label": SUBJECT_REPLACEMENT_ACTION_LABELS.get(action_key(pose)),
@@ -6279,7 +6508,7 @@ def list_subject_profiles(
         "items": items,
         "actions": [
             {"id": action, "label": SUBJECT_REPLACEMENT_ACTION_LABELS[action]}
-            for action in SUBJECT_REPLACEMENT_ACTIONS
+            for action in ALL_SUBJECT_REPLACEMENT_ACTIONS
         ],
     }
 
@@ -6292,8 +6521,11 @@ def subject_profile_preview(
 ) -> FileResponse:
     try:
         profile = load_subject_profile(profile_id)
-        selected_action = parse_subject_actions(
-            action or str(profile.get("preview_action") or "eating")
+        selected_action = normalize_subject_actions_for_species(
+            parse_subject_actions(
+                action or str(profile.get("preview_action") or "eating")
+            ),
+            subject_profile_species(profile),
         )[0]
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -6382,19 +6614,6 @@ async def create_subject_replacement_api_job(
     image_right: UploadFile | None = None,
     callback_enabled: bool = False,
 ) -> dict[str, Any]:
-    try:
-        actions = parse_subject_actions(actions_raw)
-        profile = load_subject_profile(subject_profile_id)
-        effective_subject_config = resolve_effective_subject_config(
-            profile,
-            actions,
-            seed=seed,
-            scail_steps=scail_steps,
-            pose_strength=pose_strength,
-        )
-    except (ValueError, FileNotFoundError) as exc:
-        await close_uploaded_identity_uploads(image, image_left, image_right)
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if output_format not in {"mp4", "transparent_gif"}:
         await close_uploaded_identity_uploads(image, image_left, image_right)
         raise HTTPException(
@@ -6414,6 +6633,50 @@ async def create_subject_replacement_api_job(
         image_right,
     )
     raw = raw_views.get("front")
+
+    try:
+        requested_actions = parse_subject_actions(actions_raw)
+        if raw is not None:
+            species_classification = await asyncio.to_thread(
+                classify_pet_species,
+                raw_views,
+                project_root=PROJECT_ROOT,
+            )
+            species = str(species_classification["species"])
+            routed_profile_id = subject_profile_for_species(species)
+            profile = load_subject_profile(routed_profile_id)
+        else:
+            profile = load_subject_profile(subject_profile_id)
+            species = subject_profile_species(profile)
+            species_classification = {
+                "species": species,
+                "scores": None,
+                "margin": None,
+                "per_view": [],
+                "view_count": 0,
+                "policy": "subject_profile_declared_species_v1",
+                "forced_binary": True,
+                "unknown_class": False,
+                "fallback": False,
+            }
+        actions = normalize_subject_actions_for_species(
+            requested_actions,
+            species,
+        )
+        effective_subject_config = resolve_effective_subject_config(
+            profile,
+            actions,
+            seed=seed,
+            scail_steps=scail_steps,
+            pose_strength=pose_strength,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    reference_image_profile_id = (
+        DOG_SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE
+        if species == "dog"
+        else SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE
+    )
 
     prompt = prompt.strip()
     if prompt:
@@ -6543,9 +6806,13 @@ async def create_subject_replacement_api_job(
             "poses_en": actions,
             "pose_count": len(actions),
             "subject_profile": profile["id"],
+            "requested_subject_profile": subject_profile_id,
+            "subject_profile_routed_by_species": raw is not None,
             "subject_profile_label": profile.get("display_name") or profile["id"],
             "subject_profile_path": profile["_path"],
             "subject_profile_sha256": effective_subject_config["profile_sha256"],
+            "species": species,
+            "species_classification": species_classification,
             "subject_source": subject_source,
             "requested_subject_source": ("upload" if raw is not None else "profile"),
             "effective_subject_source": subject_source,
@@ -6621,7 +6888,7 @@ async def create_subject_replacement_api_job(
                 )
             ),
             "reference_image_profile": (
-                SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE if raw is not None else None
+                reference_image_profile_id if raw is not None else None
             ),
             "reference_normalization_contract": (
                 {
@@ -6637,7 +6904,9 @@ async def create_subject_replacement_api_job(
                     "action_stage_identity_input": (
                         "normalized_qwen_full_body_canonical_image1"
                     ),
-                    "action_stage_geometry_input": ("main_case_action_guide_image2"),
+                    "action_stage_geometry_input": (
+                        "species_profile_action_guide_image2"
+                    ),
                     "raw_upload_sent_to_scail": False,
                     "selected_candidate_byte_copied_to_scail_reference": True,
                     "wan_green_derived_one_way_from_rgba": True,
@@ -6707,7 +6976,11 @@ async def create_subject_replacement_api_job(
             "duration_seconds": final_duration,
             "seed": resolved_seed,
             "visual_style": (
-                "uploaded_identity_qwen_full_body_action_keyframes_scail"
+                (
+                    "uploaded_dog_identity_qwen_full_body_action_keyframes_scail"
+                    if species == "dog"
+                    else "uploaded_identity_qwen_full_body_action_keyframes_scail"
+                )
                 if raw is not None
                 else (
                     "main_case_profile_standard_direct"
