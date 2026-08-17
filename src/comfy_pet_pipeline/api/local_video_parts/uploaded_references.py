@@ -625,7 +625,11 @@ def prepare_uploaded_subject_qwen_references(
         pose_reference_source_sha256s=pose_reference_source_sha256s,
         pose_reference_input_sha256s=pose_reference_input_sha256s,
         pose_reference_metadata=pose_reference_metadata,
-        reference_pose_source="per_action_species_profile_driver_geometry",
+        reference_pose_source=(
+            "per_action_main_case_driver_geometry"
+            if species == "cat"
+            else "per_action_species_profile_driver_geometry"
+        ),
         pose_reference_policy=pose_reference_policies,
         pose_reference_guide_style="per_action_main_case_driver_geometry_v2",
         pose_reference_guide_styles=pose_reference_guide_styles,

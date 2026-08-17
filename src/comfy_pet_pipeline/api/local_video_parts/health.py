@@ -55,6 +55,7 @@ def health() -> dict[str, Any]:
     translator_ok = not PROMPT_TRANSLATION_ENABLED or not translator_missing
     subject_profile_items: list[dict[str, Any]] = []
     subject_replacement_missing: list[str] = []
+    species_route_missing: list[str] = []
     dog_profile_health: dict[str, Any] = {"status": "unavailable"}
     classifier_paths = {
         "python": Path(
@@ -82,7 +83,7 @@ def health() -> dict[str, Any]:
         "missing": classifier_missing,
     }
     if classifier_missing:
-        subject_replacement_missing.extend(
+        species_route_missing.extend(
             f"species classifier asset is missing: {path}"
             for path in classifier_missing
         )
@@ -555,8 +556,9 @@ def health() -> dict[str, Any]:
             "profile_id": DOG_SUBJECT_PROFILE,
             "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
         }
-        subject_replacement_missing.append(f"dog profile health failed: {exc}")
+        species_route_missing.append(f"dog profile health failed: {exc}")
     subject_replacement_ok = not subject_replacement_missing
+    all_species_ready = subject_replacement_ok and not species_route_missing
     return {
         "status": (
             "ok"
@@ -566,7 +568,7 @@ def health() -> dict[str, Any]:
                 and API_KEY
                 and ffmpeg_ok
                 and translator_ok
-                and subject_replacement_ok
+                and all_species_ready
             )
             else "degraded"
         ),
@@ -622,6 +624,8 @@ def health() -> dict[str, Any]:
             "default": True,
             "enabled": subject_replacement_ok,
             "ok": subject_replacement_ok,
+            "all_species_ready": all_species_ready,
+            "species_route_missing": species_route_missing,
             "species_classifier": species_classifier_health,
             "dog_profile": dog_profile_health,
             "species_routes": {

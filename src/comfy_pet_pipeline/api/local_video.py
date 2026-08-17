@@ -1624,9 +1624,11 @@ def subject_profile_actions(profile: dict[str, Any]) -> tuple[str, ...]:
 
 
 def subject_profile_for_species(species: str) -> str:
+    if species == "cat":
+        return CAT_SUBJECT_PROFILE
     if species == "dog":
         return DOG_SUBJECT_PROFILE
-    return CAT_SUBJECT_PROFILE
+    raise ValueError(f"Unsupported classified species: {species!r}")
 
 
 def subject_profile_runtime(profile: dict[str, Any]) -> dict[str, Any]:
