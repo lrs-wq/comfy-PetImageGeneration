@@ -760,6 +760,41 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         self.assertLessEqual(max(chest[:3]) - min(chest[:3]), 3)
         self.assertEqual(corrected.getchannel("A").tobytes(), alpha_before)
 
+    def test_identity_aware_despill_reconstructs_warm_local_coat_chroma(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "warm-dog-candidate.png"
+            image = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            warm_coat = (194, 158, 96, 255)
+            draw.rectangle((32, 24, 223, 231), fill=warm_coat)
+            draw.rectangle((76, 138, 179, 208), fill=(82, 172, 94, 255))
+            image.save(path)
+            alpha_before = image.getchannel("A").tobytes()
+            source_palette = {
+                "available": True,
+                "fractions": {"green": 0.0, "blue_or_cyan": 0.0},
+                "green_or_cyan_body_fraction": 0.0,
+            }
+
+            result = pipeline.neutralize_uploaded_identity_chroma_spill(
+                path,
+                source_palette,
+            )
+            with Image.open(path) as corrected_image:
+                corrected = corrected_image.convert("RGBA")
+
+        chest = corrected.getpixel((128, 170))
+        self.assertTrue(result["applied"], result)
+        self.assertEqual(
+            result["chroma_reconstruction"],
+            "local_lab_telea_inpaint",
+        )
+        self.assertGreater(result["chroma_donor_pixels"], 0)
+        self.assertGreater(chest[0], chest[1])
+        self.assertGreater(chest[1], chest[2])
+        self.assertGreater(max(chest[:3]) - min(chest[:3]), 20)
+        self.assertEqual(corrected.getchannel("A").tobytes(), alpha_before)
+
     def test_unavailable_identity_palette_signature_fails_closed(self) -> None:
         source = {"available": True, "fractions": {}}
         candidate = {"available": False, "reason": "empty_subject_mask"}

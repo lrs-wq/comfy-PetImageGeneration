@@ -173,7 +173,8 @@ EATING_NEGATIVE_PROMPT = (
 DOG_EATING_PROMPT = (
     "A complete full-body restrained stylized 3D dog matching the supplied "
     "reference as the only identity and appearance authority. Preserve the exact "
-    "breed traits, apparent age, head and muzzle silhouette, eye color and spacing, "
+    "breed traits, apparent age, skull width, forehead slope, cheek width, exact "
+    "muzzle length, width and taper, eye size, color and spacing, "
     "ear shape and carriage, nose, coat colors, localized markings, natural coat "
     "length and volume, body proportions, paws, and complete tail. Use the "
     "neutral-white dog anatomy driver only for eating motion timing, joint "
@@ -182,7 +183,11 @@ DOG_EATING_PROMPT = (
     "Follow the supplied eating sequence precisely: lower the dog's muzzle naturally "
     "into exactly one fixed shallow bowl and raise it again while keeping all four "
     "legs anatomically attached and stable. Keep identity, coat markings, scale, "
-    "camera and background temporally stable with the complete dog uncropped."
+    "camera and background temporally stable with the complete dog uncropped. "
+    "Preserve an adult as an adult: never shorten or round the muzzle, enlarge the "
+    "head or eyes, or add a puppy-like panting smile. The entire background remains "
+    "perfectly uniform pure #00FF00 chroma-key green in every frame, with no floor, "
+    "horizon, shadow, reflection, gradient, texture, flicker, or green spill on fur."
 )
 
 DOG_STANDING_PROMPT = (
@@ -191,21 +196,30 @@ DOG_STANDING_PROMPT = (
     "breed traits, apparent age, face, muzzle, eyes, ears, nose, coat colors and "
     "markings, natural coat length and volume, body proportions, paws, and complete "
     "tail. Use the neutral-white dog anatomy driver only for the standing action's "
-    "joint trajectories, stable upright idle geometry, gentle tail motion, camera, "
+    "joint trajectories, driver-defined seated-or-upright idle geometry, gentle tail "
+    "motion, camera, "
     "scale and framing. Never copy the driver's white coat, face, eyes, body "
     "proportions, material, or lighting. Keep one complete unclothed dog, stable "
     "identity, coherent anatomy and a static camera. No prop, collar, harness, "
-    "clothing, floor, shadow, text, logo, or extra subject."
+    "clothing, floor, shadow, text, logo, or extra subject. Preserve the exact muzzle "
+    "length, head-to-body ratio, eye size, mouth posture and apparent age; never make "
+    "an adult look like a puppy or add a panting smile. The entire background remains "
+    "perfectly uniform pure #00FF00 chroma-key green in every frame, with no floor, "
+    "horizon, shadow, reflection, gradient, texture, flicker, or green spill on fur."
 )
 
 DOG_NEGATIVE_PROMPT = (
     "cat, feline, kitten, different dog, different breed, generic dog, copied "
     "white-model identity, white-model face, white-model coat, changed face, changed "
-    "muzzle, changed ears, changed eye color, changed coat color, changed markings, "
+    "muzzle, shortened muzzle, shortened snout, rounded baby face, puppy when source "
+    "is adult, younger dog, enlarged head, oversized eyes, enlarged irises, panting "
+    "smile, tongue out, changed ears, changed eye color, changed coat color, changed markings, "
     "changed coat length, changed body proportions, extra limb, missing limb, "
     "duplicated limb, detached paw, fused legs, extra tail, duplicate subject, "
     "collar, harness, clothing, accessory, camera movement, zoom, scene cut, flicker, "
-    "floor, shadow, text, logo, watermark"
+    "white background, gray background, black background, non-green background, floor, "
+    "floor line, horizon, shadow, reflection, background gradient, background texture, "
+    "green bounce light, green color spill, green rim light, cyan rim light, text, logo, watermark"
 )
 
 

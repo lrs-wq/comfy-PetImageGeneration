@@ -604,7 +604,7 @@ UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE = (
     "uploaded_identity_absolute_surface_contract_v1"
 )
 UPLOADED_IDENTITY_CHROMA_SPILL_POLICY = (
-    "source_palette_guarded_green_spill_neutralization_v1"
+    "source_palette_guarded_local_chroma_reconstruction_v2"
 )
 BOWL_IDENTITY_PALETTE_BOTTOM_EXCLUSION = max(
     0.0,
@@ -1314,7 +1314,10 @@ DOG_CARTOON_NEGATIVE = (
     "flat 2D drawing, anime, comic, watercolor, low-poly, hard plastic toy, "
     "generic dog, different breed, cat, feline, kitten, changed coat color, "
     "changed marking placement, changed face shape, changed eye color, changed "
-    "ear shape, changed muzzle, changed body proportions, changed tail, invented "
+    "ear shape, changed muzzle, shortened muzzle, shortened snout, rounded baby "
+    "face, puppy when the source is adult, younger dog, enlarged head, oversized "
+    "eyes, enlarged irises, panting smile, tongue out, changed body proportions, "
+    "changed tail, invented "
     "stripes, invented spots, clothes, collar, harness, glasses, hat, shoes, "
     "jewelry, accessory, costume, deformed anatomy, extra limb, missing limb, "
     "duplicate subject, white border, halo, floor, shadow, text, logo, watermark"
@@ -3876,6 +3879,8 @@ Required action: {qwen_first_frame_spec(pose)}
 Action rules: {action_rules}
 
 Anatomy contract: exactly one complete dog with four anatomically attached legs, complete visible paws appropriate to the geometry, both ears, and one tail continuous from base to tip. No duplicate, fused, detached, hidden, humanlike, or extra limb. Preserve Image 1's body proportions while articulating them around Image 2's joints.
+
+Face and age contract: keep Image 1's exact skull width, forehead slope, cheek width, muzzle length, muzzle width and taper, eye diameter and spacing, ear scale, nose scale, mouth posture and apparent age. Never make an adult dog look like a puppy, shorten or round the muzzle, enlarge the head or eyes, or add a panting smile unless the required action physically needs an open mouth.
 
 Coat contract: {fur_contract} Never import the white model's white coat, face, eyes, proportions, smooth material, or lighting. Do not invent colors or markings absent from Image 1.
 

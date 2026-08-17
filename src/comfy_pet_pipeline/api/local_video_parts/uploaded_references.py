@@ -22,7 +22,11 @@ def prepare_uploaded_subject_qwen_references(
         job = dict(JOBS[job_id])
     job_dir = OUTPUT_ROOT / job_id
     upload_integrity = verify_uploaded_identity_submission(job, job_dir)
-    identity_view_audit = compose_uploaded_identity_view_audit(upload_integrity)
+    species = str(job.get("species") or "cat").strip().lower()
+    identity_view_audit = compose_uploaded_identity_view_audit(
+        upload_integrity,
+        species=species,
+    )
     write_json_atomic(
         job_dir / "workflows" / "uploaded_identity_view_set_audit.json",
         identity_view_audit,
@@ -89,7 +93,6 @@ def prepare_uploaded_subject_qwen_references(
             identity_view_audit["issues"],
         )
 
-    species = str(job.get("species") or "cat").strip().lower()
     image_profile_id = str(
         job.get("reference_image_profile")
         or (

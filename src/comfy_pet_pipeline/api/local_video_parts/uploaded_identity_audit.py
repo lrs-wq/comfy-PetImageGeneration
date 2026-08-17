@@ -292,6 +292,8 @@ def canonical_upper_body_palette_reference(
 
 def compose_uploaded_identity_view_audit(
     upload_integrity: dict[str, Any],
+    *,
+    species: str = "cat",
 ) -> dict[str, Any]:
     """Combine optional view-set checks with required front-view validation."""
     _sync_local_video_runtime(globals(), {"compose_uploaded_identity_view_audit"})
@@ -300,7 +302,8 @@ def compose_uploaded_identity_view_audit(
     if not isinstance(views, dict) or not isinstance(views.get("front"), dict):
         raise RuntimeError("Uploaded identity front view integrity is invalid.")
     front_view_audit = audit_uploaded_front_identity_view(
-        Path(views["front"]["input_path"])
+        Path(views["front"]["input_path"]),
+        species=species,
     )
     if GENERATION_VISUAL_AUDITS_BLOCKING:
         audit = audit_uploaded_identity_view_set(upload_integrity)
@@ -360,7 +363,7 @@ def compose_uploaded_identity_view_audit(
             "warnings": advisory_issues,
             "structural_audit_status": structural_status,
             "front_view_audit": front_view_audit,
-            "front_view_audit_required": True,
+            "front_view_audit_required": str(species).strip().lower() == "cat",
             "front_view_audit_blocking": front_blocking,
         }
     )

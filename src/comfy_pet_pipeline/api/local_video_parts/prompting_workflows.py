@@ -91,9 +91,10 @@ def subject_replacement_pose_prompt(action: str, *, species: str = "cat") -> str
         return SUBJECT_REPLACEMENT_GROOMING_POSE_PROMPT
     if action == "standing" and species == "dog":
         return (
-            "standing | A complete full-body dog in the stable upright idle pose "
-            "shown by the action geometry. Keep the chest lifted, all visible legs "
-            "anatomically attached and grounded, both ears and the complete tail "
+            "standing | A complete full-body dog in the stable idle pose shown by "
+            "the supplied action geometry. The geometry, rather than the action "
+            "label, controls whether the torso is seated or upright. Keep all "
+            "visible legs anatomically attached, both ears and the complete tail "
             "readable. No prop, clothing, collar, harness, floor, or extra subject."
         )
     raise ValueError(f"Unsupported subject-replacement action: {action}")
@@ -147,9 +148,10 @@ def action_first_frame_rules(pose: str, *, species: str = "cat") -> str:
         )
     if species == "dog" and action == "standing":
         return (
-            "No prop. Match Image 2's stable upright dog idle geometry exactly, "
-            "including torso height, leg placement, head angle, camera, subject scale "
-            "and tail layout. Keep every visible paw grounded and every leg attached. "
+            "No prop. Match Image 2's stable dog idle geometry exactly, including "
+            "its seated-or-upright torso state, leg placement, head angle, camera, "
+            "subject scale and tail layout. Keep every visible paw grounded and "
+            "every leg attached. "
             "Show one complete natural dog with both ears and the tail from base to "
             "tip; no pose redesign, extra limb, collar, harness, clothing or object."
         )
@@ -241,9 +243,9 @@ The uploaded identity image, or the role-labeled uploaded identity image set whe
 User creative direction: {creative_direction}
 Apply it only to restrained rendering quality and expression. It cannot override identity, anatomy, full-body framing, natural coat, clothing, or background rules.
 
-Identity lock: preserve the uploaded dog's exact apparent age, breed traits, head and muzzle silhouette, eye color and spacing, ear shape and carriage, nose color, coat base colors, localized markings, natural coat length and volume, body proportions, leg length, paws, and complete tail. Preserve natural asymmetry and never invent markings.{palette_section}{fur_section}
+Identity lock: preserve the uploaded dog's exact apparent age, breed traits, skull width, forehead slope, cheek width, head-to-body ratio, muzzle length, muzzle width and taper, eye diameter and spacing, ear size and carriage, nose size and color, mouth posture, coat base colors, localized markings, natural coat length and volume, body proportions, leg length, paws, and complete tail. Preserve natural asymmetry and never invent markings. The front view is authoritative for the face and expression; side views are authoritative for muzzle projection, body length, tail and side-specific markings.{palette_section}{fur_section}
 
-Target style: a polished restrained semi-realistic stylized 3D digital double under neutral-white high-key character lighting. Identity outranks stylization. Do not make the dog younger, chibi, toy-like, feline, or generic. The dog is completely natural and unclothed: no collar, harness, glasses, bow, shirt, costume, shoes, jewelry, or accessory.
+Target style: a polished restrained semi-realistic stylized 3D digital double under neutral-white high-key character lighting. Identity outranks stylization. Preserve an adult as an adult and a puppy as a puppy; never shorten the muzzle, round the forehead, enlarge the eyes or head, add a panting smile, or otherwise make the dog younger, chibi, toy-like, feline, or generic. Preserve the uploaded front view's closed- or open-mouth state unless an action explicitly requires mouth motion. The dog is completely natural and unclothed: no collar, harness, glasses, bow, shirt, costume, shoes, jewelry, or accessory.
 
 Composition lock: one complete dog in a neutral stable upright four-paw pose at a slight three-quarter front angle. Show both ear tips, the full torso, exactly four anatomically attached legs and complete paws, and the tail continuously from base to tip. Keep at least 15% clear green margin on every edge and keep the dog within 68% of canvas width and height. Nothing may be cropped, fused, hidden behind the torso, or outside the canvas.
 

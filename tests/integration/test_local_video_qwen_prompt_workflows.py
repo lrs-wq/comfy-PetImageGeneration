@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 
 import local_video_api as pipeline
+from src.comfy_pet_pipeline.pipeline import subject_replacement as scail_pipeline
 
 from tests.integration.local_video_subject_replacement_test_support import (
     SubjectReplacementQwenReferenceTestBase,
@@ -16,6 +17,39 @@ from tests.integration.local_video_subject_replacement_test_support import (
 
 
 class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceTestBase):
+    def test_dog_prompts_lock_age_muzzle_chroma_and_driver_defined_idle_pose(
+        self,
+    ) -> None:
+        canonical = pipeline.build_cartoon_reference_prompt(species="dog")
+        standing_pose = pipeline.subject_replacement_pose_prompt(
+            "standing",
+            species="dog",
+        )
+        standing_rules = pipeline.action_first_frame_rules(
+            standing_pose,
+            species="dog",
+        )
+        action_prompt = pipeline.build_qwen_prompt(
+            "",
+            standing_pose,
+            transparent_gif=True,
+            pose_reference_available=True,
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+            species="dog",
+        )
+
+        self.assertIn("muzzle length", canonical)
+        self.assertIn("Preserve an adult as an adult", canonical)
+        self.assertIn("front view is authoritative for the face", canonical)
+        self.assertIn("seated or upright", standing_pose)
+        self.assertNotIn("stable upright", standing_pose)
+        self.assertIn("seated-or-upright torso state", standing_rules)
+        self.assertIn("Face and age contract", action_prompt)
+        self.assertIn("Never make an adult dog look like a puppy", action_prompt)
+        self.assertIn("pure #00FF00", scail_pipeline.DOG_EATING_PROMPT)
+        self.assertIn("pure #00FF00", scail_pipeline.DOG_STANDING_PROMPT)
+        self.assertIn("non-green background", scail_pipeline.DOG_NEGATIVE_PROMPT)
+
     def test_direct_uploaded_eating_prompt_assigns_image_roles(self) -> None:
         prompt = pipeline.build_qwen_prompt(
             "",

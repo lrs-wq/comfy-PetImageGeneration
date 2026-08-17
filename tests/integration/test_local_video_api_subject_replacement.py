@@ -224,6 +224,28 @@ class SubjectReplacementParsingTests(unittest.TestCase):
             ["eating", "standing"],
         )
         self.assertEqual(set(runtime["actions"]), {"eating", "standing"})
+        self.assertEqual(
+            profile["uploaded_identity_driving"]["revision"],
+            "dog-user-white-model-20260817-v2",
+        )
+        self.assertEqual(
+            profile["uploaded_identity_driving"]["actions"]["eating"]["loop_policy"],
+            "full_source_down_up_down_cycle_2x_v1",
+        )
+        self.assertGreaterEqual(
+            profile["uploaded_identity_driving"]["actions"]["eating"]["endpoint_ssim"],
+            0.95,
+        )
+        self.assertTrue(
+            runtime["actions"]["eating"]["driving_animation"].endswith(
+                "20260817-user-white-model-v2/"
+                "eating_white_model_driver_512x512_81f_16fps.mp4"
+            )
+        )
+        self.assertEqual(
+            runtime["actions"]["eating"]["driving_animation_sha256"],
+            "df1526fd3c5807c0fa2fe774e9e4622504fd4f8b6dfbf6cb3f885c2e5b958aa6",
+        )
         for action in ("eating", "standing"):
             action_runtime = runtime["actions"][action]
             self.assertTrue(Path(action_runtime["driving_animation"]).is_file())

@@ -483,8 +483,10 @@ def neutralize_uploaded_identity_chroma_spill(
     identities whose source coat has no green/cyan body region, Qwen can still
     paint the screen reflection into opaque muzzle, chest, or flank pixels.  A
     paired compact eye detector protects plausible irises; remaining
-    green-dominant foreground pixels are neutralized while alpha stays byte
-    identical.  A downstream localized palette gate verifies the result.
+    green-dominant foreground pixels have their Lab chroma reconstructed from
+    nearby unaffected coat pixels while luminance and alpha stay byte identical.
+    This avoids turning warm or patterned coats into gray patches.  A downstream
+    localized palette gate verifies the result.
     """
     _sync_local_video_runtime(globals(), {"neutralize_uploaded_identity_chroma_spill"})
 
@@ -649,16 +651,44 @@ def neutralize_uploaded_identity_chroma_spill(
     alpha_hash_before = hashlib.sha256(alpha.tobytes()).hexdigest()
     if corrected_count:
         rgb = rgba[:, :, :3]
-        # Neutralize chroma in Lab while preserving luminance and therefore fur
-        # texture.  Reducing only G converts a green reflection into cyan when
-        # B becomes the new maximum; setting a/b to neutral removes both casts.
+        # Reconstruct chroma in Lab while preserving luminance and therefore fur
+        # texture.  A flat neutral a/b replacement removed green but produced
+        # visible gray patches on warm dogs.  Seed non-donor pixels with the
+        # subject's robust coat chroma, then let Telea propagate local intact coat
+        # color across the detected spill region.  Alpha is never touched.
         lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
-        neutral_lab = lab.copy()
-        neutral_lab[:, :, 1][correction] = 128
-        neutral_lab[:, :, 2][correction] = 128
-        neutral_rgb = cv2.cvtColor(neutral_lab, cv2.COLOR_LAB2RGB)
-        rgb[correction] = neutral_rgb[correction]
+        donor = foreground & ~correction & ~paired_eye_mask
+        donor_count = int(np.count_nonzero(donor))
+        if donor_count >= 64:
+            fallback_a = int(np.median(lab[:, :, 1][donor]))
+            fallback_b = int(np.median(lab[:, :, 2][donor]))
+        else:
+            fallback_a = 128
+            fallback_b = 128
+        inpaint_radius = max(
+            3,
+            min(15, int(round(min(subject_width, subject_height) * 0.025))),
+        )
+        correction_u8 = correction.astype(np.uint8) * 255
+        reconstructed_lab = lab.copy()
+        for channel, fallback in ((1, fallback_a), (2, fallback_b)):
+            prepared = lab[:, :, channel].copy()
+            prepared[~donor] = fallback
+            repaired = cv2.inpaint(
+                prepared,
+                correction_u8,
+                float(inpaint_radius),
+                cv2.INPAINT_TELEA,
+            )
+            reconstructed_lab[:, :, channel][correction] = repaired[correction]
+        reconstructed_rgb = cv2.cvtColor(reconstructed_lab, cv2.COLOR_LAB2RGB)
+        rgb[correction] = reconstructed_rgb[correction]
         Image.fromarray(rgba, mode="RGBA").save(path, format="PNG", optimize=True)
+    else:
+        donor_count = 0
+        fallback_a = 128
+        fallback_b = 128
+        inpaint_radius = 0
 
     remaining = spill_mask(rgba[:, :, :3])
     remaining_count = int(np.count_nonzero(remaining))
@@ -668,6 +698,10 @@ def neutralize_uploaded_identity_chroma_spill(
             "applied": bool(corrected_count),
             "reason": "corrected" if corrected_count else "only_paired_eye_accents",
             "corrected_pixels": corrected_count,
+            "chroma_reconstruction": "local_lab_telea_inpaint",
+            "chroma_donor_pixels": donor_count,
+            "fallback_lab_ab": [fallback_a, fallback_b],
+            "inpaint_radius": inpaint_radius,
             "protected_eye_pixels": int(np.count_nonzero(paired_eye_mask)),
             "protected_eye_component_labels": protected_labels,
             "detected_pixels_after": remaining_count,

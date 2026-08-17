@@ -65,6 +65,27 @@ class UploadedFrontViewDetectorTests(unittest.TestCase):
         )
         self.assertFalse(audit["blocking"])
 
+    def test_dog_front_view_does_not_run_cat_face_cascade(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image_path = Path(temporary) / "front-dog.png"
+            Image.new("RGB", (400, 500), "white").save(image_path)
+            with patch.object(
+                front_view.cv2,
+                "CascadeClassifier",
+                side_effect=AssertionError("cat cascade must not run for dogs"),
+            ):
+                audit = front_view.audit_uploaded_front_identity_view(
+                    image_path,
+                    species="dog",
+                )
+
+        self.assertTrue(audit["acceptable"])
+        self.assertEqual(audit["species"], "dog")
+        self.assertEqual(audit["status"], "skipped_advisory")
+        self.assertFalse(audit["frontality_verified"])
+        self.assertEqual(audit["issues"], [])
+        self.assertEqual(audit["classifiers_requested"], [])
+
     def test_audit_internal_error_is_reported_and_generation_can_continue(self) -> None:
         with patch.object(
             front_view,
@@ -116,6 +137,40 @@ class UploadedFrontViewPipelineTests(unittest.TestCase):
         )
         self.assertEqual(audit["status"], "warning_advisory")
         self.assertFalse(audit["front_view_audit_blocking"])
+
+    def test_dog_compose_skips_cat_frontality_without_recording_warning(self) -> None:
+        integrity = {
+            "view_mode": "single_view",
+            "view_roles": ["front"],
+            "views": {"front": {"input_path": Path("front-dog.png")}},
+        }
+        dog_front = {
+            "policy": pipeline.UPLOADED_FRONT_VIEW_AUDIT_POLICY,
+            "role": "front",
+            "species": "dog",
+            "blocking": False,
+            "acceptable": True,
+            "status": "skipped_advisory",
+            "issues": [],
+        }
+        with (
+            patch.object(pipeline, "GENERATION_VISUAL_AUDITS_BLOCKING", False),
+            patch.object(
+                pipeline,
+                "audit_uploaded_front_identity_view",
+                return_value=dog_front,
+            ) as front_audit,
+        ):
+            audit = pipeline.compose_uploaded_identity_view_audit(
+                integrity,
+                species="dog",
+            )
+
+        front_audit.assert_called_once_with(Path("front-dog.png"), species="dog")
+        self.assertTrue(audit["acceptable"])
+        self.assertEqual(audit["status"], "passed_advisory")
+        self.assertEqual(audit["issues"], [])
+        self.assertFalse(audit["front_view_audit_required"])
 
     def test_prepare_records_public_warning_stage_and_continues_pipeline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
