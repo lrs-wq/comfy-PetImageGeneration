@@ -1781,8 +1781,6 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 + ", "
                 + CHROMA_NEGATIVE
             )
-            if source_palette_negative:
-                negative_prompt += ", " + source_palette_negative
             if profile_fur_negative:
                 negative_prompt += ", " + profile_fur_negative
             if action_key(pose) == "running":
@@ -1871,6 +1869,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
                 else None
             )
+            pose_palette_negative = (
+                identity_palette_negative_prompt(
+                    pose_identity_palette_prompt_signature
+                )
+                if pose_identity_palette_prompt_signature is not None
+                else source_palette_negative
+            )
+            pose_negative_prompt = negative_prompt
+            if pose_palette_negative:
+                pose_negative_prompt += ", " + pose_palette_negative
             pose_reference_identity_palette = (
                 identity_palette_signature(
                     pose_palette_reference_path,
@@ -3298,7 +3306,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     (
                         ""
                         if advisory_grooming_action_transfer_active
-                        else negative_prompt
+                        else pose_negative_prompt
                     ),
                     attempt_seed,
                     prefix,

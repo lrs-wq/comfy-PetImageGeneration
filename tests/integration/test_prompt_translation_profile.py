@@ -736,7 +736,9 @@ class IdentityPaletteGuardTests(unittest.TestCase):
             eye_color = (32, 154, 52, 255)
             draw.ellipse((72, 58, 99, 82), fill=eye_color)
             draw.ellipse((156, 58, 183, 82), fill=eye_color)
-            draw.rectangle((76, 138, 179, 208), fill=(82, 172, 94, 255))
+            # A low-hue, low-red-delta screen reflection like the pale green cast
+            # observed on the white-dog E2E canonical.
+            draw.rectangle((76, 138, 179, 208), fill=(163, 169, 125, 255))
             image.save(path)
             alpha_before = image.getchannel("A").tobytes()
             source_palette = {
@@ -894,6 +896,8 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         prompt = pipeline.identity_palette_prompt(source, retry=True)
         negative = pipeline.identity_palette_negative_prompt(source)
 
+        self.assertIn("uploaded pet", prompt)
+        self.assertNotIn("uploaded cat", prompt)
         self.assertIn("Red or pink is a small skin accent, never a fur color", prompt)
         self.assertIn("tiny low-saturation nose pad", prompt)
         self.assertIn("Do not enlarge, saturate, or spread it", prompt)

@@ -17,6 +17,34 @@ from tests.integration.local_video_subject_replacement_test_support import (
 
 
 class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceTestBase):
+    def test_digest_bound_dog_eating_loop_passes_full_pose_motion_gate(self) -> None:
+        profile = pipeline.load_subject_profile("dog_white_model_v1")
+        driver_path = Path(
+            profile["runtime"]["actions"]["eating"]["driving_animation"]
+        )
+        frames, durations = scail_pipeline.read_animation_frames(driver_path)
+        sampled = scail_pipeline.sample_timed_frames(frames, durations, 81, 16.0)
+
+        _, _, metadata = scail_pipeline.make_full_eating_pose_and_mask_frames(
+            sampled,
+            (512, 512),
+        )
+
+        audit = metadata["identity_motion_audit"]
+        self.assertGreaterEqual(
+            audit["overall_change_ratio_max"],
+            scail_pipeline.EATING_FULL_POSE_OVERALL_CHANGE_RATIO_MIN,
+        )
+        self.assertGreaterEqual(
+            audit["lower_half_change_ratio_max"],
+            scail_pipeline.EATING_FULL_POSE_LOWER_HALF_CHANGE_RATIO_MIN,
+        )
+        self.assertGreaterEqual(
+            audit["lower_quarter_change_ratio_max"],
+            scail_pipeline.EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN,
+        )
+        self.assertLess(audit["lower_quarter_change_ratio_max"], 0.012)
+
     def test_dog_prompts_lock_age_muzzle_chroma_and_driver_defined_idle_pose(
         self,
     ) -> None:

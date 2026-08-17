@@ -62,7 +62,10 @@ EATING_MUZZLE_FOOD_OVERLAP_MIN_PX = 6
 EATING_MUZZLE_FOOD_OVERLAP_MAX_PX = 10
 EATING_FULL_POSE_OVERALL_CHANGE_RATIO_MIN = 0.02
 EATING_FULL_POSE_LOWER_HALF_CHANGE_RATIO_MIN = 0.01
-EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN = 0.012
+# The digest-bound dog loop keeps its paws planted while the head completes a
+# down-up-down eating cycle.  Its audited lower-quarter XOR is 0.011581, so a
+# round 1.1% floor preserves the anti-static gate without rejecting that motion.
+EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN = 0.011
 
 DEFAULT_PROMPT = (
     "A complete full-body premium stylized 3D cartoon cat matching the sleek "

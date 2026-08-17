@@ -604,7 +604,7 @@ UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE = (
     "uploaded_identity_absolute_surface_contract_v1"
 )
 UPLOADED_IDENTITY_CHROMA_SPILL_POLICY = (
-    "source_palette_guarded_local_chroma_reconstruction_v2"
+    "source_palette_guarded_local_chroma_reconstruction_v3"
 )
 BOWL_IDENTITY_PALETTE_BOTTOM_EXCLUSION = max(
     0.0,
@@ -2118,8 +2118,11 @@ def configure_uploaded_subject_validation(
         action_config["geometry_reference_sha256"] = (
             geometry_reference_sha256
         )
+        selected_frame_index = int(
+            uploaded_driver.get("selected_frame_index", 40)
+        )
         action_config["geometry_reference_kind"] = (
-            "uploaded_white_maquette_frame040_rgba"
+            f"uploaded_white_maquette_frame{selected_frame_index:03d}_rgba"
         )
         if GENERATION_VISUAL_AUDITS_BLOCKING and cat_profile:
             require_uploaded_fur_surface_gate(action_config, action)
@@ -2388,6 +2391,19 @@ def resolve_effective_subject_config(
                     uploaded_action.get("action_contract") or ""
                 ).strip(),
             }
+            for metadata_key in (
+                "source_segment_start_seconds",
+                "source_segment_duration_seconds",
+                "pts_scale",
+                "loop_policy",
+                "endpoint_ssim",
+                "minimum_endpoint_ssim",
+                "observed_pose_note",
+            ):
+                if metadata_key in uploaded_action:
+                    resolved_actions[action]["uploaded_identity_driving"][
+                        metadata_key
+                    ] = uploaded_action[metadata_key]
         fur_surface_baseline = resolve_profile_fur_surface_baseline(
             profile,
             action,

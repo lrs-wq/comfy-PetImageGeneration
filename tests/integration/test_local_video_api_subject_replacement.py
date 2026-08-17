@@ -236,6 +236,34 @@ class SubjectReplacementParsingTests(unittest.TestCase):
             profile["uploaded_identity_driving"]["actions"]["eating"]["endpoint_ssim"],
             0.95,
         )
+        effective = pipeline.resolve_effective_subject_config(
+            profile,
+            ["eating", "standing"],
+            seed=None,
+            scail_steps=None,
+            pose_strength=None,
+        )
+        eating_driver = effective["actions"]["eating"][
+            "uploaded_identity_driving"
+        ]
+        self.assertEqual(
+            eating_driver["loop_policy"],
+            "full_source_down_up_down_cycle_2x_v1",
+        )
+        self.assertEqual(eating_driver["selected_frame_index"], 8)
+        self.assertEqual(eating_driver["minimum_endpoint_ssim"], 0.95)
+        frozen, _ = pipeline.configure_uploaded_subject_validation(
+            effective,
+            ["eating", "standing"],
+        )
+        self.assertEqual(
+            frozen["actions"]["eating"]["geometry_reference_kind"],
+            "uploaded_white_maquette_frame008_rgba",
+        )
+        self.assertEqual(
+            frozen["actions"]["standing"]["geometry_reference_kind"],
+            "uploaded_white_maquette_frame040_rgba",
+        )
         self.assertTrue(
             runtime["actions"]["eating"]["driving_animation"].endswith(
                 "20260817-user-white-model-v2/"

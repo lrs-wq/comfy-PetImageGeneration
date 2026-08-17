@@ -541,11 +541,11 @@ def neutralize_uploaded_identity_chroma_spill(
         return (
             foreground
             & (green >= 52)
-            & (green - red >= 7)
+            & (green - red >= 5)
             & (green - blue >= -4)
-            & (hsv[:, :, 0] >= 38)
+            & (hsv[:, :, 0] >= 34)
             & (hsv[:, :, 0] < 112)
-            & (hsv[:, :, 1] >= 28)
+            & (hsv[:, :, 1] >= 20)
         )
 
     detected = spill_mask(rgba[:, :, :3])
@@ -660,7 +660,10 @@ def neutralize_uploaded_identity_chroma_spill(
         donor = foreground & ~correction & ~paired_eye_mask
         donor_count = int(np.count_nonzero(donor))
         if donor_count >= 64:
-            fallback_a = int(np.median(lab[:, :, 1][donor]))
+            # Screen bounce can tint even nominally unaffected pale coat donors.
+            # Keep the yellow/blue channel local, but never propagate a green
+            # Lab a-axis value back into a source identity that has no green coat.
+            fallback_a = max(128, int(np.median(lab[:, :, 1][donor])))
             fallback_b = int(np.median(lab[:, :, 2][donor]))
         else:
             fallback_a = 128
@@ -680,6 +683,8 @@ def neutralize_uploaded_identity_chroma_spill(
                 float(inpaint_radius),
                 cv2.INPAINT_TELEA,
             )
+            if channel == 1:
+                repaired = np.maximum(repaired, 128).astype(np.uint8)
             reconstructed_lab[:, :, channel][correction] = repaired[correction]
         reconstructed_rgb = cv2.cvtColor(reconstructed_lab, cv2.COLOR_LAB2RGB)
         rgb[correction] = reconstructed_rgb[correction]
@@ -701,6 +706,7 @@ def neutralize_uploaded_identity_chroma_spill(
             "chroma_reconstruction": "local_lab_telea_inpaint",
             "chroma_donor_pixels": donor_count,
             "fallback_lab_ab": [fallback_a, fallback_b],
+            "corrected_lab_a_floor": 128,
             "inpaint_radius": inpaint_radius,
             "protected_eye_pixels": int(np.count_nonzero(paired_eye_mask)),
             "protected_eye_component_labels": protected_labels,
@@ -812,7 +818,7 @@ def identity_palette_prompt(
         "SOURCE COAT PALETTE LOCK - higher priority than style and LoRA: "
         f"{rule} Preserve the exact spatial placement and proportion of every source "
         "color region. Never add calico, tortoiseshell, tabby, stripe, spot, patch, "
-        f"or warm highlight that is absent from the uploaded cat.{retry_rule}"
+        f"or warm highlight that is absent from the uploaded pet.{retry_rule}"
     )
 
 

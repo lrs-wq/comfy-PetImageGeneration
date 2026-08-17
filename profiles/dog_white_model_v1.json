@@ -52,6 +52,7 @@
         "pts_scale": 0.5,
         "loop_policy": "full_source_down_up_down_cycle_2x_v1",
         "endpoint_ssim": 0.970489,
+        "minimum_endpoint_ssim": 0.95,
         "selected_frame_index": 8,
         "selected_frame_timestamp_seconds": 0.5,
         "action_contract": "dog_down_up_down_eating_cycle_with_one_fixed_shallow_kibble_bowl"
