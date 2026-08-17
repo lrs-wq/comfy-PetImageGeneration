@@ -20,8 +20,8 @@
     "path": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v2/manifest.json",
     "sha256": "9bd0060b7eaea23f7c9771ce93c5742da44c1f1c30a3b62fc139db9ebf0132f3",
     "validation_scope": "deterministic_cpu_driver_rgba_geometry_and_endpoint_loop_assets",
-    "full_gpu_generation_validation": "pending",
-    "end_to_end_api_validation": "pending"
+    "full_gpu_generation_validation": "passed:20260817T095404Z-4c06981f63",
+    "end_to_end_api_validation": "passed:20260817T095404Z-4c06981f63"
   },
   "uploaded_identity_driving": {
     "revision": "dog-user-white-model-20260817-v2",
