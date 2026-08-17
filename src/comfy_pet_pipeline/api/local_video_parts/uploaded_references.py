@@ -631,12 +631,18 @@ def prepare_uploaded_subject_qwen_references(
             else "per_action_species_profile_driver_geometry"
         ),
         pose_reference_policy=pose_reference_policies,
-        pose_reference_guide_style="per_action_main_case_driver_geometry_v2",
+        pose_reference_guide_style=(
+            "per_action_main_case_driver_geometry_v2"
+            if species == "cat"
+            else "per_action_dog_white_model_driver_geometry_v1"
+        ),
         pose_reference_guide_styles=pose_reference_guide_styles,
         pose_reference_role="per_action_geometry_input_role",
         pose_identity_input_policy=POSE_IDENTITY_INPUT_POLICY_CANONICAL,
         pose_identity_input_policy_scope=(
-            "species_actions_canonical_image1_geometry_image2"
+            "eating_and_grooming_canonical_image1_geometry_image2"
+            if species == "cat"
+            else "eating_and_standing_canonical_image1_geometry_image2"
         ),
         pose_identity_input_policies={
             action: POSE_IDENTITY_INPUT_POLICY_CANONICAL for action in actions
@@ -645,10 +651,18 @@ def prepare_uploaded_subject_qwen_references(
             action: "image1_qwen_full_body_canonical" for action in actions
         },
         pose_identity_geometry_roles={
-            action: "image2_species_profile_driver_geometry_guide"
+            action: (
+                "image2_main_case_driver_geometry_guide"
+                if species == "cat"
+                else "image2_dog_white_model_driver_geometry_guide"
+            )
             for action in actions
         },
-        eating_pose_lora_policy=("canonical_identity_plus_main_case_geometry_v1"),
+        eating_pose_lora_policy=(
+            "canonical_identity_plus_main_case_geometry_v1"
+            if species == "cat"
+            else "canonical_identity_plus_dog_white_model_geometry_v1"
+        ),
         eating_identity_refine_enabled=True,
         eating_identity_refine_active=False,
         eating_identity_refine_policy=(EATING_CANONICAL_IDENTITY_REFINE_POLICY),
