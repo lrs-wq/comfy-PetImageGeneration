@@ -1153,6 +1153,70 @@ class CanonicalChromaIntegrityTests(unittest.TestCase):
 
 
 class SubjectReplacementJobCreationTests(unittest.TestCase):
+    def test_uploaded_dog_routes_to_standing_profile_and_legacy_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary) / "outputs"
+            jobs: dict[str, dict[str, object]] = {}
+            job_queue: queue.Queue[str] = queue.Queue(maxsize=4)
+            image_bytes = io.BytesIO()
+            Image.new("RGB", (512, 512), (130, 90, 60)).save(
+                image_bytes,
+                format="PNG",
+            )
+            upload = pipeline.UploadFile(
+                filename="dog.png",
+                file=io.BytesIO(image_bytes.getvalue()),
+            )
+            classification = {
+                "species": "dog",
+                "scores": {"cat": 0.02, "dog": 0.91},
+                "margin": 0.89,
+                "forced_binary": True,
+                "unknown_class": False,
+                "fallback": False,
+            }
+            with (
+                patch.multiple(
+                    pipeline,
+                    OUTPUT_ROOT=output_root,
+                    JOBS=jobs,
+                    JOB_QUEUE=job_queue,
+                ),
+                patch.object(
+                    pipeline,
+                    "classify_pet_species",
+                    return_value=classification,
+                ),
+                patch.object(pipeline, "require_subject_replacement_assets"),
+            ):
+                result = asyncio.run(
+                    pipeline.create_subject_replacement_api_job(
+                        image=upload,
+                        prompt="",
+                        actions_raw='["eating", "grooming"]',
+                        subject_profile_id="sleek_tabby_cat_v1",
+                        output_format="transparent_gif",
+                        scail_steps=6,
+                        pose_strength=None,
+                        seed=123,
+                    )
+                )
+
+        self.assertEqual(result["species"], "dog")
+        self.assertEqual(result["species_classification"], classification)
+        self.assertEqual(result["subject_profile"], "dog_white_model_v1")
+        self.assertEqual(result["requested_subject_profile"], "sleek_tabby_cat_v1")
+        self.assertTrue(result["subject_profile_routed_by_species"])
+        self.assertEqual(result["actions"], ["eating", "standing"])
+        self.assertEqual(
+            result["reference_image_profile"],
+            pipeline.DOG_SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE,
+        )
+        self.assertEqual(
+            set(result["effective_subject_config"]["actions"]),
+            {"eating", "standing"},
+        )
+
     def test_default_profile_job_needs_no_uploaded_image(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
