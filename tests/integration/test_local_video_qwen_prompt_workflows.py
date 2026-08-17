@@ -72,11 +72,54 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertIn("seated or upright", standing_pose)
         self.assertNotIn("stable upright", standing_pose)
         self.assertIn("seated-or-upright torso state", standing_rules)
+        self.assertIn("uninterrupted green band below", standing_rules)
+        self.assertIn("Never draw a floor", standing_rules)
         self.assertIn("Face and age contract", action_prompt)
         self.assertIn("Never make an adult dog look like a puppy", action_prompt)
+        standing_retry = pipeline.build_qwen_prompt(
+            "",
+            standing_pose,
+            transparent_gif=True,
+            quality_retry=2,
+            pose_reference_available=True,
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+            species="dog",
+        )
+        self.assertIn("FLOOR-ARTIFACT RETRY", standing_retry)
+        self.assertIn("nothing may continue downward", standing_retry)
         self.assertIn("pure #00FF00", scail_pipeline.DOG_EATING_PROMPT)
         self.assertIn("pure #00FF00", scail_pipeline.DOG_STANDING_PROMPT)
         self.assertIn("non-green background", scail_pipeline.DOG_NEGATIVE_PROMPT)
+
+    def test_action_matte_edge_clearance_rejects_floor_reflection_before_resize(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            clean_path = Path(temporary) / "clean.png"
+            reflected_path = Path(temporary) / "reflected.png"
+            clean = np.zeros((512, 512, 4), dtype=np.uint8)
+            clean[70:430, 145:370, :3] = (210, 190, 150)
+            clean[70:430, 145:370, 3] = 255
+            reflected = clean.copy()
+            reflected[430:512, 185:335, :3] = (80, 70, 55)
+            reflected[430:512, 185:335, 3] = 220
+            Image.fromarray(clean, mode="RGBA").save(clean_path)
+            Image.fromarray(reflected, mode="RGBA").save(reflected_path)
+
+            clean_quality = pipeline.qwen_action_edge_clearance_quality(
+                clean_path,
+            )
+            reflected_quality = pipeline.qwen_action_edge_clearance_quality(
+                reflected_path,
+            )
+
+        self.assertTrue(clean_quality["acceptable"])
+        self.assertFalse(reflected_quality["acceptable"])
+        self.assertIn("bottom", reflected_quality["failing_edges"])
+        self.assertIn(
+            "action_matte_foreground_touches_canvas_edge",
+            reflected_quality["issues"],
+        )
 
     def test_direct_uploaded_eating_prompt_assigns_image_roles(self) -> None:
         prompt = pipeline.build_qwen_prompt(

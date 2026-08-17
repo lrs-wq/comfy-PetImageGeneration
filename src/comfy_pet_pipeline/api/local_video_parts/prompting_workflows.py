@@ -153,7 +153,11 @@ def action_first_frame_rules(pose: str, *, species: str = "cat") -> str:
             "subject scale and tail layout. Keep every visible paw grounded and "
             "every leg attached. "
             "Show one complete natural dog with both ears and the tail from base to "
-            "tip; no pose redesign, extra limb, collar, harness, clothing or object."
+            "tip; no pose redesign, extra limb, collar, harness, clothing or object. "
+            "The dog exists in a digital green void with no support surface: every "
+            "paw and the tail must end cleanly against pure green, with an "
+            "uninterrupted green band below them. Never draw a floor, contact shadow, "
+            "mirrored continuation, glossy patch or reflection beneath the dog."
         )
     if action == "running":
         return (

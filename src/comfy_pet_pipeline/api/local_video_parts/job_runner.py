@@ -1773,6 +1773,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         active_pose_profiles,
                         enabled=True,
                     )
+                elif species == "dog" and action_key(pose) == "standing":
+                    # Standing keyframes must be retried when the pre-normalization
+                    # alpha reaches an edge (most commonly a generated floor
+                    # reflection).  Later matte normalization would otherwise hide
+                    # the edge contact and pass that artifact into SCAIL.
+                    active_pose_profiles = active_pose_profiles[
+                        :QWEN_POSE_MAX_ATTEMPTS
+                    ]
                 else:
                     active_pose_profiles = active_pose_profiles[:1]
             negative_prompt += (

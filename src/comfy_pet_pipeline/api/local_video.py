@@ -3871,6 +3871,13 @@ def build_dog_qwen_prompt(
             "identity, anatomy and green background while keeping Image 1 unchanged "
             "as the sole appearance authority."
         )
+        if action == "standing":
+            retry += (
+                " FLOOR-ARTIFACT RETRY: the previous matte reached a canvas edge. "
+                "Remove the entire floor, shadow and mirrored reflection. End every "
+                "paw and the tail cleanly, then leave a broad uninterrupted pure-green "
+                "band beneath the lowest dog pixel; nothing may continue downward."
+            )
     if quality_retry >= 3:
         retry += (
             " Keep at least 12% pure-green clearance on all sides. Remove every "
@@ -5552,6 +5559,11 @@ semantic_background_recovery = _local_video_identity_quality.semantic_background
 
 finalize_qwen_action_reference_candidate = (
     _local_video_generation_quality.finalize_qwen_action_reference_candidate
+)
+
+
+qwen_action_edge_clearance_quality = (
+    _local_video_generation_quality.qwen_action_edge_clearance_quality
 )
 
 
