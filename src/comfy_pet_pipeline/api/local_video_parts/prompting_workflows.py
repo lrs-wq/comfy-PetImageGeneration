@@ -97,7 +97,11 @@ def subject_replacement_pose_prompt(action: str, *, species: str = "cat") -> str
             "the supplied action geometry. The geometry, rather than the action "
             "label, controls whether the torso is seated or upright. Keep all "
             "visible legs anatomically attached, both ears and the complete tail "
-            "readable. No prop, clothing, collar, harness, floor, or extra subject."
+            "readable. Show a relaxed natural panting expression: the mouth is "
+            "visibly open with a dark mouth cavity, separated lower jaw and one "
+            "anatomically attached pink tongue at a neutral mid-extension. Never "
+            "place a tongue through closed lips. No prop, clothing, collar, harness, "
+            "floor, or extra subject."
         )
     raise ValueError(f"Unsupported subject-replacement action: {action}")
 
@@ -159,6 +163,11 @@ def action_first_frame_rules(pose: str, *, species: str = "cat") -> str:
             "every leg attached. "
             "Show one complete natural dog with both ears and the tail from base to "
             "tip; no pose redesign, extra limb, collar, harness, clothing or object. "
+            "This action explicitly requires relaxed panting even if Image 1 is a "
+            "closed-mouth still: keep the lips and lower jaw visibly separated, show "
+            "a readable dark mouth cavity, and attach one natural pink tongue inside "
+            "the mouth at a neutral mid-extension. Never paste a tongue onto a closed "
+            "muzzle or detach it from the mouth cavity. "
             "The dog exists in a digital green void with no support surface: every "
             "paw and the tail must end cleanly against pure green, with an "
             "uninterrupted green band below them. Never draw a floor, contact shadow, "

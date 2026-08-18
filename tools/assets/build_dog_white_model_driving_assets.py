@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -25,7 +26,7 @@ from typing import Any
 
 DEFAULT_ASSET_ROOT = Path(
     "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/"
-    "driving/20260818-stable-kibble-v3"
+    "driving/20260818-standing-pant-v4"
 )
 DEFAULT_SOURCE_ROOT = Path(
     "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/"
@@ -73,7 +74,7 @@ ACTION_NORMALIZATION = {
 OUTPUT_SIZE = 512
 OUTPUT_FRAMES = 81
 OUTPUT_FPS = 16
-POLICY = "dog_white_model_action_specific_loop_normalization_stable_kibble_v3"
+POLICY = "dog_white_model_action_specific_loop_normalization_standing_pant_v4"
 EATING_KIBBLE_STABILIZATION = {
     "policy": "fixed_low_level_small_kibble_below_rim_v1",
     "source_locked_size": [512, 512],
@@ -90,6 +91,19 @@ EATING_KIBBLE_STABILIZATION = {
     "food_above_rim_allowed": False,
     "source_mound_removed": True,
     "food_motion": "fixed_pattern_with_only_natural_muzzle_occlusion",
+}
+STANDING_MOUTH_TONGUE_MOTION = {
+    "policy": "relaxed_open_mouth_attached_tongue_extension_retraction_v1",
+    "source_locked_size": [512, 512],
+    "mouth_roi": [154, 148, 206, 207],
+    "tongue_color_policy": "largest_connected_warm_pink_component_v1",
+    "tongue_extension_cycles": 2,
+    "tongue_extension_scale_min": 1.0,
+    "tongue_extension_scale_max": 1.16,
+    "tongue_sway_pixels": 1.25,
+    "tongue_root_motion": "fixed_inside_visible_open_mouth",
+    "minimum_tongue_tip_y_span_pixels": 4,
+    "minimum_visible_mouth_cavity_dark_pixels": 120,
 }
 
 
@@ -479,6 +493,297 @@ def stabilize_eating_runtime(ffmpeg: str, runtime: Path) -> dict[str, Any]:
     }
 
 
+def _is_tongue_pixel(r: int, g: int, b: int) -> bool:
+    """Match the source-locked warm-pink tongue without sampling dog identity."""
+
+    return (
+        r > 100
+        and r > g + 25
+        and r > b + 12
+        and g < 178
+        and b < 178
+    )
+
+
+def _standing_tongue_component(pixels: bytearray) -> set[tuple[int, int]]:
+    left, top, right, bottom = STANDING_MOUTH_TONGUE_MOTION["mouth_roi"]
+    candidates: set[tuple[int, int]] = set()
+    for y in range(top, bottom):
+        for x in range(left, right):
+            offset = (y * OUTPUT_SIZE + x) * 3
+            if _is_tongue_pixel(*pixels[offset : offset + 3]):
+                candidates.add((x, y))
+
+    components: list[set[tuple[int, int]]] = []
+    remaining = set(candidates)
+    while remaining:
+        seed = remaining.pop()
+        component = {seed}
+        pending = [seed]
+        while pending:
+            x, y = pending.pop()
+            for neighbor_y in range(y - 1, y + 2):
+                for neighbor_x in range(x - 1, x + 2):
+                    neighbor = (neighbor_x, neighbor_y)
+                    if neighbor in remaining:
+                        remaining.remove(neighbor)
+                        component.add(neighbor)
+                        pending.append(neighbor)
+        components.append(component)
+
+    if not components:
+        raise RuntimeError("standing_tongue_motion_source_missing")
+    component = max(
+        components,
+        key=lambda item: (len(item), max(y for _x, y in item)),
+    )
+    if len(component) < 240:
+        raise RuntimeError(
+            "standing_tongue_motion_source_too_small: "
+            f"pixels={len(component)}"
+        )
+    return component
+
+
+def _expand_mask(
+    mask: set[tuple[int, int]],
+    *,
+    radius: int = 1,
+) -> set[tuple[int, int]]:
+    expanded: set[tuple[int, int]] = set()
+    for x, y in mask:
+        for offset_y in range(-radius, radius + 1):
+            for offset_x in range(-radius, radius + 1):
+                target_x = x + offset_x
+                target_y = y + offset_y
+                if 0 <= target_x < OUTPUT_SIZE and 0 <= target_y < OUTPUT_SIZE:
+                    expanded.add((target_x, target_y))
+    return expanded
+
+
+def _erase_tongue_with_row_context(
+    pixels: bytearray,
+    mask: set[tuple[int, int]],
+) -> None:
+    rows: dict[int, list[int]] = {}
+    for x, y in mask:
+        rows.setdefault(y, []).append(x)
+    for y, row_xs in rows.items():
+        start_x = min(row_xs)
+        end_x = max(row_xs)
+        sample_left_x = max(0, start_x - 3)
+        sample_right_x = min(OUTPUT_SIZE - 1, end_x + 3)
+        left_offset = (y * OUTPUT_SIZE + sample_left_x) * 3
+        right_offset = (y * OUTPUT_SIZE + sample_right_x) * 3
+        left_rgb = pixels[left_offset : left_offset + 3]
+        right_rgb = pixels[right_offset : right_offset + 3]
+        width = max(1, end_x - start_x)
+        for x in range(start_x, end_x + 1):
+            fraction = (x - start_x) / width
+            replacement = bytes(
+                round(left_rgb[channel] * (1.0 - fraction) + right_rgb[channel] * fraction)
+                for channel in range(3)
+            )
+            offset = (y * OUTPUT_SIZE + x) * 3
+            pixels[offset : offset + 3] = replacement
+
+
+def _animate_standing_ppm(path: Path, frame_index: int) -> dict[str, Any]:
+    """Add loop-safe low-amplitude tongue motion to the supplied static pant."""
+
+    prefix, pixels = _read_ppm(path)
+    source_pixels = bytearray(pixels)
+    tongue = _standing_tongue_component(source_pixels)
+    tongue_with_edge = _expand_mask(tongue)
+
+    source_top = min(y for _x, y in tongue)
+    source_tip = max(y for _x, y in tongue)
+    source_center_x = sum(x for x, _y in tongue) / len(tongue)
+    # Keep the tongue root and lip contact byte-preserved.  Moving the entire
+    # component caused a pale horizontal seam where the source tongue meets the
+    # mouth.  Only the free lower tongue deforms around this fixed oral anchor.
+    anchor_y = source_top + 6
+    moving_tongue = {
+        (x, y) for x, y in tongue_with_edge if y > anchor_y
+    }
+    if len(moving_tongue) < 180:
+        raise RuntimeError(
+            "standing_tongue_motion_free_tip_too_small: "
+            f"frame={frame_index} pixels={len(moving_tongue)}"
+        )
+    _erase_tongue_with_row_context(pixels, moving_tongue)
+    cycle_phase = (
+        2.0
+        * math.pi
+        * int(STANDING_MOUTH_TONGUE_MOTION["tongue_extension_cycles"])
+        * frame_index
+        / (OUTPUT_FRAMES - 1)
+    )
+    extension_fraction = 0.5 - 0.5 * math.cos(cycle_phase)
+    minimum_scale = float(
+        STANDING_MOUTH_TONGUE_MOTION["tongue_extension_scale_min"]
+    )
+    maximum_scale = float(
+        STANDING_MOUTH_TONGUE_MOTION["tongue_extension_scale_max"]
+    )
+    scale = minimum_scale + (maximum_scale - minimum_scale) * extension_fraction
+    sway = float(STANDING_MOUTH_TONGUE_MOTION["tongue_sway_pixels"]) * math.sin(
+        2.0 * math.pi * frame_index / (OUTPUT_FRAMES - 1)
+    )
+
+    target_tip = anchor_y + (source_tip - anchor_y) * scale
+    target_left = min(x for x, _y in moving_tongue) - 3
+    target_right = max(x for x, _y in moving_tongue) + 4
+    target_top = anchor_y + 1
+    target_bottom = math.ceil(target_tip) + 3
+    for target_y in range(target_top, target_bottom + 1):
+        source_y = anchor_y + (target_y - anchor_y) / scale
+        motion_weight = min(
+            1.0,
+            max(0.0, (source_y - anchor_y) / max(1.0, source_tip - anchor_y)),
+        )
+        for target_x in range(target_left, target_right + 1):
+            source_x = target_x - sway * motion_weight
+            nearest = (round(source_x), round(source_y))
+            if nearest not in moving_tongue:
+                continue
+            source_offset = (nearest[1] * OUTPUT_SIZE + nearest[0]) * 3
+            target_offset = (target_y * OUTPUT_SIZE + target_x) * 3
+            pixels[target_offset : target_offset + 3] = source_pixels[
+                source_offset : source_offset + 3
+            ]
+
+    path.write_bytes(prefix + bytes(pixels))
+    rendered_core = _standing_tongue_component(pixels)
+    if len(rendered_core) < 220:
+        raise RuntimeError(
+            "standing_tongue_motion_render_too_small: "
+            f"frame={frame_index} pixels={len(rendered_core)}"
+        )
+
+    mouth_dark_pixels = 0
+    for y in range(156, 187):
+        for x in range(158, 203):
+            offset = (y * OUTPUT_SIZE + x) * 3
+            red, green, blue = pixels[offset : offset + 3]
+            if red < 108 and green < 103 and blue < 108:
+                mouth_dark_pixels += 1
+    return {
+        "frame_index": frame_index,
+        "extension_scale": round(scale, 6),
+        "sway_pixels": round(sway, 6),
+        "tongue_pixels": len(rendered_core),
+        "tongue_root_y": min(y for _x, y in rendered_core),
+        "tongue_tip_y": max(y for _x, y in rendered_core),
+        "tongue_center_x": round(
+            sum(x for x, _y in rendered_core) / len(rendered_core),
+            6,
+        ),
+        "source_tongue_center_x": round(source_center_x, 6),
+        "visible_mouth_cavity_dark_pixels": mouth_dark_pixels,
+    }
+
+
+def animate_standing_runtime(ffmpeg: str, runtime: Path) -> dict[str, Any]:
+    """Replace the source's frozen tongue with a deterministic breathing loop."""
+
+    temporary = runtime.with_name(f".{runtime.stem}.pant.tmp{runtime.suffix}")
+    temporary.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix="dog-white-model-standing-pant-") as root:
+        frames_root = Path(root)
+        run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(runtime),
+                str(frames_root / "frame-%03d.ppm"),
+            ]
+        )
+        frame_paths = sorted(frames_root.glob("frame-*.ppm"))
+        if len(frame_paths) != OUTPUT_FRAMES:
+            raise RuntimeError(
+                f"Expected {OUTPUT_FRAMES} normalized standing frames, "
+                f"found {len(frame_paths)}"
+            )
+        frame_audits = [
+            _animate_standing_ppm(frame_path, frame_index)
+            for frame_index, frame_path in enumerate(frame_paths)
+        ]
+        run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-framerate",
+                str(OUTPUT_FPS),
+                "-i",
+                str(frames_root / "frame-%03d.ppm"),
+                "-frames:v",
+                str(OUTPUT_FRAMES),
+                "-an",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "18",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(temporary),
+            ]
+        )
+    os.replace(temporary, runtime)
+
+    tongue_tip_values = [item["tongue_tip_y"] for item in frame_audits]
+    tongue_tip_span = max(tongue_tip_values) - min(tongue_tip_values)
+    minimum_tip_span = int(
+        STANDING_MOUTH_TONGUE_MOTION["minimum_tongue_tip_y_span_pixels"]
+    )
+    if tongue_tip_span < minimum_tip_span:
+        raise RuntimeError(
+            "standing_tongue_motion_below_minimum: "
+            f"span={tongue_tip_span} minimum={minimum_tip_span}"
+        )
+    mouth_cavity_min = min(
+        item["visible_mouth_cavity_dark_pixels"] for item in frame_audits
+    )
+    minimum_mouth_cavity = int(
+        STANDING_MOUTH_TONGUE_MOTION[
+            "minimum_visible_mouth_cavity_dark_pixels"
+        ]
+    )
+    if mouth_cavity_min < minimum_mouth_cavity:
+        raise RuntimeError(
+            "standing_open_mouth_cavity_below_minimum: "
+            f"pixels={mouth_cavity_min} minimum={minimum_mouth_cavity}"
+        )
+    sampled_indices = [0, 10, 20, 30, 40, 50, 60, 70, 80]
+    return {
+        **STANDING_MOUTH_TONGUE_MOTION,
+        "frames_audited": len(frame_audits),
+        "tongue_pixels_min": min(item["tongue_pixels"] for item in frame_audits),
+        "tongue_pixels_max": max(item["tongue_pixels"] for item in frame_audits),
+        "tongue_tip_y_min": min(tongue_tip_values),
+        "tongue_tip_y_max": max(tongue_tip_values),
+        "tongue_tip_y_span_pixels": tongue_tip_span,
+        "visible_mouth_cavity_dark_pixels_min": mouth_cavity_min,
+        "visible_mouth_cavity_dark_pixels_max": max(
+            item["visible_mouth_cavity_dark_pixels"] for item in frame_audits
+        ),
+        "sampled_motion": [frame_audits[index] for index in sampled_indices],
+        "loop_endpoints_share_motion_phase": True,
+        "passed": True,
+    }
+
+
 def build_reference(
     ffmpeg: str,
     runtime: Path,
@@ -591,8 +896,14 @@ def main() -> int:
         reference = asset_root / REFERENCE_FILENAMES[action]
         build_runtime(args.ffmpeg, source, runtime, normalization)
         eating_food_stabilization = None
+        standing_mouth_tongue_motion = None
         if action == "eating":
             eating_food_stabilization = stabilize_eating_runtime(
+                args.ffmpeg,
+                runtime,
+            )
+        elif action == "standing":
+            standing_mouth_tongue_motion = animate_standing_runtime(
                 args.ffmpeg,
                 runtime,
             )
@@ -633,6 +944,8 @@ def main() -> int:
         }
         if eating_food_stabilization is not None:
             action_manifest["food_stabilization"] = eating_food_stabilization
+        if standing_mouth_tongue_motion is not None:
+            action_manifest["mouth_tongue_motion"] = standing_mouth_tongue_motion
         actions[action] = action_manifest
 
     manifest = {
@@ -647,6 +960,7 @@ def main() -> int:
             "audio_removed": True,
             "last_frame_padding": "clone_source_endpoint_to_81_frames",
             "eating_food_stabilization": EATING_KIBBLE_STABILIZATION,
+            "standing_mouth_tongue_motion": STANDING_MOUTH_TONGUE_MOTION,
             "actions": ACTION_NORMALIZATION,
         },
         "actions": actions,

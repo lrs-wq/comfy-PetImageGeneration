@@ -204,13 +204,18 @@ DOG_STANDING_PROMPT = (
     "markings, natural coat length and volume, body proportions, paws, and complete "
     "tail. Use the neutral-white dog anatomy driver only for the standing action's "
     "joint trajectories, driver-defined seated-or-upright idle geometry, gentle tail "
-    "motion, camera, "
-    "scale and framing. Never copy the driver's white coat, face, eyes, body "
+    "motion, relaxed panting mouth motion, camera, scale and framing. The standing "
+    "idle has a visibly open natural mouth with a readable dark mouth cavity and "
+    "an anatomically attached pink tongue. Follow the driver so the tongue gently "
+    "extends, retracts and softly bobs in a periodic cycle; never freeze it, paste "
+    "it onto the muzzle, or show it passing through closed lips. Never copy the "
+    "driver's white coat, face, eyes, body "
     "proportions, material, or lighting. Keep one complete unclothed dog, stable "
     "identity, coherent anatomy and a static camera. No prop, collar, harness, "
     "clothing, floor, shadow, text, logo, or extra subject. Preserve the exact muzzle "
-    "length, head-to-body ratio, eye size, mouth posture and apparent age; never make "
-    "an adult look like a puppy or add a panting smile. The entire background remains "
+    "length, head-to-body ratio, eye size and apparent age while allowing only this "
+    "action-required open-mouth panting motion; never make an adult look like a puppy. "
+    "The entire background remains "
     "perfectly uniform pure #00FF00 chroma-key green in every frame, with no floor, "
     "horizon, shadow, reflection, gradient, texture, flicker, or green spill on fur."
 )
@@ -230,6 +235,15 @@ DOG_NEGATIVE_PROMPT = (
     "white background, gray background, black background, non-green background, floor, "
     "floor line, horizon, shadow, reflection, background gradient, background texture, "
     "green bounce light, green color spill, green rim light, cyan rim light, text, logo, watermark"
+)
+DOG_EATING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT
+DOG_STANDING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT.replace(
+    "panting smile, tongue out, ",
+    "",
+) + (
+    ", closed lips around visible tongue, tongue through closed mouth, no mouth cavity, "
+    "static tongue, frozen tongue, pasted tongue, detached tongue, rigid tongue, "
+    "melting tongue, disappearing tongue"
 )
 
 
@@ -309,7 +323,11 @@ def parse_args() -> argparse.Namespace:
             args.prompt = EATING_PROMPT if args.action == "eating" else DEFAULT_PROMPT
     if args.negative_prompt is None:
         if args.species == "dog":
-            args.negative_prompt = DOG_NEGATIVE_PROMPT
+            args.negative_prompt = (
+                DOG_EATING_NEGATIVE_PROMPT
+                if args.action == "eating"
+                else DOG_STANDING_NEGATIVE_PROMPT
+            )
         else:
             args.negative_prompt = (
                 EATING_NEGATIVE_PROMPT

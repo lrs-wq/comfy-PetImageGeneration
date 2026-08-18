@@ -122,7 +122,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.25.3"
+API_VERSION = "2.25.4"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -4007,6 +4007,19 @@ def build_dog_qwen_prompt(
         "Preserve Image 1's exact natural coat length, volume, strand direction, "
         "genuine tufts and source-bounded outer silhouette."
     )
+    face_motion_contract = (
+        "This standing action explicitly overrides only Image 1's still mouth state: "
+        "show relaxed natural panting with visibly separated lips and lower jaw, a "
+        "readable dark mouth cavity, and one anatomically attached pink tongue at a "
+        "neutral mid-extension. Never paste the tongue onto a closed muzzle or detach "
+        "it from the mouth cavity."
+        if action == "standing"
+        else (
+            "Preserve Image 1's exact closed- or open-mouth posture unless physical "
+            "muzzle contact with the food requires a small natural adjustment. Never "
+            "add a panting smile or visible tongue."
+        )
+    )
     return f"""CRITICAL DOG ACTION TRANSFER CONTRACT:
 Image 1 is the approved canonical dog and the only identity and appearance authority. Preserve its exact apparent age, breed traits, head and muzzle silhouette, eyes, ears, nose, coat base colors, localized markings, natural coat length and volume, body proportions, paws, complete tail, and restrained stylized 3D material.
 {geometry_role}
@@ -4018,7 +4031,7 @@ Action rules: {action_rules}
 
 Anatomy contract: exactly one complete dog with four anatomically attached legs, complete visible paws appropriate to the geometry, both ears, and one tail continuous from base to tip. No duplicate, fused, detached, hidden, humanlike, or extra limb. Preserve Image 1's body proportions while articulating them around Image 2's joints.
 
-Face and age contract: keep Image 1's exact skull width, forehead slope, cheek width, muzzle length, muzzle width and taper, eye diameter and spacing, ear scale, nose scale, mouth posture and apparent age. Never make an adult dog look like a puppy, shorten or round the muzzle, enlarge the head or eyes, or add a panting smile unless the required action physically needs an open mouth.
+Face and age contract: keep Image 1's exact skull width, forehead slope, cheek width, muzzle length, muzzle width and taper, eye diameter and spacing, ear scale, nose scale and apparent age. {face_motion_contract} Never make an adult dog look like a puppy, shorten or round the muzzle, or enlarge the head or eyes.
 
 Coat contract: {fur_contract} Never import the white model's white coat, face, eyes, proportions, smooth material, or lighting. Do not invent colors or markings absent from Image 1.
 

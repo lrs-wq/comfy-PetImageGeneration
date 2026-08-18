@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -17,6 +18,30 @@ from tests.integration.local_video_subject_replacement_test_support import (
 
 
 class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceTestBase):
+    def test_dog_scail_cli_uses_action_specific_negative_prompt(self) -> None:
+        with patch(
+            "sys.argv",
+            ["subject_replacement", "--action", "standing", "--species", "dog"],
+        ):
+            standing = scail_pipeline.parse_args()
+        with patch(
+            "sys.argv",
+            ["subject_replacement", "--action", "eating", "--species", "dog"],
+        ):
+            eating = scail_pipeline.parse_args()
+
+        self.assertEqual(
+            standing.negative_prompt,
+            scail_pipeline.DOG_STANDING_NEGATIVE_PROMPT,
+        )
+        self.assertIn("static tongue", standing.negative_prompt)
+        self.assertNotIn("tongue out", standing.negative_prompt)
+        self.assertEqual(
+            eating.negative_prompt,
+            scail_pipeline.DOG_EATING_NEGATIVE_PROMPT,
+        )
+        self.assertIn("tongue out", eating.negative_prompt)
+
     def test_dog_eating_driver_keeps_compressed_kibble_below_rim(self) -> None:
         profile = pipeline.load_subject_profile("dog_white_model_v1")
         driver_path = Path(
@@ -138,11 +163,17 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertIn("front view is authoritative for the face", canonical)
         self.assertIn("seated or upright", standing_pose)
         self.assertNotIn("stable upright", standing_pose)
+        self.assertIn("mouth is visibly open", standing_pose)
+        self.assertIn("anatomically attached pink tongue", standing_pose)
         self.assertIn("seated-or-upright torso state", standing_rules)
+        self.assertIn("explicitly requires relaxed panting", standing_rules)
+        self.assertIn("readable dark mouth cavity", standing_rules)
         self.assertIn("uninterrupted green band below", standing_rules)
         self.assertIn("Never draw a floor", standing_rules)
         self.assertIn("Face and age contract", action_prompt)
         self.assertIn("Never make an adult dog look like a puppy", action_prompt)
+        self.assertIn("explicitly overrides only Image 1's still mouth state", action_prompt)
+        self.assertIn("Never paste the tongue onto a closed muzzle", action_prompt)
         standing_retry = pipeline.build_qwen_prompt(
             "",
             standing_pose,
@@ -156,6 +187,9 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertIn("nothing may continue downward", standing_retry)
         self.assertIn("pure #00FF00", scail_pipeline.DOG_EATING_PROMPT)
         self.assertIn("pure #00FF00", scail_pipeline.DOG_STANDING_PROMPT)
+        self.assertIn("tongue gently extends", scail_pipeline.DOG_STANDING_PROMPT)
+        self.assertIn("static tongue", scail_pipeline.DOG_STANDING_NEGATIVE_PROMPT)
+        self.assertNotIn("tongue out", scail_pipeline.DOG_STANDING_NEGATIVE_PROMPT)
         self.assertIn("non-green background", scail_pipeline.DOG_NEGATIVE_PROMPT)
 
     def test_action_matte_edge_clearance_rejects_floor_reflection_before_resize(

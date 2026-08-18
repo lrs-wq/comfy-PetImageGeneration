@@ -226,7 +226,7 @@ class SubjectReplacementParsingTests(unittest.TestCase):
         self.assertEqual(set(runtime["actions"]), {"eating", "standing"})
         self.assertEqual(
             profile["uploaded_identity_driving"]["revision"],
-            "dog-stable-kibble-20260818-v3",
+            "dog-stable-kibble-standing-pant-20260818-v4",
         )
         self.assertEqual(
             profile["uploaded_identity_driving"]["actions"]["eating"]["loop_policy"],
@@ -258,7 +258,7 @@ class SubjectReplacementParsingTests(unittest.TestCase):
         )
         self.assertEqual(
             asset_manifest["policy"],
-            "dog_white_model_action_specific_loop_normalization_stable_kibble_v3",
+            "dog_white_model_action_specific_loop_normalization_standing_pant_v4",
         )
         manifest_food = asset_manifest["actions"]["eating"][
             "food_stabilization"
@@ -270,6 +270,23 @@ class SubjectReplacementParsingTests(unittest.TestCase):
         self.assertEqual(manifest_food["food_pattern_top_y"], 373)
         self.assertEqual(manifest_food["forbidden_food_pixels_above_rim"], 0)
         self.assertTrue(manifest_food["passed"])
+        manifest_mouth = asset_manifest["actions"]["standing"][
+            "mouth_tongue_motion"
+        ]
+        self.assertEqual(
+            manifest_mouth["policy"],
+            "relaxed_open_mouth_attached_tongue_extension_retraction_v1",
+        )
+        self.assertGreaterEqual(
+            manifest_mouth["tongue_tip_y_span_pixels"],
+            manifest_mouth["minimum_tongue_tip_y_span_pixels"],
+        )
+        self.assertGreaterEqual(
+            manifest_mouth["visible_mouth_cavity_dark_pixels_min"],
+            manifest_mouth["minimum_visible_mouth_cavity_dark_pixels"],
+        )
+        self.assertEqual(manifest_mouth["frames_audited"], 81)
+        self.assertTrue(manifest_mouth["passed"])
         effective = pipeline.resolve_effective_subject_config(
             profile,
             ["eating", "standing"],
@@ -337,13 +354,17 @@ class SubjectReplacementParsingTests(unittest.TestCase):
         )
         self.assertTrue(
             runtime["actions"]["eating"]["driving_animation"].endswith(
-                "20260818-stable-kibble-v3/"
+                "20260818-standing-pant-v4/"
                 "eating_white_model_driver_512x512_81f_16fps.mp4"
             )
         )
         self.assertEqual(
             runtime["actions"]["eating"]["driving_animation_sha256"],
             "b6009f9ca7f12c5233c4e6b172b50d3fe6a69e8bc2faf97e6f2593843d5c7d20",
+        )
+        self.assertEqual(
+            runtime["actions"]["standing"]["driving_animation_sha256"],
+            "9f2f951fdb46e08249e4b553dbdcd55e1940fded56e92cfe8462bd37ba40f1e0",
         )
         for action in ("eating", "standing"):
             action_runtime = runtime["actions"][action]
