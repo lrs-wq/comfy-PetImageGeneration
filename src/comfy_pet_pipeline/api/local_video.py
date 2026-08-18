@@ -87,6 +87,7 @@ from ..media.transparent_animation import (
     build_standard_direct_outputs,
     build_transparent_animations,
     build_transparent_cutout,
+    retime_video_playback,
 )
 from ..identity.uploaded_identity import (
     POLICY as UPLOADED_IDENTITY_SCAIL_REFERENCE_POLICY,
@@ -121,7 +122,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.25.2"
+API_VERSION = "2.25.3"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -1710,6 +1711,27 @@ def subject_profile_runtime(profile: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 f"Subject profile runtime {action} pose_strength is out of range"
             )
+        try:
+            output_playback_rate = float(
+                raw_action.get("output_playback_rate", 1.0)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Subject profile runtime {action} output_playback_rate is invalid"
+            ) from exc
+        if not 0.25 <= output_playback_rate <= 2.0:
+            raise ValueError(
+                f"Subject profile runtime {action} output_playback_rate "
+                "must be between 0.25 and 2.0"
+            )
+        output_playback_policy = str(
+            raw_action.get("output_playback_policy")
+            or "profile_default_realtime_v1"
+        ).strip()
+        if not output_playback_policy:
+            raise ValueError(
+                f"Subject profile runtime {action} output_playback_policy is empty"
+            )
         driving_animation_sha256 = (
             str(raw_action.get("driving_animation_sha256") or "").strip().lower()
         )
@@ -1729,6 +1751,8 @@ def subject_profile_runtime(profile: dict[str, Any]) -> dict[str, Any]:
             "driving_animation_sha256": driving_animation_sha256 or None,
             "pose_strength": action_pose_strength,
             "seed_offset": action_seed_offset,
+            "output_playback_rate": output_playback_rate,
+            "output_playback_policy": output_playback_policy,
         }
     return {
         "schema_version": 2,
@@ -2297,6 +2321,22 @@ def resolve_effective_subject_config(
             if pose_strength is not None
             else action_runtime["pose_strength"]
         )
+        output_playback_rate = float(
+            action_runtime.get("output_playback_rate", 1.0)
+        )
+        if not 0.25 <= output_playback_rate <= 2.0:
+            raise ValueError(
+                f"Subject profile {action} output_playback_rate must be "
+                "between 0.25 and 2.0"
+            )
+        output_playback_policy = str(
+            action_runtime.get("output_playback_policy")
+            or "profile_default_realtime_v1"
+        ).strip()
+        if not output_playback_policy:
+            raise ValueError(
+                f"Subject profile {action} output_playback_policy is empty"
+            )
         if (
             action == "eating"
             and effective_pose_strength > SCAIL_EATING_POSE_STRENGTH_MAX
@@ -2319,6 +2359,8 @@ def resolve_effective_subject_config(
             "pose_strength": effective_pose_strength,
             "seed_offset": int(action_runtime["seed_offset"]),
             "effective_seed": base_seed + int(action_runtime["seed_offset"]),
+            "output_playback_rate": output_playback_rate,
+            "output_playback_policy": output_playback_policy,
         }
         uploaded_action = uploaded_identity_driving_actions.get(action)
         if uploaded_identity_driving_actions and not isinstance(uploaded_action, dict):
@@ -2477,6 +2519,71 @@ def resolve_effective_subject_config(
         "steps": steps,
         "actions": resolved_actions,
         "standard_direct": standard_direct,
+    }
+
+
+def subject_replacement_action_output_timing(
+    effective_config: dict[str, Any] | None,
+    action: str,
+) -> dict[str, Any]:
+    """Resolve post-generation playback without changing SCAIL motion frames."""
+
+    config = effective_config if isinstance(effective_config, dict) else {}
+    raw_actions = config.get("actions")
+    action_config = (
+        raw_actions.get(action)
+        if isinstance(raw_actions, dict)
+        and isinstance(raw_actions.get(action), dict)
+        else {}
+    )
+    source_frames = int(config.get("frames") or SCAIL_FRAMES)
+    source_fps = float(config.get("fps") or SCAIL_FPS)
+    playback_rate = float(action_config.get("output_playback_rate", 1.0))
+    policy = str(
+        action_config.get("output_playback_policy")
+        or "profile_default_realtime_v1"
+    ).strip()
+    if source_frames < 1 or source_fps <= 0:
+        raise ValueError("Subject-replacement source timing is invalid")
+    if not 0.25 <= playback_rate <= 2.0:
+        raise ValueError(
+            f"Subject-replacement {action} playback rate is invalid: "
+            f"{playback_rate}"
+        )
+
+    video_fps_float = source_fps * playback_rate
+    video_fps = int(round(video_fps_float))
+    gif_fps_float = float(TRANSPARENT_GIF_FPS) * playback_rate
+    gif_fps = int(round(gif_fps_float))
+    if (
+        video_fps < 1
+        or abs(video_fps_float - video_fps) > 1e-9
+        or gif_fps < 1
+        or abs(gif_fps_float - gif_fps) > 1e-9
+        or 100 % gif_fps != 0
+    ):
+        raise ValueError(
+            f"Subject-replacement {action} playback rate {playback_rate} "
+            "cannot be represented by the MP4/GIF timing contract"
+        )
+    return {
+        "policy": policy,
+        "playback_rate": playback_rate,
+        "generation": {
+            "frames": source_frames,
+            "fps": source_fps,
+            "duration_seconds": source_frames / source_fps,
+        },
+        "video": {
+            "frames": source_frames,
+            "fps": float(video_fps),
+            "duration_seconds": source_frames / float(video_fps),
+        },
+        "transparent_gif": {
+            "frames": TRANSPARENT_GIF_FRAMES,
+            "fps": gif_fps,
+            "duration_seconds": TRANSPARENT_GIF_FRAMES / float(gif_fps),
+        },
     }
 
 
@@ -2641,6 +2748,7 @@ def subject_profile_fur_guard(profile: dict[str, Any]) -> tuple[str, str]:
 def subject_profile_public(profile: dict[str, Any]) -> dict[str, Any]:
     profile_actions = subject_profile_actions(profile)
     action_references = profile.get("action_references", {})
+    runtime_actions = subject_profile_runtime(profile)["actions"]
     driving_standards = profile.get("driving_standards")
     raw_standard_direct = profile.get("standard_direct")
     public_driving_standards: dict[str, Any] | None = None
@@ -2799,6 +2907,13 @@ def subject_profile_public(profile: dict[str, Any]) -> dict[str, Any]:
                 "reference_ready": bool(
                     isinstance(action_references.get(action), str)
                     and Path(action_references[action]).is_file()
+                ),
+                "output_playback_rate": float(
+                    runtime_actions[action].get("output_playback_rate", 1.0)
+                ),
+                "output_playback_policy": str(
+                    runtime_actions[action].get("output_playback_policy")
+                    or "profile_default_realtime_v1"
                 ),
             }
             for action in profile_actions
@@ -6863,22 +6978,50 @@ async def create_subject_replacement_api_job(
                 profile_reference_actions,
             )
         effective_actions = effective_subject_config["actions"]
-        final_frames = (
-            TRANSPARENT_GIF_FRAMES
-            if output_format == "transparent_gif"
-            else int(effective_subject_config["frames"])
+        output_timing_by_action = {
+            action: subject_replacement_action_output_timing(
+                effective_subject_config,
+                action,
+            )
+            for action in actions
+        }
+        output_timing_key = (
+            "transparent_gif" if output_format == "transparent_gif" else "video"
         )
-        final_fps = (
-            TRANSPARENT_GIF_FPS
-            if output_format == "transparent_gif"
-            else float(effective_subject_config["fps"])
-        )
-        final_duration = (
-            TRANSPARENT_GIF_DURATION_SECONDS
-            if output_format == "transparent_gif"
-            else float(effective_subject_config["frames"])
-            / float(effective_subject_config["fps"])
-        )
+        output_contracts = [
+            output_timing_by_action[action][output_timing_key]
+            for action in actions
+        ]
+        distinct_output_timings = {
+            (
+                int(contract["frames"]),
+                float(contract["fps"]),
+                float(contract["duration_seconds"]),
+            )
+            for contract in output_contracts
+        }
+        output_timing_is_action_specific = len(distinct_output_timings) > 1
+        if output_timing_is_action_specific:
+            final_frames = (
+                TRANSPARENT_GIF_FRAMES
+                if output_format == "transparent_gif"
+                else int(effective_subject_config["frames"])
+            )
+            final_fps = (
+                TRANSPARENT_GIF_FPS
+                if output_format == "transparent_gif"
+                else float(effective_subject_config["fps"])
+            )
+            final_duration = (
+                TRANSPARENT_GIF_DURATION_SECONDS
+                if output_format == "transparent_gif"
+                else float(effective_subject_config["frames"])
+                / float(effective_subject_config["fps"])
+            )
+        else:
+            final_frames, final_fps, final_duration = next(
+                iter(distinct_output_timings)
+            )
         job = {
             "job_id": job_id,
             "callback_enabled": callback_enabled,
@@ -7027,6 +7170,8 @@ async def create_subject_replacement_api_job(
                 action: float(effective_actions[action]["pose_strength"])
                 for action in actions
             },
+            "output_timing_by_action": output_timing_by_action,
+            "output_timing_is_action_specific": output_timing_is_action_specific,
             "effective_subject_config": effective_subject_config,
             "output_format": output_format,
             "skip_video": False,

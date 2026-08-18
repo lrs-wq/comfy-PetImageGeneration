@@ -42,6 +42,84 @@ def _run(command: list[str], stage_name: str, timeout: int = 900) -> None:
         raise RuntimeError(f"{stage_name} failed: {detail[-4000:]}")
 
 
+def retime_video_playback(
+    source: Path,
+    target: Path,
+    *,
+    ffmpeg_bin: str = "ffmpeg",
+    source_fps: float,
+    output_fps: float,
+    frame_count: int,
+) -> dict[str, object]:
+    """Change only presentation timestamps while preserving the frame sequence."""
+
+    if not source.is_file():
+        raise FileNotFoundError(f"Playback source video is missing: {source}")
+    if source_fps <= 0 or output_fps <= 0 or frame_count < 1:
+        raise ValueError("Playback timing must use positive FPS and frame count")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.stem}.{uuid4().hex}.retimed.mp4")
+    pts_scale = source_fps / output_fps
+    try:
+        _run(
+            [
+                ffmpeg_bin,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(source),
+                "-vf",
+                f"setpts={pts_scale:.9f}*PTS",
+                "-r",
+                str(output_fps),
+                "-frames:v",
+                str(frame_count),
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                str(temporary),
+            ],
+            "Video playback retiming",
+        )
+        capture = cv2.VideoCapture(str(temporary))
+        try:
+            observed_frames = int(round(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
+            observed_fps = float(capture.get(cv2.CAP_PROP_FPS))
+            width = int(round(capture.get(cv2.CAP_PROP_FRAME_WIDTH)))
+            height = int(round(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        finally:
+            capture.release()
+        if observed_frames != frame_count:
+            raise RuntimeError(
+                "Retimed video frame count changed: "
+                f"{observed_frames} != {frame_count}"
+            )
+        if abs(observed_fps - output_fps) > 1e-6:
+            raise RuntimeError(
+                f"Retimed video FPS changed: {observed_fps} != {output_fps}"
+            )
+        os.replace(temporary, target)
+        return {
+            "policy": "post_generation_pts_only_playback_rate_v1",
+            "source_fps": source_fps,
+            "output_fps": observed_fps,
+            "playback_rate": output_fps / source_fps,
+            "pts_scale": pts_scale,
+            "frames": observed_frames,
+            "duration_seconds": observed_frames / observed_fps,
+            "size": [width, height],
+            "bytes": target.stat().st_size,
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _selected_video_frames(source: Path, size: int, frame_count: int) -> list[np.ndarray]:
     capture = cv2.VideoCapture(str(source))
     source_frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))

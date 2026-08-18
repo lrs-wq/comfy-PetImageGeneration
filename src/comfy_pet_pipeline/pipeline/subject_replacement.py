@@ -4046,6 +4046,14 @@ def build_unstabilized_transparent_gif(
     white_mp4_target: Path | None = None,
 ) -> dict[str, Any]:
     """Remove green per frame and encode a GIF without spatial stabilization."""
+    if source_fps <= 0 or gif_fps < 1 or gif_frames < 1:
+        raise ValueError(
+            "Transparent output timing requires positive FPS and frame counts"
+        )
+    if 100 % gif_fps != 0:
+        raise ValueError(
+            "Transparent GIF FPS must map exactly to GIF centisecond delays"
+        )
     frames_root = gif_target.parent / f".{gif_target.stem}.{uuid.uuid4().hex}.frames"
     binary_dir = frames_root / "gif"
     soft_dir = frames_root / "soft"
@@ -4579,6 +4587,10 @@ def build_unstabilized_transparent_gif(
                 size=output_size,
                 frame_count=len(source_frames),
             )
+            white_mp4_validation.update(
+                fps=source_fps,
+                duration_seconds=len(source_frames) / source_fps,
+            )
             white_mp4_target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(white_temporary, white_mp4_target)
         return {
@@ -4613,6 +4625,13 @@ def build_unstabilized_transparent_gif(
             },
             "source_frames": len(source_frames),
             "source_fps": source_fps,
+            "output_playback": {
+                "policy": "post_generation_pts_only_playback_rate_v1",
+                "video_fps": source_fps,
+                "gif_fps": gif_fps,
+                "gif_frames": gif_frames,
+                "gif_duration_seconds": gif_frames / float(gif_fps),
+            },
             "sampled_source_indices": sampled_indices,
             "foreground_fraction_min": min(foreground_fractions),
             "foreground_fraction_max": max(foreground_fractions),

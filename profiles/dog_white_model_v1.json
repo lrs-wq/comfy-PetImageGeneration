@@ -102,7 +102,9 @@
         "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-stable-kibble-v3/eating_white_model_driver_512x512_81f_16fps.mp4",
         "driving_animation_sha256": "b6009f9ca7f12c5233c4e6b172b50d3fe6a69e8bc2faf97e6f2593843d5c7d20",
         "pose_strength": 1.1,
-        "seed_offset": 0
+        "seed_offset": 0,
+        "output_playback_rate": 0.5,
+        "output_playback_policy": "restore_original_eating_source_tempo_v1"
       },
       "standing": {
         "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-stable-kibble-v3/standing_white_model_driver_512x512_81f_16fps.mp4",
@@ -112,5 +114,5 @@
       }
     }
   },
-  "usage_note": "仅用于分类为 dog 的上传主体。白模只提供 eating / standing 的动作几何与时序，上传图片始终是身份、犬种、脸部、毛色、花纹、毛长和体型的唯一外观标准。"
+  "usage_note": "仅用于分类为 dog 的上传主体。白模只提供 eating / standing 的动作几何与时序，上传图片始终是身份、犬种、脸部、毛色、花纹、毛长和体型的唯一外观标准。eating 在生成完成后以 0.5 倍速播放，恢复原始 10 秒白模动作节奏；standing 和猫链路保持原速。"
 }

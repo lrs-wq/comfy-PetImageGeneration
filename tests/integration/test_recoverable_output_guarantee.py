@@ -163,22 +163,27 @@ class PoseAttemptProvenanceRegressionTests(unittest.TestCase):
 
 
 class RecoverableOutputGuaranteeTests(unittest.TestCase):
-    def assert_gif_contract(self, path: Path) -> None:
+    def assert_gif_contract(
+        self,
+        path: Path,
+        *,
+        expected_duration_ms: int = 2000,
+    ) -> None:
         self.assertTrue(path.is_file(), path)
         with Image.open(path) as animation:
             self.assertEqual(animation.size, (TEST_GIF_SIZE, TEST_GIF_SIZE))
             self.assertEqual(animation.n_frames, TEST_GIF_FRAMES)
             self.assertEqual(animation.info.get("loop"), 0)
-            duration_ms = 0
+            observed_duration_ms = 0
             transparent = False
             visible = False
             for index in range(animation.n_frames):
                 animation.seek(index)
-                duration_ms += int(animation.info.get("duration") or 0)
+                observed_duration_ms += int(animation.info.get("duration") or 0)
                 alpha_extrema = animation.convert("RGBA").getchannel("A").getextrema()
                 transparent = transparent or alpha_extrema[0] == 0
                 visible = visible or alpha_extrema[1] >= 64
-            self.assertEqual(duration_ms, 2000)
+            self.assertEqual(observed_duration_ms, expected_duration_ms)
             self.assertTrue(transparent)
             self.assertTrue(visible)
 
@@ -238,7 +243,26 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             job_dir = output_root / job_id
             job_dir.mkdir()
             _write_transparent_identity(job_dir / "input.png")
-            jobs = {job_id: _accepted_job(job_id, ["eating", "standing"], status="running")}
+            jobs = {
+                job_id: _accepted_job(
+                    job_id,
+                    ["eating", "standing"],
+                    status="running",
+                )
+            }
+            jobs[job_id]["effective_subject_config"] = {
+                "frames": 81,
+                "fps": 16,
+                "actions": {
+                    "eating": {
+                        "output_playback_rate": 0.5,
+                        "output_playback_policy": (
+                            "restore_original_eating_source_tempo_v1"
+                        ),
+                    },
+                    "standing": {},
+                },
+            }
             job_queue: queue.Queue[str] = queue.Queue(maxsize=8)
             job_queue.put_nowait(job_id)
             stop_event = Mock()
@@ -274,9 +298,16 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
                 if output["type"] == "transparent_gif"
             }
             self.assertEqual(set(gif_outputs), {"eating", "standing"})
-            for output in gif_outputs.values():
+            for action, output in gif_outputs.items():
                 self.assertTrue(output["degraded"])
-                self.assert_gif_contract(job_dir / str(output["filename"]))
+                self.assert_gif_contract(
+                    job_dir / str(output["filename"]),
+                    expected_duration_ms=4000 if action == "eating" else 2000,
+                )
+            self.assertEqual(gif_outputs["eating"]["fps"], 2)
+            self.assertEqual(gif_outputs["eating"]["duration_seconds"], 4.0)
+            self.assertEqual(gif_outputs["standing"]["fps"], 4)
+            self.assertEqual(gif_outputs["standing"]["duration_seconds"], 2.0)
             self.assertEqual(
                 {result["action"] for result in final_job["subject_replacement_results"]},
                 {"eating", "standing"},

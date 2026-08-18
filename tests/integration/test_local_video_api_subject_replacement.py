@@ -277,6 +277,43 @@ class SubjectReplacementParsingTests(unittest.TestCase):
             scail_steps=None,
             pose_strength=None,
         )
+        self.assertEqual(effective["actions"]["eating"]["output_playback_rate"], 0.5)
+        self.assertEqual(
+            effective["actions"]["eating"]["output_playback_policy"],
+            "restore_original_eating_source_tempo_v1",
+        )
+        self.assertEqual(
+            effective["actions"]["standing"]["output_playback_rate"], 1.0
+        )
+        eating_timing = pipeline.subject_replacement_action_output_timing(
+            effective,
+            "eating",
+        )
+        standing_timing = pipeline.subject_replacement_action_output_timing(
+            effective,
+            "standing",
+        )
+        self.assertEqual(
+            eating_timing["generation"],
+            {"frames": 81, "fps": 16.0, "duration_seconds": 5.0625},
+        )
+        self.assertEqual(
+            eating_timing["video"],
+            {"frames": 81, "fps": 8.0, "duration_seconds": 10.125},
+        )
+        self.assertEqual(
+            eating_timing["transparent_gif"],
+            {"frames": 100, "fps": 10, "duration_seconds": 10.0},
+        )
+        self.assertEqual(standing_timing["video"]["fps"], 16.0)
+        self.assertEqual(standing_timing["transparent_gif"]["fps"], 20)
+        self.assertEqual(standing_timing["transparent_gif"]["duration_seconds"], 5.0)
+        public_actions = {
+            action["id"]: action
+            for action in pipeline.subject_profile_public(profile)["actions"]
+        }
+        self.assertEqual(public_actions["eating"]["output_playback_rate"], 0.5)
+        self.assertEqual(public_actions["standing"]["output_playback_rate"], 1.0)
         eating_driver = effective["actions"]["eating"][
             "uploaded_identity_driving"
         ]
@@ -315,6 +352,13 @@ class SubjectReplacementParsingTests(unittest.TestCase):
                 action_runtime["driving_animation_sha256"],
                 r"^[0-9a-f]{64}$",
             )
+
+    def test_profile_rejects_out_of_range_output_playback_rate(self) -> None:
+        profile = pipeline.load_subject_profile("dog_white_model_v1")
+        profile["runtime"]["actions"]["eating"]["output_playback_rate"] = 0.1
+
+        with self.assertRaisesRegex(ValueError, "output_playback_rate"):
+            pipeline.subject_profile_runtime(profile)
 
     def test_profile_exposes_action_specific_references(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1292,6 +1336,15 @@ class SubjectReplacementJobCreationTests(unittest.TestCase):
         self.assertEqual(result["requested_subject_profile"], "sleek_tabby_cat_v1")
         self.assertTrue(result["subject_profile_routed_by_species"])
         self.assertEqual(result["actions"], ["eating", "standing"])
+        self.assertTrue(result["output_timing_is_action_specific"])
+        self.assertEqual(
+            result["output_timing_by_action"]["eating"]["transparent_gif"],
+            {"frames": 100, "fps": 10, "duration_seconds": 10.0},
+        )
+        self.assertEqual(
+            result["output_timing_by_action"]["standing"]["transparent_gif"],
+            {"frames": 100, "fps": 20, "duration_seconds": 5.0},
+        )
         self.assertEqual(
             result["reference_image_profile"],
             pipeline.DOG_SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE,
@@ -1351,6 +1404,11 @@ class SubjectReplacementJobCreationTests(unittest.TestCase):
         self.assertEqual(result["subject_profile"], "sleek_tabby_cat_v1")
         self.assertEqual(result["frames"], 100)
         self.assertEqual(result["fps"], 20.0)
+        self.assertFalse(result["output_timing_is_action_specific"])
+        self.assertEqual(
+            result["output_timing_by_action"]["eating"]["transparent_gif"],
+            {"frames": 100, "fps": 20, "duration_seconds": 5.0},
+        )
         self.assertEqual(result["seed"], 123)
         self.assertEqual(result["seed_mode"], "base_plus_action_offset")
         self.assertEqual(
