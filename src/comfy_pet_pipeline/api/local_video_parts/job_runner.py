@@ -8,6 +8,114 @@ from __future__ import annotations
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
+POSE_ATTEMPT_PROVENANCE_FIELDS = (
+    "identity_input_policy",
+    "image1_input_name",
+    "image2_input_name",
+    "image3_input_name",
+    "sampler_latent_input_name",
+    "sampler_noise_mask_input_name",
+    "identity_input_name",
+    "geometry_input_name",
+)
+POSE_ATTEMPT_REQUIRED_PROVENANCE_FIELDS = (
+    "image1_input_name",
+    "sampler_latent_input_name",
+    "identity_input_name",
+)
+
+
+def _pose_workflow_load_image_names(record: dict[str, Any]) -> list[str]:
+    workflow = record.get("workflow")
+    if not isinstance(workflow, dict):
+        return []
+    prompt = workflow.get("prompt")
+    if isinstance(prompt, dict):
+        workflow = prompt
+    names: list[str] = []
+    for node in workflow.values():
+        if not isinstance(node, dict) or node.get("class_type") != "LoadImage":
+            continue
+        inputs = node.get("inputs")
+        image_name = inputs.get("image") if isinstance(inputs, dict) else None
+        if isinstance(image_name, str) and image_name.strip():
+            names.append(image_name.strip())
+    return list(dict.fromkeys(names))
+
+
+def pose_attempt_provenance(record: dict[str, Any]) -> dict[str, Any]:
+    """Return a total, serialization-safe pose workflow provenance payload."""
+
+    settings = record.get("settings")
+    settings = settings if isinstance(settings, dict) else {}
+    workflow_input_names = _pose_workflow_load_image_names(record)
+    values: dict[str, str | None] = {}
+    field_sources: dict[str, str] = {}
+    for field in POSE_ATTEMPT_PROVENANCE_FIELDS:
+        raw_value = record.get(field)
+        source = "attempt_record"
+        if not str(raw_value or "").strip():
+            raw_value = settings.get(field)
+            source = "attempt_settings"
+        values[field] = (
+            str(raw_value).strip() if str(raw_value or "").strip() else None
+        )
+        field_sources[field] = source if values[field] else "absent_optional"
+    if not values["image1_input_name"] and workflow_input_names:
+        values["image1_input_name"] = workflow_input_names[0]
+        field_sources["image1_input_name"] = "workflow_load_image_1"
+    if not values["image2_input_name"] and len(workflow_input_names) >= 2:
+        values["image2_input_name"] = workflow_input_names[1]
+        field_sources["image2_input_name"] = "workflow_load_image_2"
+    if not values["image3_input_name"] and len(workflow_input_names) >= 3:
+        values["image3_input_name"] = workflow_input_names[2]
+        field_sources["image3_input_name"] = "workflow_load_image_3"
+    if not values["sampler_latent_input_name"]:
+        values["sampler_latent_input_name"] = values["image1_input_name"]
+        field_sources["sampler_latent_input_name"] = "inferred_from_image1"
+    if not values["identity_input_name"]:
+        values["identity_input_name"] = values["image1_input_name"]
+        field_sources["identity_input_name"] = "inferred_from_image1"
+    if (
+        not values["geometry_input_name"]
+        and values["image2_input_name"]
+    ):
+        values["geometry_input_name"] = values["image2_input_name"]
+        field_sources["geometry_input_name"] = "inferred_from_image2"
+    required_fields = list(POSE_ATTEMPT_REQUIRED_PROVENANCE_FIELDS)
+    if values["image2_input_name"] or values["image3_input_name"]:
+        required_fields.append("geometry_input_name")
+    missing_fields = [
+        field
+        for field in required_fields
+        if not str(values.get(field) or "").strip()
+    ]
+    mapped_inputs = {
+        str(value).strip()
+        for field, value in values.items()
+        if field.endswith("_input_name") and str(value or "").strip()
+    }
+    unmapped_workflow_inputs = [
+        name for name in workflow_input_names if name not in mapped_inputs
+    ]
+    return {
+        **values,
+        "complete": not missing_fields and not unmapped_workflow_inputs,
+        "required_fields": required_fields,
+        "missing_fields": missing_fields,
+        "field_sources": field_sources,
+        "workflow_load_image_names": workflow_input_names,
+        "unmapped_workflow_input_names": unmapped_workflow_inputs,
+        "issues": [
+            *missing_fields,
+            *[
+                f"unmapped_workflow_input:{name}"
+                for name in unmapped_workflow_inputs
+            ],
+        ],
+    }
+
+
 def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
     _sync_local_video_runtime(globals(), {"run_job"})
     raise_if_cancelled(job_id)
@@ -6188,6 +6296,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         + ", ".join(issues)
                     )
                 best_attempt = {
+                    **{
+                        field: fallback_record.get(field)
+                        for field in POSE_ATTEMPT_PROVENANCE_FIELDS
+                    },
                     "attempt": len(attempts) + 1,
                     "profile": "rembg_u2net_fallback",
                     "seed": fallback_record["seed"],
@@ -6438,6 +6550,38 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         grooming_advisory_minimum_gate_selected
                     ),
                 )
+            selected_pose_provenance = pose_attempt_provenance(best_attempt)
+            if not selected_pose_provenance["complete"]:
+                LOGGER.warning(
+                    "%s pose %s selected candidate has incomplete workflow "
+                    "provenance: %s",
+                    job_id,
+                    index,
+                    selected_pose_provenance["issues"],
+                )
+                record_nonblocking_job_anomaly(
+                    job_id,
+                    code=f"pose_{index:02d}_workflow_provenance_incomplete",
+                    message=(
+                        f"动作 {index} 已生成，但内部工作流来源记录不完整；"
+                        "生成继续，结果需保留降级审计。"
+                    ),
+                    stage="pose_workflow_provenance",
+                    details={
+                        "pose_index": index,
+                        "pose": pose,
+                        "selected_attempt": best_attempt.get("attempt"),
+                        "selected_profile": best_attempt.get("profile"),
+                        "missing_fields": selected_pose_provenance[
+                            "missing_fields"
+                        ],
+                        "unmapped_workflow_input_names": (
+                            selected_pose_provenance[
+                                "unmapped_workflow_input_names"
+                            ]
+                        ),
+                    },
+                )
             write_workflow(
                 job_dir, f"qwen_pose_{index:02d}.json", best_attempt["workflow"]
             )
@@ -6447,14 +6591,25 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "selected_attempt": best_attempt["attempt"],
                     "selected_profile": best_attempt["profile"],
                     "identity_input_policy": (effective_pose_identity_input_policy),
-                    "image1_input_name": best_attempt["image1_input_name"],
-                    "image2_input_name": best_attempt["image2_input_name"],
-                    "image3_input_name": best_attempt.get("image3_input_name"),
-                    "sampler_latent_input_name": best_attempt[
+                    "image1_input_name": selected_pose_provenance[
+                        "image1_input_name"
+                    ],
+                    "image2_input_name": selected_pose_provenance[
+                        "image2_input_name"
+                    ],
+                    "image3_input_name": selected_pose_provenance[
+                        "image3_input_name"
+                    ],
+                    "sampler_latent_input_name": selected_pose_provenance[
                         "sampler_latent_input_name"
                     ],
-                    "identity_input_name": best_attempt["identity_input_name"],
-                    "geometry_input_name": best_attempt["geometry_input_name"],
+                    "identity_input_name": selected_pose_provenance[
+                        "identity_input_name"
+                    ],
+                    "geometry_input_name": selected_pose_provenance[
+                        "geometry_input_name"
+                    ],
+                    "workflow_input_provenance": selected_pose_provenance,
                     "grooming_foreleg_repair": best_attempt.get(
                         "grooming_foreleg_repair"
                     ),
@@ -6526,14 +6681,30 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "attempt": best_attempt["attempt"],
                     "profile": best_attempt["profile"],
                     "identity_input_policy": (effective_pose_identity_input_policy),
-                    "image1_input_name": best_attempt["image1_input_name"],
-                    "image2_input_name": best_attempt["image2_input_name"],
-                    "image3_input_name": best_attempt.get("image3_input_name"),
-                    "sampler_latent_input_name": best_attempt[
+                    "image1_input_name": selected_pose_provenance[
+                        "image1_input_name"
+                    ],
+                    "image2_input_name": selected_pose_provenance[
+                        "image2_input_name"
+                    ],
+                    "image3_input_name": selected_pose_provenance[
+                        "image3_input_name"
+                    ],
+                    "sampler_latent_input_name": selected_pose_provenance[
                         "sampler_latent_input_name"
                     ],
-                    "identity_input_name": best_attempt["identity_input_name"],
-                    "geometry_input_name": best_attempt["geometry_input_name"],
+                    "identity_input_name": selected_pose_provenance[
+                        "identity_input_name"
+                    ],
+                    "geometry_input_name": selected_pose_provenance[
+                        "geometry_input_name"
+                    ],
+                    "workflow_input_provenance_complete": (
+                        selected_pose_provenance["complete"]
+                    ),
+                    "workflow_input_provenance_missing_fields": (
+                        selected_pose_provenance["missing_fields"]
+                    ),
                     "grooming_foreleg_repair": best_attempt.get(
                         "grooming_foreleg_repair"
                     ),

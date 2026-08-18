@@ -747,6 +747,18 @@ def health() -> dict[str, Any]:
                 "frames": TRANSPARENT_GIF_FRAMES,
                 "fps": TRANSPARENT_GIF_FPS,
                 "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                "recoverable_fallback": {
+                    "enabled": True,
+                    "policy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+                    "scope": "accepted_subject_replacement_transparent_gif_jobs",
+                    "per_requested_action": True,
+                    "triggers": [
+                        "generation_exception",
+                        "service_restart_during_generation",
+                        "restored_queue_capacity_exceeded",
+                    ],
+                    "cancelled_jobs_excluded": True,
+                },
             },
             "missing": subject_replacement_missing,
         },

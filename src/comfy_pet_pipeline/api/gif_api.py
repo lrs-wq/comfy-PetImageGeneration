@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 INTERNAL_API_URL = os.getenv(
     "LOCAL_VIDEO_INTERNAL_URL", "http://127.0.0.1:8770"
 ).rstrip("/")

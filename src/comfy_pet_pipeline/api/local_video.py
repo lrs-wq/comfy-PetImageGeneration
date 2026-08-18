@@ -121,7 +121,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.25.0"
+API_VERSION = "2.25.1"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -6354,12 +6354,41 @@ revalidate_uploaded_qwen_references_before_scail = (
 )
 
 
+recover_subject_replacement_job_with_fallback = (
+    _local_video_subject_replacement.recover_subject_replacement_job_with_fallback
+)
+RECOVERABLE_OUTPUT_FALLBACK_POLICY = (
+    _local_video_subject_replacement.RECOVERABLE_OUTPUT_FALLBACK_POLICY
+)
+
+
 run_subject_replacement_job = (
     _local_video_subject_replacement.run_subject_replacement_job
 )
 
 
+pose_attempt_provenance = _local_video_job_runner.pose_attempt_provenance
 run_job = _local_video_job_runner.run_job
+
+
+def try_recover_subject_replacement_output(
+    job_id: str,
+    error: BaseException,
+) -> bool:
+    """Best-effort terminal recovery for an accepted transparent GIF job."""
+
+    with JOBS_LOCK:
+        failed_job = dict(JOBS.get(job_id) or {})
+    if failed_job.get("generation_mode") != "subject_replacement":
+        return False
+    try:
+        return recover_subject_replacement_job_with_fallback(job_id, error)
+    except Exception:  # noqa: BLE001 - caller retains the original failure
+        LOGGER.exception(
+            "Job %s degraded output fallback also failed",
+            job_id,
+        )
+        return False
 
 
 def worker_loop() -> None:
@@ -6399,26 +6428,34 @@ def worker_loop() -> None:
             LOGGER.error("Job %s failed: %s\n%s", job_id, exc, traceback.format_exc())
             with JOBS_LOCK:
                 failed_job = dict(JOBS.get(job_id) or {})
-            reference_failure: dict[str, Any] = {}
-            if failed_job.get("reference_generation_status") == "running":
-                reference_failure = {
-                    "reference_generation_status": "failed",
-                    "reference_generation_completed": False,
-                }
-            update_job(
-                job_id,
-                status="failed",
-                stage="failed",
-                error=str(exc)[:4000],
-                recovery_active=False,
-                recovery_attempt=None,
-                quality_retry=None,
-                active_prompt_id=None,
-                current_pose_index=None,
-                current_pose=None,
-                finished_at=utc_now(),
-                **reference_failure,
-            )
+            output_recovered = try_recover_subject_replacement_output(job_id, exc)
+            if output_recovered:
+                LOGGER.warning(
+                    "Job %s completed with degraded output fallback after: %s",
+                    job_id,
+                    exc,
+                )
+            else:
+                reference_failure: dict[str, Any] = {}
+                if failed_job.get("reference_generation_status") == "running":
+                    reference_failure = {
+                        "reference_generation_status": "failed",
+                        "reference_generation_completed": False,
+                    }
+                update_job(
+                    job_id,
+                    status="failed",
+                    stage="failed",
+                    error=str(exc)[:4000],
+                    recovery_active=False,
+                    recovery_attempt=None,
+                    quality_retry=None,
+                    active_prompt_id=None,
+                    current_pose_index=None,
+                    current_pose=None,
+                    finished_at=utc_now(),
+                    **reference_failure,
+                )
             try:
                 wait_comfy_idle(timeout=120)
                 free_comfy_models()
@@ -6432,11 +6469,13 @@ def worker_loop() -> None:
 def restore_jobs() -> None:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     queued: list[str] = []
+    interrupted: list[str] = []
     for path in sorted(OUTPUT_ROOT.glob("*/status.json")):
         try:
             job = json.loads(path.read_text(encoding="utf-8"))
             job_id = str(job["job_id"])
             callback_changed = False
+            JOBS[job_id] = job
             if (
                 job.get("cancel_requested")
                 and job.get("status") not in TERMINAL_JOB_STATUSES
@@ -6452,30 +6491,56 @@ def restore_jobs() -> None:
                 write_json_atomic(path, job)
                 callback_changed = True
             elif job.get("status") == "running":
-                if job.get("reference_generation_status") == "running":
-                    job.update(
-                        reference_generation_status="failed",
-                        reference_generation_completed=False,
-                    )
                 job.update(
-                    status="failed",
-                    stage="failed",
-                    error="API service restarted while this job was running; submit it again.",
-                    finished_at=utc_now(),
+                    stage="recovering_after_service_restart",
+                    error=None,
+                    active_prompt_id=None,
                     updated_at=utc_now(),
                 )
                 write_json_atomic(path, job)
+                interrupted.append(job_id)
                 callback_changed = True
             elif job.get("status") == "queued":
                 queued.append(job_id)
-            JOBS[job_id] = job
             if callback_changed:
                 report_job_callback(job)
         except (OSError, KeyError, json.JSONDecodeError):
             LOGGER.exception("Could not restore job status from %s", path)
-    for job_id in queued[:MAX_QUEUE_SIZE]:
+
+    retry_after_recovery: list[str] = []
+    for job_id in interrupted:
+        restart_error = RuntimeError(
+            "API service restarted while this accepted job was running."
+        )
+        if try_recover_subject_replacement_output(job_id, restart_error):
+            LOGGER.warning(
+                "Recovered interrupted job %s with audited degraded GIF outputs",
+                job_id,
+            )
+            continue
+        update_job(
+            job_id,
+            status="queued",
+            stage="queued_after_service_restart",
+            error=None,
+            finished_at=None,
+        )
+        retry_after_recovery.append(job_id)
+
+    restored_queue = retry_after_recovery + queued
+    available_slots = max(0, MAX_QUEUE_SIZE - JOB_QUEUE.qsize())
+    for job_id in restored_queue[:available_slots]:
         JOB_QUEUE.put_nowait(job_id)
-    for job_id in queued[MAX_QUEUE_SIZE:]:
+    for job_id in restored_queue[available_slots:]:
+        overflow_error = RuntimeError(
+            "Queue capacity was exceeded while restoring this accepted job."
+        )
+        if try_recover_subject_replacement_output(job_id, overflow_error):
+            LOGGER.warning(
+                "Recovered overflowed restored job %s with degraded GIF outputs",
+                job_id,
+            )
+            continue
         update_job(
             job_id,
             status="failed",
