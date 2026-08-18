@@ -82,9 +82,11 @@ def subject_replacement_pose_prompt(action: str, *, species: str = "cat") -> str
             return (
                 "eating | A complete full-body dog in a natural low-head eating "
                 "pose at a three-quarter front angle. Exactly one shallow food bowl "
-                "contains visible brown kibble. The lower muzzle enters and overlaps "
-                "the kibble while all four anatomically attached legs remain stable "
-                "and the complete tail stays visible."
+                "contains a small, low, level layer of ordinary brown dry kibble "
+                "fully below the rim. The food is never a heap, mound, cone, pyramid, "
+                "fused mass, oversized pile, or overflow. The lower muzzle enters and "
+                "overlaps the low food layer while all four anatomically attached legs "
+                "remain stable and the complete tail stays visible."
             )
         return f"eating | {MULTIPOSE_PRESET_BY_ACTION['eating']['prompt_en']}"
     if action == "grooming":
@@ -139,12 +141,15 @@ def action_first_frame_rules(pose: str, *, species: str = "cat") -> str:
     action = action_key(pose)
     if species == "dog" and action == "eating":
         return (
-            "Include exactly one small shallow matte food bowl with clearly visible "
-            "brown kibble. Keep all four dog legs anatomically attached and stable. "
-            "Lower the head until the dog's lower muzzle physically enters and "
-            "overlaps the kibble and near rim; a gap between mouth and food is "
-            "invalid. Keep both ears, the upper face, body and complete tail readable. "
-            "The bowl is the only prop."
+            "Include exactly one small shallow matte food bowl containing only a "
+            "small, low, level layer of ordinary brown dry kibble fully below its "
+            "continuous rim. Keep the food surface shallow and planar: no heap, mound, "
+            "cone, pyramid, oversized pellets, fused mass, overfilled bowl, or food "
+            "outside the bowl. Keep all four dog legs anatomically attached and stable. "
+            "Lower the head until the dog's lower muzzle physically enters and overlaps "
+            "the low kibble layer and near rim; a gap between mouth and food is invalid. "
+            "Keep both ears, the upper face, body and complete tail readable. The bowl "
+            "is the only prop."
         )
     if species == "dog" and action == "standing":
         return (

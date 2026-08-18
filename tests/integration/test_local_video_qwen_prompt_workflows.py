@@ -17,6 +17,42 @@ from tests.integration.local_video_subject_replacement_test_support import (
 
 
 class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceTestBase):
+    def test_dog_eating_driver_keeps_compressed_kibble_below_rim(self) -> None:
+        profile = pipeline.load_subject_profile("dog_white_model_v1")
+        driver_path = Path(
+            profile["runtime"]["actions"]["eating"]["driving_animation"]
+        )
+        capture = cv2.VideoCapture(str(driver_path))
+        above_rim_counts: list[int] = []
+        food_band_counts: list[int] = []
+        try:
+            while True:
+                decoded, frame = capture.read()
+                if not decoded:
+                    break
+                blue, green, red = cv2.split(frame)
+                red16 = red.astype(np.int16)
+                green16 = green.astype(np.int16)
+                blue16 = blue.astype(np.int16)
+                kibble = (
+                    (red >= 65)
+                    & (red16 > green16 + 10)
+                    & (green16 > blue16 + 3)
+                    & (red16 - blue16 >= 26)
+                )
+                above_rim_counts.append(int(kibble[360:367, 65:205].sum()))
+                food_band_counts.append(int(kibble[373:386, 77:191].sum()))
+        finally:
+            capture.release()
+
+        self.assertEqual(len(above_rim_counts), 81)
+        # H.264 chroma subsampling can bleed a few edge pixels across the rim;
+        # a visible mound produces hundreds here in the old white model.
+        self.assertLessEqual(max(above_rim_counts), 8)
+        self.assertLessEqual(sum(above_rim_counts), 150)
+        self.assertGreaterEqual(min(food_band_counts), 750)
+        self.assertLessEqual(max(food_band_counts), 1100)
+
     def test_digest_bound_dog_eating_loop_passes_full_pose_motion_gate(self) -> None:
         profile = pipeline.load_subject_profile("dog_white_model_v1")
         driver_path = Path(
@@ -43,7 +79,38 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             audit["lower_quarter_change_ratio_max"],
             scail_pipeline.EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN,
         )
-        self.assertLess(audit["lower_quarter_change_ratio_max"], 0.012)
+        # Flattening the mound changes a narrow band of the separated prop/muzzle
+        # silhouette without changing the digest-bound down/up/down timing. Keep a
+        # tight v3 fingerprint instead of treating that expected mask delta as speed.
+        self.assertLess(audit["lower_quarter_change_ratio_max"], 0.015)
+
+    def test_dog_eating_prompts_require_low_fixed_kibble_below_rim(self) -> None:
+        pose = pipeline.subject_replacement_pose_prompt("eating", species="dog")
+        rules = pipeline.action_first_frame_rules(pose, species="dog")
+        qwen_prompt = pipeline.build_qwen_prompt(
+            "",
+            pose,
+            transparent_gif=True,
+            pose_reference_available=True,
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+            species="dog",
+        )
+
+        for prompt in (pose, rules, qwen_prompt):
+            self.assertIn("small, low, level layer", prompt)
+            self.assertIn("fully below", prompt)
+            self.assertIn("mound", prompt)
+            self.assertIn("pyramid", prompt)
+        self.assertIn(
+            "low food surface and every kibble position remain fixed",
+            scail_pipeline.DOG_EATING_PROMPT,
+        )
+        self.assertIn(
+            "only the muzzle may naturally occlude",
+            scail_pipeline.DOG_EATING_PROMPT,
+        )
+        self.assertIn("kibble mound", scail_pipeline.DOG_NEGATIVE_PROMPT)
+        self.assertIn("changing food surface", scail_pipeline.DOG_NEGATIVE_PROMPT)
 
     def test_dog_prompts_lock_age_muzzle_chroma_and_driver_defined_idle_pose(
         self,

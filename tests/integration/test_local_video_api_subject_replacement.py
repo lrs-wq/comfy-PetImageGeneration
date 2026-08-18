@@ -226,7 +226,7 @@ class SubjectReplacementParsingTests(unittest.TestCase):
         self.assertEqual(set(runtime["actions"]), {"eating", "standing"})
         self.assertEqual(
             profile["uploaded_identity_driving"]["revision"],
-            "dog-user-white-model-20260817-v2",
+            "dog-stable-kibble-20260818-v3",
         )
         self.assertEqual(
             profile["uploaded_identity_driving"]["actions"]["eating"]["loop_policy"],
@@ -236,6 +236,40 @@ class SubjectReplacementParsingTests(unittest.TestCase):
             profile["uploaded_identity_driving"]["actions"]["eating"]["endpoint_ssim"],
             0.95,
         )
+        food_stabilization = profile["uploaded_identity_driving"]["actions"][
+            "eating"
+        ]["food_stabilization"]
+        self.assertEqual(
+            food_stabilization["policy"],
+            "fixed_low_level_small_kibble_below_rim_v1",
+        )
+        self.assertGreater(
+            food_stabilization["food_pattern_top_y"],
+            food_stabilization["bowl_rim_top_y"],
+        )
+        self.assertFalse(food_stabilization["food_above_rim_allowed"])
+        self.assertEqual(food_stabilization["frames_audited"], 81)
+        self.assertEqual(food_stabilization["forbidden_food_pixels_above_rim"], 0)
+        self.assertTrue(food_stabilization["passed"])
+        asset_manifest = json.loads(
+            Path(profile["profile_asset_manifest"]["path"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            asset_manifest["policy"],
+            "dog_white_model_action_specific_loop_normalization_stable_kibble_v3",
+        )
+        manifest_food = asset_manifest["actions"]["eating"][
+            "food_stabilization"
+        ]
+        self.assertEqual(
+            manifest_food["food_pattern_sha256"],
+            food_stabilization["food_pattern_sha256"],
+        )
+        self.assertEqual(manifest_food["food_pattern_top_y"], 373)
+        self.assertEqual(manifest_food["forbidden_food_pixels_above_rim"], 0)
+        self.assertTrue(manifest_food["passed"])
         effective = pipeline.resolve_effective_subject_config(
             profile,
             ["eating", "standing"],
@@ -266,13 +300,13 @@ class SubjectReplacementParsingTests(unittest.TestCase):
         )
         self.assertTrue(
             runtime["actions"]["eating"]["driving_animation"].endswith(
-                "20260817-user-white-model-v2/"
+                "20260818-stable-kibble-v3/"
                 "eating_white_model_driver_512x512_81f_16fps.mp4"
             )
         )
         self.assertEqual(
             runtime["actions"]["eating"]["driving_animation_sha256"],
-            "df1526fd3c5807c0fa2fe774e9e4622504fd4f8b6dfbf6cb3f885c2e5b958aa6",
+            "b6009f9ca7f12c5233c4e6b172b50d3fe6a69e8bc2faf97e6f2593843d5c7d20",
         )
         for action in ("eating", "standing"):
             action_runtime = runtime["actions"][action]
