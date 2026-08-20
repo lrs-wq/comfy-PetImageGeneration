@@ -9,7 +9,7 @@
 | `cat` | `eating`、`grooming` | `gifs.eating`、`gifs.grooming` |
 | `dog` | `eating`、`standing` | `gifs.eating`、`gifs.standing`；兼容期内 `gifs.grooming` 与 `gifs.standing` 是同一 URL |
 
-调用方不能修改动作、提示词、尺寸或输出格式。所有业务请求都使用 `POST /api`，通过表单字段 `type` 区分上传和查询。
+调用方不能修改动作、提示词、尺寸或输出格式。上传、查询和兼容取消请求使用 `POST /api`，通过表单字段 `type` 区分；另提供显式终止接口 `POST /api/<key>/cancel`。
 
 ## 鉴权
 
@@ -288,7 +288,30 @@ queued
 
 生成期间尚未产出的 GIF URL 为 `null`。建议每 10～20 秒查询一次。
 
-## 3. 下载 GIF
+## 3. 终止任务
+
+推荐使用显式终止接口：
+
+```bash
+curl -X POST \
+  -H 'X-API-Key: <API_KEY>' \
+  'http://39.106.120.253:8051/api/<key>/cancel'
+```
+
+为兼容现有单入口调用方式，也可以使用 `type=cancel`：
+
+```bash
+curl -X POST 'http://39.106.120.253:8051/api' \
+  -H 'X-API-Key: <API_KEY>' \
+  -F 'type=cancel' \
+  -F 'key=<key>'
+```
+
+排队中的任务会直接返回 `status=cancelled, stage=cancelled`。运行中的任务先返回 `status=running, stage=cancel_requested`；调用方应继续使用查询接口轮询，直到 `status=cancelled`。`completed`、`failed` 或已经 `cancelled` 的任务重复调用终止接口不会改变原终态。
+
+终止操作不会删除已经生成并固化的文件。请求不存在的 key 返回 HTTP `404`，非法 key 或携带图片的取消请求返回 HTTP `422`。
+
+## 4. 下载 GIF
 
 查询结果中的 URL 仍需携带同一个 API Key：
 

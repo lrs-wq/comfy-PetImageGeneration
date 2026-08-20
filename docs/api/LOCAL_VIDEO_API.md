@@ -308,12 +308,16 @@ curl -L -H "X-API-Key: $API_KEY" -o pose.gif \
 
 curl -L -H "X-API-Key: $API_KEY" -o pose-soft.png \
   'http://39.106.120.253/api/local-video/jobs/JOB_ID/files/pose_01_transparent_512_soft.png'
+
+curl -X POST -H "X-API-Key: $API_KEY" \
+  'http://39.106.120.253/api/local-video/jobs/JOB_ID/cancel'
 ```
 
-任务状态为 `queued`、`running`、`completed` 或 `failed`。任务文件保存在 `/data/comfy-pet-pipeline/outputs/local_video_api/JOB_ID/`。
+任务状态为 `queued`、`running`、`completed`、`failed` 或 `cancelled`。排队任务取消后立即进入 `cancelled`；运行任务先进入 `stage=cancel_requested`，活动 ComfyUI prompt 或子进程停止后进入 `status=cancelled, stage=cancelled`。对终态任务重复调用取消接口是幂等操作。任务文件保存在 `/data/comfy-pet-pipeline/outputs/local_video_api/JOB_ID/`。
 
 ## 其他接口
 
 - 健康检查：`GET /api/local-video/health`
 - 最近任务：`GET /api/local-video/jobs?limit=20`，需要 API Key
+- 终止任务：`POST /api/local-video/jobs/{job_id}/cancel`，需要 API Key
 - Swagger：`GET /api/local-video/docs`

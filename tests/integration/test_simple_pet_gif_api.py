@@ -316,6 +316,94 @@ class SimplePetGifApiTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(caught.exception.status_code, 422)
 
+    async def test_cancel_gateway_forwards_to_internal_cancel_endpoint(self):
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["url"] = url
+            captured["headers"] = kwargs["headers"]
+            return FakeResponse(
+                200,
+                {
+                    "status": "running",
+                    "stage": "cancel_requested",
+                    "progress": 43.3,
+                    "species": "cat",
+                    "outputs": [],
+                },
+            )
+
+        with (
+            patch.object(api.asyncio, "to_thread", new=immediate_to_thread),
+            patch.object(api.requests, "post", side_effect=fake_post),
+        ):
+            result = await api.api_gateway(
+                make_request(),
+                operation="cancel",
+                key="task-key",
+                front=None,
+                left=None,
+                right=None,
+                _auth=None,
+            )
+
+        self.assertEqual(
+            captured["url"],
+            f"{api.INTERNAL_JOBS_URL}/task-key/cancel",
+        )
+        self.assertEqual(captured["headers"], api.internal_headers())
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["stage"], "cancel_requested")
+        self.assertEqual(result["gifs"], {"eating": None, "grooming": None})
+
+    async def test_explicit_cancel_endpoint_returns_cancelled_terminal_state(self):
+        with (
+            patch.object(api.asyncio, "to_thread", new=immediate_to_thread),
+            patch.object(
+                api.requests,
+                "post",
+                return_value=FakeResponse(
+                    200,
+                    {
+                        "status": "cancelled",
+                        "stage": "cancelled",
+                        "progress": 0,
+                        "species": "cat",
+                        "outputs": [],
+                    },
+                ),
+            ),
+        ):
+            result = await api.cancel_api_job(
+                make_request(),
+                key="queued-task",
+                _auth=None,
+            )
+
+        self.assertEqual(result["key"], "queued-task")
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(result["stage"], "cancelled")
+
+    async def test_cancel_rejects_and_closes_uploaded_images(self):
+        front = upload("front.png", b"front")
+        with self.assertRaises(HTTPException) as caught:
+            await api.api_gateway(
+                make_request(),
+                operation="cancel",
+                key="task-key",
+                front=front,
+                left=None,
+                right=None,
+                _auth=None,
+            )
+
+        self.assertEqual(caught.exception.status_code, 422)
+        self.assertTrue(front.file.closed)
+
+    def test_openapi_exposes_explicit_cancel_endpoint(self):
+        operation = api.app.openapi()["paths"]["/api/{key}/cancel"]["post"]
+        self.assertEqual(operation["tags"], ["jobs"])
+
     def test_documentation_covers_minimal_contract(self):
         documentation = (
             Path(__file__).resolve().parents[2]
@@ -326,6 +414,8 @@ class SimplePetGifApiTests(unittest.IsolatedAsyncioTestCase):
         for required in (
             "type=upload",
             "type=query",
+            "type=cancel",
+            "POST /api/<key>/cancel",
             "front=@",
             "left=@",
             "right=@",

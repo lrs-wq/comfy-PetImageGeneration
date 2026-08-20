@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
 
 
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 INTERNAL_API_URL = os.getenv(
     "LOCAL_VIDEO_INTERNAL_URL", "http://127.0.0.1:8770"
 ).rstrip("/")
@@ -37,7 +37,8 @@ app = FastAPI(
     version=APP_VERSION,
     description=(
         "Submit one pet identity for forced cat/dog routing. Cats return eating and "
-        "grooming; dogs return eating and standing with a temporary grooming alias."
+        "grooming; dogs return eating and standing with a temporary grooming alias. "
+        "Queued and running jobs can be cancelled through the public API."
     ),
 )
 
@@ -226,6 +227,41 @@ async def close_uploads(*uploads: UploadFile | None) -> None:
             await upload.close()
 
 
+async def cancel_public_job(
+    request: Request,
+    key: str | None,
+) -> dict[str, Any]:
+    """Forward an authenticated public cancellation to the internal job API."""
+    job_key = validate_key(key)
+    try:
+        response = await asyncio.to_thread(
+            requests.post,
+            f"{INTERNAL_JOBS_URL}/{quote(job_key, safe='')}/cancel",
+            headers=internal_headers(),
+            timeout=(10, 60),
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Generation service is unreachable.",
+        ) from exc
+    if not response.ok:
+        raise_backend_error(response, query=True)
+    try:
+        job = response.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Generation service returned an invalid response.",
+        ) from exc
+    if not isinstance(job, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="Generation service returned an invalid response.",
+        )
+    return public_job(job, request, job_key)
+
+
 @app.get("/health", tags=["service"])
 async def health() -> dict[str, Any]:
     backend = "unavailable"
@@ -250,7 +286,7 @@ async def health() -> dict[str, Any]:
 @app.post("/api", tags=["jobs"], response_model=None)
 async def api_gateway(
     request: Request,
-    operation: str = Form(alias="type", description="upload or query"),
+    operation: str = Form(alias="type", description="upload, query, or cancel"),
     key: str | None = Form(default=None),
     front: UploadFile | None = File(default=None),
     left: UploadFile | None = File(default=None),
@@ -356,9 +392,30 @@ async def api_gateway(
                 )
             return public_job(job, request, job_key)
 
-        raise HTTPException(status_code=422, detail="type must be upload or query.")
+        if operation == "cancel":
+            if any(upload is not None for upload in (front, left, right)):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Images are only valid for type=upload.",
+                )
+            return await cancel_public_job(request, key)
+
+        raise HTTPException(
+            status_code=422,
+            detail="type must be upload, query, or cancel.",
+        )
     finally:
         await close_uploads(front, left, right)
+
+
+@app.post("/api/{key}/cancel", tags=["jobs"])
+async def cancel_api_job(
+    request: Request,
+    key: str,
+    _auth: None = Depends(require_api_key),
+) -> dict[str, Any]:
+    del _auth
+    return await cancel_public_job(request, key)
 
 
 @app.get("/file/{key}/{filename}", tags=["jobs"])
