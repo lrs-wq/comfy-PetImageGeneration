@@ -189,6 +189,159 @@ def get_rembg_session() -> Any:
     return REMBG_SESSION
 
 
+def _identity_marking_spatial_signature(
+    rgb: np.ndarray,
+    foreground: np.ndarray,
+) -> dict[str, Any]:
+    """Measure internal elongated dark bands without treating contour shade as fur.
+
+    Global palette histograms cannot distinguish a few narrow invented stripes from
+    ordinary dark eyes, nose, or stylized shading.  This signature looks only inside
+    the middle body corridor, removes the subject boundary, and counts sizeable dark
+    components that are both locally contrasted and elongated.  It is deliberately
+    pose-independent: the quality gate compares component count and occupied area,
+    not exact pixel coordinates.
+    """
+
+    foreground = foreground.astype(bool)
+    rows, columns = np.where(foreground)
+    if len(rows) < 256:
+        return {
+            "available": False,
+            "policy": IDENTITY_MARKING_SPATIAL_POLICY,
+            "reason": "insufficient_foreground_for_marking_topology",
+        }
+    x0, x1 = int(columns.min()), int(columns.max()) + 1
+    y0, y1 = int(rows.min()), int(rows.max()) + 1
+    subject_width = x1 - x0
+    subject_height = y1 - y0
+    row_grid = np.indices(foreground.shape)[0]
+    body = (
+        foreground
+        & (row_grid >= y0 + int(round(subject_height * 0.28)))
+        & (row_grid < y0 + int(round(subject_height * 0.88)))
+    )
+    boundary_clearance = max(
+        2,
+        int(round(min(subject_width, subject_height) * 0.012)),
+    )
+    distance = cv2.distanceTransform(
+        foreground.astype(np.uint8),
+        cv2.DIST_L2,
+        5,
+    )
+    body &= distance >= boundary_clearance
+    body_pixels = int(np.count_nonzero(body))
+    if body_pixels < 256:
+        return {
+            "available": False,
+            "policy": IDENTITY_MARKING_SPATIAL_POLICY,
+            "reason": "insufficient_internal_body_for_marking_topology",
+            "foreground_bbox": [x0, y0, x1, y1],
+        }
+
+    luma = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)[:, :, 0]
+    blur_sigma = max(
+        3,
+        min(15, int(round(min(subject_width, subject_height) * 0.035))),
+    )
+    blur_kernel = blur_sigma * 4 + 1
+    if blur_kernel % 2 == 0:
+        blur_kernel += 1
+    local_luma = cv2.GaussianBlur(
+        luma,
+        (blur_kernel, blur_kernel),
+        sigmaX=float(blur_sigma),
+    )
+    local_contrast = local_luma.astype(np.int16) - luma.astype(np.int16)
+    dark = (
+        body
+        & (local_contrast >= IDENTITY_MARKING_LOCAL_CONTRAST_MIN)
+        & (luma <= IDENTITY_MARKING_LUMA_MAX)
+    )
+    dark = cv2.morphologyEx(
+        dark.astype(np.uint8),
+        cv2.MORPH_OPEN,
+        np.ones((3, 3), dtype=np.uint8),
+    )
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        dark,
+        connectivity=8,
+    )
+    minimum_component_area = max(
+        10,
+        int(
+            round(
+                body_pixels * IDENTITY_MARKING_COMPONENT_AREA_FRACTION_MIN
+            )
+        ),
+    )
+    stripe_components: list[dict[str, Any]] = []
+    stripe_pixels = 0
+    subject_scale = float(max(1, min(subject_width, subject_height)))
+    for label in range(1, component_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < minimum_component_area:
+            continue
+        component_rows, component_columns = np.where(labels == label)
+        points = np.column_stack((component_columns, component_rows)).astype(
+            np.float64
+        )
+        eigenvalues = np.linalg.eigvalsh(np.cov(points, rowvar=False))
+        elongation = float(
+            np.sqrt(
+                max(float(eigenvalues[-1]), 0.0)
+                / max(0.25, float(eigenvalues[0]))
+            )
+        )
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        length_ratio = max(width, height) / subject_scale
+        thinness = min(width, height) / float(max(1, max(width, height)))
+        if (
+            elongation < IDENTITY_MARKING_COMPONENT_ELONGATION_MIN
+            or length_ratio < IDENTITY_MARKING_COMPONENT_LENGTH_RATIO_MIN
+            or thinness > IDENTITY_MARKING_COMPONENT_THINNESS_MAX
+        ):
+            continue
+        stripe_pixels += area
+        stripe_components.append(
+            {
+                "area": area,
+                "area_fraction": round(area / float(body_pixels), 6),
+                "bbox": [
+                    int(stats[label, cv2.CC_STAT_LEFT]),
+                    int(stats[label, cv2.CC_STAT_TOP]),
+                    width,
+                    height,
+                ],
+                "elongation": round(elongation, 6),
+                "length_ratio": round(length_ratio, 6),
+                "thinness": round(thinness, 6),
+            }
+        )
+    return {
+        "available": True,
+        "policy": IDENTITY_MARKING_SPATIAL_POLICY,
+        "foreground_bbox": [x0, y0, x1, y1],
+        "body_pixels": body_pixels,
+        "boundary_clearance": boundary_clearance,
+        "local_contrast_min": IDENTITY_MARKING_LOCAL_CONTRAST_MIN,
+        "luma_max": IDENTITY_MARKING_LUMA_MAX,
+        "minimum_component_area": minimum_component_area,
+        "dark_contrast_fraction": round(
+            float(np.count_nonzero(dark)) / float(body_pixels),
+            6,
+        ),
+        "stripe_component_count": len(stripe_components),
+        "stripe_area_fraction": round(
+            stripe_pixels / float(body_pixels),
+            6,
+        ),
+        "stripe_components": stripe_components,
+    }
+
+
 def identity_palette_signature(
     path: Path,
     maximum_size: int = 512,
@@ -322,6 +475,15 @@ def identity_palette_signature(
             np.ones((3, 3), dtype=np.uint8),
             iterations=1,
         )
+    marking_spatial_signature = (
+        _identity_marking_spatial_signature(rgb, foreground_u8 > 0)
+        if exclude_bottom_fraction == 0.0
+        else {
+            "available": False,
+            "policy": IDENTITY_MARKING_SPATIAL_POLICY,
+            "reason": "partial_subject_palette_excludes_spatial_marking_gate",
+        }
+    )
     foreground_rows, foreground_columns = np.where(foreground_u8 > 0)
     pixels = rgb[foreground_rows, foreground_columns]
     if len(pixels) < 64:
@@ -470,6 +632,7 @@ def identity_palette_signature(
             and green_or_cyan_body_fraction <= 0.020
             and green_or_cyan_body_share <= 0.25
         ),
+        "marking_spatial_signature": marking_spatial_signature,
     }
 
 
@@ -752,17 +915,24 @@ def identity_palette_prompt(
     if not signature.get("available"):
         return (
             "SOURCE COAT COLOR LOCK: copy every visible fur color and marking region "
-            "from the uploaded cat. Never recolor the coat or borrow a palette from "
+            "from the uploaded pet. Never recolor the coat or borrow a palette from "
             "a LoRA training example."
         )
     fractions = signature["fractions"]
     dominant = list(signature.get("dominant") or [])
     labels = [IDENTITY_PALETTE_PROMPT_LABELS[item] for item in dominant]
     palette = ", ".join(labels)
+    warm_fur_family = float(
+        fractions.get("warm_brown_or_orange", 0.0)
+    ) + float(fractions.get("yellow_or_gold", 0.0))
     absent_chromatic = [
         IDENTITY_PALETTE_PROMPT_LABELS[item]
         for item in IDENTITY_PALETTE_CHROMATIC
         if float(fractions.get(item, 0.0)) <= 0.025
+        and not (
+            item in {"warm_brown_or_orange", "yellow_or_gold"}
+            and warm_fur_family > 0.025
+        )
     ]
     source_is_achromatic = identity_palette_is_achromatic(signature)
     if source_is_achromatic:
@@ -809,7 +979,7 @@ def identity_palette_prompt(
             + "."
         )
     retry_rule = (
-        " Previous output recolored the cat and was rejected; restore the source "
+        " Previous output recolored the pet and was rejected; restore the source "
         "palette exactly before changing pose or rendering."
         if retry
         else ""
@@ -853,7 +1023,10 @@ def identity_palette_negative_prompt(signature: dict[str, Any]) -> str:
                 "large invented black and white patches",
             ]
         )
-    if float(fractions.get("warm_brown_or_orange", 0.0)) <= 0.025:
+    warm_fur_family = float(
+        fractions.get("warm_brown_or_orange", 0.0)
+    ) + float(fractions.get("yellow_or_gold", 0.0))
+    if warm_fur_family <= 0.025:
         negative.extend(
             [
                 "orange fur",
@@ -864,7 +1037,7 @@ def identity_palette_negative_prompt(signature: dict[str, Any]) -> str:
                 "tortoiseshell coat",
             ]
         )
-    if float(fractions.get("yellow_or_gold", 0.0)) <= 0.025:
+    if warm_fur_family <= 0.025:
         negative.append("golden fur")
     return ", ".join(negative)
 
@@ -977,6 +1150,12 @@ def identity_palette_quality(
     candidate_fur_warm = float(
         candidate_fractions.get("warm_brown_or_orange", 0.0)
     ) + float(candidate_fractions.get("yellow_or_gold", 0.0))
+    source_gray_or_dark = float(source_fractions.get("black", 0.0)) + float(
+        source_fractions.get("gray", 0.0)
+    )
+    candidate_gray_or_dark = float(candidate_fractions.get("black", 0.0)) + float(
+        candidate_fractions.get("gray", 0.0)
+    )
     achromatic_balance_deltas = {
         category: round(
             float(candidate_fractions.get(category, 0.0))
@@ -1017,6 +1196,100 @@ def identity_palette_quality(
         broad_warm_drift or saturated_warm_drift
     ):
         issues.append("achromatic_source_recolored_with_warm_fur")
+    warm_coat_fraction_lost = bool(
+        source_coat_warm >= IDENTITY_WARM_COAT_SOURCE_MIN
+        and source_coat_warm - candidate_coat_warm
+        >= IDENTITY_WARM_COAT_LOSS_DELTA_MIN
+        and candidate_achromatic - source_achromatic
+        >= IDENTITY_ACHROMATIC_EXPANSION_DELTA_MIN
+    )
+    if warm_coat_fraction_lost:
+        issues.append("warm_source_recolored_achromatic")
+    gray_or_dark_markings_expanded = bool(
+        source_coat_warm >= IDENTITY_WARM_COAT_SOURCE_MIN
+        and source_gray_or_dark <= IDENTITY_GRAY_OR_DARK_SOURCE_MAX
+        and candidate_gray_or_dark - source_gray_or_dark
+        >= IDENTITY_GRAY_OR_DARK_EXPANSION_DELTA_MIN
+    )
+    if gray_or_dark_markings_expanded:
+        issues.append("new_gray_or_dark_markings_expanded")
+
+    source_marking_spatial = source.get("marking_spatial_signature")
+    candidate_marking_spatial = candidate.get("marking_spatial_signature")
+    marking_spatial_available = bool(
+        isinstance(source_marking_spatial, dict)
+        and source_marking_spatial.get("available") is True
+        and isinstance(candidate_marking_spatial, dict)
+        and candidate_marking_spatial.get("available") is True
+    )
+    source_stripe_count = (
+        int(source_marking_spatial.get("stripe_component_count", 0))
+        if marking_spatial_available
+        else 0
+    )
+    candidate_stripe_count = (
+        int(candidate_marking_spatial.get("stripe_component_count", 0))
+        if marking_spatial_available
+        else 0
+    )
+    source_stripe_area = (
+        float(source_marking_spatial.get("stripe_area_fraction", 0.0))
+        if marking_spatial_available
+        else 0.0
+    )
+    candidate_stripe_area = (
+        float(candidate_marking_spatial.get("stripe_area_fraction", 0.0))
+        if marking_spatial_available
+        else 0.0
+    )
+    source_dark_contrast = (
+        float(source_marking_spatial.get("dark_contrast_fraction", 0.0))
+        if marking_spatial_available
+        else 0.0
+    )
+    candidate_dark_contrast = (
+        float(candidate_marking_spatial.get("dark_contrast_fraction", 0.0))
+        if marking_spatial_available
+        else 0.0
+    )
+    stripe_component_delta = candidate_stripe_count - source_stripe_count
+    stripe_area_delta = candidate_stripe_area - source_stripe_area
+    dark_contrast_delta = candidate_dark_contrast - source_dark_contrast
+    invented_stripe_pattern = bool(
+        marking_spatial_available
+        and source_stripe_area <= IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX
+        and stripe_component_delta >= IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN
+        and stripe_area_delta >= IDENTITY_NEW_STRIPE_AREA_DELTA_MIN
+        and dark_contrast_delta
+        >= IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN
+    )
+    if invented_stripe_pattern:
+        issues.append("invented_stripe_pattern")
+    marking_spatial_quality = {
+        "available": marking_spatial_available,
+        "policy": IDENTITY_MARKING_SPATIAL_POLICY,
+        "acceptable": not invented_stripe_pattern,
+        "invented_stripe_pattern": invented_stripe_pattern,
+        "source_stripe_component_count": source_stripe_count,
+        "candidate_stripe_component_count": candidate_stripe_count,
+        "stripe_component_delta": stripe_component_delta,
+        "source_stripe_area_fraction": round(source_stripe_area, 6),
+        "candidate_stripe_area_fraction": round(candidate_stripe_area, 6),
+        "stripe_area_delta": round(stripe_area_delta, 6),
+        "source_dark_contrast_fraction": round(source_dark_contrast, 6),
+        "candidate_dark_contrast_fraction": round(candidate_dark_contrast, 6),
+        "dark_contrast_delta": round(dark_contrast_delta, 6),
+        "thresholds": {
+            "source_stripe_area_max": IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX,
+            "stripe_component_delta_min": (
+                IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN
+            ),
+            "stripe_area_delta_min": IDENTITY_NEW_STRIPE_AREA_DELTA_MIN,
+            "dark_contrast_delta_min": (
+                IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN
+            ),
+        },
+    }
     chromatic_accents_lost = bool(
         source_chromatic >= 0.04
         and source_chromatic - candidate_chromatic >= 0.04
@@ -1051,6 +1324,25 @@ def identity_palette_quality(
         "candidate_saturated_warm_fraction": round(candidate_saturated_warm, 6),
         "source_fur_warm_fraction": round(source_fur_warm, 6),
         "candidate_fur_warm_fraction": round(candidate_fur_warm, 6),
+        "source_gray_or_dark_fraction": round(source_gray_or_dark, 6),
+        "candidate_gray_or_dark_fraction": round(candidate_gray_or_dark, 6),
+        "warm_coat_fraction_lost": warm_coat_fraction_lost,
+        "gray_or_dark_markings_expanded": gray_or_dark_markings_expanded,
+        "bidirectional_drift_policy": (
+            IDENTITY_PALETTE_BIDIRECTIONAL_DRIFT_POLICY
+        ),
+        "bidirectional_drift_thresholds": {
+            "warm_coat_source_min": IDENTITY_WARM_COAT_SOURCE_MIN,
+            "warm_coat_loss_delta_min": IDENTITY_WARM_COAT_LOSS_DELTA_MIN,
+            "achromatic_expansion_delta_min": (
+                IDENTITY_ACHROMATIC_EXPANSION_DELTA_MIN
+            ),
+            "gray_or_dark_source_max": IDENTITY_GRAY_OR_DARK_SOURCE_MAX,
+            "gray_or_dark_expansion_delta_min": (
+                IDENTITY_GRAY_OR_DARK_EXPANSION_DELTA_MIN
+            ),
+        },
+        "marking_spatial_quality": marking_spatial_quality,
         "source_red_or_pink_body_fraction": round(
             float(source.get("red_or_pink_body_fraction", 0.0)),
             6,
@@ -2651,6 +2943,26 @@ def select_canonical_fallback_attempt(
         else attempts
     )
     return min(candidates, key=canonical_fallback_score)
+
+
+def canonical_generated_attempts_require_uploaded_fallback(
+    attempts: list[dict[str, Any]],
+    *,
+    identity_palette_required: bool,
+) -> bool:
+    """Return true only when every generated canonical failed identity checks."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"canonical_generated_attempts_require_uploaded_fallback"},
+    )
+    if not identity_palette_required:
+        return False
+    return not any(
+        isinstance(record.get("identity_palette"), dict)
+        and record["identity_palette"].get("acceptable") is True
+        for record in attempts
+    )
 
 
 def semantic_quality_blocking_issues(quality: dict[str, Any]) -> list[str]:

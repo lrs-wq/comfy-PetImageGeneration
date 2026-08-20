@@ -122,7 +122,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.25.4"
+API_VERSION = "2.25.5"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -270,7 +270,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.15"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.16"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -292,6 +292,26 @@ CANONICAL_ACTION_IDENTITY_PALETTE_POLICY = (
 # fixed fail-closed gap between those populations instead of allowing a gray
 # guide to replace a light canonical subject.
 CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX = 0.40
+IDENTITY_PALETTE_POLICY = "source_palette_guard_v3"
+IDENTITY_PALETTE_BIDIRECTIONAL_DRIFT_POLICY = (
+    "warm_achromatic_bidirectional_identity_drift_v1"
+)
+IDENTITY_WARM_COAT_SOURCE_MIN = 0.30
+IDENTITY_WARM_COAT_LOSS_DELTA_MIN = 0.20
+IDENTITY_ACHROMATIC_EXPANSION_DELTA_MIN = 0.15
+IDENTITY_GRAY_OR_DARK_SOURCE_MAX = 0.20
+IDENTITY_GRAY_OR_DARK_EXPANSION_DELTA_MIN = 0.15
+IDENTITY_MARKING_SPATIAL_POLICY = "internal_dark_band_topology_v1"
+IDENTITY_MARKING_LOCAL_CONTRAST_MIN = 24
+IDENTITY_MARKING_LUMA_MAX = 165
+IDENTITY_MARKING_COMPONENT_AREA_FRACTION_MIN = 0.0015
+IDENTITY_MARKING_COMPONENT_ELONGATION_MIN = 2.0
+IDENTITY_MARKING_COMPONENT_LENGTH_RATIO_MIN = 0.04
+IDENTITY_MARKING_COMPONENT_THINNESS_MAX = 0.70
+IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX = 0.018
+IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN = 3
+IDENTITY_NEW_STRIPE_AREA_DELTA_MIN = 0.012
+IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN = 0.035
 GROOMING_QWEN_NEGATIVE_SPACE_METHOD = (
     "verified_foreleg_anchor_organic_open_curve_negative_space_v3"
 )
@@ -1156,7 +1176,7 @@ IMAGE_PROFILES: dict[str, dict[str, Any]] = {
         "pose_seed_offsets": dict(MULTIPOSE_SEED_OFFSETS),
         "default_poses": list(DEFAULT_POSES),
         "identity_palette_guard": True,
-        "identity_palette_policy": "source_palette_guard_v2",
+        "identity_palette_policy": IDENTITY_PALETTE_POLICY,
         "user_loras": [dict(item) for item in BASELINE_IMAGE_USER_LORAS],
         **BASELINE_IMAGE_GENERATION_SETTINGS,
     },
@@ -1213,7 +1233,7 @@ IMAGE_PROFILES: dict[str, dict[str, Any]] = {
         "pose_seed_offsets": {"eating": 0, "standing": 2},
         "default_poses": ["eating", "standing"],
         "identity_palette_guard": True,
-        "identity_palette_policy": "source_palette_guard_v2",
+        "identity_palette_policy": IDENTITY_PALETTE_POLICY,
         # Cat/kitten photography LoRAs must never enter the dog route.
         "user_loras": [],
         "user_lora_mode": "replace",
@@ -5532,7 +5552,7 @@ IDENTITY_PALETTE_PROMPT_LABELS = {
     "black": "black",
     "white": "white",
     "gray": "neutral gray",
-    "warm_brown_or_orange": "brown/orange/ginger/tan",
+    "warm_brown_or_orange": "warm brown/orange/ginger/tan/golden/cream",
     "red_or_pink": "red/pink",
     "yellow_or_gold": "yellow/gold",
     "green": "green",
@@ -5660,6 +5680,11 @@ canonical_fallback_score = _local_video_identity_quality.canonical_fallback_scor
 
 select_canonical_fallback_attempt = (
     _local_video_identity_quality.select_canonical_fallback_attempt
+)
+
+
+canonical_generated_attempts_require_uploaded_fallback = (
+    _local_video_identity_quality.canonical_generated_attempts_require_uploaded_fallback
 )
 
 
@@ -7637,7 +7662,7 @@ async def create_job(
                 profile.get("identity_palette_policy")
                 if profile
                 else (
-                    "source_palette_guard_v2"
+                    IDENTITY_PALETTE_POLICY
                     if output_format == "transparent_gif"
                     else None
                 )

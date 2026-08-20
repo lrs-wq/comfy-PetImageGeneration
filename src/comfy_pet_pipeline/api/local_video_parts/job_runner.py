@@ -1178,15 +1178,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     and source_identity_palette.get("available")
                 ),
             )
-            identity_safe_generated_attempts = [
-                record
-                for record in cartoon_attempts
-                if isinstance(record.get("identity_palette"), dict)
-                and record["identity_palette"].get("acceptable") is True
-            ]
-            fallback_uses_uploaded_identity = bool(
-                canonical_identity_palette_gate_required
-                and not identity_safe_generated_attempts
+            fallback_uses_uploaded_identity = (
+                canonical_generated_attempts_require_uploaded_fallback(
+                    cartoon_attempts,
+                    identity_palette_required=(
+                        canonical_identity_palette_gate_required
+                    ),
+                )
             )
             fallback_source = (
                 Path(identity_source_path)

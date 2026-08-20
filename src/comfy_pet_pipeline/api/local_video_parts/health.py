@@ -858,10 +858,42 @@ def health() -> dict[str, Any]:
                 "canonical_raw_palette_retained_for_audit": True,
                 "canonical_identity_palette_gate": {
                     "enabled": True,
+                    "policy": IDENTITY_PALETTE_POLICY,
                     "fail_closed_for_generated_candidates": True,
                     "retry_all_canonical_profiles": True,
                     "terminal_recovery": "original_uploaded_identity_safe_matte",
                     "terminal_recovery_must_pass_same_palette_gate": True,
+                    "bidirectional_drift": {
+                        "policy": IDENTITY_PALETTE_BIDIRECTIONAL_DRIFT_POLICY,
+                        "warm_coat_source_min": IDENTITY_WARM_COAT_SOURCE_MIN,
+                        "warm_coat_loss_delta_min": (
+                            IDENTITY_WARM_COAT_LOSS_DELTA_MIN
+                        ),
+                        "achromatic_expansion_delta_min": (
+                            IDENTITY_ACHROMATIC_EXPANSION_DELTA_MIN
+                        ),
+                        "gray_or_dark_source_max": (
+                            IDENTITY_GRAY_OR_DARK_SOURCE_MAX
+                        ),
+                        "gray_or_dark_expansion_delta_min": (
+                            IDENTITY_GRAY_OR_DARK_EXPANSION_DELTA_MIN
+                        ),
+                    },
+                    "spatial_marking_gate": {
+                        "policy": IDENTITY_MARKING_SPATIAL_POLICY,
+                        "source_stripe_area_max": (
+                            IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX
+                        ),
+                        "stripe_component_delta_min": (
+                            IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN
+                        ),
+                        "stripe_area_delta_min": (
+                            IDENTITY_NEW_STRIPE_AREA_DELTA_MIN
+                        ),
+                        "dark_contrast_delta_min": (
+                            IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN
+                        ),
+                    },
                 },
                 "canonical_chroma_despill": (
                     "alpha_boundary_plus_source_palette_guarded_interior_v1"

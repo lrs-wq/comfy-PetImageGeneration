@@ -333,6 +333,60 @@ def aggregate_identity_palette_signatures(
             6,
         )
 
+    marking_by_role = {
+        role: signature.get("marking_spatial_signature")
+        for role, signature in signatures.items()
+        if isinstance(signature.get("marking_spatial_signature"), dict)
+        and signature["marking_spatial_signature"].get("available") is True
+    }
+    if marking_by_role:
+        marking_spatial_signature = {
+            "available": True,
+            "policy": IDENTITY_MARKING_SPATIAL_POLICY,
+            "aggregation": "source_view_conservative_max_v1",
+            "source_view_roles": list(marking_by_role),
+            "stripe_component_count": max(
+                int(value.get("stripe_component_count", 0))
+                for value in marking_by_role.values()
+            ),
+            "stripe_area_fraction": round(
+                max(
+                    float(value.get("stripe_area_fraction", 0.0))
+                    for value in marking_by_role.values()
+                ),
+                6,
+            ),
+            "dark_contrast_fraction": round(
+                max(
+                    float(value.get("dark_contrast_fraction", 0.0))
+                    for value in marking_by_role.values()
+                ),
+                6,
+            ),
+            "per_view": {
+                role: {
+                    "stripe_component_count": int(
+                        value.get("stripe_component_count", 0)
+                    ),
+                    "stripe_area_fraction": round(
+                        float(value.get("stripe_area_fraction", 0.0)),
+                        6,
+                    ),
+                    "dark_contrast_fraction": round(
+                        float(value.get("dark_contrast_fraction", 0.0)),
+                        6,
+                    ),
+                }
+                for role, value in marking_by_role.items()
+            },
+        }
+    else:
+        marking_spatial_signature = {
+            "available": False,
+            "policy": IDENTITY_MARKING_SPATIAL_POLICY,
+            "reason": "source_view_marking_topology_unavailable",
+        }
+
     return {
         "available": True,
         "mask_method": "multi_view_equal_weight_consensus",
@@ -367,6 +421,7 @@ def aggregate_identity_palette_signatures(
             )
             for signature in signatures.values()
         ),
+        "marking_spatial_signature": marking_spatial_signature,
     }
 
 
