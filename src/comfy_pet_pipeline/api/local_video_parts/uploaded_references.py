@@ -1245,15 +1245,7 @@ def prepare_uploaded_subject_qwen_references(
         uploaded_identity_effective_view_mode=upload_integrity["view_mode"],
         uploaded_identity_effective_view_roles=upload_integrity["view_roles"],
         uploaded_identity_effective_view_count=len(upload_integrity["view_roles"]),
-        uploaded_identity_view_verdict=(
-            "skipped_advisory"
-            if identity_view_audit.get("status") == "skipped_advisory"
-            else (
-                "passed"
-                if identity_view_audit["acceptable"]
-                else "warning_advisory"
-            )
-        ),
+        uploaded_identity_view_verdict=identity_view_audit["status"],
         subject_fur_silhouette_quality=fur_silhouette_quality_by_action,
         subject_fur_surface_quality=fur_surface_quality_by_action,
         fur_surface_gate_status={
