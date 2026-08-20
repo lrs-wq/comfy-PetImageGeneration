@@ -1016,7 +1016,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertFalse(
             grooming_health["same_canonical_face_identity_reference_loaded_by_qwen"]
         )
-        self.assertFalse(grooming_health["identity_palette_prompt_conditioning"])
+        self.assertTrue(grooming_health["identity_palette_prompt_conditioning"])
         self.assertFalse(grooming_health["negative_prompt_conditioning"])
         self.assertEqual(grooming_health["steps"], 4)
         self.assertEqual(

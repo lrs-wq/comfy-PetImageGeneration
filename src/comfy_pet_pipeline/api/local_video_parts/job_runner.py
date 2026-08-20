@@ -116,6 +116,26 @@ def pose_attempt_provenance(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def resolve_action_identity_palette_reference(
+    *,
+    uploaded_reference_job: bool,
+    identity_input_policy: str,
+    uploaded_identity_source: Path,
+    canonical_reference: Path | None,
+) -> Path | None:
+    """Keep uploaded action color conditioning anchored to the raw identity."""
+    _sync_local_video_runtime(
+        globals(),
+        {"resolve_action_identity_palette_reference"},
+    )
+    if uploaded_reference_job or identity_input_policy in {
+        POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,
+        POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+    }:
+        return uploaded_identity_source
+    return canonical_reference
+
+
 def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
     _sync_local_video_runtime(globals(), {"run_job"})
     raise_if_cancelled(job_id)
@@ -589,6 +609,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         job.get("identity_palette_guard", False)
     )
     identity_palette_guidance_enabled = requested_identity_palette_guard
+    canonical_identity_palette_guard_requested = bool(
+        force_qwen_reference and requested_identity_palette_guard
+    )
     identity_palette_guard = bool(
         GENERATION_VISUAL_AUDITS_BLOCKING
         and requested_identity_palette_guard
@@ -597,6 +620,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         job_id,
         requested_identity_palette_guard=requested_identity_palette_guard,
         effective_identity_palette_guard=identity_palette_guard,
+        canonical_identity_palette_guard_requested=(
+            canonical_identity_palette_guard_requested
+        ),
         identity_palette_guidance_enabled=identity_palette_guidance_enabled,
         identity_palette_guidance_mode=(
             "prompt_and_negative_conditioning"
@@ -694,6 +720,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         source_identity_view_upper_body_palettes,
         source_identity_upper_body_palette,
     )
+    canonical_identity_palette_gate_required = bool(
+        canonical_identity_palette_guard_requested
+        and isinstance(source_identity_palette, dict)
+        and source_identity_palette.get("available") is True
+        and isinstance(canonical_source_upper_body_palette, dict)
+        and canonical_source_upper_body_palette.get("available") is True
+    )
     source_palette_prompt = (
         identity_palette_prompt(source_identity_palette)
         if source_identity_palette is not None
@@ -723,6 +756,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 else "single_front_view"
             ),
             identity_palette_prompt=source_palette_prompt,
+            canonical_identity_palette_gate_required=(
+                canonical_identity_palette_gate_required
+            ),
+            canonical_identity_palette_gate_mode=(
+                "blocking_with_uploaded_identity_fallback"
+                if canonical_identity_palette_gate_required
+                else "unavailable_or_not_requested"
+            ),
         )
     canonical_similarity_reference: Path | None = None
     if transparent_gif and not bypass_generated_canonical:
@@ -749,7 +790,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         selected_cartoon: dict[str, Any] | None = None
         canonical_profiles = (
             recovery_profiles
-            if GENERATION_VISUAL_AUDITS_BLOCKING
+            if (
+                GENERATION_VISUAL_AUDITS_BLOCKING
+                or canonical_identity_palette_gate_required
+            )
             else recovery_profiles[:1]
         )
         for attempt, profile in enumerate(canonical_profiles, start=1):
@@ -973,6 +1017,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             attempt_acceptable = bool(
                 chroma_metrics["acceptable"]
                 and (
+                    not canonical_identity_palette_gate_required
+                    or (
+                        isinstance(palette_quality, dict)
+                        and palette_quality.get("acceptable") is True
+                    )
+                )
+                and (
                     not GENERATION_VISUAL_AUDITS_BLOCKING
                     or (
                         cartoon_quality
@@ -1122,12 +1173,26 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             fallback_record = select_canonical_fallback_attempt(
                 cartoon_attempts,
                 identity_palette_required=bool(
-                    identity_palette_guard
+                    canonical_identity_palette_gate_required
                     and source_identity_palette is not None
                     and source_identity_palette.get("available")
                 ),
             )
-            fallback_source = job_dir / fallback_record["keyframe"]
+            identity_safe_generated_attempts = [
+                record
+                for record in cartoon_attempts
+                if isinstance(record.get("identity_palette"), dict)
+                and record["identity_palette"].get("acceptable") is True
+            ]
+            fallback_uses_uploaded_identity = bool(
+                canonical_identity_palette_gate_required
+                and not identity_safe_generated_attempts
+            )
+            fallback_source = (
+                Path(identity_source_path)
+                if fallback_uses_uploaded_identity
+                else job_dir / fallback_record["keyframe"]
+            )
             fallback_green = job_dir / "cartoon_reference_semantic_green.png"
             fallback_cutout = job_dir / "cartoon_reference_semantic_cutout_final.png"
             fallback_semantic = job_dir / "cartoon_reference_semantic_cutout_raw.png"
@@ -1191,7 +1256,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         fallback_cutout,
                         source_identity_palette,
                     )
-                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    if (
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                        or canonical_identity_palette_gate_required
+                    )
                     else {
                         "policy": UPLOADED_IDENTITY_CHROMA_SPILL_POLICY,
                         "applied": False,
@@ -1239,8 +1307,207 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     fallback_primary_quality,
                     fallback_upper_quality,
                 )
+                fallback_profile = (
+                    "uploaded_identity_semantic_fallback"
+                    if fallback_uses_uploaded_identity
+                    else "rembg_u2net_fallback"
+                )
+                fallback_recovery_reason = (
+                    "canonical_identity_palette_drift_exhausted"
+                    if fallback_uses_uploaded_identity
+                    else "qwen_chroma_retries_exhausted"
+                )
+                fallback_recovery_strategy = (
+                    "use_original_uploaded_identity_after_safe_matte"
+                    if fallback_uses_uploaded_identity
+                    else "rembg_u2net_fallback"
+                )
+                fallback_raw_candidate_identity_palette = (
+                    source_identity_palette
+                    if fallback_uses_uploaded_identity
+                    else fallback_record.get("raw_candidate_identity_palette")
+                )
+                fallback_raw_candidate_upper_body_identity_palette = (
+                    canonical_source_upper_body_palette
+                    if fallback_uses_uploaded_identity
+                    else fallback_record.get(
+                        "raw_candidate_upper_body_identity_palette"
+                    )
+                )
+                if fallback_uses_uploaded_identity:
+                    update_job(
+                        job_id,
+                        canonical_uploaded_identity_fallback_used=True,
+                        canonical_generated_palette_failure={
+                            "attempts": [
+                                record.get("identity_palette")
+                                for record in cartoon_attempts
+                            ],
+                        },
+                        canonical_uploaded_identity_fallback_source=(
+                            str(fallback_source)
+                        ),
+                    )
                 if (
-                    GENERATION_VISUAL_AUDITS_BLOCKING
+                    canonical_identity_palette_gate_required
+                    and (
+                        not isinstance(fallback_palette_quality, dict)
+                        or fallback_palette_quality.get("acceptable") is not True
+                    )
+                ):
+                    generated_fallback_palette_quality = fallback_palette_quality
+                    uploaded_fallback_sources = list(
+                        dict.fromkeys(
+                            [
+                                Path(identity_source_path),
+                                Path(upload_integrity["input_path"])
+                                if upload_integrity is not None
+                                else Path(identity_source_path),
+                            ]
+                        )
+                    )
+                    uploaded_fallback_error: Exception | None = None
+                    uploaded_fallback_accepted = False
+                    for uploaded_fallback_index, uploaded_fallback_source in enumerate(
+                        uploaded_fallback_sources,
+                        start=1,
+                    ):
+                        uploaded_fallback_green = (
+                            job_dir
+                            / "cartoon_reference_uploaded_identity_"
+                            f"fallback_{uploaded_fallback_index:02d}_green.png"
+                        )
+                        uploaded_fallback_cutout = (
+                            job_dir
+                            / "cartoon_reference_uploaded_identity_"
+                            f"fallback_{uploaded_fallback_index:02d}_cutout.png"
+                        )
+                        uploaded_fallback_semantic = (
+                            job_dir
+                            / "cartoon_reference_uploaded_identity_"
+                            f"fallback_{uploaded_fallback_index:02d}_semantic.png"
+                        )
+                        try:
+                            uploaded_chroma_metrics = semantic_background_recovery(
+                                uploaded_fallback_source,
+                                uploaded_fallback_green,
+                                uploaded_fallback_cutout,
+                                uploaded_fallback_semantic,
+                            )
+                            uploaded_chroma_metrics[
+                                "identity_chroma_spill_cleanup"
+                            ] = neutralize_uploaded_identity_chroma_spill(
+                                uploaded_fallback_cutout,
+                                source_identity_palette,
+                            )
+                            uploaded_candidate_palette = identity_palette_signature(
+                                uploaded_fallback_cutout
+                            )
+                            uploaded_upper_candidate_palette = (
+                                identity_palette_signature(
+                                    uploaded_fallback_cutout,
+                                    exclude_bottom_fraction=(
+                                        BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
+                                    ),
+                                )
+                            )
+                            uploaded_palette_quality = (
+                                canonical_identity_palette_quality(
+                                    identity_palette_quality(
+                                        source_identity_palette,
+                                        uploaded_candidate_palette,
+                                    ),
+                                    identity_palette_quality(
+                                        canonical_source_upper_body_palette,
+                                        uploaded_upper_candidate_palette,
+                                    ),
+                                )
+                            )
+                            if (
+                                not isinstance(uploaded_palette_quality, dict)
+                                or uploaded_palette_quality.get("acceptable")
+                                is not True
+                            ):
+                                raise RuntimeError(
+                                    "Uploaded identity semantic fallback did not "
+                                    "preserve the source palette: "
+                                    + ", ".join(
+                                        str(issue)
+                                        for issue in (
+                                            uploaded_palette_quality or {}
+                                        ).get("issues", [])
+                                    )
+                                )
+                        except Exception as exc:  # noqa: BLE001 - try normalized source next
+                            uploaded_fallback_error = exc
+                            append_recovery_event(
+                                job_id,
+                                {
+                                    "stage": "cartoon_reference",
+                                    "attempt": len(cartoon_attempts) + 1,
+                                    "reason": "canonical_identity_palette_drift",
+                                    "strategy": (
+                                        "uploaded_identity_semantic_fallback"
+                                    ),
+                                    "source": uploaded_fallback_source.name,
+                                    "result": "rejected",
+                                    "error": (
+                                        f"{type(exc).__name__}: {str(exc)[:1000]}"
+                                    ),
+                                },
+                            )
+                            continue
+                        fallback_green = uploaded_fallback_green
+                        fallback_cutout = uploaded_fallback_cutout
+                        fallback_semantic = uploaded_fallback_semantic
+                        chroma_metrics = uploaded_chroma_metrics
+                        fallback_candidate_palette = uploaded_candidate_palette
+                        fallback_upper_body_candidate_palette = (
+                            uploaded_upper_candidate_palette
+                        )
+                        fallback_palette_quality = uploaded_palette_quality
+                        fallback_profile = "uploaded_identity_semantic_fallback"
+                        fallback_recovery_reason = (
+                            "canonical_identity_palette_drift_exhausted"
+                        )
+                        fallback_recovery_strategy = (
+                            "use_original_uploaded_identity_after_safe_matte"
+                        )
+                        fallback_raw_candidate_identity_palette = (
+                            source_identity_palette
+                        )
+                        fallback_raw_candidate_upper_body_identity_palette = (
+                            canonical_source_upper_body_palette
+                        )
+                        uploaded_fallback_accepted = True
+                        update_job(
+                            job_id,
+                            canonical_uploaded_identity_fallback_used=True,
+                            canonical_generated_palette_failure=(
+                                generated_fallback_palette_quality
+                            ),
+                            canonical_uploaded_identity_fallback_source=(
+                                str(uploaded_fallback_source)
+                            ),
+                        )
+                        break
+                    if not uploaded_fallback_accepted:
+                        raise RuntimeError(
+                            "Canonical identity palette drift remained after all "
+                            "Qwen retries and the original-upload safe fallback "
+                            "could not be prepared: "
+                            + (
+                                f"{type(uploaded_fallback_error).__name__}: "
+                                f"{str(uploaded_fallback_error)[:1000]}"
+                                if uploaded_fallback_error is not None
+                                else "no fallback source"
+                            )
+                        )
+                if (
+                    (
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                        or canonical_identity_palette_gate_required
+                    )
                     and
                     fallback_palette_quality is not None
                     and fallback_palette_quality.get("acceptable") is not True
@@ -1267,7 +1534,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     cartoon_size = recovered_image.size
                 selected_cartoon = {
                     "attempt": len(cartoon_attempts) + 1,
-                    "profile": "rembg_u2net_fallback",
+                    "profile": fallback_profile,
                     "seed": fallback_record["seed"],
                     "keyframe": fallback_green.name,
                     "cutout": fallback_cutout.name,
@@ -1275,11 +1542,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "chroma": chroma_metrics,
                     "identity_palette": fallback_palette_quality,
                     "identity_palette_input": fallback_cutout.name,
-                    "raw_candidate_identity_palette": fallback_record.get(
-                        "raw_candidate_identity_palette"
+                    "raw_candidate_identity_palette": (
+                        fallback_raw_candidate_identity_palette
                     ),
-                    "raw_candidate_upper_body_identity_palette": fallback_record.get(
-                        "raw_candidate_upper_body_identity_palette"
+                    "raw_candidate_upper_body_identity_palette": (
+                        fallback_raw_candidate_upper_body_identity_palette
                     ),
                     "candidate_identity_palette": fallback_candidate_palette,
                     "candidate_upper_body_identity_palette": (
@@ -1327,9 +1594,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     {
                         "stage": "cartoon_reference",
                         "attempt": selected_cartoon["attempt"],
-                        "reason": "qwen_chroma_retries_exhausted",
-                        "strategy": "rembg_u2net_fallback",
-                        "profile": "rembg_u2net_fallback",
+                        "reason": fallback_recovery_reason,
+                        "strategy": fallback_recovery_strategy,
+                        "profile": fallback_profile,
                         "result": "accepted",
                         "chroma": chroma_metrics,
                         "identity_palette": selected_cartoon.get("identity_palette"),
@@ -1396,7 +1663,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             normalized_chroma = None
             cartoon_output = cartoon_reference
         canonical_palette_audit = identity_palette_audit(
-            identity_palette_guard,
+            canonical_identity_palette_gate_required,
             selected_cartoon.get("identity_palette"),
         )
         write_workflow(
@@ -1963,16 +2230,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             pose_palette_bottom_exclusion = (
                 BOWL_IDENTITY_PALETTE_BOTTOM_EXCLUSION if bowl_action else 0.0
             )
-            pose_palette_reference_path = (
-                identity_source_path
-                if (
-                    effective_pose_identity_input_policy
-                    in {
-                        POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,
-                        POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
-                    }
-                )
-                else canonical_similarity_reference
+            pose_palette_reference_path = resolve_action_identity_palette_reference(
+                uploaded_reference_job=bool(
+                    force_qwen_reference and upload_integrity is not None
+                ),
+                identity_input_policy=effective_pose_identity_input_policy,
+                uploaded_identity_source=identity_source_path,
+                canonical_reference=canonical_similarity_reference,
             )
             pose_identity_palette_prompt_signature = (
                 identity_palette_signature(
@@ -6616,6 +6880,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "palette_reference_role": (
                         "uploaded_identity_source"
                         if (
+                            (force_qwen_reference and upload_integrity is not None)
+                            or
                             effective_pose_identity_input_policy
                             in {
                                 POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,

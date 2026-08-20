@@ -535,6 +535,15 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             pipeline.CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY,
         )
         self.assertTrue(guard["canonical_raw_palette_retained_for_audit"])
+        canonical_palette_gate = guard["canonical_identity_palette_gate"]
+        self.assertTrue(canonical_palette_gate["enabled"])
+        self.assertTrue(
+            canonical_palette_gate["fail_closed_for_generated_candidates"]
+        )
+        self.assertEqual(
+            canonical_palette_gate["terminal_recovery"],
+            "original_uploaded_identity_safe_matte",
+        )
         self.assertEqual(
             guard["canonical_chroma_despill"],
             "alpha_boundary_plus_source_palette_guarded_interior_v1",
@@ -610,7 +619,7 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         )
         self.assertEqual(
             guard["pose_identity_palette_reference_role"]["eating"],
-            "qwen_full_body_canonical",
+            "uploaded_identity_source",
         )
         self.assertEqual(
             guard["legacy_profile_action_reference_used"],

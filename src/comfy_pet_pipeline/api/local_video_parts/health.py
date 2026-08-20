@@ -133,6 +133,13 @@ def health() -> dict[str, Any]:
             CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY
         ),
         "canonical_raw_palette_retained_for_audit": True,
+        "canonical_identity_palette_gate": {
+            "enabled": True,
+            "fail_closed_for_generated_candidates": True,
+            "retry_all_canonical_profiles": True,
+            "terminal_recovery": "original_uploaded_identity_safe_matte",
+            "terminal_recovery_must_pass_same_palette_gate": True,
+        },
         "canonical_chroma_despill": (
             "alpha_boundary_plus_source_palette_guarded_interior_v1"
         ),
@@ -849,6 +856,13 @@ def health() -> dict[str, Any]:
                     CANONICAL_UPPER_BODY_PALETTE_REFERENCE_POLICY
                 ),
                 "canonical_raw_palette_retained_for_audit": True,
+                "canonical_identity_palette_gate": {
+                    "enabled": True,
+                    "fail_closed_for_generated_candidates": True,
+                    "retry_all_canonical_profiles": True,
+                    "terminal_recovery": "original_uploaded_identity_safe_matte",
+                    "terminal_recovery_must_pass_same_palette_gate": True,
+                },
                 "canonical_chroma_despill": (
                     "alpha_boundary_plus_source_palette_guarded_interior_v1"
                 ),
@@ -924,12 +938,10 @@ def health() -> dict[str, Any]:
                     "comfy_input_copy_sha256_verified": True,
                     "all_submitted_views_sha256_required": True,
                     "all_submitted_views_comfy_copy_sha256_verified": True,
-                    "duplicate_three_view_rejection": (
-                        GENERATION_VISUAL_AUDITS_BLOCKING
-                    ),
-                    "near_duplicate_view_angle_rejection": (
-                        GENERATION_VISUAL_AUDITS_BLOCKING
-                    ),
+                    "duplicate_three_view_rejection": False,
+                    "duplicate_three_view_downgrade_to_single_view": True,
+                    "near_duplicate_view_angle_rejection": False,
+                    "near_duplicate_view_downgrade_to_single_view": True,
                     "gross_palette_conflict_rejection": (
                         GENERATION_VISUAL_AUDITS_BLOCKING
                     ),
@@ -1192,9 +1204,12 @@ def health() -> dict[str, Any]:
                     "grooming": "image1_qwen_full_body_canonical",
                 },
                 "pose_identity_palette_reference_role": {
-                    "eating": "qwen_full_body_canonical",
-                    "grooming": "qwen_full_body_canonical",
+                    "eating": "uploaded_identity_source",
+                    "grooming": "uploaded_identity_source",
                 },
+                "pose_identity_palette_anchor_policy": (
+                    "original_uploaded_front_source_for_every_action_attempt_v1"
+                ),
                 "pose_identity_geometry_role": {
                     "eating": "image2_main_case_driver_geometry_guide",
                     "grooming": (
@@ -1253,9 +1268,10 @@ def health() -> dict[str, Any]:
                     "raw_qwen_selection_byte_preserving": True,
                     "uploaded_front_identity_confirmation_loaded_by_qwen": False,
                     "same_canonical_face_identity_reference_loaded_by_qwen": False,
-                    "uploaded_identity_views_consumed_via_canonical_only": True,
+                    "uploaded_identity_pixels_consumed_via_canonical_only": True,
+                    "uploaded_identity_palette_consumed_directly": True,
                     "appearance_free_pose_seed_loaded_by_qwen": False,
-                    "identity_palette_prompt_conditioning": False,
+                    "identity_palette_prompt_conditioning": True,
                     "negative_prompt_conditioning": False,
                     "sampling_schedule": (
                         "qwen_image_edit_2511_lightning_exact_four_step_v1"

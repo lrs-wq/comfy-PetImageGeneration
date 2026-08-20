@@ -127,14 +127,53 @@ def verify_uploaded_identity_submission(
             raise RuntimeError(
                 "Uploaded front identity digests disagree with legacy submission fields."
             )
+        effective_mode = str(
+            job.get("uploaded_identity_effective_view_mode") or mode
+        ).strip()
+        effective_roles = list(
+            job.get("uploaded_identity_effective_view_roles") or expected_roles
+        )
+        effective_count = int(
+            job.get("uploaded_identity_effective_view_count") or len(effective_roles)
+        )
+        downgraded = bool(
+            job.get("uploaded_identity_view_downgraded_to_single_view")
+        )
+        if effective_mode == mode:
+            if effective_roles != list(expected_roles) or effective_count != len(
+                expected_roles
+            ):
+                raise RuntimeError(
+                    "Uploaded identity effective view contract is inconsistent."
+                )
+        elif effective_mode == "single_view":
+            if (
+                mode != "front_left_right"
+                or not downgraded
+                or effective_roles != ["front"]
+                or effective_count != 1
+            ):
+                raise RuntimeError(
+                    "Uploaded identity single-view downgrade contract is invalid."
+                )
+        else:
+            raise RuntimeError("Uploaded identity effective view mode is invalid.")
+        effective_views = {
+            role: verified_views[role]
+            for role in effective_roles
+        }
         return {
             "input_path": front["input_path"],
             "source_path": front["source_path"],
             "input_sha256": front["input_sha256"],
             "source_sha256": front["source_sha256"],
-            "view_mode": mode,
-            "view_roles": list(expected_roles),
-            "views": verified_views,
+            "view_mode": effective_mode,
+            "view_roles": effective_roles,
+            "views": effective_views,
+            "submitted_view_mode": mode,
+            "submitted_view_roles": list(expected_roles),
+            "submitted_views": verified_views,
+            "downgraded_to_single_view": downgraded,
         }
 
     # Backward compatibility for already queued v1.0 single-view jobs.
@@ -175,6 +214,72 @@ def verify_uploaded_identity_submission(
         "view_mode": "single_view",
         "view_roles": ["front"],
         "views": {"front": front},
+        "submitted_view_mode": "single_view",
+        "submitted_view_roles": ["front"],
+        "submitted_views": {"front": front},
+        "downgraded_to_single_view": False,
+    }
+
+
+def effective_uploaded_identity_integrity(
+    upload_integrity: dict[str, Any],
+    identity_view_audit: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply an audited duplicate-view downgrade without mutating source records."""
+    _sync_local_video_runtime(globals(), {"effective_uploaded_identity_integrity"})
+
+    if not identity_view_audit.get("downgraded_to_single_view"):
+        return {
+            **upload_integrity,
+            "submitted_view_mode": upload_integrity.get(
+                "submitted_view_mode",
+                upload_integrity["view_mode"],
+            ),
+            "submitted_view_roles": list(
+                upload_integrity.get(
+                    "submitted_view_roles",
+                    upload_integrity["view_roles"],
+                )
+            ),
+            "submitted_views": dict(
+                upload_integrity.get(
+                    "submitted_views",
+                    upload_integrity["views"],
+                )
+            ),
+            "downgraded_to_single_view": False,
+        }
+    views = upload_integrity.get("views")
+    if (
+        upload_integrity.get("view_mode") != "front_left_right"
+        or not isinstance(views, dict)
+        or not isinstance(views.get("front"), dict)
+    ):
+        raise RuntimeError(
+            "Duplicate-view downgrade requires a valid front-left-right submission."
+        )
+    return {
+        **upload_integrity,
+        "view_mode": "single_view",
+        "view_roles": ["front"],
+        "views": {"front": views["front"]},
+        "submitted_view_mode": upload_integrity.get(
+            "submitted_view_mode",
+            upload_integrity["view_mode"],
+        ),
+        "submitted_view_roles": list(
+            upload_integrity.get(
+                "submitted_view_roles",
+                upload_integrity["view_roles"],
+            )
+        ),
+        "submitted_views": dict(
+            upload_integrity.get(
+                "submitted_views",
+                views,
+            )
+        ),
+        "downgraded_to_single_view": True,
     }
 
 
@@ -305,29 +410,37 @@ def compose_uploaded_identity_view_audit(
         Path(views["front"]["input_path"]),
         species=species,
     )
-    if GENERATION_VISUAL_AUDITS_BLOCKING:
-        audit = audit_uploaded_identity_view_set(upload_integrity)
-        structural_acceptable = bool(audit.get("acceptable"))
-        structural_issues = list(audit.get("issues") or [])
-        structural_status = "passed" if structural_acceptable else "failed"
-    else:
-        audit = {
-            "policy": UPLOADED_IDENTITY_VIEW_POLICY,
-            "blocking": False,
-            "fail_closed": False,
-            "generation_audit_policy": GENERATION_AUDIT_POLICY,
-            "view_mode": upload_integrity.get("view_mode"),
-            "roles": list(upload_integrity.get("view_roles") or []),
-            "view_count": len(upload_integrity.get("view_roles") or []),
-            "duplicate_pairs": [],
-            "view_angle_comparisons": {},
-            "pairwise_palette_observations": {},
-            "palettes": {},
-            "upper_body_palettes": {},
-        }
+    audit = audit_uploaded_identity_view_set(upload_integrity)
+    detected_structural_issues = list(audit.get("issues") or [])
+    exact_duplicate_pairs = list(audit.get("duplicate_pairs") or [])
+    near_duplicate_pairs = [
+        pair_name.split("_", 1)
+        for pair_name, comparison in dict(
+            audit.get("view_angle_comparisons") or {}
+        ).items()
+        if isinstance(comparison, dict) and comparison.get("near_duplicate") is True
+    ]
+    downgraded_to_single_view = bool(
+        upload_integrity.get("view_mode") == "front_left_right"
+        and (exact_duplicate_pairs or near_duplicate_pairs)
+    )
+    if downgraded_to_single_view:
         structural_acceptable = True
         structural_issues = []
-        structural_status = "skipped_advisory"
+        structural_advisory_issues = []
+        structural_status = "downgraded_to_single_view"
+    elif GENERATION_VISUAL_AUDITS_BLOCKING:
+        structural_acceptable = bool(audit.get("acceptable"))
+        structural_issues = detected_structural_issues
+        structural_advisory_issues = []
+        structural_status = "passed" if structural_acceptable else "failed"
+    else:
+        structural_acceptable = True
+        structural_issues = []
+        structural_advisory_issues = detected_structural_issues
+        structural_status = (
+            "warning_advisory" if detected_structural_issues else "passed_advisory"
+        )
     front_issues = list(front_view_audit.get("issues") or [])
     front_blocking = bool(front_view_audit.get("blocking"))
     front_blocking_issues = (
@@ -339,13 +452,20 @@ def compose_uploaded_identity_view_audit(
         dict.fromkeys(structural_issues + front_blocking_issues)
     )
     blocking_acceptable = structural_acceptable and not front_blocking_issues
-    advisory_issues = [] if front_blocking else front_issues
+    advisory_issues = list(
+        dict.fromkeys(
+            structural_advisory_issues
+            + ([] if front_blocking else front_issues)
+        )
+    )
     overall_acceptable = blocking_acceptable and bool(
         front_view_audit.get("acceptable")
     )
     status = (
         "failed"
         if not blocking_acceptable
+        else "downgraded_to_single_view"
+        if downgraded_to_single_view and not advisory_issues
         else "warning_advisory"
         if advisory_issues
         else "passed"
@@ -362,6 +482,35 @@ def compose_uploaded_identity_view_audit(
             "issues": list(dict.fromkeys(blocking_issues + advisory_issues)),
             "warnings": advisory_issues,
             "structural_audit_status": structural_status,
+            "submitted_view_mode": upload_integrity.get("view_mode"),
+            "submitted_view_roles": list(upload_integrity.get("view_roles") or []),
+            "submitted_view_count": len(upload_integrity.get("view_roles") or []),
+            "effective_view_mode": (
+                "single_view"
+                if downgraded_to_single_view
+                else upload_integrity.get("view_mode")
+            ),
+            "effective_view_roles": (
+                ["front"]
+                if downgraded_to_single_view
+                else list(upload_integrity.get("view_roles") or [])
+            ),
+            "effective_view_count": (
+                1
+                if downgraded_to_single_view
+                else len(upload_integrity.get("view_roles") or [])
+            ),
+            "downgraded_to_single_view": downgraded_to_single_view,
+            "downgrade_reason": (
+                "duplicate_or_near_duplicate_three_view_submission"
+                if downgraded_to_single_view
+                else None
+            ),
+            "resolved_structural_issues": (
+                detected_structural_issues if downgraded_to_single_view else []
+            ),
+            "exact_duplicate_pairs": exact_duplicate_pairs,
+            "near_duplicate_pairs": near_duplicate_pairs,
             "front_view_audit": front_view_audit,
             "front_view_audit_required": str(species).strip().lower() == "cat",
             "front_view_audit_blocking": front_blocking,
