@@ -952,6 +952,10 @@ def revalidate_uploaded_qwen_references_before_scail(
     canonical_qwen_image1_comfy_sha256 = (
         str(job.get("canonical_qwen_image1_comfy_sha256") or "").strip().lower()
     )
+    uploaded_identity_source = job_dir / "input_identity_source.png"
+    uploaded_identity_source_sha256 = (
+        str(job.get("uploaded_identity_source_sha256") or "").strip().lower()
+    )
     if (
         canonical_reference != job_dir / "cartoon_reference_transparent.png"
         or canonical_public_path != canonical_reference
@@ -1093,6 +1097,13 @@ def revalidate_uploaded_qwen_references_before_scail(
                         else ""
                     )
                 )
+                minimum_palette_reference = Path(
+                    str(
+                        selected_minimum.get("identity_palette_reference_path")
+                        if isinstance(selected_minimum, dict)
+                        else ""
+                    )
+                )
                 if (
                     advisory_grooming_minimum_status
                     not in {"passed", "degraded_passed"}
@@ -1120,6 +1131,14 @@ def revalidate_uploaded_qwen_references_before_scail(
                     != canonical_qwen_image1_sha256
                     or selected_minimum.get("identity_reference_sha256")
                     != canonical_qwen_image1_sha256
+                    or minimum_palette_reference != uploaded_identity_source
+                    or not minimum_palette_reference.is_file()
+                    or file_sha256(minimum_palette_reference)
+                    != uploaded_identity_source_sha256
+                    or selected_minimum.get(
+                        "identity_palette_reference_sha256"
+                    )
+                    != uploaded_identity_source_sha256
                 ):
                     raise RuntimeError(
                         "Persisted Qwen grooming reference lost its minimum "

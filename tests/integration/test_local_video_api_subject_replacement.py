@@ -2004,6 +2004,7 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
             job_dir.mkdir(parents=True)
             canonical = job_dir / "cartoon_reference_transparent.png"
             canonical_image1 = job_dir / "cartoon_reference.png"
+            uploaded_identity_source = job_dir / "input_identity_source.png"
             action_reference = job_dir / "grooming_transparent.png"
             rgba = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
             rgba.paste((220, 220, 220, 255), (128, 64, 384, 448))
@@ -2012,6 +2013,7 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
             green = Image.new("RGB", (512, 512), (0, 255, 0))
             green.paste((220, 220, 220), (128, 64, 384, 448))
             green.save(canonical_image1)
+            rgba.save(uploaded_identity_source)
             comfy_canonical = (
                 comfy_input
                 / "local_video_api"
@@ -2022,6 +2024,9 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
             comfy_canonical.write_bytes(canonical_image1.read_bytes())
             canonical_digest = pipeline.file_sha256(canonical)
             image1_digest = pipeline.file_sha256(canonical_image1)
+            uploaded_identity_source_digest = pipeline.file_sha256(
+                uploaded_identity_source
+            )
             action_digest = pipeline.file_sha256(action_reference)
             selected_minimum = {
                 "policy": pipeline.GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
@@ -2030,6 +2035,12 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
                 "candidate_sha256": action_digest,
                 "selected_candidate_path": str(action_reference),
                 "selected_candidate_sha256": action_digest,
+                "identity_palette_reference_path": str(
+                    uploaded_identity_source
+                ),
+                "identity_palette_reference_sha256": (
+                    uploaded_identity_source_digest
+                ),
                 "identity_reference_path": str(canonical_image1),
                 "identity_reference_sha256": image1_digest,
             }
@@ -2059,6 +2070,9 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
                     "canonical_qwen_image1_comfy_path": str(comfy_canonical),
                     "canonical_qwen_image1_sha256": image1_digest,
                     "canonical_qwen_image1_comfy_sha256": image1_digest,
+                    "uploaded_identity_source_sha256": (
+                        uploaded_identity_source_digest
+                    ),
                     "subject_reference_paths": {
                         "grooming": str(action_reference)
                     },
@@ -2102,6 +2116,20 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
                         "qwen_reference_pre_scail_minimum_contract_status"
                     ],
                     "passed",
+                )
+                selected_minimum["identity_palette_reference_sha256"] = "0" * 64
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "minimum action/identity contract",
+                ):
+                    pipeline.revalidate_uploaded_qwen_references_before_scail(
+                        job_id,
+                        jobs[job_id],
+                        effective_config,
+                        ["grooming"],
+                    )
+                selected_minimum["identity_palette_reference_sha256"] = (
+                    uploaded_identity_source_digest
                 )
                 selected_minimum["acceptable"] = False
                 selected_minimum["degraded_fallback_accepted"] = True
