@@ -32,7 +32,55 @@ def prepare_uploaded_subject_qwen_references(
         uploaded_identity_view_audit=identity_view_audit,
         uploaded_identity_front_view_audit=identity_view_audit["front_view_audit"],
         uploaded_identity_view_verdict=identity_view_audit["status"],
+        uploaded_identity_submitted_view_mode=identity_view_audit[
+            "submitted_view_mode"
+        ],
+        uploaded_identity_submitted_view_roles=identity_view_audit[
+            "submitted_view_roles"
+        ],
+        uploaded_identity_submitted_view_count=identity_view_audit[
+            "submitted_view_count"
+        ],
+        uploaded_identity_effective_view_mode=identity_view_audit[
+            "effective_view_mode"
+        ],
+        uploaded_identity_effective_view_roles=identity_view_audit[
+            "effective_view_roles"
+        ],
+        uploaded_identity_effective_view_count=identity_view_audit[
+            "effective_view_count"
+        ],
+        uploaded_identity_view_downgraded_to_single_view=identity_view_audit[
+            "downgraded_to_single_view"
+        ],
+        uploaded_identity_view_downgrade_reason=identity_view_audit[
+            "downgrade_reason"
+        ],
     )
+    upload_integrity = effective_uploaded_identity_integrity(
+        upload_integrity,
+        identity_view_audit,
+    )
+    if identity_view_audit["downgraded_to_single_view"]:
+        append_recovery_event(
+            job_id,
+            {
+                "stage": "uploaded_identity_view_audit",
+                "reason": identity_view_audit["downgrade_reason"],
+                "strategy": "downgrade_duplicate_three_view_to_front_only",
+                "result": "continued_as_single_view",
+                "submitted_view_roles": identity_view_audit[
+                    "submitted_view_roles"
+                ],
+                "effective_view_roles": identity_view_audit[
+                    "effective_view_roles"
+                ],
+                "duplicate_pairs": identity_view_audit.get("exact_duplicate_pairs"),
+                "near_duplicate_pairs": identity_view_audit.get(
+                    "near_duplicate_pairs"
+                ),
+            },
+        )
     front_view_audit = identity_view_audit["front_view_audit"]
     if not front_view_audit["acceptable"]:
         front_issue = str(
@@ -748,8 +796,11 @@ def prepare_uploaded_subject_qwen_references(
         grooming_foreleg_repair_global_pose_threshold_changed=False,
         grooming_pose_gate_composite_recovery=None,
         pose_identity_palette_reference_roles={
-            action: "qwen_full_body_canonical" for action in actions
+            action: "uploaded_identity_source" for action in actions
         },
+        pose_identity_palette_anchor_policy=(
+            "original_uploaded_front_source_for_every_action_attempt_v1"
+        ),
         image_profile_lora_source=lora_source,
         image_profile_suppresses_builtin_style=True,
         lock_retry_lora_strengths=bool(
@@ -1101,9 +1152,23 @@ def prepare_uploaded_subject_qwen_references(
             role: view["source_sha256"]
             for role, view in upload_integrity["views"].items()
         },
-        uploaded_identity_view_mode=upload_integrity["view_mode"],
-        uploaded_identity_view_roles=upload_integrity["view_roles"],
-        uploaded_identity_view_count=len(upload_integrity["view_roles"]),
+        uploaded_identity_view_mode=upload_integrity.get(
+            "submitted_view_mode",
+            upload_integrity["view_mode"],
+        ),
+        uploaded_identity_view_roles=upload_integrity.get(
+            "submitted_view_roles",
+            upload_integrity["view_roles"],
+        ),
+        uploaded_identity_view_count=len(
+            upload_integrity.get(
+                "submitted_view_roles",
+                upload_integrity["view_roles"],
+            )
+        ),
+        uploaded_identity_effective_view_mode=upload_integrity["view_mode"],
+        uploaded_identity_effective_view_roles=upload_integrity["view_roles"],
+        uploaded_identity_effective_view_count=len(upload_integrity["view_roles"]),
         uploaded_identity_view_verdict=(
             "skipped_advisory"
             if identity_view_audit.get("status") == "skipped_advisory"

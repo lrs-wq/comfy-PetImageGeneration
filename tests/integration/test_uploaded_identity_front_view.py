@@ -117,6 +117,143 @@ class UploadedFrontViewPipelineTests(unittest.TestCase):
         self.assertEqual(audit["status"], "warning_advisory")
         self.assertFalse(audit["front_view_audit_blocking"])
 
+    def test_duplicate_three_view_is_downgraded_to_front_only(self) -> None:
+        integrity = {
+            "view_mode": "front_left_right",
+            "view_roles": ["front", "left", "right"],
+            "views": {
+                role: {
+                    "input_path": Path(f"{role}.png"),
+                    "source_path": Path(f"{role}-source.png"),
+                }
+                for role in ("front", "left", "right")
+            },
+        }
+        structural_audit = {
+            "policy": pipeline.UPLOADED_IDENTITY_VIEW_POLICY,
+            "view_mode": "front_left_right",
+            "roles": ["front", "left", "right"],
+            "view_count": 3,
+            "acceptable": False,
+            "blocking": False,
+            "fail_closed": False,
+            "issues": [
+                "duplicate_identity_views_front_left",
+                "duplicate_identity_views_front_right",
+            ],
+            "duplicate_pairs": [
+                ["front", "left"],
+                ["front", "right"],
+            ],
+            "view_angle_comparisons": {},
+            "palettes": {},
+            "upper_body_palettes": {},
+        }
+        front_pass = {
+            "policy": pipeline.UPLOADED_FRONT_VIEW_AUDIT_POLICY,
+            "role": "front",
+            "blocking": False,
+            "acceptable": True,
+            "status": "passed_advisory",
+            "issues": [],
+        }
+        with (
+            patch.object(pipeline, "GENERATION_VISUAL_AUDITS_BLOCKING", False),
+            patch.object(
+                pipeline,
+                "audit_uploaded_front_identity_view",
+                return_value=front_pass,
+            ),
+            patch.object(
+                pipeline,
+                "audit_uploaded_identity_view_set",
+                return_value=structural_audit,
+            ),
+        ):
+            audit = pipeline.compose_uploaded_identity_view_audit(integrity)
+
+        self.assertTrue(audit["acceptable"])
+        self.assertTrue(audit["blocking_acceptable"])
+        self.assertTrue(audit["downgraded_to_single_view"])
+        self.assertEqual(audit["status"], "downgraded_to_single_view")
+        self.assertEqual(audit["effective_view_mode"], "single_view")
+        self.assertEqual(audit["effective_view_roles"], ["front"])
+        self.assertEqual(
+            audit["exact_duplicate_pairs"],
+            [["front", "left"], ["front", "right"]],
+        )
+        effective = pipeline.effective_uploaded_identity_integrity(
+            integrity,
+            audit,
+        )
+        self.assertEqual(effective["view_mode"], "single_view")
+        self.assertEqual(effective["view_roles"], ["front"])
+        self.assertEqual(set(effective["views"]), {"front"})
+        self.assertEqual(
+            effective["submitted_view_roles"],
+            ["front", "left", "right"],
+        )
+
+    def test_verified_submission_applies_persisted_single_view_downgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            job_dir = Path(temporary)
+            records: dict[str, dict[str, object]] = {}
+            for index, role in enumerate(("front", "left", "right"), start=1):
+                input_filename, source_filename = (
+                    pipeline.UPLOADED_IDENTITY_VIEW_FILES[role]
+                )
+                input_path = job_dir / input_filename
+                source_path = job_dir / source_filename
+                Image.new("RGB", (32, 32), (index * 30, 60, 90)).save(input_path)
+                Image.new("RGB", (32, 32), (index * 30, 60, 90)).save(source_path)
+                records[role] = {
+                    "role": role,
+                    "input_filename": input_filename,
+                    "source_filename": source_filename,
+                    "input_sha256": pipeline.file_sha256(input_path),
+                    "source_sha256": pipeline.file_sha256(source_path),
+                }
+            front = records["front"]
+            job = {
+                "uploaded_identity_view_mode": "front_left_right",
+                "uploaded_identity_view_roles": ["front", "left", "right"],
+                "uploaded_identity_view_count": 3,
+                "uploaded_identity_view_policy": (
+                    pipeline.UPLOADED_IDENTITY_VIEW_POLICY
+                ),
+                "uploaded_identity_views": records,
+                "uploaded_identity_input_sha256": front["input_sha256"],
+                "uploaded_identity_source_sha256": front["source_sha256"],
+                "uploaded_identity_effective_view_mode": "single_view",
+                "uploaded_identity_effective_view_roles": ["front"],
+                "uploaded_identity_effective_view_count": 1,
+                "uploaded_identity_view_downgraded_to_single_view": True,
+            }
+
+            verified = pipeline.verify_uploaded_identity_submission(job, job_dir)
+
+        self.assertEqual(verified["view_mode"], "single_view")
+        self.assertEqual(verified["view_roles"], ["front"])
+        self.assertEqual(set(verified["views"]), {"front"})
+        self.assertEqual(
+            verified["submitted_view_roles"],
+            ["front", "left", "right"],
+        )
+
+    def test_uploaded_action_palette_reference_always_uses_original_source(self) -> None:
+        uploaded_source = Path("input_identity_source.png")
+        generated_canonical = Path("cartoon_reference.png")
+
+        selected = pipeline.resolve_action_identity_palette_reference(
+            uploaded_reference_job=True,
+            identity_input_policy=pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+            uploaded_identity_source=uploaded_source,
+            canonical_reference=generated_canonical,
+        )
+
+        self.assertEqual(selected, uploaded_source)
+        self.assertNotEqual(selected, generated_canonical)
+
     def test_prepare_records_public_warning_stage_and_continues_pipeline(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output_root = Path(temporary)
@@ -141,13 +278,25 @@ class UploadedFrontViewPipelineTests(unittest.TestCase):
                 ],
                 "issues": [pipeline.FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE],
                 "front_view_audit": front_warning,
+                "submitted_view_mode": "single_view",
+                "submitted_view_roles": ["front"],
+                "submitted_view_count": 1,
+                "effective_view_mode": "single_view",
+                "effective_view_roles": ["front"],
+                "effective_view_count": 1,
+                "downgraded_to_single_view": False,
+                "downgrade_reason": None,
             }
             with (
                 patch.multiple(pipeline, OUTPUT_ROOT=output_root, JOBS=jobs),
                 patch.object(
                     pipeline,
                     "verify_uploaded_identity_submission",
-                    return_value={"views": {"front": {}}},
+                    return_value={
+                        "view_mode": "single_view",
+                        "view_roles": ["front"],
+                        "views": {"front": {}},
+                    },
                 ),
                 patch.object(
                     pipeline,

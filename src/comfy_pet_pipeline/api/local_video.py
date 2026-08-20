@@ -5843,6 +5843,11 @@ verify_uploaded_identity_submission = (
 )
 
 
+effective_uploaded_identity_integrity = (
+    _local_video_uploaded_identity_audit.effective_uploaded_identity_integrity
+)
+
+
 aggregate_identity_palette_signatures = (
     _local_video_uploaded_identity_audit.aggregate_identity_palette_signatures
 )
@@ -6092,6 +6097,11 @@ revalidate_uploaded_qwen_references_before_scail = (
 
 run_subject_replacement_job = (
     _local_video_subject_replacement.run_subject_replacement_job
+)
+
+
+resolve_action_identity_palette_reference = (
+    _local_video_job_runner.resolve_action_identity_palette_reference
 )
 
 
