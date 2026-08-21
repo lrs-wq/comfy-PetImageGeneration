@@ -119,7 +119,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.24.19"
+API_VERSION = "2.24.20"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -185,6 +185,19 @@ GENERATION_VISUAL_AUDITS_BLOCKING = GENERATION_VISUAL_AUDIT_MODE in {
     "yes",
     "on",
 }
+GENERATION_ACTION_CANDIDATE_GATES_ENABLED = os.environ.get(
+    "LOCAL_VIDEO_ACTION_CANDIDATE_GATES",
+    "1",
+).strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+    "disabled",
+}
+GENERATION_ACTION_CANDIDATE_GATE_POLICY = (
+    "retry_strict_candidates_then_identity_first_generated_fallback_v1"
+)
 FUR_SURFACE_GATE_MAX_REJECTIONS = 3
 FUR_SURFACE_GATE_RETRY_POLICY = "preserve_configured_eating_bowl_surface_recovery_v1"
 QWEN_BOWL_POSE_RETRY_NAME = "bowl_palette_canvas_seed_retry"
@@ -267,7 +280,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.15"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.16"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -534,7 +547,10 @@ EATING_CANONICAL_IDENTITY_REFINE_POLICY = (
 )
 EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT = 5
 EATING_CANONICAL_IDENTITY_REFINE_STEPS = 12
-EATING_CANONICAL_IDENTITY_REFINE_DENOISE = 1.0
+EATING_CANONICAL_IDENTITY_REFINE_DENOISE = 0.65
+EATING_CANONICAL_IDENTITY_REFINE_POSE_SAFE_ISSUES = frozenset(
+    {"eating_bowl_contact_unreliable"}
+)
 GROOMING_QWEN_FORELEG_REPAIR_MASK_DILATION_PX = 18
 GROOMING_QWEN_FORELEG_REPAIR_SEED_LOWPASS_SIGMA_PX = 2.5
 GROOMING_QWEN_FORELEG_REPAIR_SEED_IDENTITY_MEDIAN_BLEND = 0.12

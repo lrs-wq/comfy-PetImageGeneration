@@ -2158,7 +2158,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
         self.assertEqual(
             final_job["pose_reference_policy"],
             {
-                "eating": ("main_case_eating_driver_geometry_image2_guide_v4"),
+                "eating": ("main_case_eating_driver_geometry_image2_guide_v5"),
                 "grooming": pipeline.GROOMING_QWEN_POSE_REFERENCE_POLICY,
             },
         )
@@ -2235,8 +2235,8 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
             final_job["pose_reference_guide_styles"],
             {
                 "eating": (
-                    "texture_free_low_frequency_white_maquette_geometry_with_explicit_"
-                    "muzzle_overlap_on_pure_green"
+                    "texture_free_flat_neutral_subject_silhouette_with_explicit_"
+                    "muzzle_overlap_and_semantic_food_on_pure_green"
                 ),
                 "grooming": (pipeline.GROOMING_QWEN_GUIDE_STYLE),
             },
@@ -2248,7 +2248,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
         eating_metadata = final_job["pose_reference_metadata"]["eating"]
         self.assertEqual(
             eating_metadata["policy"],
-            "main_case_eating_driver_geometry_image2_guide_v4",
+            "main_case_eating_driver_geometry_image2_guide_v5",
         )
         self.assertEqual(
             eating_metadata["image_role"],

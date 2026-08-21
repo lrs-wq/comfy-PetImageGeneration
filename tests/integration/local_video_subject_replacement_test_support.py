@@ -714,6 +714,7 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
         identity_palette_guard: bool = False,
         canonical_action_palette_drift_attempts: set[int] | None = None,
         action_chroma_acceptable_attempts: set[int] | None = None,
+        eating_pose_contact_unreliable: bool = False,
         pose_safe_grooming_attempt4: bool = False,
         uploaded_white_maquette: bool = False,
         main_case_raw_identity_chain: bool | None = None,
@@ -1437,6 +1438,7 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
                 QWEN_POSE_MAX_ATTEMPTS=3,
                 QWEN_BOWL_POSE_EXTRA_ATTEMPTS=2,
                 GENERATION_VISUAL_AUDITS_BLOCKING=visual_audits_blocking,
+                GENERATION_ACTION_CANDIDATE_GATES_ENABLED=True,
                 QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH=style_strength,
                 MODEL_ROOT=model_root,
                 USER_LORA_DIR=user_lora_dir,
@@ -1464,9 +1466,13 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
                 "pose_cutout_quality",
                 return_value={
                     "available": True,
-                    "acceptable": True,
-                    "issues": [],
-                    "penalty": 0.0,
+                    "acceptable": (not eating_pose_contact_unreliable),
+                    "issues": (
+                        ["eating_bowl_contact_unreliable"]
+                        if eating_pose_contact_unreliable
+                        else []
+                    ),
+                    "penalty": (24.0 if eating_pose_contact_unreliable else 0.0),
                 },
             ),
             patch.object(

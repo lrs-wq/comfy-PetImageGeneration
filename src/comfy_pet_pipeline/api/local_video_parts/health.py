@@ -747,13 +747,34 @@ def health() -> dict[str, Any]:
                     ),
                 },
                 "canonical_action_identity_palette_gate": {
-                    "enabled": GENERATION_VISUAL_AUDITS_BLOCKING,
+                    "enabled": bool(
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                        or GENERATION_ACTION_CANDIDATE_GATES_ENABLED
+                    ),
                     "policy": CANONICAL_ACTION_IDENTITY_PALETTE_POLICY,
                     "achromatic_balance_l1_max": (
                         CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX
                     ),
                     "scope": "eating_and_grooming_qwen_action_candidates",
-                    "fail_closed": GENERATION_VISUAL_AUDITS_BLOCKING,
+                    "fail_closed": bool(
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                        or GENERATION_ACTION_CANDIDATE_GATES_ENABLED
+                    ),
+                    "job_fails_on_exhaustion": (
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                    ),
+                },
+                "canonical_action_candidate_gate": {
+                    "enabled": GENERATION_ACTION_CANDIDATE_GATES_ENABLED,
+                    "policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
+                    "scope": "uploaded_canonical_non_grooming_action_candidates",
+                    "full_retry_budget": True,
+                    "rejects_identity_palette_quality_similarity_and_silhouette_drift": True,
+                    "job_fails_on_exhaustion": GENERATION_VISUAL_AUDITS_BLOCKING,
+                    "advisory_terminal_recovery": (
+                        "identity_first_lowest_risk_generated_candidate"
+                    ),
+                    "returns_original_upload": False,
                 },
                 "uploaded_identity_appearance_authority": True,
                 "subject_profile_appearance_role": "action_geometry_only",
@@ -861,11 +882,11 @@ def health() -> dict[str, Any]:
                     "per_action_qwen_canonical_and_main_case_geometry_roles"
                 ),
                 "upload_pose_reference_policy": {
-                    "eating": "main_case_eating_driver_geometry_image2_guide_v4",
+                    "eating": "main_case_eating_driver_geometry_image2_guide_v5",
                     "grooming": GROOMING_QWEN_POSE_REFERENCE_POLICY,
                 },
                 "geometry_generator_policy": {
-                    "eating": "driving_eating_geometry_image2_v4",
+                    "eating": "driving_eating_geometry_image2_v5",
                     "grooming": GROOMING_QWEN_GEOMETRY_GUIDE_POLICY,
                 },
                 "grooming_geometry_isolation": {

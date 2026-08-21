@@ -84,10 +84,10 @@ def prepare_eating_qwen_geometry_guide(
         raise RuntimeError("Eating geometry guide frame rate does not match.")
     if not 0 <= int(metadata.get("selected_frame_index", -1)) < int(frames):
         raise RuntimeError("Eating geometry guide selected frame is invalid.")
-    if metadata.get("policy") != "driving_eating_geometry_image2_v4":
+    if metadata.get("policy") != "driving_eating_geometry_image2_v5":
         raise RuntimeError("Eating geometry guide policy is unsupported.")
     if metadata.get("method") != (
-        "temporal_head_lowering_continuous_muzzle_semantic_food_fields_v5"
+        "temporal_head_lowering_flat_subject_semantic_food_fields_v6"
     ):
         raise RuntimeError("Eating geometry guide method is unsupported.")
     if not 0 <= int(metadata.get("muzzle_bowl_gap_px", -1)) <= 4:
@@ -144,7 +144,11 @@ def prepare_eating_qwen_geometry_guide(
     if (
         not isinstance(semantic_structure, dict)
         or semantic_structure.get("method")
-        != "percentile_normalized_low_frequency_luma_v1"
+        != "flat_uniform_subject_silhouette_v2"
+        or semantic_structure.get("subject_rgb") != [132, 132, 132]
+        or int(semantic_structure.get("subject_unique_rgb_count", -1)) != 1
+        or semantic_structure.get("internal_luma_variation") is not False
+        or semantic_structure.get("appearance_bearing_face_detail") is not False
         or semantic_structure.get("source_luma_values_preserved") is not False
         or semantic_structure.get("source_rgb_preserved") is not False
         or semantic_structure.get("source_chroma_preserved") is not False
@@ -162,7 +166,7 @@ def prepare_eating_qwen_geometry_guide(
     if (
         not isinstance(palette, dict)
         or palette.get("background") != [0, 255, 0]
-        or palette.get("subject_gray_range") != [96, 174]
+        or palette.get("subject_rgb") != [132, 132, 132]
         or palette.get("prop_semantic_colors") != expected_prop_colors
         or palette.get("source_rgb_preserved") is not False
         or palette.get("source_chroma_preserved") is not False
@@ -199,12 +203,12 @@ def prepare_eating_qwen_geometry_guide(
     grayscale_values = foreground_rgb[grayscale, 0]
     if (
         grayscale_values.size == 0
-        or int(grayscale_values.min()) < 96
-        or int(grayscale_values.max()) > 174
+        or np.any(grayscale_values != 132)
+        or int(np.unique(grayscale_values).size) != 1
         or int(grayscale_values.size) != int(metadata.get("subject_pixels", -1))
         or int(grayscale_values.size) < 500
     ):
-        raise RuntimeError("Eating geometry guide subject gray range is invalid.")
+        raise RuntimeError("Eating geometry guide subject field is not flat neutral gray.")
     prop_pixel_count = 0
     for name, color in expected_prop_colors.items():
         color_count = int(

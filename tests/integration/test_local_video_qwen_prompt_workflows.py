@@ -1431,7 +1431,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             prompt,
         )
         self.assertIn(
-            "retain their light-beige and brown colors without transferring those warm colors into the cat",
+            "retain their light-beige and brown colors without transferring those warm colors into the pet",
             prompt,
         )
         self.assertEqual(
@@ -1455,6 +1455,61 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         }
         self.assertEqual(loaded_loras, {pipeline.QWEN_LORA: 1.0})
         self.assertNotIn(self.TEST_QWEN_STYLE_LORA, loaded_loras)
+
+    def test_advisory_eating_palette_drift_retries_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, _uploaded_input, _pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="eating",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=2,
+                identity_palette_guard=True,
+                canonical_action_palette_drift_attempts={1},
+                action_chroma_acceptable_attempts={1},
+                visual_audits_blocking=False,
+            )
+
+        eating_pose = pipeline.subject_replacement_pose_prompt("eating")
+        self.assertEqual(
+            workflow["14"]["inputs"]["seed"],
+            123 + pipeline.pose_seed_offset(eating_pose, 0) + 1009,
+        )
+
+    def test_advisory_eating_attempt5_refines_contact_uncertain_palette_drift(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="eating",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=5,
+                identity_palette_guard=True,
+                canonical_action_palette_drift_attempts={4},
+                action_chroma_acceptable_attempts={4},
+                eating_pose_contact_unreliable=True,
+                visual_audits_blocking=False,
+            )
+
+        load_images = {
+            node_id: node["inputs"]["image"]
+            for node_id, node in workflow.items()
+            if node.get("class_type") == "LoadImage"
+        }
+        refine_input = (
+            "local_video_api/capture-eating/eating_identity_refine_source.png"
+        )
+        self.assertEqual(load_images["1"], refine_input)
+        self.assertNotIn(pose_input, load_images.values())
+        self.assertIn(uploaded_input, load_images.values())
+        self.assertIn(
+            "normalized eating candidate from attempt 4",
+            workflow["6"]["inputs"]["prompt"],
+        )
+        self.assertEqual(
+            workflow["14"]["inputs"]["denoise"],
+            0.65,
+        )
 
     def test_eating_action_workflow_uses_main_case_geometry_and_uploaded_identity(
         self,

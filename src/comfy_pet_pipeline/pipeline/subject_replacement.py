@@ -1933,72 +1933,11 @@ def make_eating_geometry_guide(
             "eating_geometry_guide_unreliable: outline_smoothing_failed"
         )
 
-    subject_distance = cv2.distanceTransform(
-        selected_subject.astype(np.uint8),
-        cv2.DIST_L2,
-        5,
-    )
-    subject_scale = max(1.0, float(np.percentile(subject_distance[selected_subject], 95)))
-
-    # A pure distance field looks like an abstract radial fan to Qwen when it
-    # is also the sampler canvas. Preserve only very-low-frequency grayscale
-    # structure so the model can still read "cat face/paws over a food bowl".
-    # Original RGB, chroma, exact luma values, markings, and fur texture are
-    # discarded: the blurred fields are percentile-normalized into narrow,
-    # neutral ranges and then redrawn.
-    selected_rgb = np.asarray(
-        normalized_frames[int(selected["index"])].convert("RGB"),
-        dtype=np.uint8,
-    )
-    selected_luma = cv2.cvtColor(selected_rgb, cv2.COLOR_RGB2GRAY).astype(
-        np.float32
-    )
-    raw_subject_support = (
-        subject_masks[int(selected["index"])] & ~prop_union
-    ).astype(np.float32)
-    subject_structure_sigma = max(3.0, min(canvas_size) * 6.0 / 512.0)
-    subject_weighted_luma = cv2.GaussianBlur(
-        selected_luma * raw_subject_support,
-        (0, 0),
-        sigmaX=subject_structure_sigma,
-        sigmaY=subject_structure_sigma,
-    )
-    subject_blurred_support = cv2.GaussianBlur(
-        raw_subject_support,
-        (0, 0),
-        sigmaX=subject_structure_sigma,
-        sigmaY=subject_structure_sigma,
-    )
-    subject_low_frequency_luma = subject_weighted_luma / np.maximum(
-        subject_blurred_support,
-        0.01,
-    )
-    subject_structure_values = subject_low_frequency_luma[selected_subject]
-    subject_luma_p10, subject_luma_p90 = np.percentile(
-        subject_structure_values,
-        (10, 90),
-    )
-    subject_luma_contrast = float(subject_luma_p90 - subject_luma_p10)
-    if subject_luma_contrast < 8.0:
-        raise ValueError(
-            "eating_geometry_guide_unreliable: "
-            f"low_frequency_subject_contrast={subject_luma_contrast:.3f}"
-        )
-    subject_structure = np.clip(
-        (
-            subject_low_frequency_luma - float(subject_luma_p10)
-        )
-        / max(subject_luma_contrast, 1.0),
-        0.0,
-        1.0,
-    )
-    subject_gray = np.clip(
-        96.0
-        + 70.0 * subject_structure
-        + 8.0 * subject_distance / subject_scale,
-        96,
-        174,
-    ).astype(np.uint8)
+    # The eating guide carries geometry only. Even low-frequency source luma
+    # retained a Labrador-like face, eyes, nose, and short-coat shading that Qwen
+    # could mistake for identity. Draw the whole animal as one flat neutral field;
+    # the silhouette and muzzle-to-food contact remain the only subject signal.
+    subject_semantic_rgb = np.array([132, 132, 132], dtype=np.uint8)
 
     median_rgb = np.median(
         np.stack(
@@ -2122,19 +2061,15 @@ def make_eating_geometry_guide(
     )
     guide = np.zeros((canvas_size[1], canvas_size[0], 3), dtype=np.uint8)
     guide[:] = (0, 255, 0)
-    guide[selected_subject] = np.repeat(
-        subject_gray[selected_subject][:, None],
-        3,
-        axis=1,
-    )
+    guide[selected_subject] = subject_semantic_rgb
     guide[prop_union] = bowl_semantic_rgb
     guide[bowl_rim] = bowl_rim_semantic_rgb
     guide[food_core] = food_semantic_rgb
 
     metadata = {
-        "policy": "driving_eating_geometry_image2_v4",
+        "policy": "driving_eating_geometry_image2_v5",
         "method": (
-            "temporal_head_lowering_continuous_muzzle_semantic_food_fields_v5"
+            "temporal_head_lowering_flat_subject_semantic_food_fields_v6"
         ),
         "selected_frame_index": int(selected["index"]),
         "muzzle_bowl_gap_px": int(selected["muzzle_bowl_gap_px"]),
@@ -2196,11 +2131,11 @@ def make_eating_geometry_guide(
             "high_frequency_outline_preserved": False,
         },
         "semantic_structure": {
-            "method": "percentile_normalized_low_frequency_luma_v1",
-            "subject_gaussian_sigma": round(subject_structure_sigma, 3),
-            "subject_luma_p10": round(float(subject_luma_p10), 3),
-            "subject_luma_p90": round(float(subject_luma_p90), 3),
-            "subject_luma_contrast": round(subject_luma_contrast, 3),
+            "method": "flat_uniform_subject_silhouette_v2",
+            "subject_rgb": subject_semantic_rgb.tolist(),
+            "subject_unique_rgb_count": 1,
+            "internal_luma_variation": False,
+            "appearance_bearing_face_detail": False,
             "bowl_gaussian_sigma": round(bowl_structure_sigma, 3),
             "bowl_luma_p10": round(float(bowl_luma_p10), 3),
             "bowl_luma_p90": round(float(bowl_luma_p90), 3),
@@ -2212,7 +2147,7 @@ def make_eating_geometry_guide(
         },
         "palette": {
             "background": [0, 255, 0],
-            "subject_gray_range": [96, 174],
+            "subject_rgb": subject_semantic_rgb.tolist(),
             "prop_semantic_colors": {
                 "bowl": bowl_semantic_rgb.tolist(),
                 "bowl_rim": bowl_rim_semantic_rgb.tolist(),

@@ -227,14 +227,14 @@ def prepare_uploaded_subject_qwen_references(
                 fps=float(effective_subject_config["fps"]),
             )
             pose_reference_policies[action] = (
-                "main_case_eating_driver_geometry_image2_guide_v4"
+                "main_case_eating_driver_geometry_image2_guide_v5"
             )
             pose_reference_guide_styles[action] = (
-                "texture_free_low_frequency_white_maquette_geometry_with_explicit_"
-                "muzzle_overlap_on_pure_green"
+                "texture_free_flat_neutral_subject_silhouette_with_explicit_"
+                "muzzle_overlap_and_semantic_food_on_pure_green"
             )
             pose_reference_metadata[action] = {
-                "policy": "main_case_eating_driver_geometry_image2_guide_v4",
+                "policy": "main_case_eating_driver_geometry_image2_guide_v5",
                 "generator_policy": guide_metadata.get("policy"),
                 "generator_method": guide_metadata.get("method"),
                 "image_role": "image2_action_geometry_guide",

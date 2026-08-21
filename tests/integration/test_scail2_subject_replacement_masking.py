@@ -411,19 +411,19 @@ class EatingScenePropMaskTests(unittest.TestCase):
         )
         self.assertEqual(
             metadata["policy"],
-            "driving_eating_geometry_image2_v4",
+            "driving_eating_geometry_image2_v5",
         )
         self.assertFalse(metadata["palette"]["source_rgb_preserved"])
         self.assertFalse(
             metadata["palette"]["high_frequency_texture_preserved"]
         )
-        self.assertFalse(
-            metadata["semantic_structure"]["source_luma_values_preserved"]
-        )
-        self.assertGreaterEqual(
-            metadata["semantic_structure"]["subject_luma_contrast"],
-            8.0,
-        )
+        structure = metadata["semantic_structure"]
+        self.assertEqual(structure["method"], "flat_uniform_subject_silhouette_v2")
+        self.assertEqual(structure["subject_rgb"], [132, 132, 132])
+        self.assertEqual(structure["subject_unique_rgb_count"], 1)
+        self.assertFalse(structure["internal_luma_variation"])
+        self.assertFalse(structure["appearance_bearing_face_detail"])
+        self.assertFalse(structure["source_luma_values_preserved"])
         self.assertLessEqual(
             metadata["outline_smoothing"]["perimeter_ratio"],
             1.01,
@@ -446,6 +446,8 @@ class EatingScenePropMaskTests(unittest.TestCase):
         subject_foreground = foreground[~semantic_prop]
         self.assertTrue(np.all(subject_foreground[:, 0] == subject_foreground[:, 1]))
         self.assertTrue(np.all(subject_foreground[:, 1] == subject_foreground[:, 2]))
+        self.assertTrue(np.all(subject_foreground == 132))
+        self.assertEqual(np.unique(subject_foreground, axis=0).tolist(), [[132, 132, 132]])
         self.assertTrue(metadata["semantic_food"]["semantic_chroma_only"])
         self.assertTrue(
             all(
