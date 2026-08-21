@@ -31,8 +31,16 @@ try:
 except ModuleNotFoundError:  # CPU-only guide/tests do not decode video containers.
     av = None
 
-from ..media.transparent_animation import _gif_alpha, _save_rgba, _subject_mask
-
+from ..media.transparent_animation import (
+    GIF_ALPHA_SMOOTHING_SIGMA,
+    GIF_ALPHA_THRESHOLD,
+    _binary_alpha_edge_metrics,
+    _encode_soft_alpha_apng,
+    _gif_alpha,
+    _save_rgba,
+    _subject_mask,
+    validate_animation,
+)
 
 COMFY_URL = "http://127.0.0.1:8188"
 COMFY_INPUT = Path("/data/comfy-pet-pipeline/comfyui/input")
@@ -3564,6 +3572,7 @@ def _validate_transparent_gif(
         encoded_foreground_retentions: list[float] = []
         encoded_foreground_ious: list[float] = []
         alpha_has_both: list[bool] = []
+        edge_metrics: list[dict[str, float | int]] = []
         for index in range(image.n_frames):
             image.seek(index)
             durations.append(int(image.info.get("duration", 0)))
@@ -3589,6 +3598,7 @@ def _validate_transparent_gif(
             alpha_has_both.append(
                 bool(np.any(alpha == 0) and np.any(alpha == 255))
             )
+            edge_metrics.append(_binary_alpha_edge_metrics(alpha))
             if expected_foreground_masks is not None:
                 expected_foreground = expected_foreground_masks[index]
                 expected_pixels = max(
@@ -3661,6 +3671,20 @@ def _validate_transparent_gif(
             encoded_foreground_retention_min
         ),
         "encoded_foreground_iou_min": encoded_foreground_iou_min,
+        "edge_quality": {
+            "tiny_foreground_components_max": max(
+                int(item["tiny_foreground_components"])
+                for item in edge_metrics
+            ),
+            "sparse_boundary_fraction_max": max(
+                float(item["sparse_boundary_fraction"])
+                for item in edge_metrics
+            ),
+            "checkerboard_fraction_max": max(
+                float(item["checkerboard_fraction"])
+                for item in edge_metrics
+            ),
+        },
         "loop": loop_count,
         "bytes": path.stat().st_size,
     }
@@ -3906,8 +3930,9 @@ def build_unstabilized_transparent_gif(
     gif_fps: int = 20,
     gif_frames: int = 100,
     white_mp4_target: Path | None = None,
+    soft_apng_target: Path | None = None,
 ) -> dict[str, Any]:
-    """Remove green per frame and encode a GIF without spatial stabilization."""
+    """Extract one matte and publish clean GIF plus optional soft-alpha APNG."""
     frames_root = gif_target.parent / f".{gif_target.stem}.{uuid.uuid4().hex}.frames"
     binary_dir = frames_root / "gif"
     soft_dir = frames_root / "soft"
@@ -3921,6 +3946,15 @@ def build_unstabilized_transparent_gif(
         if white_mp4_target is not None
         else None
     )
+    apng_temporary = (
+        soft_apng_target.with_name(
+            f".{soft_apng_target.stem}.{uuid.uuid4().hex}.png"
+        )
+        if soft_apng_target is not None
+        else None
+    )
+    if soft_apng_target is not None:
+        soft_apng_target.unlink(missing_ok=True)
     binary_dir.mkdir(parents=True, exist_ok=False)
     soft_dir.mkdir(parents=True, exist_ok=False)
     try:
@@ -4377,7 +4411,7 @@ def build_unstabilized_transparent_gif(
             "[0:v]format=rgba,split[gif][pal];"
             "[pal]palettegen=reserve_transparent=1:"
             "transparency_color=0x000000:stats_mode=diff[p];"
-            "[gif][p]paletteuse=dither=sierra2_4a:"
+            "[gif][p]paletteuse=dither=none:"
             "alpha_threshold=128:diff_mode=rectangle[v]"
         )
         _run_checked(
@@ -4416,6 +4450,29 @@ def build_unstabilized_transparent_gif(
             expected_foreground_masks=expected_foreground_masks,
         )
         os.replace(temporary, gif_target)
+        apng_validation: dict[str, Any] | None = None
+        apng_error: str | None = None
+        if soft_apng_target is not None and apng_temporary is not None:
+            try:
+                _encode_soft_alpha_apng(
+                    (
+                        soft_dir / f"frame_{index:03d}.png"
+                        for index in range(gif_frames)
+                    ),
+                    apng_temporary,
+                    fps=gif_fps,
+                )
+                apng_validation = validate_animation(
+                    apng_temporary,
+                    size=output_size,
+                    frame_count=gif_frames,
+                    duration_ms=int(gif_frames * 1000 / gif_fps),
+                )
+                soft_apng_target.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(apng_temporary, soft_apng_target)
+            except Exception as exc:
+                apng_error = f"{type(exc).__name__}: {exc}"
+                apng_temporary.unlink(missing_ok=True)
         white_mp4_validation: dict[str, Any] | None = None
         if white_mp4_target is not None and white_temporary is not None:
             white_frames: list[Image.Image] = []
@@ -4523,13 +4580,24 @@ def build_unstabilized_transparent_gif(
                     default=None,
                 ),
             },
+            "gif_edge": {
+                "policy": "clean_hard_alpha_v1",
+                "ordered_alpha_dither": False,
+                "alpha_threshold": GIF_ALPHA_THRESHOLD,
+                "alpha_smoothing_sigma": GIF_ALPHA_SMOOTHING_SIGMA,
+                "palette_dither": "none",
+            },
             "gif": validation,
+            "apng": apng_validation,
+            "apng_error": apng_error,
             "white_background_mp4": white_mp4_validation,
         }
     finally:
         temporary.unlink(missing_ok=True)
         if white_temporary is not None:
             white_temporary.unlink(missing_ok=True)
+        if apng_temporary is not None:
+            apng_temporary.unlink(missing_ok=True)
         shutil.rmtree(frames_root, ignore_errors=True)
 
 
@@ -5064,15 +5132,20 @@ def main() -> int:
             gif_path = video_path.with_name(
                 video_path.stem + "_transparent_512x512_5s.gif"
             )
+            apng_path = video_path.with_name(
+                video_path.stem + "_transparent_512x512_5s_soft.png"
+            )
             gif_metrics = build_unstabilized_transparent_gif(
                 video_path,
                 gif_path,
                 guidance_mask_video=pose_mask_path,
                 output_size=(args.width, args.height),
                 source_fps=args.fps,
+                soft_apng_target=apng_path,
             )
             transparent_gif = {
                 "path": str(gif_path),
+                "soft_apng_path": str(apng_path),
                 "metrics": gif_metrics,
             }
         manifest.update(

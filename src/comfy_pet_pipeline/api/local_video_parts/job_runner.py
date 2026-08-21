@@ -7366,13 +7366,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
                     "transparent": True,
                     "visual_style": "identity_preserving_cute_3d_natural_cat",
-                    "edge_mode": "fixed_ordered_dither",
+                    "edge_mode": "clean_hard_alpha_no_dither",
                     "stabilization": metrics["after"],
                     "visual_core_stabilization": metrics["visual_core_stabilization"],
                     "head_lock": metrics["head_lock"],
                     "video_engine": video_engine,
                     "video_engine_metadata": video_engine_metadata,
-                    "primary": True,
+                    "primary": False,
                 },
             )
             append_output(
@@ -7396,7 +7396,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "video_engine": video_engine,
                     "video_engine_metadata": video_engine_metadata,
                     "recommended_for_quality": True,
-                    "primary": False,
+                    "primary": True,
                 },
             )
         else:

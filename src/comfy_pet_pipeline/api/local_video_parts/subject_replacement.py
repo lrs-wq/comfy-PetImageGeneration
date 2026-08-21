@@ -80,6 +80,11 @@ def run_profile_standard_direct_job(job_id: str) -> None:
             if job.get("output_format") == "transparent_gif"
             else None
         )
+        apng_target = (
+            job_dir / f"{action}_subject_replacement_transparent_512_soft.png"
+            if job.get("output_format") == "transparent_gif"
+            else None
+        )
         update_job(
             job_id,
             stage="matting_profile_standard_direct_outputs",
@@ -89,6 +94,7 @@ def run_profile_standard_direct_job(job_id: str) -> None:
             runtime_path,
             video_target,
             gif_target,
+            apng_target,
             ffmpeg_bin=FFMPEG_BIN,
             size=512,
             source_fps=int(effective["fps"]),
@@ -209,6 +215,9 @@ def run_profile_standard_direct_job(job_id: str) -> None:
                 raise RuntimeError(
                     f"Standard-direct {action} transparent GIF was not produced."
                 )
+            apng_available = bool(
+                apng_target is not None and apng_target.is_file()
+            )
             transparent_metrics = matte_metrics
             metrics_path = job_dir / f"{action}_transparent_metrics.json"
             write_json_atomic(metrics_path, transparent_metrics)
@@ -233,9 +242,36 @@ def run_profile_standard_direct_job(job_id: str) -> None:
                     "matte_policy": matte_metrics["policy"],
                     "foreground_rgb_redrawn": False,
                     "spatial_transform_applied": False,
-                    "primary": True,
+                    "edge_mode": "clean_hard_alpha_no_dither",
+                    "primary": not apng_available,
                 },
             )
+            if apng_available and apng_target is not None:
+                append_output(
+                    job_id,
+                    {
+                        "type": "transparent_apng",
+                        "action": action,
+                        "action_label": action_label,
+                        "filename": apng_target.name,
+                        "width": TRANSPARENT_GIF_SIZE,
+                        "height": TRANSPARENT_GIF_SIZE,
+                        "frames": TRANSPARENT_GIF_FRAMES,
+                        "fps": TRANSPARENT_GIF_FPS,
+                        "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                        "transparent": True,
+                        "soft_alpha": True,
+                        "video_engine": "deterministic-main-case-standard-direct",
+                        "driving_template": runtime_path.name,
+                        "sha256": file_sha256(apng_target),
+                        "source_runtime_sha256": standard["runtime_sha256"],
+                        "matte_policy": matte_metrics["policy"],
+                        "foreground_rgb_redrawn": False,
+                        "spatial_transform_applied": False,
+                        "recommended_for_quality": True,
+                        "primary": True,
+                    },
+                )
         results.append(
             {
                 "action": action,
@@ -254,6 +290,13 @@ def run_profile_standard_direct_job(job_id: str) -> None:
                 "transparent_gif": (
                     f"{action}_subject_replacement_transparent_512.gif"
                     if transparent_metrics is not None
+                    else None
+                ),
+                "transparent_apng": (
+                    f"{action}_subject_replacement_transparent_512_soft.png"
+                    if transparent_metrics is not None
+                    and apng_target is not None
+                    and apng_target.is_file()
                     else None
                 ),
                 "transparent_metrics": transparent_metrics,
@@ -1330,6 +1373,10 @@ def run_subject_replacement_job(job_id: str) -> None:
             )
             guidance_path = Path(manifest["input_files"]["pose_mask_video"])
             gif_target = job_dir / f"{action}_subject_replacement_transparent_512.gif"
+            apng_target = (
+                job_dir
+                / f"{action}_subject_replacement_transparent_512_soft.png"
+            )
             transparent_log = job_dir / f"{action}_transparent.log"
             run_cancelable_process(
                 job_id,
@@ -1341,11 +1388,18 @@ def run_subject_replacement_job(job_id: str) -> None:
                     str(gif_target),
                     "--white-mp4-target",
                     str(video_target),
+                    "--soft-apng-target",
+                    str(apng_target),
                 ],
                 log_path=transparent_log,
                 stage_name=f"{action} transparent GIF extraction",
                 timeout=1800,
             )
+            if not gif_target.is_file():
+                raise RuntimeError(
+                    f"{action} transparent GIF extraction produced no file."
+                )
+            apng_available = apng_target.is_file()
             transparent_metrics = logged_json(transparent_log)
             fur_contour_quality: dict[str, Any] | None = None
             fur_gate = action_config.get("fur_silhouette_gate")
@@ -1461,9 +1515,33 @@ def run_subject_replacement_job(job_id: str) -> None:
                     "transparent": True,
                     "video_engine": "scail2-14b-fp8",
                     "driving_template": Path(action_config["driving_animation"]).name,
-                    "primary": True,
+                    "edge_mode": "clean_hard_alpha_no_dither",
+                    "primary": not apng_available,
                 },
             )
+            if apng_available:
+                append_output(
+                    job_id,
+                    {
+                        "type": "transparent_apng",
+                        "action": action,
+                        "action_label": action_label,
+                        "filename": apng_target.name,
+                        "width": TRANSPARENT_GIF_SIZE,
+                        "height": TRANSPARENT_GIF_SIZE,
+                        "frames": TRANSPARENT_GIF_FRAMES,
+                        "fps": TRANSPARENT_GIF_FPS,
+                        "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                        "transparent": True,
+                        "soft_alpha": True,
+                        "video_engine": "scail2-14b-fp8",
+                        "driving_template": Path(
+                            action_config["driving_animation"]
+                        ).name,
+                        "recommended_for_quality": True,
+                        "primary": True,
+                    },
+                )
         results.append(
             {
                 "action": action,
@@ -1477,6 +1555,12 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "transparent_gif": (
                     f"{action}_subject_replacement_transparent_512.gif"
                     if transparent_metrics is not None
+                    else None
+                ),
+                "transparent_apng": (
+                    f"{action}_subject_replacement_transparent_512_soft.png"
+                    if transparent_metrics is not None
+                    and apng_target.is_file()
                     else None
                 ),
                 "transparent_metrics": transparent_metrics,

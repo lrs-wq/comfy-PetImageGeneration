@@ -2,31 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Iterable
 from uuid import uuid4
 
 import cv2
 import numpy as np
 from PIL import Image
 
-
-BAYER_8X8 = np.array(
-    [
-        [0, 32, 8, 40, 2, 34, 10, 42],
-        [48, 16, 56, 24, 50, 18, 58, 26],
-        [12, 44, 4, 36, 14, 46, 6, 38],
-        [60, 28, 52, 20, 62, 30, 54, 22],
-        [3, 35, 11, 43, 1, 33, 9, 41],
-        [51, 19, 59, 27, 49, 17, 57, 25],
-        [15, 47, 7, 39, 13, 45, 5, 37],
-        [63, 31, 55, 23, 61, 29, 53, 21],
-    ],
-    dtype=np.float32,
-)
+GIF_ALPHA_THRESHOLD = 144
+GIF_ALPHA_SMOOTHING_SIGMA = 0.45
+GIF_MIN_COMPONENT_FRACTION = 0.00003
 
 
 def _run(command: list[str], stage_name: str, timeout: int = 900) -> None:
@@ -396,12 +385,143 @@ def _stabilize_visual_core(
 
 
 def _gif_alpha(soft_alpha: np.ndarray) -> np.ndarray:
-    height, width = soft_alpha.shape
-    threshold = np.tile(
-        ((BAYER_8X8 + 0.5) * (255.0 / 64.0)).astype(np.uint8),
-        (math.ceil(height / 8), math.ceil(width / 8)),
-    )[:height, :width]
-    return np.where(soft_alpha > threshold, 255, 0).astype(np.uint8)
+    """Create a deliberate hard matte for GIF without ordered-alpha dust.
+
+    GIF has one transparent palette entry and cannot represent the soft alpha
+    used by APNG.  Ordered dithering approximates that coverage with isolated
+    opaque dots, which becomes a visible ant-line around pale fur.  Use one
+    stable contour instead, then remove only tiny detached components and
+    pinholes.  Fine semi-transparent hairs remain available in the APNG output.
+    """
+    if soft_alpha.ndim != 2:
+        raise ValueError("GIF alpha must be a two-dimensional array.")
+    alpha = np.asarray(soft_alpha, dtype=np.uint8)
+    smoothed = cv2.GaussianBlur(
+        alpha,
+        (0, 0),
+        sigmaX=GIF_ALPHA_SMOOTHING_SIGMA,
+        sigmaY=GIF_ALPHA_SMOOTHING_SIGMA,
+    )
+    hard = smoothed >= GIF_ALPHA_THRESHOLD
+    minimum_area = max(
+        4,
+        int(round(alpha.size * GIF_MIN_COMPONENT_FRACTION)),
+    )
+
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        hard.astype(np.uint8),
+        connectivity=8,
+    )
+    cleaned = np.zeros_like(hard)
+    for label in range(1, component_count):
+        if int(stats[label, cv2.CC_STAT_AREA]) >= minimum_area:
+            cleaned[labels == label] = True
+
+    # Fill only tiny enclosed pinholes. Background regions connected to the
+    # canvas border (including spaces between legs) must remain transparent.
+    background_count, background_labels, background_stats, _ = (
+        cv2.connectedComponentsWithStats(
+            (~cleaned).astype(np.uint8),
+            connectivity=8,
+        )
+    )
+    border_labels = set(np.unique(background_labels[0, :]))
+    border_labels.update(np.unique(background_labels[-1, :]))
+    border_labels.update(np.unique(background_labels[:, 0]))
+    border_labels.update(np.unique(background_labels[:, -1]))
+    for label in range(1, background_count):
+        if (
+            label not in border_labels
+            and int(background_stats[label, cv2.CC_STAT_AREA]) < minimum_area
+        ):
+            cleaned[background_labels == label] = True
+    return cleaned.astype(np.uint8) * 255
+
+
+def _binary_alpha_edge_metrics(alpha: np.ndarray) -> dict[str, float | int]:
+    """Measure detached dust and unstable one-pixel patterns in a hard matte."""
+    foreground = np.asarray(alpha) >= 128
+    component_count, _, stats, _ = cv2.connectedComponentsWithStats(
+        foreground.astype(np.uint8),
+        connectivity=8,
+    )
+    minimum_area = max(
+        4,
+        int(round(foreground.size * GIF_MIN_COMPONENT_FRACTION)),
+    )
+    tiny_components = sum(
+        1
+        for label in range(1, component_count)
+        if int(stats[label, cv2.CC_STAT_AREA]) < minimum_area
+    )
+    eroded = cv2.erode(
+        foreground.astype(np.uint8),
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    boundary = foreground & ~eroded
+    neighbor_count = cv2.filter2D(
+        foreground.astype(np.uint8),
+        ddepth=cv2.CV_16U,
+        kernel=np.ones((3, 3), dtype=np.uint8),
+        borderType=cv2.BORDER_CONSTANT,
+    )
+    sparse_boundary_pixels = int(
+        np.count_nonzero(boundary & (neighbor_count <= 3))
+    )
+    boundary_pixels = int(np.count_nonzero(boundary))
+
+    top_left = foreground[:-1, :-1]
+    top_right = foreground[:-1, 1:]
+    bottom_left = foreground[1:, :-1]
+    bottom_right = foreground[1:, 1:]
+    checkerboards = (
+        top_left & bottom_right & ~top_right & ~bottom_left
+    ) | (
+        top_right & bottom_left & ~top_left & ~bottom_right
+    )
+    checkerboard_blocks = int(np.count_nonzero(checkerboards))
+    return {
+        "foreground_components": max(0, component_count - 1),
+        "tiny_foreground_components": tiny_components,
+        "boundary_pixels": boundary_pixels,
+        "sparse_boundary_pixels": sparse_boundary_pixels,
+        "sparse_boundary_fraction": float(sparse_boundary_pixels)
+        / float(max(1, boundary_pixels)),
+        "checkerboard_2x2_blocks": checkerboard_blocks,
+        "checkerboard_fraction": float(checkerboard_blocks)
+        / float(max(1, boundary_pixels)),
+    }
+
+
+def _encode_soft_alpha_apng(
+    frame_paths: Iterable[Path],
+    target: Path,
+    *,
+    fps: int,
+) -> None:
+    """Encode RGBA frame files as an animated PNG with full 8-bit alpha."""
+    frames: list[Image.Image] = []
+    for path in frame_paths:
+        with Image.open(path) as source:
+            frames.append(source.convert("RGBA"))
+    if not frames:
+        raise RuntimeError("Cannot encode an APNG without frames.")
+    try:
+        frames[0].save(
+            target,
+            format="PNG",
+            save_all=True,
+            append_images=frames[1:],
+            duration=int(round(1000 / fps)),
+            loop=0,
+            disposal=1,
+            blend=0,
+            optimize=True,
+        )
+    finally:
+        for frame in frames:
+            frame.close()
 
 
 def _save_rgba(path: Path, rgb: np.ndarray, alpha: np.ndarray) -> None:
@@ -469,25 +589,49 @@ def _animation_metrics(alphas: list[np.ndarray]) -> dict[str, object]:
 def validate_animation(
     path: Path,
     *,
-    size: int,
+    size: int | tuple[int, int],
     frame_count: int,
     duration_ms: int,
 ) -> dict[str, object]:
+    expected_size = (size, size) if isinstance(size, int) else size
     with Image.open(path) as image:
-        if image.size != (size, size):
+        if image.size != expected_size:
             raise RuntimeError(f"Animation has unexpected size {image.size}.")
         if image.n_frames != frame_count:
             raise RuntimeError(f"Animation has {image.n_frames} frames, expected {frame_count}.")
         durations: list[int] = []
         corners: list[int] = []
+        border_alpha_max = 0
+        soft_alpha_frames = 0
+        soft_alpha_pixels = 0
+        edge_metrics: list[dict[str, float | int]] = []
         for frame_index in range(image.n_frames):
             image.seek(frame_index)
             durations.append(int(image.info.get("duration", 0)))
-            rgba = image.convert("RGBA")
+            rgba = np.asarray(image.convert("RGBA"))
+            alpha = rgba[:, :, 3]
             corners.extend(
-                rgba.getpixel(point)[3]
-                for point in ((0, 0), (size - 1, 0), (0, size - 1), (size - 1, size - 1))
+                int(alpha[y, x])
+                for x, y in (
+                    (0, 0),
+                    (expected_size[0] - 1, 0),
+                    (0, expected_size[1] - 1),
+                    (expected_size[0] - 1, expected_size[1] - 1),
+                )
             )
+            border_alpha_max = max(
+                border_alpha_max,
+                int(alpha[:2, :].max()),
+                int(alpha[-2:, :].max()),
+                int(alpha[:, :2].max()),
+                int(alpha[:, -2:].max()),
+            )
+            frame_soft_pixels = int(
+                np.count_nonzero((alpha > 0) & (alpha < 255))
+            )
+            soft_alpha_pixels += frame_soft_pixels
+            soft_alpha_frames += int(frame_soft_pixels > 0)
+            edge_metrics.append(_binary_alpha_edge_metrics(alpha))
         actual_duration_ms = sum(durations)
         if actual_duration_ms != duration_ms:
             raise RuntimeError(f"Animation duration is {actual_duration_ms}ms, expected {duration_ms}ms.")
@@ -499,6 +643,23 @@ def validate_animation(
             "duration_ms": actual_duration_ms,
             "frame_durations_ms": sorted(set(durations)),
             "all_corners_transparent": True,
+            "full_2px_border_transparent": border_alpha_max == 0,
+            "soft_alpha_frames": soft_alpha_frames,
+            "soft_alpha_pixels": soft_alpha_pixels,
+            "edge_quality": {
+                "tiny_foreground_components_max": max(
+                    int(item["tiny_foreground_components"])
+                    for item in edge_metrics
+                ),
+                "sparse_boundary_fraction_max": max(
+                    float(item["sparse_boundary_fraction"])
+                    for item in edge_metrics
+                ),
+                "checkerboard_fraction_max": max(
+                    float(item["checkerboard_fraction"])
+                    for item in edge_metrics
+                ),
+            },
             "bytes": path.stat().st_size,
         }
 
@@ -582,7 +743,7 @@ def build_transparent_animations(
         gif_filter = (
             "[0:v]format=rgba,split[gif][pal];"
             "[pal]palettegen=reserve_transparent=1:transparency_color=0x000000:stats_mode=diff[p];"
-            "[gif][p]paletteuse=dither=sierra2_4a:alpha_threshold=128:diff_mode=rectangle[v]"
+            "[gif][p]paletteuse=dither=none:alpha_threshold=128:diff_mode=rectangle[v]"
         )
         final_delay_centiseconds = int(round(100 / fps))
         _run(
@@ -619,25 +780,14 @@ def build_transparent_animations(
 
         apng_validation: dict[str, object] | None = None
         if apng_target and apng_temporary:
-            apng_frames = [
-                Image.open(soft_frames / f"frame_{index:03d}.png").convert("RGBA")
-                for index in range(frame_count)
-            ]
-            try:
-                apng_frames[0].save(
-                    apng_temporary,
-                    format="PNG",
-                    save_all=True,
-                    append_images=apng_frames[1:],
-                    duration=int(round(1000 / fps)),
-                    loop=0,
-                    disposal=1,
-                    blend=0,
-                    optimize=True,
-                )
-            finally:
-                for frame in apng_frames:
-                    frame.close()
+            _encode_soft_alpha_apng(
+                (
+                    soft_frames / f"frame_{index:03d}.png"
+                    for index in range(frame_count)
+                ),
+                apng_temporary,
+                fps=fps,
+            )
             apng_validation = validate_animation(
                 apng_temporary,
                 size=size,
@@ -651,6 +801,13 @@ def build_transparent_animations(
             "after": after_metrics,
             "visual_core_stabilization": visual_core_metrics,
             "head_lock": head_lock_metrics,
+            "gif_edge": {
+                "policy": "clean_hard_alpha_v1",
+                "ordered_alpha_dither": False,
+                "alpha_threshold": GIF_ALPHA_THRESHOLD,
+                "alpha_smoothing_sigma": GIF_ALPHA_SMOOTHING_SIGMA,
+                "palette_dither": "none",
+            },
             "gif": gif_validation,
             "apng": apng_validation,
         }
@@ -665,6 +822,7 @@ def build_standard_direct_outputs(
     source: Path,
     white_mp4_target: Path,
     gif_target: Path | None = None,
+    apng_target: Path | None = None,
     *,
     ffmpeg_bin: str = "ffmpeg",
     size: int = 512,
@@ -675,9 +833,10 @@ def build_standard_direct_outputs(
 ) -> dict[str, object]:
     """Chroma-matte an approved standard without spatially changing its action.
 
-    The white MP4 and optional transparent GIF are derived from the exact same
-    per-source-frame RGB/alpha pair.  Only the GIF timeline is resampled; there
-    is no anchoring, stabilization, scaling, optical flow, or generative redraw.
+    The white MP4 and optional transparent animations are derived from the exact
+    same per-source-frame RGB/alpha pair. Only the animation timeline is
+    resampled; there is no anchoring, stabilization, scaling, optical flow, or
+    generative redraw.
     """
 
     frames_root = white_mp4_target.parent / (
@@ -694,6 +853,13 @@ def build_standard_direct_outputs(
         if gif_target is not None
         else None
     )
+    apng_temporary = (
+        apng_target.with_name(f".{apng_target.stem}.{uuid4().hex}.png")
+        if apng_target is not None
+        else None
+    )
+    if apng_target is not None:
+        apng_target.unlink(missing_ok=True)
     white_frames.mkdir(parents=True, exist_ok=False)
     rgba_frames.mkdir(parents=True, exist_ok=False)
     if gif_target is not None:
@@ -746,11 +912,19 @@ def build_standard_direct_outputs(
         os.replace(mp4_temporary, white_mp4_target)
 
         gif_validation: dict[str, object] | None = None
+        apng_validation: dict[str, object] | None = None
+        apng_error: str | None = None
         sampled_indices: list[int] | None = None
-        if gif_target is not None and gif_temporary is not None:
+        if gif_target is not None or apng_target is not None:
             sampled_indices = np.rint(
                 np.linspace(0, source_frame_count - 1, gif_frame_count)
             ).astype(int).tolist()
+
+        if (
+            gif_target is not None
+            and gif_temporary is not None
+            and sampled_indices is not None
+        ):
             for output_index, source_index in enumerate(sampled_indices):
                 rgb, alpha = matte_frames[source_index]
                 _save_rgba(
@@ -762,7 +936,7 @@ def build_standard_direct_outputs(
                 "[0:v]format=rgba,split[gif][pal];"
                 "[pal]palettegen=reserve_transparent=1:"
                 "transparency_color=0x000000:stats_mode=diff[p];"
-                "[gif][p]paletteuse=dither=sierra2_4a:"
+                "[gif][p]paletteuse=dither=none:"
                 "alpha_threshold=128:diff_mode=rectangle[v]"
             )
             _run(
@@ -797,6 +971,33 @@ def build_standard_direct_outputs(
             )
             os.replace(gif_temporary, gif_target)
 
+        if (
+            apng_target is not None
+            and apng_temporary is not None
+            and sampled_indices is not None
+        ):
+            try:
+                _encode_soft_alpha_apng(
+                    (
+                        rgba_frames / f"frame_{source_index:03d}.png"
+                        for source_index in sampled_indices
+                    ),
+                    apng_temporary,
+                    fps=gif_fps,
+                )
+                apng_validation = validate_animation(
+                    apng_temporary,
+                    size=size,
+                    frame_count=gif_frame_count,
+                    duration_ms=int(
+                        round(gif_frame_count * 1000 / gif_fps)
+                    ),
+                )
+                os.replace(apng_temporary, apng_target)
+            except Exception as exc:
+                apng_error = f"{type(exc).__name__}: {exc}"
+                apng_temporary.unlink(missing_ok=True)
+
         return {
             "policy": "shared_per_frame_chroma_matte_no_spatial_transform_v1",
             "source_frames": source_frame_count,
@@ -809,6 +1010,15 @@ def build_standard_direct_outputs(
                 "bytes": white_mp4_target.stat().st_size,
             },
             "transparent_gif": gif_validation,
+            "transparent_apng": apng_validation,
+            "transparent_apng_error": apng_error,
+            "gif_edge": {
+                "policy": "clean_hard_alpha_v1",
+                "ordered_alpha_dither": False,
+                "alpha_threshold": GIF_ALPHA_THRESHOLD,
+                "alpha_smoothing_sigma": GIF_ALPHA_SMOOTHING_SIGMA,
+                "palette_dither": "none",
+            },
             "gif_sampled_source_indices": sampled_indices,
             "foreground_fraction": {
                 "minimum": min(alpha_foreground_fractions),
@@ -819,13 +1029,17 @@ def build_standard_direct_outputs(
             "spatial_scaling": False,
             "spatial_translation": False,
             "temporal_resampling": (
-                "gif_only_nearest_source_frame" if gif_target is not None else False
+                "transparent_animation_nearest_source_frame"
+                if sampled_indices is not None
+                else False
             ),
         }
     finally:
         mp4_temporary.unlink(missing_ok=True)
         if gif_temporary is not None:
             gif_temporary.unlink(missing_ok=True)
+        if apng_temporary is not None:
+            apng_temporary.unlink(missing_ok=True)
         shutil.rmtree(frames_root, ignore_errors=True)
 
 
