@@ -301,7 +301,7 @@ curl \
 仅通过 8051 公共 GIF API 的 `type=upload` 提交的任务会把生命周期变化主动回调到业务系统。测试台或其他调用方直接提交到内部 8770 服务的任务不会触发该回调：
 
 ```text
-POST https://app.hzzootech.com/api/open/gifCallback
+POST https://prod.hzzootech.com/api/open/gifCallback
 Content-Type: application/json
 X-API-Key: <CALLBACK_API_KEY>
 ```
