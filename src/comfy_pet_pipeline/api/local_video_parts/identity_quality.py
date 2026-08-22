@@ -1737,11 +1737,20 @@ def evaluate_advisory_grooming_minimum_gate(
     *,
     identity_reference_palette: dict[str, Any],
     identity_reference_path: Path,
+    identity_palette_reference_path: Path,
     geometry_guide: Path,
     geometry_metadata: Path,
     attempt: int = 1,
 ) -> dict[str, Any]:
-    """Require recognizable identity and one real paw-to-mouth grooming limb."""
+    """Require recognizable identity and one real paw-to-mouth grooming limb.
+
+    ``identity_reference_path`` is the normalized 512x512 canonical used to
+    prove that Qwen actually edited the neutral pose.  Coat color remains
+    independently anchored to ``identity_palette_reference_path``, the raw
+    uploaded identity image from which ``identity_reference_palette`` was
+    measured.  Keeping those roles separate prevents arbitrary upload sizes
+    from disabling the canonical action-edit proof.
+    """
     _sync_local_video_runtime(globals(), {"evaluate_advisory_grooming_minimum_gate"})
 
     candidate_palette = identity_palette_signature(candidate)
@@ -1817,6 +1826,10 @@ def evaluate_advisory_grooming_minimum_gate(
         "candidate_sha256": file_sha256(candidate),
         "identity_reference_path": str(identity_reference_path),
         "identity_reference_sha256": file_sha256(identity_reference_path),
+        "identity_palette_reference_path": str(identity_palette_reference_path),
+        "identity_palette_reference_sha256": file_sha256(
+            identity_palette_reference_path
+        ),
         "geometry_guide_path": str(geometry_guide),
         "geometry_guide_sha256": file_sha256(geometry_guide),
         "geometry_metadata_path": str(geometry_metadata),

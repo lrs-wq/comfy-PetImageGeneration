@@ -1744,6 +1744,7 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
             job_dir.mkdir(parents=True)
             canonical = job_dir / "cartoon_reference_transparent.png"
             canonical_image1 = job_dir / "cartoon_reference.png"
+            uploaded_identity = job_dir / "input_identity_source.png"
             action_reference = job_dir / "grooming_transparent.png"
             rgba = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
             rgba.paste((220, 220, 220, 255), (128, 64, 384, 448))
@@ -1752,6 +1753,12 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
             green = Image.new("RGB", (512, 512), (0, 255, 0))
             green.paste((220, 220, 220), (128, 64, 384, 448))
             green.save(canonical_image1)
+            # Regression fixture for task 20260822T054539Z-98a9c633ea: the
+            # uploaded identity is intentionally not 512x512.  It is the coat
+            # palette authority, never the canonical action-edit canvas.
+            uploaded_rgba = Image.new("RGBA", (514, 584), (0, 0, 0, 0))
+            uploaded_rgba.paste((220, 220, 220, 255), (80, 48, 434, 552))
+            uploaded_rgba.save(uploaded_identity)
             comfy_canonical = (
                 comfy_input
                 / "local_video_api"
@@ -1762,6 +1769,7 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
             comfy_canonical.write_bytes(canonical_image1.read_bytes())
             canonical_digest = pipeline.file_sha256(canonical)
             image1_digest = pipeline.file_sha256(canonical_image1)
+            uploaded_identity_digest = pipeline.file_sha256(uploaded_identity)
             action_digest = pipeline.file_sha256(action_reference)
             selected_minimum = {
                 "policy": pipeline.GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
@@ -1772,6 +1780,8 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
                 "selected_candidate_sha256": action_digest,
                 "identity_reference_path": str(canonical_image1),
                 "identity_reference_sha256": image1_digest,
+                "identity_palette_reference_path": str(uploaded_identity),
+                "identity_palette_reference_sha256": uploaded_identity_digest,
             }
             jobs: dict[str, dict[str, object]] = {
                 job_id: {
@@ -1799,6 +1809,8 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
                     "canonical_qwen_image1_comfy_path": str(comfy_canonical),
                     "canonical_qwen_image1_sha256": image1_digest,
                     "canonical_qwen_image1_comfy_sha256": image1_digest,
+                    "uploaded_identity_anchor_path": str(uploaded_identity),
+                    "uploaded_identity_source_sha256": uploaded_identity_digest,
                     "subject_reference_paths": {
                         "grooming": str(action_reference)
                     },

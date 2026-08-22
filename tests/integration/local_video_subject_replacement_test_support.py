@@ -1384,8 +1384,19 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
             candidate: Path,
             *,
             identity_reference_path: Path,
+            identity_palette_reference_path: Path,
             **_kwargs: object,
         ) -> dict[str, object]:
+            self.assertEqual(
+                identity_reference_path,
+                job_dir / "cartoon_reference.png",
+                "the grooming action-edit proof must use the normalized canonical",
+            )
+            self.assertEqual(
+                identity_palette_reference_path,
+                job_dir / "input_identity_source.png",
+                "grooming coat color must remain anchored to the raw upload",
+            )
             attempt_number = next(
                 (
                     value
@@ -1424,6 +1435,12 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
                 "identity_reference_path": str(identity_reference_path),
                 "identity_reference_sha256": pipeline.file_sha256(
                     identity_reference_path
+                ),
+                "identity_palette_reference_path": str(
+                    identity_palette_reference_path
+                ),
+                "identity_palette_reference_sha256": pipeline.file_sha256(
+                    identity_palette_reference_path
                 ),
                 "identity_palette": identity_palette_quality,
             }

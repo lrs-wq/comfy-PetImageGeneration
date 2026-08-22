@@ -4666,6 +4666,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             dict,
                         )
                         or pose_palette_reference_path is None
+                        or canonical_similarity_reference is None
                         or grooming_pose_gate_guide_path is None
                         or grooming_pose_gate_metadata_path is None
                     ):
@@ -4679,7 +4680,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             identity_reference_palette=(
                                 advisory_grooming_identity_palette_reference
                             ),
-                            identity_reference_path=pose_palette_reference_path,
+                            identity_reference_path=(
+                                canonical_similarity_reference
+                            ),
+                            identity_palette_reference_path=(
+                                pose_palette_reference_path
+                            ),
                             geometry_guide=grooming_pose_gate_guide_path,
                             geometry_metadata=grooming_pose_gate_metadata_path,
                             attempt=attempt,
@@ -6916,10 +6922,19 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     != GROOMING_ADVISORY_MINIMUM_GATE_VERSION
                     or selected_minimum_gate.get("candidate_sha256")
                     != selected_digest
-                    or pose_palette_reference_path is None
+                    or canonical_similarity_reference is None
                     or selected_minimum_gate.get("identity_reference_path")
-                    != str(pose_palette_reference_path)
+                    != str(canonical_similarity_reference)
                     or selected_minimum_gate.get("identity_reference_sha256")
+                    != file_sha256(canonical_similarity_reference)
+                    or pose_palette_reference_path is None
+                    or selected_minimum_gate.get(
+                        "identity_palette_reference_path"
+                    )
+                    != str(pose_palette_reference_path)
+                    or selected_minimum_gate.get(
+                        "identity_palette_reference_sha256"
+                    )
                     != file_sha256(pose_palette_reference_path)
                 ):
                     update_job(

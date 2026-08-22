@@ -561,6 +561,28 @@ def revalidate_uploaded_qwen_references_before_scail(
                         else ""
                     )
                 )
+                minimum_palette_reference = Path(
+                    str(
+                        selected_minimum.get(
+                            "identity_palette_reference_path"
+                        )
+                        if isinstance(selected_minimum, dict)
+                        else ""
+                    )
+                )
+                minimum_palette_reference_sha256 = str(
+                    selected_minimum.get(
+                        "identity_palette_reference_sha256"
+                    )
+                    if isinstance(selected_minimum, dict)
+                    else ""
+                ).strip().lower()
+                uploaded_identity_anchor = Path(
+                    str(job.get("uploaded_identity_anchor_path") or "")
+                )
+                uploaded_identity_anchor_sha256 = str(
+                    job.get("uploaded_identity_source_sha256") or ""
+                ).strip().lower()
                 if (
                     advisory_grooming_minimum_status
                     not in {"passed", "degraded_passed"}
@@ -588,6 +610,16 @@ def revalidate_uploaded_qwen_references_before_scail(
                     != canonical_qwen_image1_sha256
                     or selected_minimum.get("identity_reference_sha256")
                     != canonical_qwen_image1_sha256
+                    or minimum_palette_reference != uploaded_identity_anchor
+                    or not minimum_palette_reference.is_file()
+                    or not re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        minimum_palette_reference_sha256,
+                    )
+                    or minimum_palette_reference_sha256
+                    != uploaded_identity_anchor_sha256
+                    or file_sha256(minimum_palette_reference)
+                    != minimum_palette_reference_sha256
                 ):
                     raise RuntimeError(
                         "Persisted Qwen grooming reference lost its minimum "
