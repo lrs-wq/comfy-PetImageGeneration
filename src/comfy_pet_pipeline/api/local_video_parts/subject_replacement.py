@@ -1438,6 +1438,7 @@ def run_subject_replacement_job(job_id: str) -> None:
             append_output(job_id, video_output)
 
         transparent_metrics: dict[str, Any] | None = None
+        temporal_cycle_output: dict[str, Any] | None = None
         if job.get("output_format") == "transparent_gif":
             raise_if_cancelled(job_id)
             update_job(
@@ -1497,6 +1498,54 @@ def run_subject_replacement_job(job_id: str) -> None:
                 )
             apng_available = apng_target.is_file()
             transparent_metrics = logged_json(transparent_log)
+            if action == "grooming":
+                temporal_cycle = transparent_metrics.get("temporal_cycle")
+                published_loop_quality = (
+                    temporal_cycle.get("published_loop_quality")
+                    if isinstance(temporal_cycle, dict)
+                    else None
+                )
+                temporal_cycle_acceptable = (
+                    isinstance(temporal_cycle, dict)
+                    and temporal_cycle.get("policy")
+                    == GROOMING_TEMPORAL_LOOP_POLICY
+                    and temporal_cycle.get("applied") is True
+                    and temporal_cycle.get("closed_loop") is True
+                    and temporal_cycle.get("acceptable") is True
+                    and isinstance(published_loop_quality, dict)
+                    and published_loop_quality.get("acceptable") is True
+                )
+                if not temporal_cycle_acceptable:
+                    update_job(
+                        job_id,
+                        grooming_temporal_loop_status="failed",
+                        grooming_temporal_loop_policy=(
+                            GROOMING_TEMPORAL_LOOP_POLICY
+                        ),
+                        grooming_temporal_loop_quality=temporal_cycle,
+                    )
+                    raise RuntimeError(
+                        "grooming_temporal_loop_failed: the published animation "
+                        "did not preserve the closed-loop action contract"
+                    )
+                temporal_cycle_output = {
+                    "policy": GROOMING_TEMPORAL_LOOP_POLICY,
+                    "playback": temporal_cycle.get("playback"),
+                    "pivot_source_frame_index": temporal_cycle.get(
+                        "pivot_source_frame_index"
+                    ),
+                    "closed_loop": True,
+                    "published_loop_quality": published_loop_quality,
+                }
+                video_output["temporal_cycle"] = temporal_cycle_output
+                update_job(
+                    job_id,
+                    grooming_temporal_loop_status="passed",
+                    grooming_temporal_loop_policy=(
+                        GROOMING_TEMPORAL_LOOP_POLICY
+                    ),
+                    grooming_temporal_loop_quality=temporal_cycle_output,
+                )
             fur_contour_quality: dict[str, Any] | None = None
             fur_gate = action_config.get("fur_silhouette_gate")
             if (
@@ -1612,6 +1661,7 @@ def run_subject_replacement_job(job_id: str) -> None:
                     "video_engine": "scail2-14b-fp8",
                     "driving_template": Path(action_config["driving_animation"]).name,
                     "edge_mode": "clean_hard_alpha_no_dither",
+                    "temporal_cycle": temporal_cycle_output,
                     "primary": not apng_available,
                 },
             )
@@ -1635,6 +1685,7 @@ def run_subject_replacement_job(job_id: str) -> None:
                             action_config["driving_animation"]
                         ).name,
                         "recommended_for_quality": True,
+                        "temporal_cycle": temporal_cycle_output,
                         "primary": True,
                     },
                 )
@@ -1660,6 +1711,7 @@ def run_subject_replacement_job(job_id: str) -> None:
                     else None
                 ),
                 "transparent_metrics": transparent_metrics,
+                "temporal_cycle": temporal_cycle_output,
                 "final_video_fur_surface": final_video_fur_surface,
             }
         )

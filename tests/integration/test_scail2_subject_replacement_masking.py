@@ -1189,6 +1189,39 @@ class SemanticCleanupComponentTests(unittest.TestCase):
 
 
 class DrivingAnimationDecodeTests(unittest.TestCase):
+    def test_grooming_loop_keeps_action_half_and_closes_at_contact(self) -> None:
+        self.assertEqual(
+            scail.grooming_closed_loop_source_indices(9),
+            [4, 5, 6, 7, 8, 7, 6, 5, 4],
+        )
+
+    def test_grooming_loop_rejects_non_scail_frame_counts(self) -> None:
+        for frame_count in (0, 2, 8):
+            with self.subTest(frame_count=frame_count), self.assertRaisesRegex(
+                ValueError,
+                "odd source frame count",
+            ):
+                scail.grooming_closed_loop_source_indices(frame_count)
+
+    def test_closed_loop_quality_rejects_large_boundary_jump(self) -> None:
+        alpha = np.full((4, 4), 255, dtype=np.uint8)
+        frames = [
+            (np.full((4, 4, 3), value, dtype=np.uint8), alpha)
+            for value in (0, 5, 10, 200)
+        ]
+        open_quality = scail.transparent_animation_loop_quality(
+            frames,
+            [0, 1, 2, 3],
+        )
+        closed_quality = scail.transparent_animation_loop_quality(
+            frames,
+            [1, 2, 1],
+        )
+
+        self.assertFalse(open_quality["acceptable"])
+        self.assertTrue(closed_quality["acceptable"])
+        self.assertEqual(closed_quality["loop_transition_score"], 0.0)
+
     def test_video_driver_decodes_all_frames_with_constant_timing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "driver.avi"

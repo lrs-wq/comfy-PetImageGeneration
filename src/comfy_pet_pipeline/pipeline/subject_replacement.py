@@ -71,6 +71,9 @@ EATING_MUZZLE_FOOD_OVERLAP_MAX_PX = 10
 EATING_FULL_POSE_OVERALL_CHANGE_RATIO_MIN = 0.02
 EATING_FULL_POSE_LOWER_HALF_CHANGE_RATIO_MIN = 0.01
 EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN = 0.012
+GROOMING_TEMPORAL_LOOP_POLICY = (
+    "grooming_second_half_ping_pong_closed_loop_v1"
+)
 
 DEFAULT_PROMPT = (
     "A complete full-body premium stylized 3D cartoon cat matching the sleek "
@@ -4309,6 +4312,62 @@ def _remove_dark_silhouette_halo(
     return cleaned_rgb, metrics
 
 
+def grooming_closed_loop_source_indices(frame_count: int) -> list[int]:
+    """Keep the validated grooming half and return to its contact frame."""
+    if frame_count < 3 or frame_count % 2 == 0:
+        raise ValueError(
+            "Grooming closed-loop publication requires an odd source frame "
+            f"count of at least 3, got {frame_count}."
+        )
+    pivot = frame_count // 2
+    indices = list(range(pivot, frame_count))
+    indices.extend(range(frame_count - 2, pivot - 1, -1))
+    if len(indices) != frame_count or indices[0] != indices[-1]:
+        raise RuntimeError("Grooming closed-loop index construction failed.")
+    return indices
+
+
+def _transparent_frame_transition_score(
+    first: tuple[np.ndarray, np.ndarray],
+    second: tuple[np.ndarray, np.ndarray],
+) -> float:
+    first_rgb, first_alpha = first
+    second_rgb, second_alpha = second
+    first_rgba = np.dstack((first_rgb, first_alpha)).astype(np.float32)
+    second_rgba = np.dstack((second_rgb, second_alpha)).astype(np.float32)
+    return float(np.mean(np.abs(first_rgba - second_rgba)))
+
+
+def transparent_animation_loop_quality(
+    frames: list[tuple[np.ndarray, np.ndarray]],
+    frame_indices: list[int],
+) -> dict[str, Any]:
+    """Measure the published last-to-first jump against normal motion."""
+    if len(frame_indices) < 2:
+        raise ValueError("Animation loop quality requires at least two frames.")
+    selected = [frames[index] for index in frame_indices]
+    adjacent_scores = [
+        _transparent_frame_transition_score(first, second)
+        for first, second in zip(selected, selected[1:])
+    ]
+    adjacent_median = float(np.median(adjacent_scores))
+    loop_score = _transparent_frame_transition_score(selected[-1], selected[0])
+    permitted_score = max(adjacent_median * 1.5, 0.5)
+    ratio = (
+        loop_score / adjacent_median
+        if adjacent_median > 1e-6
+        else (0.0 if loop_score <= 1e-6 else None)
+    )
+    return {
+        "frame_count": len(frame_indices),
+        "loop_transition_score": loop_score,
+        "adjacent_transition_median": adjacent_median,
+        "loop_to_adjacent_ratio": ratio,
+        "permitted_transition_score": permitted_score,
+        "acceptable": loop_score <= permitted_score,
+    }
+
+
 def build_unstabilized_transparent_gif(
     source_video: Path,
     gif_target: Path,
@@ -4357,6 +4416,7 @@ def build_unstabilized_transparent_gif(
         if not source_frames:
             raise RuntimeError(f"No frames decoded from {source_video}")
         source_frame_count = len(source_frames)
+        source_index_map = list(range(source_frame_count))
         phase_start_index = int(start_frame_index)
         if not 0 <= phase_start_index < source_frame_count:
             raise ValueError(
@@ -4383,11 +4443,49 @@ def build_unstabilized_transparent_gif(
                 source_frames[phase_start_index:]
                 + source_frames[:phase_start_index]
             )
+            source_index_map = (
+                source_index_map[phase_start_index:]
+                + source_index_map[:phase_start_index]
+            )
             if guidance_frames is not None:
                 guidance_frames = (
                     guidance_frames[phase_start_index:]
                     + guidance_frames[:phase_start_index]
                 )
+
+        temporal_cycle: dict[str, Any] = {
+            "policy": None,
+            "action": action,
+            "applied": False,
+            "closed_loop": False,
+            "preserves_source_frame_count": True,
+            "preserves_duration": True,
+        }
+        if action == "grooming":
+            loop_indices = grooming_closed_loop_source_indices(
+                len(source_frames)
+            )
+            source_frames = [source_frames[index] for index in loop_indices]
+            source_index_map = [
+                source_index_map[index] for index in loop_indices
+            ]
+            if guidance_frames is not None:
+                guidance_frames = [
+                    guidance_frames[index] for index in loop_indices
+                ]
+            temporal_cycle = {
+                "policy": GROOMING_TEMPORAL_LOOP_POLICY,
+                "action": action,
+                "applied": True,
+                "playback": "validated_second_half_forward_then_reverse",
+                "pivot_source_frame_index": source_index_map[0],
+                "source_index_map": source_index_map,
+                "closed_loop": source_index_map[0] == source_index_map[-1],
+                "preserves_source_frame_count": (
+                    len(source_frames) == source_frame_count
+                ),
+                "preserves_duration": True,
+            }
 
         def normalized_rgb(frame: np.ndarray) -> np.ndarray:
             if (frame.shape[1], frame.shape[0]) == output_size:
@@ -4779,9 +4877,26 @@ def build_unstabilized_transparent_gif(
             for index in range(gif_frames)
         ]
         sampled_original_source_indices = [
-            (phase_start_index + source_index) % source_frame_count
+            source_index_map[source_index]
             for source_index in sampled_indices
         ]
+        sampled_loop_quality = transparent_animation_loop_quality(
+            extracted_frames,
+            sampled_indices,
+        )
+        temporal_cycle["sampled_loop_quality"] = sampled_loop_quality
+        sampled_loop_acceptable = (
+            bool(temporal_cycle["closed_loop"])
+            and bool(temporal_cycle["preserves_source_frame_count"])
+            and bool(sampled_loop_quality["acceptable"])
+            if action == "grooming"
+            else True
+        )
+        if action == "grooming" and not sampled_loop_acceptable:
+            raise RuntimeError(
+                "Grooming sampled temporal loop failed its continuity contract: "
+                f"{json.dumps(temporal_cycle, ensure_ascii=False)}"
+            )
         foreground_fractions: list[float] = []
         corner_alpha: list[int] = []
         for output_index, source_index in enumerate(sampled_indices):
@@ -4866,6 +4981,29 @@ def build_unstabilized_transparent_gif(
             duration_ms=int(gif_frames * 1000 / gif_fps),
             expected_foreground_masks=expected_foreground_masks,
         )
+        with Image.open(temporary) as encoded_gif:
+            published_frames: list[tuple[np.ndarray, np.ndarray]] = []
+            for encoded_frame in ImageSequence.Iterator(encoded_gif):
+                rgba = np.asarray(encoded_frame.convert("RGBA"))
+                published_frames.append(
+                    (rgba[:, :, :3].copy(), rgba[:, :, 3].copy())
+                )
+        published_loop_quality = transparent_animation_loop_quality(
+            published_frames,
+            list(range(len(published_frames))),
+        )
+        temporal_cycle["published_loop_quality"] = published_loop_quality
+        temporal_cycle["acceptable"] = (
+            bool(sampled_loop_acceptable)
+            and bool(published_loop_quality["acceptable"])
+            if action == "grooming"
+            else None
+        )
+        if action == "grooming" and temporal_cycle["acceptable"] is not True:
+            raise RuntimeError(
+                "Grooming published temporal loop failed its continuity contract: "
+                f"{json.dumps(temporal_cycle, ensure_ascii=False)}"
+            )
         os.replace(temporary, gif_target)
         apng_validation: dict[str, Any] | None = None
         apng_error: str | None = None
@@ -5003,6 +5141,7 @@ def build_unstabilized_transparent_gif(
                 "start_frame_index": phase_start_index,
                 "rotated": bool(phase_start_index),
             },
+            "temporal_cycle": temporal_cycle,
             "sampled_source_indices": sampled_indices,
             "sampled_original_source_indices": sampled_original_source_indices,
             "foreground_fraction_min": min(foreground_fractions),
