@@ -498,6 +498,14 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             canonical_action_palette_gate["achromatic_balance_l1_max"],
             pipeline.CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX,
         )
+        self.assertEqual(
+            canonical_action_palette_gate["light_identity_black_fraction_max"],
+            pipeline.CANONICAL_ACTION_LIGHT_IDENTITY_BLACK_FRACTION_MAX,
+        )
+        self.assertEqual(
+            canonical_action_palette_gate["dark_feature_expansion_max"],
+            pipeline.CANONICAL_ACTION_DARK_FEATURE_EXPANSION_MAX,
+        )
         self.assertTrue(canonical_action_palette_gate["fail_closed"])
         self.assertTrue(
             guard["grooming_geometry_isolation"]["qwen_structural_negative_space"]
@@ -576,6 +584,12 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             eating_refine["attempt"],
             pipeline.EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT,
         )
+        self.assertEqual(
+            eating_refine["starts_at_attempt"],
+            pipeline.EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT,
+        )
+        self.assertTrue(eating_refine["persists_for_remaining_attempts"])
+        self.assertTrue(eating_refine["generic_full_redraw_forbidden_after_source"])
         self.assertTrue(eating_refine["qwen_lightning_only"])
         self.assertIsNone(eating_refine["style_lora"])
         self.assertIsNone(eating_refine["sampler_noise_mask"])

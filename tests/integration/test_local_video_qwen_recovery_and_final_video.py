@@ -2205,6 +2205,14 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
             final_job["eating_identity_refine_denoise"],
             pipeline.EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
         )
+        self.assertEqual(
+            final_job["canonical_action_light_identity_black_fraction_max"],
+            pipeline.CANONICAL_ACTION_LIGHT_IDENTITY_BLACK_FRACTION_MAX,
+        )
+        self.assertEqual(
+            final_job["canonical_action_dark_feature_expansion_max"],
+            pipeline.CANONICAL_ACTION_DARK_FEATURE_EXPANSION_MAX,
+        )
         self.assertIsNone(final_job["eating_identity_refine_style_lora"])
         self.assertFalse(final_job["eating_identity_refine_global_thresholds_changed"])
         self.assertEqual(

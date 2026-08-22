@@ -1383,7 +1383,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             ),
         )
 
-    def test_production_eating_attempt5_refines_pose_safe_palette_drift(
+    def test_production_eating_attempt4_refines_pose_safe_palette_drift(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1391,10 +1391,10 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
                 Path(temporary),
                 action="eating",
                 action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
-                pose_attempt=5,
+                pose_attempt=4,
                 identity_palette_guard=True,
-                canonical_action_palette_drift_attempts={4},
-                action_chroma_acceptable_attempts={4},
+                canonical_action_palette_drift_attempts={3},
+                action_chroma_acceptable_attempts={3},
             )
 
         load_images = {
@@ -1415,7 +1415,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         prompt = workflow["6"]["inputs"]["prompt"]
         self.assertIn("CRITICAL EATING IDENTITY REFINE", prompt)
         self.assertIn(
-            "normalized eating candidate from attempt 4",
+            "normalized eating candidate from attempt 3",
             prompt,
         )
         self.assertIn(
@@ -1475,7 +1475,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             123 + pipeline.pose_seed_offset(eating_pose, 0) + 1009,
         )
 
-    def test_advisory_eating_attempt5_refines_contact_uncertain_palette_drift(
+    def test_advisory_eating_attempt5_keeps_refining_contact_uncertain_palette_drift(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1485,8 +1485,8 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
                 action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
                 pose_attempt=5,
                 identity_palette_guard=True,
-                canonical_action_palette_drift_attempts={4},
-                action_chroma_acceptable_attempts={4},
+                canonical_action_palette_drift_attempts={3},
+                action_chroma_acceptable_attempts={3},
                 eating_pose_contact_unreliable=True,
                 visual_audits_blocking=False,
             )
@@ -1503,7 +1503,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertNotIn(pose_input, load_images.values())
         self.assertIn(uploaded_input, load_images.values())
         self.assertIn(
-            "normalized eating candidate from attempt 4",
+            "normalized eating candidate from attempt 3",
             workflow["6"]["inputs"]["prompt"],
         )
         self.assertEqual(

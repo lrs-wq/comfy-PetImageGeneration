@@ -2594,7 +2594,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 canonical_eating_identity_refine_active = bool(
                     canonical_action_reference
                     and action_key(pose) == "eating"
-                    and attempt == EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
+                    and attempt >= EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
                     and isinstance(eating_identity_refine_source, dict)
                 )
                 grooming_foreleg_repair_active = bool(

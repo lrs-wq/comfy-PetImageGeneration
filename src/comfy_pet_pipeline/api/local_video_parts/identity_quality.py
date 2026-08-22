@@ -1049,6 +1049,12 @@ def identity_palette_quality(
         "green_or_cyan_body_spill": green_or_cyan_body_spill,
         "achromatic_balance_deltas": achromatic_balance_deltas,
         "achromatic_balance_l1": round(achromatic_balance_l1, 6),
+        "source_black_fraction": round(source_black_fraction, 6),
+        "candidate_black_fraction": round(candidate_black_fraction, 6),
+        "black_fraction_delta": round(
+            candidate_black_fraction - source_black_fraction,
+            6,
+        ),
         "achromatic_value_balance_lost": achromatic_value_balance_lost,
         "achromatic_dark_marking_lost": achromatic_dark_marking_lost,
         "achromatic_dark_marking_expanded": achromatic_dark_marking_expanded,
@@ -1077,6 +1083,8 @@ def canonical_action_identity_palette_quality(
     source_achromatic = float(quality.get("source_achromatic_fraction", 0.0))
     candidate_achromatic = float(quality.get("candidate_achromatic_fraction", 0.0))
     achromatic_balance_l1 = float(quality.get("achromatic_balance_l1", 0.0))
+    source_black = float(quality.get("source_black_fraction", 0.0))
+    candidate_black = float(quality.get("candidate_black_fraction", 0.0))
     balance_drift = bool(
         quality.get("available") is True
         and source_achromatic >= 0.72
@@ -1086,7 +1094,23 @@ def canonical_action_identity_palette_quality(
     issue = "canonical_action_achromatic_value_balance_drift"
     if balance_drift and issue not in issues:
         issues.append(issue)
-    acceptable = bool(quality.get("acceptable")) and not balance_drift
+    dark_feature_expansion = bool(
+        quality.get("available") is True
+        and source_achromatic >= 0.72
+        and candidate_achromatic >= 0.72
+        and source_black
+        <= CANONICAL_ACTION_LIGHT_IDENTITY_BLACK_FRACTION_MAX
+        and candidate_black - source_black
+        > CANONICAL_ACTION_DARK_FEATURE_EXPANSION_MAX
+    )
+    dark_feature_issue = (
+        "canonical_action_light_identity_dark_feature_expansion"
+    )
+    if dark_feature_expansion and dark_feature_issue not in issues:
+        issues.append(dark_feature_issue)
+    acceptable = bool(quality.get("acceptable")) and not (
+        balance_drift or dark_feature_expansion
+    )
     return {
         **quality,
         "acceptable": acceptable,
@@ -1094,7 +1118,9 @@ def canonical_action_identity_palette_quality(
         "issues": issues,
         "warnings": warnings,
         "penalty": round(
-            float(quality.get("penalty", 0.0)) + (100.0 if balance_drift else 0.0),
+            float(quality.get("penalty", 0.0))
+            + (100.0 if balance_drift else 0.0)
+            + (100.0 if dark_feature_expansion else 0.0),
             6,
         ),
         "canonical_action_identity_palette_policy": (
@@ -1105,6 +1131,13 @@ def canonical_action_identity_palette_quality(
         ),
         "canonical_action_achromatic_balance_enforced": True,
         "canonical_action_achromatic_balance_drift": balance_drift,
+        "canonical_action_light_identity_black_fraction_max": (
+            CANONICAL_ACTION_LIGHT_IDENTITY_BLACK_FRACTION_MAX
+        ),
+        "canonical_action_dark_feature_expansion_max": (
+            CANONICAL_ACTION_DARK_FEATURE_EXPANSION_MAX
+        ),
+        "canonical_action_dark_feature_expansion": dark_feature_expansion,
     }
 
 

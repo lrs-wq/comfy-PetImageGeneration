@@ -123,7 +123,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.2"
+API_VERSION = "2.26.3"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -284,7 +284,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.18"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.19"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -306,6 +306,13 @@ CANONICAL_ACTION_IDENTITY_PALETTE_POLICY = (
 # fixed fail-closed gap between those populations instead of allowing a gray
 # guide to replace a light canonical subject.
 CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX = 0.40
+# A light achromatic canonical may gain a little dark area from pose-dependent
+# self-shadowing, but a large new black feature is an identity replacement
+# signal (for example round bear ears or an oversized black muzzle).  Keep this
+# separate from the broad white/gray balance gate so legitimate dark pets are
+# unaffected.
+CANONICAL_ACTION_LIGHT_IDENTITY_BLACK_FRACTION_MAX = 0.05
+CANONICAL_ACTION_DARK_FEATURE_EXPANSION_MAX = 0.06
 GROOMING_QWEN_NEGATIVE_SPACE_METHOD = (
     "verified_foreleg_anchor_organic_open_curve_negative_space_v3"
 )
@@ -527,6 +534,7 @@ GROOMING_CANONICAL_POSE_SAFE_IDENTITY_ONLY_ISSUES = frozenset(
         "achromatic_source_recolored_with_warm_fur",
         "achromatic_coat_value_balance_lost",
         "canonical_action_achromatic_value_balance_drift",
+        "canonical_action_light_identity_dark_feature_expansion",
     }
 )
 GROOMING_CANONICAL_FULL_POSE_GUIDE_POLICY = (
@@ -547,9 +555,9 @@ GROOMING_WHITE_MAQUETTE_DEPTH_LUMA_HALF_RANGE = 18.0
 GROOMING_WHITE_MAQUETTE_FRAME0_POSE_LUMA_HALF_RANGE = 32.0
 GROOMING_WHITE_MAQUETTE_DEPTH_DISTANCE_BLEND = 0.18
 EATING_CANONICAL_IDENTITY_REFINE_POLICY = (
-    "canonical_eating_pose_uploaded_front_identity_refine_v2"
+    "canonical_eating_pose_uploaded_front_identity_refine_v3"
 )
-EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT = 5
+EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT = 4
 EATING_CANONICAL_IDENTITY_REFINE_STEPS = 12
 EATING_CANONICAL_IDENTITY_REFINE_DENOISE = 0.65
 EATING_CANONICAL_IDENTITY_REFINE_POSE_SAFE_ISSUES = frozenset(

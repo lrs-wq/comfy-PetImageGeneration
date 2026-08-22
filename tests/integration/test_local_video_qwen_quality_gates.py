@@ -974,6 +974,90 @@ class SubjectReplacementQwenQualityGateTests(SubjectReplacementQwenReferenceTest
             pipeline.CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX,
         )
 
+    def test_canonical_action_palette_gate_rejects_dark_feature_expansion_on_light_identity(
+        self,
+    ) -> None:
+        source = self._identity_palette_signature_for_test(
+            {
+                "black": 0.01,
+                "white": 0.55,
+                "gray": 0.42,
+                "warm_brown_or_orange": 0.0,
+                "red_or_pink": 0.0,
+                "yellow_or_gold": 0.0,
+                "green": 0.01,
+                "blue_or_cyan": 0.01,
+                "purple": 0.0,
+            },
+            saturated_warm_fraction=0.0,
+        )
+        candidate = self._identity_palette_signature_for_test(
+            {
+                "black": 0.10,
+                "white": 0.49,
+                "gray": 0.39,
+                "warm_brown_or_orange": 0.0,
+                "red_or_pink": 0.0,
+                "yellow_or_gold": 0.0,
+                "green": 0.01,
+                "blue_or_cyan": 0.01,
+                "purple": 0.0,
+            },
+            saturated_warm_fraction=0.0,
+        )
+
+        general_quality = pipeline.identity_palette_quality(source, candidate)
+        quality = pipeline.canonical_action_identity_palette_quality(general_quality)
+
+        self.assertTrue(general_quality["acceptable"])
+        self.assertFalse(quality["acceptable"])
+        self.assertIn(
+            "canonical_action_light_identity_dark_feature_expansion",
+            quality["issues"],
+        )
+        self.assertTrue(quality["canonical_action_dark_feature_expansion"])
+        self.assertAlmostEqual(quality["source_black_fraction"], 0.01)
+        self.assertAlmostEqual(quality["candidate_black_fraction"], 0.10)
+
+    def test_canonical_action_dark_feature_gate_does_not_target_dark_identity(
+        self,
+    ) -> None:
+        source = self._identity_palette_signature_for_test(
+            {
+                "black": 0.30,
+                "white": 0.15,
+                "gray": 0.53,
+                "warm_brown_or_orange": 0.0,
+                "red_or_pink": 0.0,
+                "yellow_or_gold": 0.0,
+                "green": 0.01,
+                "blue_or_cyan": 0.01,
+                "purple": 0.0,
+            },
+            saturated_warm_fraction=0.0,
+        )
+        candidate = self._identity_palette_signature_for_test(
+            {
+                "black": 0.37,
+                "white": 0.12,
+                "gray": 0.49,
+                "warm_brown_or_orange": 0.0,
+                "red_or_pink": 0.0,
+                "yellow_or_gold": 0.0,
+                "green": 0.01,
+                "blue_or_cyan": 0.01,
+                "purple": 0.0,
+            },
+            saturated_warm_fraction=0.0,
+        )
+
+        quality = pipeline.canonical_action_identity_palette_quality(
+            pipeline.identity_palette_quality(source, candidate)
+        )
+
+        self.assertTrue(quality["acceptable"])
+        self.assertFalse(quality["canonical_action_dark_feature_expansion"])
+
     def test_multi_view_palette_consensus_uses_equal_view_weight(self) -> None:
         front = self._identity_palette_signature_for_test(
             {

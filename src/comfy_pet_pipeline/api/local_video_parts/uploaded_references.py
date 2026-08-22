@@ -659,6 +659,12 @@ def prepare_uploaded_subject_qwen_references(
         canonical_action_achromatic_balance_l1_max=(
             CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX
         ),
+        canonical_action_light_identity_black_fraction_max=(
+            CANONICAL_ACTION_LIGHT_IDENTITY_BLACK_FRACTION_MAX
+        ),
+        canonical_action_dark_feature_expansion_max=(
+            CANONICAL_ACTION_DARK_FEATURE_EXPANSION_MAX
+        ),
         grooming_foreleg_repair_active=False,
         grooming_foreleg_repair_policy=(GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY),
         grooming_foreleg_repair_attempt=(GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT),

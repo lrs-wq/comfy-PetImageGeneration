@@ -755,6 +755,15 @@ def health() -> dict[str, Any]:
                     "achromatic_balance_l1_max": (
                         CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX
                     ),
+                    "light_identity_black_fraction_max": (
+                        CANONICAL_ACTION_LIGHT_IDENTITY_BLACK_FRACTION_MAX
+                    ),
+                    "dark_feature_expansion_max": (
+                        CANONICAL_ACTION_DARK_FEATURE_EXPANSION_MAX
+                    ),
+                    "dark_feature_expansion_scope": (
+                        "achromatic_canonical_with_low_source_black_fraction"
+                    ),
                     "scope": "eating_and_grooming_qwen_action_candidates",
                     "fail_closed": bool(
                         GENERATION_VISUAL_AUDITS_BLOCKING
@@ -1370,6 +1379,9 @@ def health() -> dict[str, Any]:
                     "enabled": True,
                     "policy": EATING_CANONICAL_IDENTITY_REFINE_POLICY,
                     "attempt": EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT,
+                    "starts_at_attempt": EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT,
+                    "persists_for_remaining_attempts": True,
+                    "generic_full_redraw_forbidden_after_source": True,
                     "source": ("best_prior_pose_and_bowl_safe_palette_drift_candidate"),
                     "steps": EATING_CANONICAL_IDENTITY_REFINE_STEPS,
                     "denoise": EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
@@ -1392,7 +1404,7 @@ def health() -> dict[str, Any]:
                     "fur_surface_gate_unchanged": True,
                     "global_thresholds_changed": False,
                     "fallback_when_no_pose_safe_palette_drift_source": (
-                        "existing_fifth_seed_retry"
+                        "existing_seed_retry"
                     ),
                 },
                 "grooming_pose_lora_policy": (
