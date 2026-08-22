@@ -12,6 +12,8 @@ def finalize_qwen_action_reference_candidate(
     metrics: dict[str, Any],
     cutout: Path,
     final_target: Path | None = None,
+    *,
+    action: str | None = None,
 ) -> tuple[dict[str, Any], Path]:
     """Normalize one reliable matte into the exact 512 RGBA gate/SCAIL file."""
     _sync_local_video_runtime(globals(), {"finalize_qwen_action_reference_candidate"})
@@ -21,6 +23,7 @@ def finalize_qwen_action_reference_candidate(
         normalization = normalize_qwen_action_reference_rgba(
             cutout,
             final_target,
+            action=action,
         )
     except Exception as exc:  # noqa: BLE001 - candidate must fail closed
         final_target.unlink(missing_ok=True)
@@ -53,6 +56,9 @@ def finalize_qwen_action_reference_candidate(
             "normalization_policy": QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY,
             "final_reference_normalization": normalization,
             "final_reference_sha256": normalization["output_sha256"],
+            "transparent_edge_quality": normalization[
+                "transparent_edge_quality"
+            ],
         },
         final_target,
     )
@@ -84,6 +90,7 @@ def normalize_qwen_action_candidate(
         final_metrics, final_cutout = finalize_qwen_action_reference_candidate(
             direct_metrics,
             direct_cutout_target,
+            action=pose,
         )
         return (
             {
@@ -133,6 +140,7 @@ def normalize_qwen_action_candidate(
     final_metrics, final_cutout = finalize_qwen_action_reference_candidate(
         semantic_metrics,
         semantic_cutout_target,
+        action=pose,
     )
     return (
         {
@@ -2102,6 +2110,7 @@ def evaluate_main_case_grooming_pose_candidate(
         chroma,
         cutout_target,
         normalized_cutout_target,
+        action="grooming",
     )
     if pose_transfer_seed is not None:
         chroma["matte_policy"] = GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY

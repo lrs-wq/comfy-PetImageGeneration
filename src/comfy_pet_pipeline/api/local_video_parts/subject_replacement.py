@@ -1433,6 +1433,8 @@ def run_subject_replacement_job(job_id: str) -> None:
                 str(generated_video),
                 str(guidance_path),
                 str(gif_target),
+                "--action",
+                action,
                 "--white-mp4-target",
                 str(video_target),
                 "--soft-apng-target",

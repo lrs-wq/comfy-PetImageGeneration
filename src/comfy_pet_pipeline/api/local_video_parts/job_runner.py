@@ -18,6 +18,13 @@ def action_candidate_degraded_selection_key(
     similarity = record.get("similarity")
     fur = record.get("fur_silhouette")
     quality = record.get("quality")
+    chroma = record.get("chroma")
+    edge = (
+        chroma.get("transparent_edge_quality")
+        if isinstance(chroma, dict)
+        and isinstance(chroma.get("transparent_edge_quality"), dict)
+        else None
+    )
     attempt = int(record.get("attempt") or 0)
     palette_unacceptable = bool(
         not isinstance(palette, dict) or palette.get("acceptable") is not True
@@ -32,6 +39,12 @@ def action_candidate_degraded_selection_key(
     quality_unacceptable = bool(
         not isinstance(quality, dict) or quality.get("acceptable") is not True
     )
+    edge_unacceptable = bool(
+        isinstance(edge, dict) and edge.get("acceptable") is not True
+    )
+    edge_penalty = (
+        float(edge.get("penalty", 0.0)) if isinstance(edge, dict) else 0.0
+    )
 
     if action != "eating":
         return (
@@ -43,6 +56,8 @@ def action_candidate_degraded_selection_key(
             float(fur.get("penalty", 1000.0))
             if isinstance(fur, dict)
             else 0.0,
+            int(edge_unacceptable),
+            edge_penalty,
             int(quality_unacceptable),
             float(quality.get("penalty", 1000.0))
             if isinstance(quality, dict)
@@ -90,6 +105,8 @@ def action_candidate_degraded_selection_key(
         int(horizontal_shelf),
         action_failure_severity,
         int(quality_unacceptable),
+        int(edge_unacceptable),
+        edge_penalty,
         int(fur_unacceptable),
         float(fur.get("penalty", 1000.0))
         if isinstance(fur, dict)
@@ -5415,6 +5432,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     quality.get("acceptable") is True
                     and similarity.get("acceptable") is True
                     and (
+                        not isinstance(
+                            chroma_metrics.get("transparent_edge_quality"),
+                            dict,
+                        )
+                        or chroma_metrics["transparent_edge_quality"].get(
+                            "acceptable"
+                        )
+                        is True
+                    )
+                    and (
                         not pose_identity_palette_gate_required
                         or (
                             isinstance(palette_quality, dict)
@@ -5448,6 +5475,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                     "acceptable": action_candidate_gate_acceptable,
                     "attempt": attempt,
+                    "transparent_edge_quality": chroma_metrics.get(
+                        "transparent_edge_quality"
+                    ),
                 }
                 if advisory_action_candidate_gate_required:
                     degraded_selection_key = action_candidate_degraded_selection_key(
@@ -6498,6 +6528,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         chroma_metrics,
                         fallback_cutout,
                         fallback_reference,
+                        action=action_key(pose),
                     )
                 )
                 if chroma_metrics.get("acceptable") is not True:

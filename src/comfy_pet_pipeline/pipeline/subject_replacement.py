@@ -3858,58 +3858,40 @@ def _select_pose_guided_semantic_components(
     return selected_labels, recovered_labels
 
 
-def _remove_dark_silhouette_halo(
+def _rgb_luma(rgb: np.ndarray) -> np.ndarray:
+    pixels = np.asarray(rgb, dtype=np.float32)
+    return (
+        pixels[:, :, 0] * 0.2126
+        + pixels[:, :, 1] * 0.7152
+        + pixels[:, :, 2] * 0.0722
+    )
+
+
+def _inward_edge_reconstruction(
     rgb: np.ndarray,
     alpha: np.ndarray,
     *,
-    band_width: int = 5,
-    minimum_luma_delta: float = 30.0,
-    minimum_reference_luma: float = 64.0,
-    minimum_candidate_pixels: int = 64,
-    minimum_candidate_fraction: float = 0.06,
-) -> tuple[np.ndarray, dict[str, Any]]:
-    """Replace a generated dark outline with colors propagated from the coat.
-
-    SCAIL can draw a thin charcoal border to separate a pale subject from its
-    white studio background. The transparency matte already supplies that
-    separation. Reconstruct only the inner boundary band from foreground-side
-    neighbors and replace pixels that are substantially darker than that local
-    reference. A dark animal or a broad marking stays dark because its inward
-    reference is dark too, and a small isolated marking cannot trigger the
-    frame-level continuity threshold.
-    """
-    foreground = alpha >= 64
-    foreground_pixels = int(np.count_nonzero(foreground))
-    if foreground_pixels < minimum_candidate_pixels:
-        return rgb, {
-            "policy": "local_inward_color_dark_halo_v1",
-            "applied": False,
-            "band_pixels": 0,
-            "candidate_pixels": 0,
-            "replaced_pixels": 0,
-            "candidate_fraction": 0.0,
-        }
-
+    band_width: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Propagate trustworthy interior color through the complete soft matte."""
+    support = alpha > 0
+    stable_foreground = alpha >= 96
     width = max(1, int(band_width))
     core = cv2.erode(
-        foreground.astype(np.uint8),
+        stable_foreground.astype(np.uint8),
         np.ones((width * 2 + 1, width * 2 + 1), dtype=np.uint8),
         iterations=1,
     ).astype(bool)
-    if int(np.count_nonzero(core)) < minimum_candidate_pixels:
-        return rgb, {
-            "policy": "local_inward_color_dark_halo_v1",
-            "applied": False,
-            "band_pixels": 0,
-            "candidate_pixels": 0,
-            "replaced_pixels": 0,
-            "candidate_fraction": 0.0,
-        }
+    if not np.any(core):
+        return rgb.astype(np.float32), core, core
 
     reconstructed = rgb.astype(np.float32).copy()
     known = core.copy()
     neighbor_kernel = np.ones((3, 3), dtype=np.float32)
-    for _ in range(width):
+    # Reaching the outside of the soft matte requires crossing the eroded inner
+    # band and then the semi-transparent fringe. The old implementation stopped
+    # at alpha 64 and therefore left the darkest fringe untouched.
+    for _ in range(width * 2 + 4):
         known_float = known.astype(np.float32)
         neighbor_count = cv2.filter2D(
             known_float,
@@ -3919,7 +3901,7 @@ def _remove_dark_silhouette_halo(
         )
         frontier = (
             (cv2.dilate(known.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0)
-            & foreground
+            & support
             & ~known
             & (neighbor_count > 0)
         )
@@ -3936,66 +3918,402 @@ def _remove_dark_silhouette_halo(
                 neighbor_sum[frontier] / neighbor_count[frontier]
             )
         known |= frontier
+    return reconstructed, core, known
 
-    band = foreground & ~core & known
+
+def _continuous_dark_edge_candidates(
+    rgb: np.ndarray,
+    alpha: np.ndarray,
+    reconstructed: np.ndarray,
+    core: np.ndarray,
+    known: np.ndarray,
+    *,
+    minimum_reference_luma: float,
+    minimum_opaque_luma_delta: float,
+    minimum_component_pixels: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    band = known & ~core
     band_pixels = int(np.count_nonzero(band))
     if not band_pixels:
-        return rgb, {
-            "policy": "local_inward_color_dark_halo_v1",
-            "applied": False,
+        return np.zeros(alpha.shape, dtype=bool), {
+            "band_pixels": 0,
+            "raw_candidate_pixels": 0,
+            "candidate_pixels": 0,
+            "candidate_fraction": 0.0,
+            "low_alpha_candidate_pixels": 0,
+        }
+
+    source_luma = _rgb_luma(rgb)
+    reference_luma = _rgb_luma(reconstructed)
+    luma_delta = reference_luma - source_luma
+    raw_candidates = (
+        band
+        & (reference_luma >= float(minimum_reference_luma))
+        & (
+            ((alpha < 96) & (luma_delta >= 8.0))
+            | (
+                (alpha >= 96)
+                & (luma_delta >= float(minimum_opaque_luma_delta))
+            )
+        )
+    )
+    # A real coat marking normally continues into the interior. Generated
+    # silhouette strokes instead form long boundary components. Select only
+    # continuous components so a tiny authentic ear or tail marking survives
+    # even when another part of the frame contains an outline.
+    joined = cv2.morphologyEx(
+        raw_candidates.astype(np.uint8),
+        cv2.MORPH_CLOSE,
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    )
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        joined,
+        connectivity=8,
+    )
+    candidates = np.zeros(alpha.shape, dtype=bool)
+    minimum_component_area = max(4, int(minimum_component_pixels))
+    for label in range(1, component_count):
+        if int(stats[label, cv2.CC_STAT_AREA]) >= minimum_component_area:
+            candidates |= raw_candidates & (labels == label)
+
+    candidate_pixels = int(np.count_nonzero(candidates))
+    return candidates, {
+        "band_pixels": band_pixels,
+        "raw_candidate_pixels": int(np.count_nonzero(raw_candidates)),
+        "candidate_pixels": candidate_pixels,
+        "candidate_fraction": float(candidate_pixels) / float(band_pixels),
+        "low_alpha_candidate_pixels": int(
+            np.count_nonzero(candidates & (alpha < 64))
+        ),
+    }
+
+
+def _remove_eating_contact_shadow(
+    rgb: np.ndarray,
+    alpha: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Remove only a thin neutral shadow attached below the detected bowl."""
+    unchanged = {
+        "policy": "eating_bowl_contact_shadow_v1",
+        "applied": False,
+        "removed_pixels": 0,
+        "component_count": 0,
+    }
+    try:
+        rgba = Image.fromarray(
+            np.dstack((rgb, alpha)).astype(np.uint8),
+            mode="RGBA",
+        )
+        _colored, prop_exclusion, prop_metadata = (
+            make_eating_reference_identity_mask(rgba)
+        )
+    except (RuntimeError, ValueError) as exc:
+        return alpha, {
+            **unchanged,
+            "status": "prop_split_unavailable",
+            "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+        }
+
+    prop = np.asarray(prop_exclusion, dtype=np.uint8) >= 128
+    rows, columns = np.where(prop)
+    if not rows.size:
+        return alpha, {**unchanged, "status": "empty_prop"}
+    x0, x1 = int(columns.min()), int(columns.max()) + 1
+    y0, y1 = int(rows.min()), int(rows.max()) + 1
+    prop_width = x1 - x0
+    prop_height = y1 - y0
+    luma = _rgb_luma(rgb)
+    chroma = (
+        rgb.max(axis=2).astype(np.int16)
+        - rgb.min(axis=2).astype(np.int16)
+    )
+    dark_neutral = (
+        (alpha >= 24)
+        & (luma <= 68.0)
+        & (chroma <= 44)
+    )
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        dark_neutral.astype(np.uint8),
+        connectivity=8,
+    )
+    row_grid = np.indices(alpha.shape)[0]
+    lower_prop = prop & (row_grid >= y0 + int(round(prop_height * 0.52)))
+    removal = np.zeros(alpha.shape, dtype=bool)
+    selected_components: list[dict[str, int | float]] = []
+    for label in range(1, component_count):
+        x, y, width, height, area = (
+            int(value) for value in stats[label]
+        )
+        component = labels == label
+        overlap = int(np.count_nonzero(component & lower_prop))
+        overlap_fraction = float(overlap) / float(max(1, area))
+        aspect_ratio = float(width) / float(max(1, height))
+        if (
+            area >= 12
+            and overlap_fraction >= 0.18
+            and y + height
+            >= y1 - max(4, int(round(prop_height * 0.12)))
+            and width >= max(12, int(round(prop_width * 0.08)))
+            and aspect_ratio >= 1.7
+        ):
+            removal |= component
+            selected_components.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                    "pixels": area,
+                    "prop_overlap_pixels": overlap,
+                    "aspect_ratio": round(aspect_ratio, 6),
+                }
+            )
+    if not selected_components:
+        return alpha, {
+            **unchanged,
+            "status": "no_contact_shadow",
+            "prop_bbox": [x0, y0, x1, y1],
+            "prop_split_status": prop_metadata.get("split_status"),
+        }
+
+    # Include the one-pixel antialiased rim around the dark component, but do
+    # not erase the light ceramic bowl body above it.
+    removal = (
+        cv2.dilate(
+            removal.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        & (alpha > 0)
+        & (luma < 104.0)
+    )
+    cleaned_alpha = alpha.copy()
+    cleaned_alpha[removal] = 0
+    return cleaned_alpha, {
+        "policy": "eating_bowl_contact_shadow_v1",
+        "applied": True,
+        "removed_pixels": int(np.count_nonzero(removal)),
+        "component_count": len(selected_components),
+        "components": selected_components,
+        "prop_bbox": [x0, y0, x1, y1],
+        "prop_split_status": prop_metadata.get("split_status"),
+    }
+
+
+def clean_transparent_edge_halo(
+    rgb: np.ndarray,
+    alpha: np.ndarray,
+    *,
+    action: str | None = None,
+    band_width: int = 9,
+    minimum_opaque_luma_delta: float = 24.0,
+    minimum_reference_luma: float = 64.0,
+    minimum_candidate_pixels: int = 64,
+    minimum_candidate_fraction: float = 0.015,
+    minimum_component_pixels: int = 24,
+    maximum_residual_candidate_fraction: float = 0.12,
+    maximum_residual_candidate_pixel_fraction: float = 0.008,
+    adjust_alpha: bool = True,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Remove painted dark contours without erasing authentic dark pets.
+
+    RGB is reconstructed from foreground-side coat pixels across every nonzero
+    alpha sample. For a confirmed continuous halo, the contaminated matte is
+    also pulled inward by at most two pixels and lightly softened. This avoids
+    turning a black outline into an equally artificial white outline.
+    """
+    rgb = np.asarray(rgb, dtype=np.uint8)
+    alpha = np.asarray(alpha, dtype=np.uint8)
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError("Transparent edge RGB must have shape HxWx3.")
+    if alpha.ndim != 2 or alpha.shape != rgb.shape[:2]:
+        raise ValueError("Transparent edge alpha must match RGB dimensions.")
+
+    contact_shadow = {
+        "policy": "eating_bowl_contact_shadow_v1",
+        "applied": False,
+        "removed_pixels": 0,
+        "component_count": 0,
+        "status": "not_eating",
+    }
+    working_alpha = alpha.copy()
+    if str(action or "").strip().lower() == "eating":
+        working_alpha, contact_shadow = _remove_eating_contact_shadow(
+            rgb,
+            working_alpha,
+        )
+
+    reconstructed, core, known = _inward_edge_reconstruction(
+        rgb,
+        working_alpha,
+        band_width=band_width,
+    )
+    if int(np.count_nonzero(core)) < int(minimum_candidate_pixels):
+        cleaned_rgb = rgb.copy()
+        cleaned_rgb[(working_alpha == 0) & (alpha > 0)] = 0
+        return cleaned_rgb, working_alpha, {
+            "policy": "local_inward_color_alpha_dark_halo_v2",
+            "applied": bool(contact_shadow.get("applied")),
+            "rgb_applied": False,
+            "alpha_applied": bool(contact_shadow.get("applied")),
+            "acceptable": True,
+            "penalty": 0.0,
             "band_pixels": 0,
             "candidate_pixels": 0,
             "replaced_pixels": 0,
             "candidate_fraction": 0.0,
+            "low_alpha_candidate_pixels": 0,
+            "alpha_adjusted_pixels": int(
+                np.count_nonzero(working_alpha != alpha)
+            ),
+            "contact_shadow": contact_shadow,
         }
 
-    source_float = rgb.astype(np.float32)
-    source_luma = (
-        source_float[:, :, 0] * 0.2126
-        + source_float[:, :, 1] * 0.7152
-        + source_float[:, :, 2] * 0.0722
+    candidates, before = _continuous_dark_edge_candidates(
+        rgb,
+        working_alpha,
+        reconstructed,
+        core,
+        known,
+        minimum_reference_luma=minimum_reference_luma,
+        minimum_opaque_luma_delta=minimum_opaque_luma_delta,
+        minimum_component_pixels=minimum_component_pixels,
     )
-    reference_luma = (
-        reconstructed[:, :, 0] * 0.2126
-        + reconstructed[:, :, 1] * 0.7152
-        + reconstructed[:, :, 2] * 0.0722
-    )
-    candidates = (
-        band
-        & (reference_luma >= float(minimum_reference_luma))
-        & (
-            reference_luma - source_luma
-            >= float(minimum_luma_delta)
-        )
-    )
-    candidate_pixels = int(np.count_nonzero(candidates))
-    candidate_fraction = float(candidate_pixels) / float(band_pixels)
-    applied = (
+    candidate_pixels = int(before["candidate_pixels"])
+    candidate_fraction = float(before["candidate_fraction"])
+    rgb_applied = bool(
         candidate_pixels >= int(minimum_candidate_pixels)
         and candidate_fraction >= float(minimum_candidate_fraction)
     )
-    cleaned = rgb.copy()
-    if applied:
+    cleaned_rgb = rgb.copy()
+    cleaned_alpha = working_alpha.copy()
+    if rgb_applied:
         blended = np.clip(
-            reconstructed * 0.95 + source_float * 0.05,
+            reconstructed * 0.98 + rgb.astype(np.float32) * 0.02,
             0,
             255,
         ).astype(np.uint8)
-        cleaned[candidates] = blended[candidates]
-    return cleaned, {
-        "policy": "local_inward_color_dark_halo_v1",
-        "applied": applied,
-        "band_pixels": band_pixels,
+        cleaned_rgb[candidates] = blended[candidates]
+        if adjust_alpha:
+            eroded_alpha = cv2.erode(
+                working_alpha,
+                np.ones((5, 5), dtype=np.uint8),
+                iterations=1,
+            )
+            cleaned_alpha[candidates] = np.minimum(
+                cleaned_alpha[candidates],
+                eroded_alpha[candidates],
+            )
+            cleaned_alpha[candidates & (working_alpha < 96)] = 0
+            cleaned_alpha = cv2.GaussianBlur(
+                cleaned_alpha,
+                (0, 0),
+                sigmaX=0.55,
+                sigmaY=0.55,
+            )
+            cleaned_alpha[cleaned_alpha < 3] = 0
+            cleaned_alpha[cleaned_alpha > 252] = 255
+
+    cleaned_rgb[(cleaned_alpha == 0) & (alpha > 0)] = 0
+    after_reconstruction, after_core, after_known = _inward_edge_reconstruction(
+        cleaned_rgb,
+        cleaned_alpha,
+        band_width=band_width,
+    )
+    _residual, after = _continuous_dark_edge_candidates(
+        cleaned_rgb,
+        cleaned_alpha,
+        after_reconstruction,
+        after_core,
+        after_known,
+        minimum_reference_luma=minimum_reference_luma,
+        minimum_opaque_luma_delta=minimum_opaque_luma_delta,
+        minimum_component_pixels=minimum_component_pixels,
+    )
+    residual_pixels = int(after["candidate_pixels"])
+    residual_fraction = float(after["candidate_fraction"])
+    maximum_residual_pixels = max(
+        int(minimum_candidate_pixels),
+        int(round(alpha.size * maximum_residual_candidate_pixel_fraction)),
+    )
+    acceptable = bool(
+        residual_pixels <= maximum_residual_pixels
+        and residual_fraction <= float(maximum_residual_candidate_fraction)
+    )
+    alpha_adjusted_pixels = int(np.count_nonzero(cleaned_alpha != alpha))
+    return cleaned_rgb, cleaned_alpha, {
+        "policy": "local_inward_color_alpha_dark_halo_v2",
+        "applied": bool(rgb_applied or contact_shadow.get("applied")),
+        "rgb_applied": rgb_applied,
+        "alpha_applied": bool(alpha_adjusted_pixels),
+        "acceptable": acceptable,
+        "penalty": round(
+            min(500.0, residual_fraction * 500.0 + residual_pixels / 64.0),
+            6,
+        ),
+        "band_pixels": int(before["band_pixels"]),
+        "raw_candidate_pixels": int(before["raw_candidate_pixels"]),
         "candidate_pixels": candidate_pixels,
-        "replaced_pixels": candidate_pixels if applied else 0,
+        "replaced_pixels": candidate_pixels if rgb_applied else 0,
         "candidate_fraction": candidate_fraction,
+        "low_alpha_candidate_pixels": int(
+            before["low_alpha_candidate_pixels"]
+        ),
+        "alpha_adjusted_pixels": alpha_adjusted_pixels,
+        "contact_shadow": contact_shadow,
+        "after": {
+            "acceptable": acceptable,
+            "penalty": round(
+                min(
+                    500.0,
+                    residual_fraction * 500.0 + residual_pixels / 64.0,
+                ),
+                6,
+            ),
+            "band_pixels": int(after["band_pixels"]),
+            "candidate_pixels": residual_pixels,
+            "candidate_fraction": residual_fraction,
+            "low_alpha_candidate_pixels": int(
+                after["low_alpha_candidate_pixels"]
+            ),
+            "maximum_candidate_pixels": maximum_residual_pixels,
+            "maximum_candidate_fraction": float(
+                maximum_residual_candidate_fraction
+            ),
+        },
     }
+
+
+def _remove_dark_silhouette_halo(
+    rgb: np.ndarray,
+    alpha: np.ndarray,
+    *,
+    band_width: int = 9,
+    minimum_luma_delta: float = 24.0,
+    minimum_reference_luma: float = 64.0,
+    minimum_candidate_pixels: int = 64,
+    minimum_candidate_fraction: float = 0.015,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Backward-compatible RGB-only wrapper for tests and diagnostic callers."""
+    cleaned_rgb, _cleaned_alpha, metrics = clean_transparent_edge_halo(
+        rgb,
+        alpha,
+        band_width=band_width,
+        minimum_opaque_luma_delta=minimum_luma_delta,
+        minimum_reference_luma=minimum_reference_luma,
+        minimum_candidate_pixels=minimum_candidate_pixels,
+        minimum_candidate_fraction=minimum_candidate_fraction,
+        adjust_alpha=False,
+    )
+    return cleaned_rgb, metrics
 
 
 def build_unstabilized_transparent_gif(
     source_video: Path,
     gif_target: Path,
     *,
+    action: str | None = None,
     guidance_mask_video: Path | None = None,
     output_size: tuple[int, int] = (512, 512),
     source_fps: float = 16.0,
@@ -4442,11 +4760,14 @@ def build_unstabilized_transparent_gif(
         edge_cleanup_metrics: list[dict[str, Any]] = []
         cleaned_extracted_frames: list[tuple[np.ndarray, np.ndarray]] = []
         for rgb, alpha in extracted_frames:
-            cleaned_rgb, cleanup_metrics = _remove_dark_silhouette_halo(
-                rgb,
-                alpha,
+            cleaned_rgb, cleaned_alpha, cleanup_metrics = (
+                clean_transparent_edge_halo(
+                    rgb,
+                    alpha,
+                    action=action,
+                )
             )
-            cleaned_extracted_frames.append((cleaned_rgb, alpha))
+            cleaned_extracted_frames.append((cleaned_rgb, cleaned_alpha))
             edge_cleanup_metrics.append(cleanup_metrics)
         extracted_frames = cleaned_extracted_frames
 
@@ -4600,7 +4921,8 @@ def build_unstabilized_transparent_gif(
             "mode": "per_frame_foreground_extraction_no_spatial_stabilization",
             "extraction_method": extraction_method,
             "silhouette_edge_cleanup": {
-                "policy": "local_inward_color_dark_halo_v1",
+                "policy": "local_inward_color_alpha_dark_halo_v2",
+                "action": action,
                 "applied_frames": sum(
                     1
                     for item in edge_cleanup_metrics
@@ -4621,6 +4943,54 @@ def build_unstabilized_transparent_gif(
                 "candidate_fraction_max": max(
                     (
                         float(item["candidate_fraction"])
+                        for item in edge_cleanup_metrics
+                    ),
+                    default=0.0,
+                ),
+                "alpha_adjusted_pixels_total": sum(
+                    int(item.get("alpha_adjusted_pixels", 0))
+                    for item in edge_cleanup_metrics
+                ),
+                "contact_shadow_removed_pixels_total": sum(
+                    int(
+                        (
+                            item.get("contact_shadow")
+                            if isinstance(item.get("contact_shadow"), dict)
+                            else {}
+                        ).get("removed_pixels", 0)
+                    )
+                    for item in edge_cleanup_metrics
+                ),
+                "contact_shadow_removed_pixels_max": max(
+                    (
+                        int(
+                            (
+                                item.get("contact_shadow")
+                                if isinstance(
+                                    item.get("contact_shadow"),
+                                    dict,
+                                )
+                                else {}
+                            ).get("removed_pixels", 0)
+                        )
+                        for item in edge_cleanup_metrics
+                    ),
+                    default=0,
+                ),
+                "acceptable_frames": sum(
+                    1
+                    for item in edge_cleanup_metrics
+                    if bool(item.get("acceptable"))
+                ),
+                "residual_candidate_fraction_max": max(
+                    (
+                        float(
+                            (
+                                item.get("after")
+                                if isinstance(item.get("after"), dict)
+                                else {}
+                            ).get("candidate_fraction", 0.0)
+                        )
                         for item in edge_cleanup_metrics
                     ),
                     default=0.0,

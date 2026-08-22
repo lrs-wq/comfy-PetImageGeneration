@@ -1762,6 +1762,45 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             ),
         )
 
+    def test_eating_degraded_selection_prefers_clean_edge_after_identity(self) -> None:
+        base = {
+            "identity_palette": {"acceptable": True, "penalty": 2.0},
+            "similarity": {"acceptable": True, "penalty": 2.0},
+            "fur_silhouette": {"acceptable": True, "penalty": 0.0},
+            "quality": {"acceptable": True, "penalty": 0.0, "issues": []},
+        }
+        black_edge = {
+            **base,
+            "attempt": 1,
+            "chroma": {
+                "transparent_edge_quality": {
+                    "acceptable": False,
+                    "penalty": 80.0,
+                }
+            },
+        }
+        clean_edge = {
+            **base,
+            "attempt": 2,
+            "chroma": {
+                "transparent_edge_quality": {
+                    "acceptable": True,
+                    "penalty": 0.0,
+                }
+            },
+        }
+
+        self.assertLess(
+            pipeline.action_candidate_degraded_selection_key(
+                clean_edge,
+                action="eating",
+            ),
+            pipeline.action_candidate_degraded_selection_key(
+                black_edge,
+                action="eating",
+            ),
+        )
+
     def test_eating_transparent_output_starts_at_validated_contact_phase(
         self,
     ) -> None:
@@ -2283,6 +2322,45 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                 pipeline.QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY,
             )
             self.assertEqual(output["sha256"], pipeline.file_sha256(source))
+
+    def test_action_reference_normalization_cleans_dark_soft_alpha_edge(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "candidate.png"
+            target = root / "candidate_reference_512.png"
+            rgba = np.zeros((256, 256, 4), dtype=np.uint8)
+            rgba[28:228, 28:228, :3] = 16
+            rgba[28:228, 28:228, 3] = 40
+            rgba[34:222, 34:222, :3] = 20
+            rgba[34:222, 34:222, 3] = 180
+            rgba[42:214, 42:214, :3] = 232
+            rgba[42:214, 42:214, 3] = 255
+            Image.fromarray(rgba, mode="RGBA").save(source)
+
+            metrics = pipeline.normalize_qwen_action_reference_rgba(
+                source,
+                target,
+                action="grooming",
+            )
+
+            cleanup = metrics["transparent_edge_cleanup"]
+            self.assertTrue(cleanup["applied"])
+            self.assertTrue(cleanup["acceptable"])
+            self.assertGreater(cleanup["low_alpha_candidate_pixels"], 64)
+            self.assertEqual(
+                metrics["transparent_edge_quality"],
+                cleanup["after"],
+            )
+            with Image.open(target) as cleaned:
+                cleaned_rgba = np.asarray(cleaned.convert("RGBA"), dtype=np.uint8)
+            retained_soft_edge = (
+                (cleaned_rgba[:, :, 3] > 0)
+                & (cleaned_rgba[:, :, 3] < 255)
+            )
+            self.assertGreater(
+                float(cleaned_rgba[:, :, :3][retained_soft_edge].mean()),
+                150.0,
+            )
 
 
 if __name__ == "__main__":

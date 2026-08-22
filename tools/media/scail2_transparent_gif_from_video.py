@@ -22,6 +22,7 @@ def main() -> int:
     parser.add_argument("video", type=Path)
     parser.add_argument("guidance_mask_video", type=Path)
     parser.add_argument("gif_target", type=Path)
+    parser.add_argument("--action", choices=("eating", "grooming", "standing"))
     parser.add_argument("--white-mp4-target", type=Path)
     parser.add_argument("--soft-apng-target", type=Path)
     parser.add_argument("--start-frame-index", type=int, default=0)
@@ -29,6 +30,7 @@ def main() -> int:
     metrics = build_unstabilized_transparent_gif(
         args.video,
         args.gif_target,
+        action=args.action,
         guidance_mask_video=args.guidance_mask_video,
         white_mp4_target=args.white_mp4_target,
         soft_apng_target=args.soft_apng_target,

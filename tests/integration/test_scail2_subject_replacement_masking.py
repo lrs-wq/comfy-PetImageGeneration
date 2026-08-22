@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -1069,6 +1070,57 @@ class SemanticCleanupComponentTests(unittest.TestCase):
 
         self.assertFalse(marked_metrics["applied"])
         self.assertTrue(np.array_equal(marked_cleaned, marked_rgb))
+
+    def test_low_alpha_black_fringe_is_recolored_and_pulled_inward(self) -> None:
+        rgb = np.zeros((72, 72, 3), dtype=np.uint8)
+        alpha = np.zeros((72, 72), dtype=np.uint8)
+        rgb[8:64, 8:64] = 18
+        alpha[8:64, 8:64] = 40
+        rgb[10:62, 10:62] = 20
+        alpha[10:62, 10:62] = 180
+        rgb[13:59, 13:59] = 232
+        alpha[13:59, 13:59] = 255
+
+        cleaned_rgb, cleaned_alpha, metrics = (
+            scail.clean_transparent_edge_halo(rgb, alpha)
+        )
+
+        self.assertTrue(metrics["applied"])
+        self.assertTrue(metrics["rgb_applied"])
+        self.assertTrue(metrics["alpha_applied"])
+        self.assertGreater(metrics["low_alpha_candidate_pixels"], 64)
+        self.assertGreater(metrics["alpha_adjusted_pixels"], 64)
+        self.assertLess(int(cleaned_alpha[8, 36]), int(alpha[8, 36]))
+        retained_edge = (cleaned_alpha > 0) & (alpha < 255)
+        self.assertGreater(float(cleaned_rgb[retained_edge].mean()), 150.0)
+        self.assertTrue(metrics["acceptable"])
+
+    def test_eating_contact_shadow_is_removed_without_erasing_dark_tail(self) -> None:
+        rgb = np.full((128, 128, 3), 238, dtype=np.uint8)
+        alpha = np.zeros((128, 128), dtype=np.uint8)
+        alpha[18:105, 14:116] = 255
+        rgb[102:109, 34:94] = 18
+        alpha[102:109, 34:94] = 255
+        rgb[88:112, 98:122] = 24
+        alpha[88:112, 98:122] = 255
+        prop = Image.new("L", (128, 128), 0)
+        ImageDraw.Draw(prop).rectangle((40, 70, 88, 104), fill=255)
+        metadata = {"split_status": "strict"}
+
+        with patch.object(
+            scail,
+            "make_eating_reference_identity_mask",
+            return_value=(Image.new("RGB", (128, 128)), prop, metadata),
+        ):
+            cleaned_alpha, metrics = scail._remove_eating_contact_shadow(
+                rgb,
+                alpha,
+            )
+
+        self.assertTrue(metrics["applied"])
+        self.assertGreater(metrics["removed_pixels"], 100)
+        self.assertEqual(int(cleaned_alpha[105, 50]), 0)
+        self.assertEqual(int(cleaned_alpha[100, 110]), 255)
 
     def test_high_confidence_subject_fragment_survives_guidance_cleanup(
         self,

@@ -87,6 +87,7 @@ from ..media.transparent_animation import (
     build_transparent_animations,
     build_transparent_cutout,
 )
+from ..pipeline.subject_replacement import clean_transparent_edge_halo
 from ..identity.uploaded_identity import (
     POLICY as UPLOADED_IDENTITY_SCAIL_REFERENCE_POLICY,
     VERSION as UPLOADED_IDENTITY_SCAIL_REFERENCE_VERSION,
@@ -119,7 +120,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.25.9"
+API_VERSION = "2.26.0"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -744,7 +745,7 @@ QWEN_ACTION_CANDIDATE_MATTE_POLICY = (
     "direct_chroma_then_per_candidate_semantic_matte_v1"
 )
 QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY = (
-    "alpha_preserving_rgba_canvas_512_then_byte_copy_v1"
+    "alpha_preserving_edge_decontaminated_rgba_canvas_512_then_byte_copy_v2"
 )
 FFMPEG_BIN = os.environ.get(
     "FFMPEG_BIN", shutil.which("ffmpeg") or "/usr/local/bin/ffmpeg"
@@ -4453,14 +4454,16 @@ def normalize_qwen_action_reference_rgba(
     source: Path,
     target: Path,
     *,
+    action: str | None = None,
     size: tuple[int, int] = (TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE),
 ) -> dict[str, Any]:
     """Create the one final RGBA action reference used by every later gate.
 
-    The reliable matte is never flattened onto green and reconstructed.  RGB is
-    resized in premultiplied-alpha space while the already-approved soft alpha
-    samples are downscaled with nearest-neighbour resampling.  This avoids a
-    second chroma-key erosion while retaining the existing 512px framing.
+    The reliable matte is never flattened onto green and reconstructed. RGB is
+    resized in premultiplied-alpha space and alpha is initially downscaled with
+    nearest-neighbour resampling. A confirmed generated dark outline is then
+    decontaminated and pulled inward locally before the exact 512px reference
+    is frozen for every later gate and SCAIL input.
     """
 
     source_digest = file_sha256(source)
@@ -4526,6 +4529,16 @@ def normalize_qwen_action_reference_rgba(
     canvas = Image.new("RGBA", size, (0, 0, 0, 0))
     offset = ((size[0] - resized.width) // 2, (size[1] - resized.height) // 2)
     canvas.alpha_composite(resized, offset)
+    canvas_rgba = np.asarray(canvas, dtype=np.uint8)
+    cleaned_rgb, cleaned_alpha, edge_cleanup = clean_transparent_edge_halo(
+        canvas_rgba[:, :, :3],
+        canvas_rgba[:, :, 3],
+        action=action,
+    )
+    canvas = Image.fromarray(
+        np.dstack((cleaned_rgb, cleaned_alpha)).astype(np.uint8),
+        mode="RGBA",
+    )
     output_alpha = canvas.getchannel("A")
     output_alpha_minimum, output_alpha_maximum = output_alpha.getextrema()
     output_corners = [
@@ -4555,8 +4568,12 @@ def normalize_qwen_action_reference_rgba(
         "output_sha256": target_digest,
         "output_mode": "RGBA",
         "output_size": list(size),
-        "alpha_resampling": "nearest_preserve_approved_matte_samples",
+        "alpha_resampling": (
+            "nearest_then_confirmed_dark_halo_contour_regularization"
+        ),
         "rgb_resampling": "premultiplied_alpha_lanczos",
+        "transparent_edge_cleanup": edge_cleanup,
+        "transparent_edge_quality": edge_cleanup.get("after", edge_cleanup),
         "output_alpha_extrema": [
             output_alpha_minimum,
             output_alpha_maximum,
