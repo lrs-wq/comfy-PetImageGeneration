@@ -119,7 +119,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.25.8"
+API_VERSION = "2.25.9"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -602,7 +602,7 @@ FINAL_VIDEO_VALIDATED_ACTION_REFERENCE_POLICIES = {
     "eating": "qwen_action_identity_with_bowl_mapped_red",
     "grooming": "qwen_action_specific_identity",
 }
-EATING_MOUTH_BOWL_CONTACT_POLICY = "warm_face_component_above_detected_bowl_v3"
+EATING_MOUTH_BOWL_CONTACT_POLICY = "warm_face_component_above_detected_bowl_v4"
 EATING_BOWL_SPLIT_FALLBACK_POLICY = (
     "food_anchored_beige_bowl_after_eroded_warm_core_miss_v2"
 )
@@ -610,6 +610,9 @@ EATING_MUZZLE_BOWL_GAP_MAX_PX = 8
 EATING_MUZZLE_COMPONENT_WIDTH_BOWL_RATIO_MAX = 0.70
 EATING_MUZZLE_COMPONENT_HEIGHT_BOWL_RATIO_MAX = 0.35
 EATING_MUZZLE_COMPONENT_CENTER_MARGIN_BOWL_RATIO = 0.10
+EATING_MUZZLE_COMPONENT_CENTER_OFFSET_BOWL_RATIO_MAX = 0.35
+EATING_MUZZLE_COMPONENT_HEIGHT_MIN_PX = 4
+EATING_MUZZLE_COMPONENT_AREA_MIN_PX = 24
 FULL_DRIVER_EATING_POSE_POLICY = "full_driver_pose_with_separate_bowl_v1"
 UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY = (
     "uploaded_subject_absolute_animation_roughness_v1"
@@ -5559,6 +5562,11 @@ eating_mouth_bowl_contact_quality = (
 )
 
 
+eating_horizontal_foreground_shelf_quality = (
+    _local_video_generation_quality.eating_horizontal_foreground_shelf_quality
+)
+
+
 pose_cutout_quality = _local_video_generation_quality.pose_cutout_quality
 
 
@@ -6116,8 +6124,18 @@ run_subject_replacement_job = (
 )
 
 
+resolve_transparent_output_phase_start_index = (
+    _local_video_subject_replacement.resolve_transparent_output_phase_start_index
+)
+
+
 resolve_action_identity_palette_reference = (
     _local_video_job_runner.resolve_action_identity_palette_reference
+)
+
+
+action_candidate_degraded_selection_key = (
+    _local_video_job_runner.action_candidate_degraded_selection_key
 )
 
 

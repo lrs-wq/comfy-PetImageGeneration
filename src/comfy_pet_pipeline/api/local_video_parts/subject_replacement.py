@@ -8,6 +8,48 @@ from __future__ import annotations
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
+def resolve_transparent_output_phase_start_index(
+    job: dict[str, Any],
+    *,
+    action: str,
+    source_frames: int,
+) -> int:
+    """Use the validated eating-contact guide frame as animation frame zero."""
+    if action != "eating":
+        return 0
+    metadata_by_action = job.get("pose_reference_metadata")
+    action_metadata = (
+        metadata_by_action.get(action)
+        if isinstance(metadata_by_action, dict)
+        else None
+    )
+    generator_metadata = (
+        action_metadata.get("generator_metadata")
+        if isinstance(action_metadata, dict)
+        else None
+    )
+    if (
+        not isinstance(generator_metadata, dict)
+        or generator_metadata.get("policy")
+        != "driving_eating_geometry_image2_v6"
+        or not isinstance(generator_metadata.get("head_lowering_selection"), dict)
+        or generator_metadata["head_lowering_selection"].get("passed") is not True
+    ):
+        return 0
+    try:
+        selected_frame_index = int(generator_metadata["selected_frame_index"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Validated eating geometry metadata lost its selected contact frame."
+        ) from exc
+    if not 0 <= selected_frame_index < int(source_frames):
+        raise RuntimeError(
+            "Validated eating contact frame is outside the generated timeline: "
+            f"{selected_frame_index} not in 0..{int(source_frames) - 1}"
+        )
+    return selected_frame_index
+
+
 def run_profile_standard_direct_job(job_id: str) -> None:
     """Publish the approved Main_case standard without Qwen/SCAIL/GPU redraw."""
     _sync_local_video_runtime(globals(), {"run_profile_standard_direct_job"})
@@ -1378,19 +1420,39 @@ def run_subject_replacement_job(job_id: str) -> None:
                 / f"{action}_subject_replacement_transparent_512_soft.png"
             )
             transparent_log = job_dir / f"{action}_transparent.log"
+            transparent_phase_start_index = (
+                resolve_transparent_output_phase_start_index(
+                    job,
+                    action=action,
+                    source_frames=int(effective_subject_config["frames"]),
+                )
+            )
+            transparent_command = [
+                str(SCAIL_PYTHON),
+                str(SCAIL_TRANSPARENT_RUNNER),
+                str(generated_video),
+                str(guidance_path),
+                str(gif_target),
+                "--white-mp4-target",
+                str(video_target),
+                "--soft-apng-target",
+                str(apng_target),
+                "--start-frame-index",
+                str(transparent_phase_start_index),
+            ]
+            update_job(
+                job_id,
+                transparent_output_phase_policy=(
+                    "validated_action_contact_phase_rotation_v1"
+                ),
+                transparent_output_phase_start_index=(
+                    transparent_phase_start_index
+                ),
+                transparent_output_phase_action=action,
+            )
             run_cancelable_process(
                 job_id,
-                [
-                    str(SCAIL_PYTHON),
-                    str(SCAIL_TRANSPARENT_RUNNER),
-                    str(generated_video),
-                    str(guidance_path),
-                    str(gif_target),
-                    "--white-mp4-target",
-                    str(video_target),
-                    "--soft-apng-target",
-                    str(apng_target),
-                ],
+                transparent_command,
                 log_path=transparent_log,
                 stage_name=f"{action} transparent GIF extraction",
                 timeout=1800,

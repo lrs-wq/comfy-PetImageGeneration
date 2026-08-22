@@ -227,14 +227,14 @@ def prepare_uploaded_subject_qwen_references(
                 fps=float(effective_subject_config["fps"]),
             )
             pose_reference_policies[action] = (
-                "main_case_eating_driver_geometry_image2_guide_v5"
+                "main_case_eating_driver_geometry_image2_guide_v6"
             )
             pose_reference_guide_styles[action] = (
-                "texture_free_flat_neutral_subject_silhouette_with_explicit_"
+                "texture_free_compressed_neutral_anatomy_with_explicit_"
                 "muzzle_overlap_and_semantic_food_on_pure_green"
             )
             pose_reference_metadata[action] = {
-                "policy": "main_case_eating_driver_geometry_image2_guide_v5",
+                "policy": "main_case_eating_driver_geometry_image2_guide_v6",
                 "generator_policy": guide_metadata.get("policy"),
                 "generator_method": guide_metadata.get("method"),
                 "image_role": "image2_action_geometry_guide",
@@ -246,6 +246,11 @@ def prepare_uploaded_subject_qwen_references(
                 "main_case_driver_used": not white_maquette_driver,
                 "uploaded_white_maquette_driver_used": white_maquette_driver,
                 "driver_appearance_authority": False,
+                "qwen_guide_internal_luma_variation": True,
+                "qwen_guide_internal_luma_variation_role": (
+                    "compressed_low_frequency_action_anatomy_only"
+                ),
+                "qwen_guide_appearance_bearing_internal_luma_variation": False,
                 "source_sha256": source_digest,
                 "guide_sha256": guide_metadata.get("guide_sha256"),
                 "generator_metadata": guide_metadata,

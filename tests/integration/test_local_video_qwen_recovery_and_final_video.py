@@ -2158,7 +2158,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
         self.assertEqual(
             final_job["pose_reference_policy"],
             {
-                "eating": ("main_case_eating_driver_geometry_image2_guide_v5"),
+                "eating": ("main_case_eating_driver_geometry_image2_guide_v6"),
                 "grooming": pipeline.GROOMING_QWEN_POSE_REFERENCE_POLICY,
             },
         )
@@ -2235,7 +2235,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
             final_job["pose_reference_guide_styles"],
             {
                 "eating": (
-                    "texture_free_flat_neutral_subject_silhouette_with_explicit_"
+                    "texture_free_compressed_neutral_anatomy_with_explicit_"
                     "muzzle_overlap_and_semantic_food_on_pure_green"
                 ),
                 "grooming": (pipeline.GROOMING_QWEN_GUIDE_STYLE),
@@ -2248,7 +2248,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
         eating_metadata = final_job["pose_reference_metadata"]["eating"]
         self.assertEqual(
             eating_metadata["policy"],
-            "main_case_eating_driver_geometry_image2_guide_v5",
+            "main_case_eating_driver_geometry_image2_guide_v6",
         )
         self.assertEqual(
             eating_metadata["image_role"],
@@ -2259,6 +2259,12 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
             "image1_qwen_full_body_canonical",
         )
         self.assertFalse(eating_metadata["source_rgb_preserved"])
+        self.assertTrue(eating_metadata["qwen_guide_internal_luma_variation"])
+        self.assertFalse(
+            eating_metadata[
+                "qwen_guide_appearance_bearing_internal_luma_variation"
+            ]
+        )
         self.assertTrue(eating_metadata["driver_silhouette_used"])
         self.assertFalse(eating_metadata["reference_space_motion"])
         self.assertFalse(eating_metadata["main_case_driver_used"])

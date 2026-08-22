@@ -2226,6 +2226,108 @@ def pose_attempt_failure_summary(attempts: list[dict[str, Any]]) -> str:
     return "; ".join(parts) or "no usable subject"
 
 
+def eating_horizontal_foreground_shelf_quality(
+    foreground: np.ndarray,
+    bbox: list[int],
+) -> dict[str, Any]:
+    """Reject an abrupt, persistent full-width ledge in the lower silhouette.
+
+    Semantic background removal can retain a carpet/floor strip as part of the
+    animal's single connected component. Component-count and canvas-margin
+    checks cannot see it, but its row edge appears abruptly and then persists
+    almost across the full subject width.
+    """
+    _sync_local_video_runtime(
+        globals(),
+        {"eating_horizontal_foreground_shelf_quality"},
+    )
+    mask = np.asarray(foreground, dtype=bool)
+    left, top, right, bottom = (int(value) for value in bbox)
+    bbox_width = max(1, right - left)
+    bbox_height = max(1, bottom - top)
+    scan_y0 = top + int(round(bbox_height * 0.52))
+    jump_threshold = max(32, int(round(bbox_width * 0.08)))
+    span_ratio_min = 0.82
+    persistence_rows_min = 5
+    edge_tolerance = max(4, int(round(bbox_width * 0.015)))
+
+    row_edges: list[tuple[int, int, int]] = []
+    for row in range(scan_y0, bottom):
+        columns = np.flatnonzero(mask[row])
+        if columns.size:
+            row_edges.append((row, int(columns[0]), int(columns[-1]) + 1))
+
+    events: list[dict[str, Any]] = []
+    maximum_left_jump = 0
+    maximum_right_jump = 0
+    for index in range(1, len(row_edges)):
+        previous_y, previous_left, previous_right = row_edges[index - 1]
+        row, current_left, current_right = row_edges[index]
+        if row != previous_y + 1:
+            continue
+        left_jump = max(0, previous_left - current_left)
+        right_jump = max(0, current_right - previous_right)
+        maximum_left_jump = max(maximum_left_jump, left_jump)
+        maximum_right_jump = max(maximum_right_jump, right_jump)
+        span_ratio = (current_right - current_left) / float(bbox_width)
+        for side, jump, expanded_edge in (
+            ("left", left_jump, current_left),
+            ("right", right_jump, current_right),
+        ):
+            if jump < jump_threshold or span_ratio < span_ratio_min:
+                continue
+            persistent_rows = 0
+            for _, next_left, next_right in row_edges[index : index + 12]:
+                next_span_ratio = (next_right - next_left) / float(bbox_width)
+                next_edge = next_left if side == "left" else next_right
+                if (
+                    next_span_ratio < span_ratio_min
+                    or abs(next_edge - expanded_edge) > edge_tolerance
+                ):
+                    break
+                persistent_rows += 1
+            events.append(
+                {
+                    "side": side,
+                    "row": row,
+                    "jump_px": jump,
+                    "row_span_ratio": round(span_ratio, 6),
+                    "persistent_rows": persistent_rows,
+                    "expanded_edge_x": expanded_edge,
+                }
+            )
+
+    blocking_events = [
+        event
+        for event in events
+        if int(event["persistent_rows"]) >= persistence_rows_min
+    ]
+    blocking_events.sort(
+        key=lambda event: (
+            int(event["jump_px"]),
+            int(event["persistent_rows"]),
+        ),
+        reverse=True,
+    )
+    acceptable = not blocking_events
+    return {
+        "acceptable": acceptable,
+        "issues": [] if acceptable else ["eating_horizontal_foreground_shelf"],
+        "penalty": 0.0 if acceptable else 150.0,
+        "policy": "eating_lower_silhouette_horizontal_shelf_v1",
+        "scan_y0": scan_y0,
+        "max_left_outward_jump_px": maximum_left_jump,
+        "max_right_outward_jump_px": maximum_right_jump,
+        "blocking_events": blocking_events[:4],
+        "thresholds": {
+            "outward_jump_px_min": jump_threshold,
+            "row_span_ratio_min": span_ratio_min,
+            "persistent_rows_min": persistence_rows_min,
+            "edge_tolerance_px": edge_tolerance,
+        },
+    }
+
+
 def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
     """Require a real face/muzzle anchor immediately above the detected food bowl.
 
@@ -2342,8 +2444,8 @@ def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
         )
     )
     minimum_face_pixels = max(
-        12,
-        int(round(np.count_nonzero(reference_subject) * 0.00015)),
+        EATING_MUZZLE_COMPONENT_AREA_MIN_PX,
+        int(round(np.count_nonzero(reference_subject) * 0.00020)),
     )
     maximum_face_width = int(bowl_width * EATING_MUZZLE_COMPONENT_WIDTH_BOWL_RATIO_MAX)
     maximum_face_height = int(
@@ -2365,13 +2467,16 @@ def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
         "component_width_bowl_ratio_max": (
             EATING_MUZZLE_COMPONENT_WIDTH_BOWL_RATIO_MAX
         ),
-        "component_height_px_min": 2,
+        "component_height_px_min": EATING_MUZZLE_COMPONENT_HEIGHT_MIN_PX,
         "component_height_px_max": maximum_face_height,
         "component_height_bowl_ratio_max": (
             EATING_MUZZLE_COMPONENT_HEIGHT_BOWL_RATIO_MAX
         ),
         "component_center_margin_bowl_ratio": (
             EATING_MUZZLE_COMPONENT_CENTER_MARGIN_BOWL_RATIO
+        ),
+        "component_center_offset_bowl_ratio_max": (
+            EATING_MUZZLE_COMPONENT_CENTER_OFFSET_BOWL_RATIO_MAX
         ),
     }
     face_components: list[tuple[int, int, float, int]] = []
@@ -2393,10 +2498,23 @@ def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
             rejection_reasons.append("gap_outside_contact_range")
         if not 3 <= component_width <= maximum_face_width:
             rejection_reasons.append("width_outside_muzzle_range")
-        if not 2 <= component_height <= maximum_face_height:
+        if not (
+            EATING_MUZZLE_COMPONENT_HEIGHT_MIN_PX
+            <= component_height
+            <= maximum_face_height
+        ):
             rejection_reasons.append("height_outside_muzzle_range")
         if not center_min <= center_x <= center_max:
             rejection_reasons.append("center_outside_bowl_corridor")
+        center_offset_bowl_ratio = abs(center_x - bowl_center_x) / max(
+            1,
+            bowl_width,
+        )
+        if (
+            center_offset_bowl_ratio
+            > EATING_MUZZLE_COMPONENT_CENTER_OFFSET_BOWL_RATIO_MAX
+        ):
+            rejection_reasons.append("center_too_far_from_bowl_center")
         component_audit = {
             "label": label,
             "bbox": [
@@ -2416,7 +2534,7 @@ def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
                 6,
             ),
             "center_offset_bowl_ratio": round(
-                abs(center_x - bowl_center_x) / max(1, bowl_width),
+                center_offset_bowl_ratio,
                 6,
             ),
             "rejection_reasons": rejection_reasons,
@@ -2556,6 +2674,7 @@ def pose_cutout_quality(
     ):
         issues.append("pose_not_low_or_wide_enough_for_bowl_action")
     bowl_components: list[dict[str, Any]] = []
+    eating_horizontal_shelf = None
     if action in {"eating", "drinking"}:
         for label in meaningful_labels[1:]:
             component_area = int(stats[label, cv2.CC_STAT_AREA])
@@ -2593,6 +2712,13 @@ def pose_cutout_quality(
         # hard gate rejects validated eating references. The hard geometric gate
         # above instead requires the character-plus-bowl layout to be low and
         # wide; the validated action guide and written prompt supply semantics.
+    if action == "eating":
+        eating_horizontal_shelf = eating_horizontal_foreground_shelf_quality(
+            foreground,
+            bbox,
+        )
+        if not eating_horizontal_shelf["acceptable"]:
+            issues.extend(eating_horizontal_shelf["issues"])
     if action in {"lying", "lying down"} and bbox_aspect_ratio < 0.90:
         issues.append("pose_not_low_or_wide_enough_for_lying")
     eating_contact = None
@@ -2639,6 +2765,7 @@ def pose_cutout_quality(
         "lower_body_components": lower_body_components,
         "bowl_component_count": len(bowl_components),
         "bowl_components": bowl_components,
+        "eating_horizontal_shelf": eating_horizontal_shelf,
         "eating_mouth_bowl_contact": eating_contact,
     }
 

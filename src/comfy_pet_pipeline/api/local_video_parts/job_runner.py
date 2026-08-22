@@ -8,6 +8,105 @@ from __future__ import annotations
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
+def action_candidate_degraded_selection_key(
+    record: dict[str, Any],
+    *,
+    action: str,
+) -> tuple[int | float, ...]:
+    """Rank an exhausted retry budget without sacrificing pet identity."""
+    palette = record.get("identity_palette")
+    similarity = record.get("similarity")
+    fur = record.get("fur_silhouette")
+    quality = record.get("quality")
+    attempt = int(record.get("attempt") or 0)
+    palette_unacceptable = bool(
+        not isinstance(palette, dict) or palette.get("acceptable") is not True
+    )
+    similarity_unacceptable = bool(
+        not isinstance(similarity, dict)
+        or similarity.get("acceptable") is not True
+    )
+    fur_unacceptable = bool(
+        isinstance(fur, dict) and fur.get("acceptable") is not True
+    )
+    quality_unacceptable = bool(
+        not isinstance(quality, dict) or quality.get("acceptable") is not True
+    )
+
+    if action != "eating":
+        return (
+            int(palette_unacceptable),
+            float(palette.get("penalty", 1000.0))
+            if isinstance(palette, dict)
+            else 1000.0,
+            int(fur_unacceptable),
+            float(fur.get("penalty", 1000.0))
+            if isinstance(fur, dict)
+            else 0.0,
+            int(quality_unacceptable),
+            float(quality.get("penalty", 1000.0))
+            if isinstance(quality, dict)
+            else 1000.0,
+            int(similarity_unacceptable),
+            float(similarity.get("penalty", 1000.0))
+            if isinstance(similarity, dict)
+            else 1000.0,
+            attempt,
+        )
+
+    quality_issues = {
+        str(issue)
+        for issue in (
+            quality.get("issues", []) if isinstance(quality, dict) else []
+        )
+    }
+    horizontal_shelf = bool(
+        "eating_horizontal_foreground_shelf" in quality_issues
+        or (
+            isinstance(quality, dict)
+            and isinstance(quality.get("eating_horizontal_shelf"), dict)
+            and quality["eating_horizontal_shelf"].get("acceptable") is False
+        )
+    )
+    eating_issues = {
+        issue for issue in quality_issues if issue.startswith("eating_")
+    }
+    if not eating_issues:
+        action_failure_severity = 0
+    elif eating_issues <= {"eating_bowl_contact_unreliable"}:
+        # A conservative prop splitter can be inconclusive even when the pose
+        # is visibly usable. Keep it ahead of a definite missing-bowl/sniffing
+        # result once identity safety has already been established.
+        action_failure_severity = 1
+    else:
+        action_failure_severity = 2
+
+    return (
+        # These fields form the identity-safe pool. A recognizable upload must
+        # always beat a structurally cleaner identity-collapsed animal.
+        int(palette_unacceptable),
+        int(similarity_unacceptable),
+        # Within that pool, visible structure/action outrank small color deltas.
+        int(horizontal_shelf),
+        action_failure_severity,
+        int(quality_unacceptable),
+        int(fur_unacceptable),
+        float(fur.get("penalty", 1000.0))
+        if isinstance(fur, dict)
+        else 0.0,
+        float(quality.get("penalty", 1000.0))
+        if isinstance(quality, dict)
+        else 1000.0,
+        float(palette.get("penalty", 1000.0))
+        if isinstance(palette, dict)
+        else 1000.0,
+        float(similarity.get("penalty", 1000.0))
+        if isinstance(similarity, dict)
+        else 1000.0,
+        attempt,
+    )
+
+
 def resolve_action_identity_palette_reference(
     *,
     uploaded_reference_job: bool,
@@ -5351,30 +5450,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "attempt": attempt,
                 }
                 if advisory_action_candidate_gate_required:
-                    degraded_selection_key = (
-                        int(
-                            not isinstance(palette_quality, dict)
-                            or palette_quality.get("acceptable") is not True
-                        ),
-                        (
-                            float(palette_quality.get("penalty", 1000.0))
-                            if isinstance(palette_quality, dict)
-                            else 1000.0
-                        ),
-                        int(
-                            isinstance(fur_silhouette_quality, dict)
-                            and fur_silhouette_quality.get("acceptable") is not True
-                        ),
-                        (
-                            float(fur_silhouette_quality.get("penalty", 1000.0))
-                            if isinstance(fur_silhouette_quality, dict)
-                            else 0.0
-                        ),
-                        int(quality.get("acceptable") is not True),
-                        float(quality.get("penalty", 1000.0)),
-                        int(similarity.get("acceptable") is not True),
-                        float(similarity.get("penalty", 1000.0)),
-                        attempt,
+                    degraded_selection_key = action_candidate_degraded_selection_key(
+                        record,
+                        action=action_key(pose),
                     )
                     record["action_candidate_degraded_selection_key"] = list(
                         degraded_selection_key
@@ -5955,7 +6033,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     degraded_fallback_accepted=True,
                     degraded_reason="candidate_attempt_budget_exhausted",
                     degraded_selection_policy=(
-                        "identity_first_lowest_risk_generated_candidate_v1"
+                        "identity_first_structural_action_generated_candidate_v2"
                     ),
                     degraded_selection_key=list(
                         best_attempt["action_candidate_degraded_selection_key"]
@@ -5973,7 +6051,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "attempt": best_attempt["attempt"],
                         "reason": "action_candidate_gate_attempts_exhausted",
                         "strategy": (
-                            "select_identity_first_lowest_risk_generated_candidate"
+                            "select_identity_first_structural_action_generated_candidate"
                         ),
                         "profile": best_attempt["profile"],
                         "result": "accepted_degraded_generated_candidate",

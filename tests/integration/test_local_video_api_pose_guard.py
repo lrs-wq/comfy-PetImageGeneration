@@ -103,6 +103,19 @@ def _save_low_connected_eating_subject(path: Path) -> None:
     image.save(path, format="PNG")
 
 
+def _save_eating_subject_with_floor_shelf(path: Path) -> None:
+    image = Image.new("RGBA", (160, 160), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    coat = (176, 116, 72, 255)
+    draw.ellipse((58, 24, 102, 66), fill=coat)
+    draw.rounded_rectangle((43, 52, 117, 110), radius=18, fill=coat)
+    draw.ellipse((55, 92, 105, 122), fill=(222, 190, 146, 255))
+    # A retained carpet strip joins the lower silhouette in one row and then
+    # persists as a nearly full-width slab. It is still one alpha component.
+    draw.rectangle((8, 110, 152, 119), fill=(190, 184, 176, 255))
+    image.save(path, format="PNG")
+
+
 def _save_mouth_bowl_contact_subject(
     path: Path,
     *,
@@ -866,6 +879,32 @@ class BowlActionSilhouetteTests(unittest.TestCase):
         )
         self.assertEqual(result["component_count"], 1)
         self.assertEqual(result["bowl_component_count"], 0)
+
+    def test_connected_floor_shelf_is_rejected_for_eating(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "floor-shelf.png"
+            _save_eating_subject_with_floor_shelf(candidate)
+
+            result = pipeline.pose_cutout_quality(
+                candidate,
+                "eating | first frame: crouched at a food bowl",
+            )
+
+        self.assertFalse(result["acceptable"], result)
+        self.assertIn(
+            "eating_horizontal_foreground_shelf",
+            result["issues"],
+        )
+        shelf = result["eating_horizontal_shelf"]
+        self.assertFalse(shelf["acceptable"])
+        self.assertGreaterEqual(
+            shelf["blocking_events"][0]["jump_px"],
+            shelf["thresholds"]["outward_jump_px_min"],
+        )
+        self.assertGreaterEqual(
+            shelf["blocking_events"][0]["persistent_rows"],
+            shelf["thresholds"]["persistent_rows_min"],
+        )
 
     def test_synthetic_low_muzzle_bowl_contact_passes_strict_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

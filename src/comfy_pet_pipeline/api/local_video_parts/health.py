@@ -840,6 +840,15 @@ def health() -> dict[str, Any]:
                     "component_center_margin_bowl_ratio": (
                         EATING_MUZZLE_COMPONENT_CENTER_MARGIN_BOWL_RATIO
                     ),
+                    "component_center_offset_bowl_ratio_max": (
+                        EATING_MUZZLE_COMPONENT_CENTER_OFFSET_BOWL_RATIO_MAX
+                    ),
+                    "component_height_px_min": (
+                        EATING_MUZZLE_COMPONENT_HEIGHT_MIN_PX
+                    ),
+                    "component_area_px_min": (
+                        EATING_MUZZLE_COMPONENT_AREA_MIN_PX
+                    ),
                     "component_audit_limit": 12,
                 },
                 "normalization_contract": {
@@ -882,12 +891,22 @@ def health() -> dict[str, Any]:
                     "per_action_qwen_canonical_and_main_case_geometry_roles"
                 ),
                 "upload_pose_reference_policy": {
-                    "eating": "main_case_eating_driver_geometry_image2_guide_v5",
+                    "eating": "main_case_eating_driver_geometry_image2_guide_v6",
                     "grooming": GROOMING_QWEN_POSE_REFERENCE_POLICY,
                 },
                 "geometry_generator_policy": {
-                    "eating": "driving_eating_geometry_image2_v5",
+                    "eating": "driving_eating_geometry_image2_v6",
                     "grooming": GROOMING_QWEN_GEOMETRY_GUIDE_POLICY,
+                },
+                "eating_geometry_isolation": {
+                    "qwen_internal_luma_variation": True,
+                    "qwen_internal_luma_variation_role": (
+                        "compressed_low_frequency_action_anatomy_only"
+                    ),
+                    "qwen_appearance_bearing_internal_luma_variation": False,
+                    "source_rgb_preserved": False,
+                    "source_chroma_preserved": False,
+                    "high_frequency_texture_preserved": False,
                 },
                 "grooming_geometry_isolation": {
                     "qwen_guide_style": GROOMING_QWEN_GUIDE_STYLE,

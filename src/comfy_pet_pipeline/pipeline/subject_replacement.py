@@ -1733,12 +1733,11 @@ def make_eating_geometry_guide(
 ) -> tuple[Image.Image, dict[str, Any]]:
     """Build an identity-free Image 2 that retains only eating action geometry.
 
-    The guide deliberately contains no source RGB pixels. A smooth neutral-gray
-    field describes the cat silhouette while fixed semantic beige/brown fields
-    describe the bowl and kibble. Every remaining pixel is pure green. This
-    prevents the driving animal's coat, collar, tag, watermark, and fur texture
-    from becoming a competing identity signal in Qwen while retaining readable
-    low-muzzle, food, and bowl semantics.
+    The guide deliberately contains no source RGB pixels. A heavily blurred,
+    compressed neutral-gray field describes low-frequency head/muzzle anatomy,
+    while fixed semantic beige/brown fields describe the bowl and kibble. Every
+    remaining pixel is pure green. This removes coat color, collar, tag,
+    watermark and fur texture while retaining readable eating geometry.
     """
     if len(sampled_frames) < 9:
         raise ValueError(
@@ -1941,11 +1940,72 @@ def make_eating_geometry_guide(
             "eating_geometry_guide_unreliable: outline_smoothing_failed"
         )
 
-    # The eating guide carries geometry only. Even low-frequency source luma
-    # retained a Labrador-like face, eyes, nose, and short-coat shading that Qwen
-    # could mistake for identity. Draw the whole animal as one flat neutral field;
-    # the silhouette and muzzle-to-food contact remain the only subject signal.
-    subject_semantic_rgb = np.array([132, 132, 132], dtype=np.uint8)
+    # Preserve only heavily blurred, compressed luminance from the selected
+    # contact frame. A flat silhouette erased the ears/head/muzzle relationship
+    # and let Qwen reinterpret the animal as a head-up cat looking at the bowl.
+    # Weighted blurring avoids pulling pure-green background into the anatomy;
+    # the narrow quantized neutral range removes source color, markings and fur
+    # texture while keeping the low-frequency eating geometry readable.
+    selected_rgb = np.asarray(
+        normalized_frames[int(selected["index"])].convert("RGB"),
+        dtype=np.uint8,
+    )
+    selected_luma = cv2.cvtColor(
+        selected_rgb,
+        cv2.COLOR_RGB2GRAY,
+    ).astype(np.float32)
+    anatomy_support = selected_subject.astype(np.float32)
+    anatomy_sigma = max(4.0, min(canvas_size) * 10.0 / 512.0)
+    anatomy_weighted_luma = cv2.GaussianBlur(
+        selected_luma * anatomy_support,
+        (0, 0),
+        sigmaX=anatomy_sigma,
+        sigmaY=anatomy_sigma,
+    )
+    anatomy_blurred_support = cv2.GaussianBlur(
+        anatomy_support,
+        (0, 0),
+        sigmaX=anatomy_sigma,
+        sigmaY=anatomy_sigma,
+    )
+    low_frequency_anatomy = anatomy_weighted_luma / np.maximum(
+        anatomy_blurred_support,
+        0.01,
+    )
+    anatomy_values = low_frequency_anatomy[selected_subject]
+    anatomy_p05, anatomy_p95 = np.percentile(anatomy_values, (5, 95))
+    anatomy_span = float(anatomy_p95 - anatomy_p05)
+    if anatomy_span < 6.0:
+        raise ValueError(
+            "eating_geometry_guide_unreliable: "
+            f"low_frequency_anatomy_contrast={anatomy_span:.3f}"
+        )
+    normalized_anatomy = np.clip(
+        (low_frequency_anatomy - float(anatomy_p05)) / anatomy_span,
+        0.0,
+        1.0,
+    )
+    anatomy_gray_min = 120
+    anatomy_gray_max = 168
+    anatomy_quantum = 8
+    anatomy_gray = (
+        anatomy_gray_min
+        + normalized_anatomy * (anatomy_gray_max - anatomy_gray_min)
+    )
+    anatomy_gray = (
+        np.round(anatomy_gray / anatomy_quantum) * anatomy_quantum
+    ).astype(np.uint8)
+    anatomy_gray = np.clip(
+        anatomy_gray,
+        anatomy_gray_min,
+        anatomy_gray_max,
+    ).astype(np.uint8)
+    anatomy_unique_values = np.unique(anatomy_gray[selected_subject])
+    if anatomy_unique_values.size < 2:
+        raise ValueError(
+            "eating_geometry_guide_unreliable: "
+            "compressed_anatomy_field_is_flat"
+        )
 
     median_rgb = np.median(
         np.stack(
@@ -2069,15 +2129,19 @@ def make_eating_geometry_guide(
     )
     guide = np.zeros((canvas_size[1], canvas_size[0], 3), dtype=np.uint8)
     guide[:] = (0, 255, 0)
-    guide[selected_subject] = subject_semantic_rgb
+    guide[selected_subject] = np.repeat(
+        anatomy_gray[selected_subject][:, None],
+        3,
+        axis=1,
+    )
     guide[prop_union] = bowl_semantic_rgb
     guide[bowl_rim] = bowl_rim_semantic_rgb
     guide[food_core] = food_semantic_rgb
 
     metadata = {
-        "policy": "driving_eating_geometry_image2_v5",
+        "policy": "driving_eating_geometry_image2_v6",
         "method": (
-            "temporal_head_lowering_flat_subject_semantic_food_fields_v6"
+            "temporal_head_lowering_compressed_anatomy_semantic_food_fields_v7"
         ),
         "selected_frame_index": int(selected["index"]),
         "muzzle_bowl_gap_px": int(selected["muzzle_bowl_gap_px"]),
@@ -2139,11 +2203,17 @@ def make_eating_geometry_guide(
             "high_frequency_outline_preserved": False,
         },
         "semantic_structure": {
-            "method": "flat_uniform_subject_silhouette_v2",
-            "subject_rgb": subject_semantic_rgb.tolist(),
-            "subject_unique_rgb_count": 1,
-            "internal_luma_variation": False,
+            "method": "compressed_blurred_quantized_neutral_anatomy_v1",
+            "subject_gray_range": [anatomy_gray_min, anatomy_gray_max],
+            "subject_gray_values": anatomy_unique_values.tolist(),
+            "subject_unique_rgb_count": int(anatomy_unique_values.size),
+            "internal_luma_variation": True,
             "appearance_bearing_face_detail": False,
+            "anatomy_gaussian_sigma": round(anatomy_sigma, 3),
+            "source_luma_p05": round(float(anatomy_p05), 3),
+            "source_luma_p95": round(float(anatomy_p95), 3),
+            "source_luma_contrast": round(anatomy_span, 3),
+            "quantum": anatomy_quantum,
             "bowl_gaussian_sigma": round(bowl_structure_sigma, 3),
             "bowl_luma_p10": round(float(bowl_luma_p10), 3),
             "bowl_luma_p90": round(float(bowl_luma_p90), 3),
@@ -2155,7 +2225,9 @@ def make_eating_geometry_guide(
         },
         "palette": {
             "background": [0, 255, 0],
-            "subject_rgb": subject_semantic_rgb.tolist(),
+            "subject_gray_range": [anatomy_gray_min, anatomy_gray_max],
+            "subject_gray_values": anatomy_unique_values.tolist(),
+            "quantum": anatomy_quantum,
             "prop_semantic_colors": {
                 "bowl": bowl_semantic_rgb.tolist(),
                 "bowl_rim": bowl_rim_semantic_rgb.tolist(),
@@ -3931,6 +4003,7 @@ def build_unstabilized_transparent_gif(
     gif_frames: int = 100,
     white_mp4_target: Path | None = None,
     soft_apng_target: Path | None = None,
+    start_frame_index: int = 0,
 ) -> dict[str, Any]:
     """Extract one matte and publish clean GIF plus optional soft-alpha APNG."""
     frames_root = gif_target.parent / f".{gif_target.stem}.{uuid.uuid4().hex}.frames"
@@ -3965,6 +4038,13 @@ def build_unstabilized_transparent_gif(
             ]
         if not source_frames:
             raise RuntimeError(f"No frames decoded from {source_video}")
+        source_frame_count = len(source_frames)
+        phase_start_index = int(start_frame_index)
+        if not 0 <= phase_start_index < source_frame_count:
+            raise ValueError(
+                "Transparent animation phase start is outside the source: "
+                f"{phase_start_index} not in 0..{source_frame_count - 1}"
+            )
 
         guidance_frames: list[np.ndarray] | None = None
         if guidance_mask_video is not None:
@@ -3977,6 +4057,18 @@ def build_unstabilized_transparent_gif(
                 raise RuntimeError(
                     "Guidance mask video is shorter than the generated video: "
                     f"{len(guidance_frames)} < {len(source_frames)}"
+                )
+            guidance_frames = guidance_frames[:source_frame_count]
+
+        if phase_start_index:
+            source_frames = (
+                source_frames[phase_start_index:]
+                + source_frames[:phase_start_index]
+            )
+            if guidance_frames is not None:
+                guidance_frames = (
+                    guidance_frames[phase_start_index:]
+                    + guidance_frames[:phase_start_index]
                 )
 
         def normalized_rgb(frame: np.ndarray) -> np.ndarray:
@@ -4365,6 +4457,10 @@ def build_unstabilized_transparent_gif(
             )
             for index in range(gif_frames)
         ]
+        sampled_original_source_indices = [
+            (phase_start_index + source_index) % source_frame_count
+            for source_index in sampled_indices
+        ]
         foreground_fractions: list[float] = []
         corner_alpha: list[int] = []
         for output_index, source_index in enumerate(sampled_indices):
@@ -4532,7 +4628,13 @@ def build_unstabilized_transparent_gif(
             },
             "source_frames": len(source_frames),
             "source_fps": source_fps,
+            "source_phase": {
+                "policy": "validated_action_contact_phase_rotation_v1",
+                "start_frame_index": phase_start_index,
+                "rotated": bool(phase_start_index),
+            },
             "sampled_source_indices": sampled_indices,
+            "sampled_original_source_indices": sampled_original_source_indices,
             "foreground_fraction_min": min(foreground_fractions),
             "foreground_fraction_max": max(foreground_fractions),
             "semantic_metrics": {

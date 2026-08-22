@@ -103,7 +103,7 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertEqual(
             guard["geometry_generator_policy"],
             {
-                "eating": "driving_eating_geometry_image2_v5",
+                "eating": "driving_eating_geometry_image2_v6",
                 "grooming": pipeline.GROOMING_QWEN_GEOMETRY_GUIDE_POLICY,
             },
         )
@@ -1143,7 +1143,9 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                 Image.new("RGB", (512, 512), (0, 255, 0)).save(target)
                 with Image.open(target) as loaded:
                     image = loaded.copy()
-                image.paste((132, 132, 132), (96, 80, 416, 432))
+                image.paste((120, 120, 120), (96, 80, 202, 432))
+                image.paste((144, 144, 144), (202, 80, 310, 432))
+                image.paste((168, 168, 168), (310, 80, 416, 432))
                 image.paste((214, 208, 196), (180, 360, 330, 420))
                 image.paste((232, 228, 218), (180, 360, 330, 370))
                 image.paste((142, 86, 45), (220, 365, 260, 390))
@@ -1154,10 +1156,10 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                 metadata_path.write_text(
                     json.dumps(
                         {
-                            "policy": "driving_eating_geometry_image2_v5",
+                            "policy": "driving_eating_geometry_image2_v6",
                             "method": (
-                                "temporal_head_lowering_flat_subject_"
-                                "semantic_food_fields_v6"
+                                "temporal_head_lowering_compressed_anatomy_"
+                                "semantic_food_fields_v7"
                             ),
                             "source_sha256": pipeline.file_sha256(source),
                             "sampled_frame_count": 81,
@@ -1201,11 +1203,17 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                                 "high_frequency_outline_preserved": False,
                             },
                             "semantic_structure": {
-                                "method": "flat_uniform_subject_silhouette_v2",
-                                "subject_rgb": [132, 132, 132],
-                                "subject_unique_rgb_count": 1,
-                                "internal_luma_variation": False,
+                                "method": (
+                                    "compressed_blurred_quantized_neutral_anatomy_v1"
+                                ),
+                                "subject_gray_range": [120, 168],
+                                "subject_gray_values": [120, 144, 168],
+                                "subject_unique_rgb_count": 3,
+                                "internal_luma_variation": True,
                                 "appearance_bearing_face_detail": False,
+                                "anatomy_gaussian_sigma": 10.0,
+                                "source_luma_contrast": 48.0,
+                                "quantum": 8,
                                 "source_luma_values_preserved": False,
                                 "source_rgb_preserved": False,
                                 "source_chroma_preserved": False,
@@ -1213,7 +1221,9 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                             },
                             "palette": {
                                 "background": [0, 255, 0],
-                                "subject_rgb": [132, 132, 132],
+                                "subject_gray_range": [120, 168],
+                                "subject_gray_values": [120, 144, 168],
+                                "quantum": 8,
                                 "prop_semantic_colors": {
                                     "bowl": [214, 208, 196],
                                     "bowl_rim": [232, 228, 218],
@@ -1259,11 +1269,11 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertIn("--eating-geometry-guide-metadata", command)
         self.assertEqual(
             metadata["policy"],
-            "driving_eating_geometry_image2_v5",
+            "driving_eating_geometry_image2_v6",
         )
         self.assertEqual(
             metadata["method"],
-            "temporal_head_lowering_flat_subject_semantic_food_fields_v6",
+            "temporal_head_lowering_compressed_anatomy_semantic_food_fields_v7",
         )
         self.assertEqual(
             metadata["muzzle_contact_semantic"]["muzzle_food_gap_px"],
@@ -1272,6 +1282,7 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertTrue(metadata["semantic_food"]["passed"])
         self.assertFalse(metadata["palette"]["source_rgb_preserved"])
         self.assertTrue(metadata["head_lowering_selection"]["passed"])
+        self.assertTrue(metadata["semantic_structure"]["internal_luma_variation"])
         self.assertFalse(metadata["semantic_structure"]["source_luma_values_preserved"])
         self.assertRegex(metadata["guide_sha256"], r"^[0-9a-f]{64}$")
 
@@ -1661,6 +1672,127 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         nearest = result["component_candidates"][0]
         self.assertEqual(nearest["width_bowl_ratio"], 0.708333)
         self.assertIn("width_outside_muzzle_range", nearest["rejection_reasons"])
+
+    def test_eating_contact_gate_rejects_tiny_off_center_bowl_edge_fragment(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "bowl-edge-fragment.png"
+            reference = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+            reference.paste((105, 110, 115, 255), (30, 20, 226, 220))
+            reference.paste((214, 208, 196, 255), (68, 170, 188, 225))
+            reference.paste((205, 118, 116, 255), (72, 168, 81, 170))
+            reference.save(candidate)
+            colored_mask = Image.new("RGB", (256, 256), (0, 0, 0))
+            colored_mask.paste((0, 0, 255), (30, 20, 226, 220))
+            colored_mask.paste((255, 0, 0), (68, 170, 188, 225))
+            with patch(
+                "scail2_subject_replacement_test.make_eating_reference_identity_mask",
+                return_value=(colored_mask, None, {"fixture": "edge-fragment"}),
+            ):
+                result = pipeline.eating_mouth_bowl_contact_quality(candidate)
+
+        self.assertFalse(result["acceptable"], result)
+        nearest = result["component_candidates"][0]
+        self.assertLess(nearest["area"], pipeline.EATING_MUZZLE_COMPONENT_AREA_MIN_PX)
+        self.assertIn("area_below_minimum", nearest["rejection_reasons"])
+        self.assertIn("height_outside_muzzle_range", nearest["rejection_reasons"])
+        self.assertIn(
+            "center_too_far_from_bowl_center",
+            nearest["rejection_reasons"],
+        )
+
+    def test_eating_degraded_selection_prefers_clean_uncertain_contact_candidate(
+        self,
+    ) -> None:
+        identity_ok = {"acceptable": True, "penalty": 8.0}
+        similarity_ok = {"acceptable": True, "penalty": 12.0}
+        bad_shelf = {
+            "attempt": 2,
+            "identity_palette": identity_ok,
+            "similarity": similarity_ok,
+            "fur_silhouette": {"acceptable": False, "penalty": 70.0},
+            "quality": {
+                "acceptable": False,
+                "penalty": 50.0,
+                "issues": [
+                    "eating_bowl_or_food_not_detected",
+                    "eating_horizontal_foreground_shelf",
+                ],
+                "eating_horizontal_shelf": {"acceptable": False},
+            },
+        }
+        clean_uncertain = {
+            "attempt": 3,
+            "identity_palette": {"acceptable": True, "penalty": 18.0},
+            "similarity": similarity_ok,
+            "fur_silhouette": {"acceptable": True, "penalty": 4.0},
+            "quality": {
+                "acceptable": False,
+                "penalty": 25.0,
+                "issues": ["eating_bowl_contact_unreliable"],
+                "eating_horizontal_shelf": {"acceptable": True},
+            },
+        }
+        identity_collapsed = {
+            "attempt": 4,
+            "identity_palette": {"acceptable": False, "penalty": 1.0},
+            "similarity": similarity_ok,
+            "fur_silhouette": {"acceptable": True, "penalty": 0.0},
+            "quality": {"acceptable": True, "penalty": 0.0, "issues": []},
+        }
+
+        clean_key = pipeline.action_candidate_degraded_selection_key(
+            clean_uncertain,
+            action="eating",
+        )
+        self.assertLess(
+            clean_key,
+            pipeline.action_candidate_degraded_selection_key(
+                bad_shelf,
+                action="eating",
+            ),
+        )
+        self.assertLess(
+            clean_key,
+            pipeline.action_candidate_degraded_selection_key(
+                identity_collapsed,
+                action="eating",
+            ),
+        )
+
+    def test_eating_transparent_output_starts_at_validated_contact_phase(
+        self,
+    ) -> None:
+        job = {
+            "pose_reference_metadata": {
+                "eating": {
+                    "generator_metadata": {
+                        "policy": "driving_eating_geometry_image2_v6",
+                        "selected_frame_index": 56,
+                        "head_lowering_selection": {"passed": True},
+                    }
+                }
+            }
+        }
+
+        self.assertEqual(
+            pipeline.resolve_transparent_output_phase_start_index(
+                job,
+                action="eating",
+                source_frames=81,
+            ),
+            56,
+        )
+        self.assertEqual(
+            pipeline.resolve_transparent_output_phase_start_index(
+                job,
+                action="grooming",
+                source_frames=81,
+            ),
+            0,
+        )
 
     def test_fur_surface_retry_preserves_only_configured_eating_recovery(
         self,
