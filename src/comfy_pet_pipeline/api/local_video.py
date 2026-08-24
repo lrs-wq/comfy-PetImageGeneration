@@ -126,7 +126,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.6"
+API_VERSION = "2.26.7"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -203,7 +203,7 @@ GENERATION_ACTION_CANDIDATE_GATES_ENABLED = os.environ.get(
     "disabled",
 }
 GENERATION_ACTION_CANDIDATE_GATE_POLICY = (
-    "retry_strict_candidates_then_upload_anchored_canonical_fallback_v2"
+    "retry_strict_candidates_then_upload_anchored_canonical_fallback_v3"
 )
 FUR_SURFACE_GATE_MAX_REJECTIONS = 3
 FUR_SURFACE_GATE_RETRY_POLICY = "preserve_configured_eating_bowl_surface_recovery_v1"
@@ -437,6 +437,12 @@ GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = (
 GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = len(
     GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT
 )
+DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
+    "canonical_image1_only_four_step_direct_eating_action_"
+    "no_white_model_or_secondary_qwen_reference_v1"
+)
+DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
+DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
 GROOMING_ADVISORY_IDENTITY_REFINE_POLICY = (
     "pose_locked_draft_image1_canonical_image2_face_image3_conditional_masked_v7"
 )
@@ -649,6 +655,12 @@ EATING_MUZZLE_COMPONENT_CENTER_OFFSET_BOWL_RATIO_MAX = 0.35
 EATING_MUZZLE_COMPONENT_HEIGHT_MIN_PX = 4
 EATING_MUZZLE_COMPONENT_AREA_MIN_PX = 24
 FULL_DRIVER_EATING_POSE_POLICY = "full_driver_pose_with_separate_bowl_v1"
+DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY = (
+    "reference_space_head_nod_food_overlap_v2"
+)
+DOG_EATING_STATIC_POSE_FALLBACK_POLICY = (
+    "static_reference_eating_pose_identity_fallback_v1"
+)
 UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY = (
     "uploaded_subject_absolute_animation_roughness_v1"
 )
@@ -4603,6 +4615,11 @@ build_canonical_grooming_pose_transfer_prompt = (
 
 build_advisory_grooming_action_transfer_prompt = (
     _local_video_prompting_workflows.build_advisory_grooming_action_transfer_prompt
+)
+
+
+build_dog_eating_prompt_only_action_transfer_prompt = (
+    _local_video_prompting_workflows.build_dog_eating_prompt_only_action_transfer_prompt
 )
 
 

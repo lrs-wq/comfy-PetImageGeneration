@@ -3037,6 +3037,83 @@ def make_eating_reference_aligned_pose_frames(
     return pose_frames, mask_frames, metadata
 
 
+def make_static_reference_eating_pose_frames(
+    reference: Image.Image,
+    reference_mask: Image.Image,
+    canvas_size: tuple[int, int],
+    *,
+    frame_count: int,
+    fallback_reason: str,
+) -> tuple[list[Image.Image], list[Image.Image], dict[str, Any]]:
+    """Return an identity-safe eating pose when bounded head motion is unavailable."""
+    if reference.size != canvas_size or reference_mask.size != canvas_size:
+        raise ValueError(
+            "eating_static_reference_fallback_unreliable: reference_size_mismatch"
+        )
+    if frame_count < 1:
+        raise ValueError(
+            "eating_static_reference_fallback_unreliable: invalid_frame_count"
+        )
+
+    rgba = np.asarray(reference.convert("RGBA"), dtype=np.uint8)
+    reference_mask_rgb = np.asarray(
+        reference_mask.convert("RGB"),
+        dtype=np.uint8,
+    )
+    identity = np.all(reference_mask_rgb == (0, 0, 255), axis=2)
+    prop = np.all(reference_mask_rgb == (255, 0, 0), axis=2)
+    if int(np.count_nonzero(identity)) < 500:
+        raise ValueError(
+            "eating_static_reference_fallback_unreliable: reference_subject_too_small"
+        )
+    if int(np.count_nonzero(prop)) < 100:
+        raise ValueError(
+            "eating_static_reference_fallback_unreliable: reference_bowl_too_small"
+        )
+
+    alpha = rgba[..., 3:4].astype(np.float32) / 255.0
+    pose_rgb = np.full((*rgba.shape[:2], 3), 255, dtype=np.uint8)
+    pose_rgb = np.clip(
+        rgba[..., :3] * alpha + pose_rgb * (1.0 - alpha),
+        0,
+        255,
+    ).astype(np.uint8)
+    colored_mask = np.full((*rgba.shape[:2], 3), 255, dtype=np.uint8)
+    colored_mask[identity] = (0, 0, 255)
+    colored_mask[prop] = (255, 0, 0)
+    pose = Image.fromarray(pose_rgb, mode="RGB")
+    mask = Image.fromarray(colored_mask, mode="RGB")
+    identity_bbox = list(binary_bbox(identity))
+    prop_bbox = list(binary_bbox(prop))
+    return (
+        [pose.copy() for _ in range(frame_count)],
+        [mask.copy() for _ in range(frame_count)],
+        {
+            "policy": "static_reference_eating_pose_identity_fallback_v1",
+            "fallback_used": True,
+            "fallback_reason": fallback_reason[:1000],
+            "driver_signal_only": False,
+            "driver_rgb_preserved": False,
+            "driver_silhouette_preserved": False,
+            "reference_identity_preserved": True,
+            "pose_geometry_scope": "static_approved_eating_reference",
+            "reference_subject_bbox": identity_bbox,
+            "reference_bowl_bbox": prop_bbox,
+            "identity_fraction": float(np.count_nonzero(identity))
+            / float(identity.size),
+            "scene_prop_fraction": float(np.count_nonzero(prop))
+            / float(prop.size),
+            "scene_prop_separated": True,
+            "static_bowl_mask": True,
+            "static_bowl_rgb": True,
+            "scene_prop_metadata": {
+                "policy": "reference_mask_static_bowl_fallback_v1",
+                "fallback_reason": fallback_reason[:1000],
+            },
+        },
+    )
+
+
 def _make_eating_reference_identity_mask_strict(
     normalized: Image.Image,
 ) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
@@ -3099,7 +3176,9 @@ def _make_eating_reference_identity_mask_strict(
         definite_prop.astype(np.uint8),
         connectivity=8,
     )
-    candidates: list[int] = []
+    preliminary_candidates: list[int] = []
+    candidate_bottoms: dict[int, int] = {}
+    candidate_shapes: dict[int, tuple[int, int, int]] = {}
     component_bottom_tolerance = max(
         2,
         int(round(subject_height * 0.01)),
@@ -3122,11 +3201,53 @@ def _make_eating_reference_identity_mask_strict(
             and center_y >= zone_y0
             and abs(center_x - subject_center_x) <= subject_width * 0.36
         ):
-            candidates.append(label)
-    if not candidates:
+            preliminary_candidates.append(label)
+            candidate_bottoms[label] = component_bottom
+            candidate_shapes[label] = (
+                int(stats[label, cv2.CC_STAT_WIDTH]),
+                int(stats[label, cv2.CC_STAT_HEIGHT]),
+                area,
+            )
+    if not preliminary_candidates:
         raise ValueError(
             "eating_reference_prop_split_unreliable: no_warm_food_component"
         )
+    # A warm dog/cat muzzle can physically touch the food and therefore pass
+    # every lower-central test above.  It is usually a tall component ending
+    # above the actual kibble row.  Keep only components in a narrow band of
+    # the deepest credible warm component before constructing the food union;
+    # this prevents the touching muzzle (and nearby warm paws) from becoming a
+    # red static SCAIL prop while still allowing separated kibble pellets.
+    horizontal_food_candidates = [
+        label
+        for label in preliminary_candidates
+        if candidate_shapes[label][2] >= 20
+        and candidate_shapes[label][0]
+        >= max(12, int(round(candidate_shapes[label][1] * 1.4)))
+    ]
+    food_candidate_pool = (
+        horizontal_food_candidates
+        if horizontal_food_candidates
+        else preliminary_candidates
+    )
+    food_candidate_selection = (
+        "deepest_horizontal_warm_food_components_v1"
+        if horizontal_food_candidates
+        else "deepest_warm_food_components_v1"
+    )
+    deepest_candidate_bottom = max(
+        candidate_bottoms[label] for label in food_candidate_pool
+    )
+    food_bottom_band_tolerance = max(
+        6,
+        int(round(subject_height * 0.04)),
+    )
+    candidates = [
+        label
+        for label in food_candidate_pool
+        if candidate_bottoms[label]
+        >= deepest_candidate_bottom - food_bottom_band_tolerance
+    ]
     food_core = np.isin(labels, np.asarray(candidates, dtype=labels.dtype))
     food_area = int(np.count_nonzero(food_core))
     food_x, food_y, food_right, food_bottom = binary_bbox(food_core)
@@ -3417,6 +3538,11 @@ def _make_eating_reference_identity_mask_strict(
         ],
         "food_core_pixels": food_area,
         "food_core_components": len(candidates),
+        "food_preliminary_components": len(preliminary_candidates),
+        "food_horizontal_components": len(horizontal_food_candidates),
+        "food_candidate_selection": food_candidate_selection,
+        "food_deepest_component_bottom": deepest_candidate_bottom,
+        "food_bottom_band_tolerance": food_bottom_band_tolerance,
         "food_component_bottom_min": component_bottom_min,
         "food_component_bottom_tolerance": component_bottom_tolerance,
         "warm_component_initially_classified_as_bowl": (
@@ -5799,12 +5925,37 @@ def main() -> int:
         contain_fraction=0.88 if args.action in {"grooming", "standing"} else 0.84,
     )
     if args.action == "eating":
-        pose_frames, pose_masks, pose_metadata = (
-            make_full_eating_pose_and_mask_frames(
-                sampled,
-                (args.width, args.height),
+        if args.species == "dog":
+            try:
+                pose_frames, pose_masks, pose_metadata = (
+                    make_eating_reference_aligned_pose_frames(
+                        sampled,
+                        reference,
+                        reference_mask,
+                        (args.width, args.height),
+                    )
+                )
+            except ValueError as exc:
+                if not str(exc).startswith(
+                    "eating_reference_motion_unreliable:"
+                ):
+                    raise
+                pose_frames, pose_masks, pose_metadata = (
+                    make_static_reference_eating_pose_frames(
+                        reference,
+                        reference_mask,
+                        (args.width, args.height),
+                        frame_count=args.frames,
+                        fallback_reason=str(exc),
+                    )
+                )
+        else:
+            pose_frames, pose_masks, pose_metadata = (
+                make_full_eating_pose_and_mask_frames(
+                    sampled,
+                    (args.width, args.height),
+                )
             )
-        )
     else:
         pose_frames, pose_masks, pose_metadata = make_pose_and_mask_frames(
             sampled,

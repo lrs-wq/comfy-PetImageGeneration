@@ -861,6 +861,72 @@ class EatingScenePropMaskTests(unittest.TestCase):
         self.assertGreater(metadata["left_paw_identity_support"], 500)
         self.assertGreater(metadata["right_paw_identity_support"], 500)
 
+    def test_golden_dog_muzzle_above_kibble_remains_identity_blue(self) -> None:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(reference)
+        draw.ellipse((57, 90, 455, 399), fill=(225, 210, 175, 255))
+        draw.ellipse((105, 345, 170, 420), fill=(228, 218, 194, 255))
+        draw.ellipse((350, 345, 425, 420), fill=(228, 218, 194, 255))
+        # A deep warm muzzle ends only ten pixels above the food. It must not
+        # be unioned into the static red bowl identity merely because this is a
+        # golden dog eating with physical mouth-to-food contact.
+        draw.rounded_rectangle(
+            (205, 320, 270, 382),
+            radius=22,
+            fill=(170, 115, 70, 255),
+        )
+        draw.rounded_rectangle(
+            (150, 390, 315, 450),
+            radius=20,
+            fill=(205, 194, 173, 255),
+        )
+        draw.ellipse((164, 391, 301, 414), fill=(145, 80, 35, 255))
+
+        colored, exclusion, metadata = scail.make_eating_reference_identity_mask(
+            reference
+        )
+        mask = np.asarray(colored, dtype=np.uint8)
+        excluded = np.asarray(exclusion, dtype=np.uint8)
+
+        self.assertEqual(metadata["split_status"], "strict")
+        self.assertGreater(
+            metadata["food_preliminary_components"],
+            metadata["food_core_components"],
+        )
+        self.assertGreaterEqual(metadata["food_bottom_band_tolerance"], 6)
+        self.assertEqual(tuple(mask[360, 235]), (0, 0, 255))
+        self.assertEqual(int(excluded[360, 235]), 0)
+        self.assertEqual(tuple(mask[430, 230]), (255, 0, 0))
+        self.assertEqual(int(excluded[430, 230]), 255)
+
+    def test_static_dog_eating_pose_fallback_preserves_reference_geometry(
+        self,
+    ) -> None:
+        reference, reference_mask = self._aligned_reference()
+        poses, masks, metadata = scail.make_static_reference_eating_pose_frames(
+            reference,
+            reference_mask,
+            (512, 512),
+            frame_count=13,
+            fallback_reason=(
+                "eating_reference_motion_unreliable: no_face_muzzle_anchor"
+            ),
+        )
+
+        self.assertEqual(len(poses), 13)
+        self.assertEqual(len(masks), 13)
+        self.assertEqual(
+            metadata["policy"],
+            "static_reference_eating_pose_identity_fallback_v1",
+        )
+        self.assertTrue(metadata["reference_identity_preserved"])
+        self.assertFalse(metadata["driver_silhouette_preserved"])
+        first_pose = np.asarray(poses[0], dtype=np.uint8)
+        first_mask = np.asarray(masks[0], dtype=np.uint8)
+        for pose, mask in zip(poses[1:], masks[1:], strict=True):
+            self.assertTrue(np.array_equal(np.asarray(pose), first_pose))
+            self.assertTrue(np.array_equal(np.asarray(mask), first_mask))
+
     def test_narrow_kibble_row_keeps_wide_pale_bowl_search_corridor(self) -> None:
         reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
         draw = ImageDraw.Draw(reference)

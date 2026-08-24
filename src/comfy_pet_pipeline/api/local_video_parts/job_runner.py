@@ -2286,6 +2286,31 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             == POSE_IDENTITY_INPUT_POLICY_CANONICAL
             and pose_reference_input_name is not None
         )
+        dog_eating_prompt_only_action_transfer_active = bool(
+            canonical_action_reference
+            and species == "dog"
+            and action_key(pose) == "eating"
+        )
+        if dog_eating_prompt_only_action_transfer_active:
+            update_job(
+                job_id,
+                dog_eating_first_frame_policy=(
+                    DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY
+                ),
+                dog_eating_first_frame_prompt_only_action_geometry=True,
+                dog_eating_first_frame_image1_role=(
+                    "approved_upload_anchored_canonical_identity_sampler"
+                ),
+                dog_eating_first_frame_white_model_loaded_by_qwen=False,
+                dog_eating_first_frame_secondary_reference_loaded_by_qwen=False,
+                dog_eating_first_frame_action_geometry_deferred_to_scail=True,
+                dog_eating_first_frame_steps=(
+                    DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
+                ),
+                dog_eating_first_frame_denoise=(
+                    DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
+                ),
+            )
         advisory_action_candidate_gate_required = bool(
             not GENERATION_VISUAL_AUDITS_BLOCKING
             and GENERATION_ACTION_CANDIDATE_GATES_ENABLED
@@ -2748,6 +2773,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
                 canonical_eating_identity_refine_active = bool(
                     canonical_action_reference
+                    and not dog_eating_prompt_only_action_transfer_active
                     and action_key(pose) == "eating"
                     and attempt >= EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
                     and isinstance(eating_identity_refine_source, dict)
@@ -2773,6 +2799,39 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 grooming_advisory_action_transfer_attempt: (
                     dict[str, Any] | None
                 ) = None
+                dog_eating_prompt_only_action_transfer_attempt: (
+                    dict[str, Any] | None
+                ) = None
+                if dog_eating_prompt_only_action_transfer_active:
+                    attempt_primary_input_name = qwen_input_name
+                    attempt_secondary_input_name = None
+                    attempt_tertiary_input_name = None
+                    attempt_additional_reference_input_names = None
+                    attempt_noise_mask_input_name = None
+                    attempt_geometry_input_name = None
+                    attempt_prompt = (
+                        build_dog_eating_prompt_only_action_transfer_prompt(
+                            pose,
+                            profile_fur_lock=profile_fur_lock,
+                        )
+                    )
+                    dog_eating_prompt_only_action_transfer_attempt = {
+                        "policy": DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY,
+                        "image1_role": (
+                            "approved_upload_anchored_canonical_identity_sampler"
+                        ),
+                        "image2_role": None,
+                        "image3_role": None,
+                        "prompt_only_action_geometry": True,
+                        "white_model_loaded_by_qwen": False,
+                        "secondary_reference_loaded_by_qwen": False,
+                        "foreign_pose_image_loaded_by_qwen": False,
+                        "uploaded_identity_views_consumed_via_canonical_only": True,
+                        "full_canvas_action_redraw": True,
+                        "action_geometry_deferred_to_scail": True,
+                        "sampler_noise_mask_input_name": None,
+                        "post_qwen_pixel_composite_enabled": False,
+                    }
                 if advisory_grooming_action_transfer_active:
                     attempt_primary_input_name = qwen_input_name
                     attempt_secondary_input_name = None
@@ -3760,6 +3819,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             )
                         ]
                     )
+                if dog_eating_prompt_only_action_transfer_active:
+                    effective_pose_denoise = (
+                        DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
+                    )
                 if advisory_grooming_identity_refine_active:
                     effective_pose_denoise = (
                         GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE
@@ -3814,6 +3877,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     # steps. Longer schedules produced neutral copies and scene
                     # drift in the same-seed grooming reproduction.
                     effective_pose_steps = GROOMING_ADVISORY_ACTION_TRANSFER_STEPS
+                if dog_eating_prompt_only_action_transfer_active:
+                    effective_pose_steps = (
+                        DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
+                    )
                 if advisory_grooming_identity_refine_active:
                     effective_pose_steps = max(
                         GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
@@ -3861,7 +3928,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     attempt_prompt,
                     (
                         ""
-                        if advisory_grooming_action_transfer_active
+                        if (
+                            advisory_grooming_action_transfer_active
+                            or dog_eating_prompt_only_action_transfer_active
+                        )
                         else pose_negative_prompt
                     ),
                     attempt_seed,
@@ -4523,6 +4593,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
                 if (
                     canonical_action_reference
+                    and not dog_eating_prompt_only_action_transfer_active
                     and action_key(pose) == "eating"
                     and attempt < EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
                     and chroma_metrics.get("acceptable")
@@ -4975,6 +5046,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                     "grooming_advisory_action_transfer": (
                         grooming_advisory_action_transfer_attempt
+                    ),
+                    "dog_eating_prompt_only_action_transfer": (
+                        dog_eating_prompt_only_action_transfer_attempt
                     ),
                     "grooming_advisory_identity_refine": (
                         grooming_advisory_identity_refine_audit

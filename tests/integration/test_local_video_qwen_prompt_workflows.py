@@ -137,6 +137,44 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertIn("kibble mound", scail_pipeline.DOG_NEGATIVE_PROMPT)
         self.assertIn("changing food surface", scail_pipeline.DOG_NEGATIVE_PROMPT)
 
+    def test_prompt_only_dog_eating_transfer_locks_breed_and_grounded_bowl(
+        self,
+    ) -> None:
+        pose = pipeline.subject_replacement_pose_prompt("eating", species="dog")
+        prompt = pipeline.build_dog_eating_prompt_only_action_transfer_prompt(
+            pose,
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+        )
+
+        self.assertTrue(prompt.startswith("Edit Image 1."))
+        self.assertIn("exact apparent age and breed geometry", prompt)
+        self.assertIn("ear topology/size/carriage", prompt)
+        self.assertIn("tail's exact thickness, shape and carriage", prompt)
+        self.assertIn("ON THE GROUND", prompt)
+        self.assertIn("completely INSIDE the continuous bowl rim", prompt)
+        self.assertIn("no pellet, heap, ring, scatter, spill", prompt)
+        self.assertIn("physically inside and overlapped", prompt)
+        self.assertIn("never lifts, carries, wears, bites or holds", prompt)
+        self.assertIn("folded ears to upright ears", prompt)
+        self.assertIn("straight tail to a curled tail", prompt)
+        self.assertIn("flat pure #00FF00 green", prompt)
+        for forbidden_token in (
+            "Image 2",
+            "white model",
+            "white maquette",
+            "action guide",
+            "video frame",
+        ):
+            self.assertNotIn(forbidden_token.lower(), prompt.lower())
+
+        with self.assertRaisesRegex(ValueError, "supports only eating"):
+            pipeline.build_dog_eating_prompt_only_action_transfer_prompt(
+                pipeline.subject_replacement_pose_prompt(
+                    "standing",
+                    species="dog",
+                )
+            )
+
     def test_dog_prompts_lock_age_muzzle_chroma_and_driver_defined_idle_pose(
         self,
     ) -> None:
@@ -1587,6 +1625,41 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             pipeline.advisory_grooming_degraded_candidate_selection_key(
                 identity_drift
             ),
+        )
+
+    def test_dog_eating_workflow_never_loads_white_model_into_qwen(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, _uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="eating",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=1,
+                identity_palette_guard=True,
+                visual_audits_blocking=False,
+                species="dog",
+            )
+
+        load_images = {
+            node_id: node["inputs"]["image"]
+            for node_id, node in workflow.items()
+            if node.get("class_type") == "LoadImage"
+        }
+        expected_canonical = "local_video_api/capture-eating/cartoon_reference.png"
+        self.assertEqual(load_images, {"1": expected_canonical})
+        self.assertNotIn(pose_input, load_images.values())
+        self.assertNotIn("image2", workflow["6"]["inputs"])
+        self.assertNotIn("image3", workflow["6"]["inputs"])
+        self.assertTrue(
+            workflow["6"]["inputs"]["prompt"].startswith("Edit Image 1.")
+        )
+        self.assertEqual(workflow["7"]["inputs"]["prompt"], "")
+        self.assertEqual(
+            workflow["14"]["inputs"]["steps"],
+            pipeline.DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS,
+        )
+        self.assertEqual(
+            workflow["14"]["inputs"]["denoise"],
+            pipeline.DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
         )
 
     def test_production_eating_attempt4_refines_pose_safe_palette_drift(

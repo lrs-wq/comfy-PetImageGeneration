@@ -717,6 +717,7 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
         eating_pose_contact_unreliable: bool = False,
         pose_safe_grooming_attempt4: bool = False,
         uploaded_white_maquette: bool = False,
+        species: str = "cat",
         main_case_raw_identity_chain: bool | None = None,
         persist_identity_digest: bool = True,
         persist_identity_source_digest: bool = True,
@@ -992,8 +993,9 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
             job_id: {
                 "job_id": job_id,
                 "generation_mode": "subject_replacement",
+                "species": species,
                 "qwen_reference_poses": [
-                    pipeline.subject_replacement_pose_prompt(action)
+                    pipeline.subject_replacement_pose_prompt(action, species=species)
                 ],
                 "qwen_reference_prompt_en": "profile-locked reference prompt",
                 "prompt": "",

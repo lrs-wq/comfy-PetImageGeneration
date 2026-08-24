@@ -433,6 +433,45 @@ POSE CONTRACT: {qwen_first_frame_spec(pose)}
 OUTPUT CONTRACT: return exactly one clean static 512x512 first frame. Keep the complete cat within 72% of canvas width and height with at least 12% clear green margin on every edge. Every non-cat pixel must be flat pure #00FF00. No floor, floor line, shadow, reflection, scenery, text, logo, or watermark. Return only the identity-correct grooming keyframe."""
 
 
+def build_dog_eating_prompt_only_action_transfer_prompt(
+    pose: str,
+    *,
+    profile_fur_lock: str = "",
+) -> str:
+    """Repose the approved dog canonical without exposing white-model morphology."""
+    _sync_local_video_runtime(
+        globals(), {"build_dog_eating_prompt_only_action_transfer_prompt"}
+    )
+
+    if action_key(pose) != "eating":
+        raise ValueError("Prompt-only dog eating transfer supports only eating.")
+    del profile_fur_lock
+    return (
+        "Edit Image 1. Keep this exact dog and its restrained stylized 3D "
+        "identity unchanged. Preserve its exact apparent age and breed geometry: "
+        "skull and cheek width, muzzle length/width/taper, ear topology/size/"
+        "carriage, eyes, nose, coat colors and markings, natural coat length/"
+        "volume, torso and leg proportions, paws, and the tail's exact thickness, "
+        "shape and carriage. Change only the pose to active eating. Put exactly "
+        "one small shallow matte bowl ON THE GROUND immediately between and "
+        "touching the two planted front paws. Put only a small low level layer of "
+        "ordinary brown dry kibble fully below and completely INSIDE the continuous "
+        "bowl rim. Every kibble pellet must remain inside the bowl; no pellet, heap, "
+        "ring, scatter, spill, overflow or food may appear outside the bowl. Lower "
+        "and bend the dog's head and neck all the way down until the lower muzzle is "
+        "physically inside and overlapped by the kibble and near rim. The dog eats "
+        "from the ground bowl; it never lifts, carries, wears, bites or holds the "
+        "bowl. Repose the torso and legs naturally as needed, keeping all four "
+        "complete attached legs and paws and the complete tail visible. Do not "
+        "change folded ears to upright ears or upright ears to folded ears, do not "
+        "shorten or widen the muzzle, and do not change a straight tail to a curled "
+        "tail or a curled tail to a straight tail. Keep one complete natural "
+        "unclothed dog with no collar, accessory, extra subject or extra prop. Every "
+        "background pixel stays flat pure #00FF00 green, with generous clearance "
+        "and no floor, food, shadow, reflection, gradient, text or watermark."
+    )
+
+
 def build_advisory_grooming_action_transfer_prompt(
     pose: str,
     *,

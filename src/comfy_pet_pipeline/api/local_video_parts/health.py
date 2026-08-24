@@ -635,6 +635,26 @@ def health() -> dict[str, Any]:
             "species_route_missing": species_route_missing,
             "species_classifier": species_classifier_health,
             "dog_profile": dog_profile_health,
+            "dog_eating_first_frame": {
+                "policy": DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY,
+                "steps": DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS,
+                "denoise": DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
+                "image1": "approved_upload_anchored_canonical_identity_sampler",
+                "prompt_only_action_geometry": True,
+                "white_model_loaded_by_qwen": False,
+                "secondary_reference_loaded_by_qwen": False,
+                "negative_prompt_conditioning": False,
+            },
+            "dog_eating_scail_pose": {
+                "policy": DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,
+                "driver_role": "head_lift_timing_signal_only",
+                "driver_rgb_preserved": False,
+                "driver_silhouette_preserved": False,
+                "reference_identity_geometry_preserved": True,
+                "static_identity_safe_fallback_policy": (
+                    DOG_EATING_STATIC_POSE_FALLBACK_POLICY
+                ),
+            },
             "species_routes": {
                 "cat": {
                     "profile": CAT_SUBJECT_PROFILE,
