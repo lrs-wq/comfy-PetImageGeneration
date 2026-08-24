@@ -899,6 +899,64 @@ class EatingScenePropMaskTests(unittest.TestCase):
         self.assertEqual(tuple(mask[430, 230]), (255, 0, 0))
         self.assertEqual(int(excluded[430, 230]), 255)
 
+    def test_off_center_dog_bowl_keeps_full_prop_and_reference_motion(
+        self,
+    ) -> None:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(reference)
+        draw.ellipse((150, 55, 420, 360), fill=(225, 210, 175, 255))
+        draw.ellipse((90, 200, 270, 395), fill=(220, 205, 175, 255))
+        draw.ellipse((245, 330, 310, 455), fill=(228, 218, 194, 255))
+        draw.ellipse((350, 300, 420, 455), fill=(228, 218, 194, 255))
+        # The natural warm muzzle touches a bowl placed at the extreme left of
+        # the complete dog bbox. There is no paw on the bowl's outer side, so a
+        # symmetric two-sided paw requirement would incorrectly reject it.
+        draw.ellipse((135, 350, 195, 378), fill=(140, 120, 115, 255))
+        draw.rounded_rectangle(
+            (90, 380, 237, 457),
+            radius=22,
+            fill=(205, 194, 173, 255),
+        )
+        draw.ellipse((103, 380, 225, 410), fill=(145, 80, 35, 255))
+
+        colored, exclusion, metadata = scail.make_eating_reference_identity_mask(
+            reference
+        )
+        mask = np.asarray(colored, dtype=np.uint8)
+        excluded = np.asarray(exclusion, dtype=np.uint8)
+
+        self.assertEqual(metadata["split_status"], "strict")
+        self.assertTrue(metadata["prop_near_left_edge"])
+        self.assertLess(
+            metadata["left_paw_identity_support"],
+            metadata["minimum_paw_identity_support"],
+        )
+        self.assertTrue(metadata["left_paw_identity_support_accepted"])
+        self.assertTrue(metadata["right_paw_identity_support_accepted"])
+        self.assertLessEqual(metadata["prop_exclusion_bbox"][0], 100)
+        self.assertGreaterEqual(metadata["prop_exclusion_bbox"][2], 235)
+        self.assertEqual(tuple(mask[365, 165]), (0, 0, 255))
+        self.assertEqual(tuple(mask[430, 120]), (255, 0, 0))
+        self.assertEqual(int(excluded[430, 120]), 255)
+        self.assertEqual(tuple(mask[410, 275]), (0, 0, 255))
+
+        _poses, _masks, motion_metadata = (
+            scail.make_eating_reference_aligned_pose_frames(
+                self._geometry_frames(static_contact_paw=True),
+                reference,
+                colored,
+                (512, 512),
+            )
+        )
+        self.assertEqual(
+            motion_metadata["policy"],
+            "reference_space_head_nod_food_overlap_v2",
+        )
+        self.assertGreaterEqual(
+            motion_metadata["low_phase_muzzle_food_overlap_depth_px"],
+            6,
+        )
+
     def test_static_dog_eating_pose_fallback_preserves_reference_geometry(
         self,
     ) -> None:

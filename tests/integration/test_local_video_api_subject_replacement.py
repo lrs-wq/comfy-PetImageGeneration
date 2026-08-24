@@ -576,6 +576,50 @@ class SubjectReplacementParsingTests(unittest.TestCase):
 
 
 class SubjectReplacementEffectiveConfigTests(unittest.TestCase):
+    def test_dog_eating_pose_policy_accepts_identity_safe_static_fallback(
+        self,
+    ) -> None:
+        for actual_policy in (
+            pipeline.DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,
+            pipeline.DOG_EATING_STATIC_POSE_FALLBACK_POLICY,
+        ):
+            pipeline.require_expected_scail_pose_policy(
+                {"pose_metadata": {"policy": actual_policy}},
+                "eating",
+                pipeline.DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,
+            )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "SCAIL eating pose policy changed before GPU submission",
+        ):
+            pipeline.require_expected_scail_pose_policy(
+                {
+                    "pose_metadata": {
+                        "policy": pipeline.FULL_DRIVER_EATING_POSE_POLICY,
+                    }
+                },
+                "eating",
+                pipeline.DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,
+            )
+
+    def test_cat_full_driver_policy_still_rejects_dog_static_fallback(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "SCAIL eating pose policy changed before GPU submission",
+        ):
+            pipeline.require_expected_scail_pose_policy(
+                {
+                    "pose_metadata": {
+                        "policy": pipeline.DOG_EATING_STATIC_POSE_FALLBACK_POLICY,
+                    }
+                },
+                "eating",
+                pipeline.FULL_DRIVER_EATING_POSE_POLICY,
+            )
+
     def test_default_upload_surface_baselines_satisfy_frozen_contract(
         self,
     ) -> None:

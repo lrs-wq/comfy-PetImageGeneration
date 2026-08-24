@@ -126,7 +126,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.7"
+API_VERSION = "2.26.8"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -2050,10 +2050,17 @@ def require_expected_scail_pose_policy(
         if isinstance(pose_metadata, dict)
         else ""
     )
-    if actual_policy != expected_policy:
+    accepted_policies = {expected_policy}
+    if (
+        action == "eating"
+        and expected_policy == DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY
+    ):
+        accepted_policies.add(DOG_EATING_STATIC_POSE_FALLBACK_POLICY)
+    if actual_policy not in accepted_policies:
         raise RuntimeError(
             f"SCAIL {action} pose policy changed before GPU submission: "
-            f"expected {expected_policy}, got {actual_policy or 'missing'}"
+            f"expected one of {sorted(accepted_policies)}, "
+            f"got {actual_policy or 'missing'}"
         )
 
 
@@ -2245,11 +2252,16 @@ def configure_uploaded_subject_validation(
             expected_surface_gate_actions.append(action)
 
         if action == "eating":
-            expected_pose_policies[action] = FULL_DRIVER_EATING_POSE_POLICY
+            expected_eating_pose_policy = (
+                DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY
+                if dog_profile
+                else FULL_DRIVER_EATING_POSE_POLICY
+            )
+            expected_pose_policies[action] = expected_eating_pose_policy
             fur_silhouette_gate = action_config.get("fur_silhouette_gate")
             if isinstance(fur_silhouette_gate, dict):
                 fur_silhouette_gate["required_pose_policy"] = (
-                    FULL_DRIVER_EATING_POSE_POLICY
+                    expected_eating_pose_policy
                 )
 
     frozen["prompt_profile"] = (

@@ -3139,8 +3139,8 @@ def _make_eating_reference_identity_mask_strict(
     # The full-subject bbox can be strongly biased by a long tail.  Keep the
     # search in the lower part of the reference, but leave enough horizontal
     # room for a bowl placed under an off-centre muzzle.
-    zone_x0 = left + int(round(subject_width * 0.20))
-    zone_x1 = left + int(round(subject_width * 0.95))
+    zone_x0 = left + int(round(subject_width * 0.02))
+    zone_x1 = left + int(round(subject_width * 0.98))
     zone_y0 = top + int(round(subject_height * 0.65))
     bowl_zone = (
         (column_indices >= zone_x0)
@@ -3497,7 +3497,17 @@ def _make_eating_reference_identity_mask_strict(
     )
     left_support = int(np.count_nonzero(identity & left_paw_zone))
     right_support = int(np.count_nonzero(identity & right_paw_zone))
-    if left_support < 500 or right_support < 500:
+    minimum_paw_support = 500
+    edge_margin = max(8, int(round(subject_width * 0.08)))
+    prop_near_left_edge = prop_x0 - left <= edge_margin
+    prop_near_right_edge = right - prop_x1 <= edge_margin
+    left_support_accepted = left_support >= minimum_paw_support or (
+        prop_near_left_edge and right_support >= minimum_paw_support
+    )
+    right_support_accepted = right_support >= minimum_paw_support or (
+        prop_near_right_edge and left_support >= minimum_paw_support
+    )
+    if not left_support_accepted or not right_support_accepted:
         raise ValueError(
             "eating_reference_prop_split_unreliable: "
             f"paw_support=({left_support},{right_support})"
@@ -3565,6 +3575,12 @@ def _make_eating_reference_identity_mask_strict(
         "prop_fraction": prop_fraction,
         "left_paw_identity_support": left_support,
         "right_paw_identity_support": right_support,
+        "minimum_paw_identity_support": minimum_paw_support,
+        "prop_edge_margin": edge_margin,
+        "prop_near_left_edge": prop_near_left_edge,
+        "prop_near_right_edge": prop_near_right_edge,
+        "left_paw_identity_support_accepted": left_support_accepted,
+        "right_paw_identity_support_accepted": right_support_accepted,
     }
     return colored_image, exclusion_image, metadata
 
