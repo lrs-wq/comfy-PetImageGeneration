@@ -243,6 +243,11 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             job_dir = output_root / job_id
             job_dir.mkdir()
             _write_transparent_identity(job_dir / "input.png")
+            _write_transparent_identity(job_dir / "input_identity_source.png")
+            profile_reference = output_root / "small-dog-profile-reference.png"
+            Image.new("RGBA", (96, 96), (245, 245, 245, 255)).save(
+                profile_reference
+            )
             jobs = {
                 job_id: _accepted_job(
                     job_id,
@@ -255,12 +260,13 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
                 "fps": 16,
                 "actions": {
                     "eating": {
+                        "reference": str(profile_reference),
                         "output_playback_rate": 0.5,
                         "output_playback_policy": (
                             "restore_original_eating_source_tempo_v1"
                         ),
                     },
-                    "standing": {},
+                    "standing": {"reference": str(profile_reference)},
                 },
             }
             job_queue: queue.Queue[str] = queue.Queue(maxsize=8)
@@ -300,6 +306,7 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             self.assertEqual(set(gif_outputs), {"eating", "standing"})
             for action, output in gif_outputs.items():
                 self.assertTrue(output["degraded"])
+                self.assertEqual(output["fallback_source_role"], "original_upload")
                 self.assert_gif_contract(
                     job_dir / str(output["filename"]),
                     expected_duration_ms=4000 if action == "eating" else 2000,
@@ -316,6 +323,12 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
                 final_job["result_anomalies"][-1]["code"],
                 "degraded_output_fallback",
             )
+            self.assertTrue(final_job["degraded_output_upload_identity_anchored"])
+            self.assertEqual(
+                final_job["degraded_output_fallback_source_roles"],
+                {"eating": "original_upload", "standing": "original_upload"},
+            )
+            self.assertIn("KeyError", final_job["error"])
 
     def test_running_job_is_recovered_after_service_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

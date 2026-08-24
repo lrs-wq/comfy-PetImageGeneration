@@ -1108,6 +1108,57 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             ]
         )
 
+    def test_static_eating_geometry_recovery_exposes_only_frozen_silhouette(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = root / "eating-reference.png"
+            source = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(source)
+            draw.ellipse((100, 70, 410, 440), fill=(250, 240, 225, 255))
+            draw.rectangle((170, 360, 350, 440), fill=(145, 82, 35, 255))
+            source.save(reference)
+            target = root / "eating-recovery-guide.png"
+            events: list[dict[str, object]] = []
+
+            with patch.object(
+                pipeline,
+                "append_recovery_event",
+                side_effect=lambda _job_id, event: events.append(event),
+            ):
+                metadata = (
+                    pipeline.prepare_static_eating_qwen_geometry_recovery_guide(
+                        "guide-recovery-job",
+                        {
+                            "geometry_reference": str(reference),
+                            "geometry_reference_sha256": pipeline.file_sha256(
+                                reference
+                            ),
+                            "uploaded_identity_driving": {
+                                "selected_frame_index": 40,
+                            },
+                        },
+                        target,
+                        ValueError("eating_prop_split_unreliable"),
+                    )
+                )
+
+            pixels = np.asarray(Image.open(target).convert("RGB"), dtype=np.uint8)
+            unique = {tuple(color) for color in pixels.reshape(-1, 3)}
+            self.assertEqual(unique, {(0, 255, 0), (144, 144, 144)})
+            self.assertEqual(
+                metadata["policy"],
+                "digest_bound_static_eating_geometry_recovery_v1",
+            )
+            self.assertTrue(metadata["temporal_geometry_recovery"])
+            self.assertFalse(metadata["driver_rgb_preserved"])
+            self.assertEqual(metadata["selected_frame_index"], 40)
+            self.assertEqual(
+                events[0]["result"],
+                "continued_with_digest_bound_static_geometry",
+            )
+
     def test_eating_qwen_geometry_guide_fails_closed_without_driver(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

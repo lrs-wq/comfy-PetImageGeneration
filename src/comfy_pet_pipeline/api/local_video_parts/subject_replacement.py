@@ -50,7 +50,7 @@ def resolve_transparent_output_phase_start_index(
     return selected_frame_index
 
 
-RECOVERABLE_OUTPUT_FALLBACK_POLICY = "identity_safe_breathing_gif_v1"
+RECOVERABLE_OUTPUT_FALLBACK_POLICY = "identity_anchored_breathing_gif_v2"
 
 
 def _recoverable_candidate_path(job_dir: Path, value: Any) -> Path | None:
@@ -68,6 +68,10 @@ def _recoverable_reference_candidates(
     index: int,
 ) -> list[tuple[Path, str]]:
     candidates: list[tuple[Path, str]] = [
+        # Terminal recovery for an uploaded subject must remain anchored to the
+        # submitted identity even when action/canonical generation failed early.
+        (job_dir / "input_identity_source.png", "original_upload"),
+        (job_dir / "input.png", "normalized_upload"),
         (
             job_dir / f"pose_{index:02d}_qwen_reference_semantic_final.png",
             "action_semantic_reference",
@@ -95,12 +99,6 @@ def _recoverable_reference_candidates(
                 selected = _recoverable_candidate_path(job_dir, action_config.get(field))
                 if selected is not None:
                     candidates.append((selected, role))
-    candidates.extend(
-        [
-            (job_dir / "input.png", "normalized_upload"),
-            (job_dir / "input_identity_source.png", "original_upload"),
-        ]
-    )
     unique: list[tuple[Path, str]] = []
     seen: set[str] = set()
     for path, role in candidates:
@@ -602,13 +600,29 @@ def recover_subject_replacement_job_with_fallback(
             "sources": recovery_sources,
         },
     )
+    fallback_source_roles = {
+        action: str(source.get("role") or "")
+        for action, source in recovery_sources.items()
+    }
+    upload_anchor_roles = {"original_upload", "normalized_upload"}
+    upload_identity_fallback = bool(fallback_source_roles) and all(
+        role in upload_anchor_roles for role in fallback_source_roles.values()
+    )
+    original_error = f"{type(error).__name__}: {str(error)[:1000]}"
+    public_error_summary = " ".join(original_error.split())[:320]
+    recovery_message = (
+        f"主生成链路发生异常（{public_error_summary}）。系统已使用原始上传图"
+        "生成身份锚定的降级循环 GIF；动作幅度可能受限，请按需重试高质量生成。"
+        if upload_identity_fallback
+        else (
+            f"主生成链路发生异常（{public_error_summary}）。系统已使用当前可用身份参考"
+            "生成降级循环 GIF；动作幅度或身份一致性可能受限，请按需重试。"
+        )
+    )
     record_nonblocking_job_anomaly(
         job_id,
         code="degraded_output_fallback",
-        message=(
-            "主生成链路发生异常，系统已返回身份保持的降级循环 GIF；"
-            "动作幅度可能受限，请按需重试高质量生成。"
-        ),
+        message=recovery_message,
         stage="completed_with_degraded_output",
         details={
             "policy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
@@ -616,6 +630,8 @@ def recover_subject_replacement_job_with_fallback(
             "error": str(error)[:1000],
             "actions": actions,
             "recovered_actions": recovered_actions,
+            "fallback_source_roles": fallback_source_roles,
+            "upload_identity_fallback": upload_identity_fallback,
         },
         expose_as_public_stage=True,
     )
@@ -638,6 +654,8 @@ def recover_subject_replacement_job_with_fallback(
         degraded_recovery=True,
         degraded_output_fallback=True,
         degraded_output_fallback_policy=RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+        degraded_output_fallback_source_roles=fallback_source_roles,
+        degraded_output_upload_identity_anchored=upload_identity_fallback,
         transparent_outputs_complete=True,
         original_generation_error=f"{type(error).__name__}: {str(error)[:4000]}",
         subject_replacement_results=[
@@ -1579,6 +1597,13 @@ def run_subject_replacement_job(job_id: str) -> None:
     reference_generation_chain = bool(job.get("reference_generation_completed"))
     progress_base = 38.0 if reference_generation_chain else 3.0
     progress_total = 59.0 if reference_generation_chain else 94.0
+    # Dog eating has the strictest prop and contact path.  Run independent dog
+    # actions first so a later eating failure cannot discard an already valid
+    # standing animation; terminal recovery will preserve that output and fill
+    # only the failed/missing action.
+    execution_actions = list(actions)
+    if str(job.get("species") or "").strip().lower() == "dog":
+        execution_actions.sort(key=lambda action: action == "eating")
 
     update_job(
         job_id,
@@ -1588,12 +1613,18 @@ def run_subject_replacement_job(job_id: str) -> None:
         started_at=job.get("started_at") or utc_now(),
         error=None,
         current_action=None,
+        subject_replacement_execution_order=execution_actions,
+        subject_replacement_failure_isolation_policy=(
+            "independent_dog_actions_before_strict_eating_v1"
+            if execution_actions != actions
+            else "requested_action_order_v1"
+        ),
     )
     wait_comfy_idle(timeout=21600, job_id=job_id)
     raise_if_cancelled(job_id)
     free_comfy_models()
 
-    for index, action in enumerate(actions, start=1):
+    for index, action in enumerate(execution_actions, start=1):
         raise_if_cancelled(job_id)
         action_config = effective_subject_config["actions"][action]
         action_timing = subject_replacement_action_output_timing(
@@ -2397,6 +2428,8 @@ def run_subject_replacement_job(job_id: str) -> None:
 
     raise_if_cancelled(job_id)
     free_comfy_models()
+    result_order = {action: index for index, action in enumerate(actions)}
+    results.sort(key=lambda result: result_order.get(str(result.get("action")), 999))
     update_job(
         job_id,
         status="completed",

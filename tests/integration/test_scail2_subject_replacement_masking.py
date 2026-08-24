@@ -13,6 +13,39 @@ import scail2_subject_replacement_test as scail
 
 
 class EatingScenePropMaskTests(unittest.TestCase):
+    def test_stationary_small_driver_bbox_jitter_is_accepted(self) -> None:
+        areas = np.full(81, 5100.0, dtype=np.float64)
+        centers = np.tile(np.asarray([[120.0, 394.5]]), (81, 1))
+        centers[28:33, 0] = (118.0, 118.0, 118.5, 119.0, 119.0)
+        centers[33:37] = (
+            (120.0, 396.5),
+            (120.0, 396.0),
+            (120.5, 394.5),
+            (119.5, 394.5),
+        )
+
+        stability = scail.evaluate_eating_prop_temporal_stability(areas, centers)
+
+        self.assertTrue(stability["accepted"])
+        self.assertFalse(stability["strict_step_passed"])
+        self.assertTrue(stability["bounded_stationary_jitter_passed"])
+        self.assertAlmostEqual(stability["center_step_max"], np.sqrt(5.0))
+        self.assertLessEqual(stability["center_x_span"], 3.0)
+        self.assertLessEqual(stability["center_y_span"], 3.0)
+
+    def test_moving_bowl_is_not_hidden_by_jitter_tolerance(self) -> None:
+        areas = np.full(20, 5100.0, dtype=np.float64)
+        centers = np.column_stack(
+            (np.arange(20, dtype=np.float64) * 2.0, np.full(20, 394.5))
+        )
+
+        stability = scail.evaluate_eating_prop_temporal_stability(areas, centers)
+
+        self.assertFalse(stability["accepted"])
+        self.assertFalse(stability["strict_step_passed"])
+        self.assertFalse(stability["bounded_stationary_jitter_passed"])
+        self.assertGreater(stability["center_x_span"], 3.0)
+
     @staticmethod
     def _normalized_frames() -> list[Image.Image]:
         frames: list[Image.Image] = []

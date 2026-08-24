@@ -126,7 +126,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.4"
+API_VERSION = "2.26.5"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -6310,6 +6310,11 @@ available_scail_run_id = _local_video_geometry_guides.available_scail_run_id
 
 prepare_eating_qwen_geometry_guide = (
     _local_video_geometry_guides.prepare_eating_qwen_geometry_guide
+)
+
+
+prepare_static_eating_qwen_geometry_recovery_guide = (
+    _local_video_uploaded_references.prepare_static_eating_qwen_geometry_recovery_guide
 )
 
 

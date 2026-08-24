@@ -536,6 +536,67 @@ def fill_internal_holes(mask: np.ndarray) -> np.ndarray:
     return (padded.astype(bool) | holes)[1:-1, 1:-1]
 
 
+def evaluate_eating_prop_temporal_stability(
+    areas: np.ndarray,
+    centers: np.ndarray,
+) -> dict[str, Any]:
+    """Accept tiny stationary bbox jitter without weakening moving-prop rejection."""
+    numeric_areas = np.asarray(areas, dtype=np.float64)
+    numeric_centers = np.asarray(centers, dtype=np.float64)
+    if (
+        numeric_areas.ndim != 1
+        or numeric_areas.size < 2
+        or numeric_centers.shape != (numeric_areas.size, 2)
+        or not np.all(np.isfinite(numeric_areas))
+        or not np.all(np.isfinite(numeric_centers))
+        or np.any(numeric_areas <= 0)
+    ):
+        raise ValueError("eating_prop_split_unreliable: invalid_temporal_metrics")
+
+    center_steps = np.linalg.norm(np.diff(numeric_centers, axis=0), axis=1)
+    area_cv = float(numeric_areas.std() / max(numeric_areas.mean(), 1.0))
+    center_step_max = float(center_steps.max())
+    center_step_p95 = float(np.percentile(center_steps, 95))
+    center_x_span = float(np.ptp(numeric_centers[:, 0]))
+    center_y_span = float(np.ptp(numeric_centers[:, 1]))
+
+    strict_step_passed = center_step_max <= 1.5
+    # A fixed bowl can gain or lose one or two boundary pixels as the muzzle
+    # occludes its rim.  The small-dog driver exhibits this rasterisation pattern:
+    # individual bbox steps reach sqrt(5) pixels, while the centre remains inside
+    # a 2.5 x 3 pixel box for the whole 81-frame cycle.  Accept that bounded,
+    # stationary jitter only; a drifting or genuinely moving prop still fails.
+    bounded_stationary_jitter_passed = bool(
+        center_step_max <= 2.5
+        and center_step_p95 <= 2.0
+        and center_x_span <= 3.0
+        and center_y_span <= 3.0
+    )
+    accepted = bool(
+        area_cv <= 0.05
+        and (strict_step_passed or bounded_stationary_jitter_passed)
+    )
+    return {
+        "policy": "strict_step_or_bounded_stationary_jitter_v1",
+        "accepted": accepted,
+        "area_cv": area_cv,
+        "center_step_max": center_step_max,
+        "center_step_p95": center_step_p95,
+        "center_x_span": center_x_span,
+        "center_y_span": center_y_span,
+        "strict_step_passed": strict_step_passed,
+        "bounded_stationary_jitter_passed": bounded_stationary_jitter_passed,
+        "thresholds": {
+            "area_cv_max": 0.05,
+            "strict_center_step_max": 1.5,
+            "bounded_jitter_center_step_max": 2.5,
+            "bounded_jitter_center_step_p95_max": 2.0,
+            "bounded_jitter_center_x_span_max": 3.0,
+            "bounded_jitter_center_y_span_max": 3.0,
+        },
+    }
+
+
 def make_eating_prop_exclusion_masks(
     normalized_frames: list[Image.Image],
 ) -> tuple[list[Image.Image], dict[str, Any]]:
@@ -769,17 +830,18 @@ def make_eating_prop_exclusion_masks(
             for box in boxes
         ]
     )
-    center_steps = (
-        np.linalg.norm(np.diff(centers, axis=0), axis=1)
-        if len(centers) > 1
-        else np.zeros(1)
-    )
-    area_cv = float(areas.std() / max(areas.mean(), 1.0))
-    center_step_max = float(center_steps.max())
-    if area_cv > 0.05 or center_step_max > 1.5:
+    temporal_stability = evaluate_eating_prop_temporal_stability(areas, centers)
+    area_cv = float(temporal_stability["area_cv"])
+    center_step_max = float(temporal_stability["center_step_max"])
+    if not temporal_stability["accepted"]:
         raise ValueError(
             "eating_prop_split_unreliable: "
-            f"area_cv={area_cv:.4f}, center_step_max={center_step_max:.3f}"
+            f"area_cv={area_cv:.4f}, center_step_max={center_step_max:.3f}, "
+            "center_step_p95="
+            f"{float(temporal_stability['center_step_p95']):.3f}, "
+            "center_span="
+            f"{float(temporal_stability['center_x_span']):.3f}x"
+            f"{float(temporal_stability['center_y_span']):.3f}"
         )
 
     foreground_areas = np.asarray(
@@ -816,6 +878,7 @@ def make_eating_prop_exclusion_masks(
         "prop_area_min": int(areas.min()),
         "prop_area_max": int(areas.max()),
         "prop_area_cv": area_cv,
+        "prop_temporal_stability": temporal_stability,
         "prop_fraction_min": float(prop_fractions.min()),
         "prop_fraction_max": float(prop_fractions.max()),
         "prop_center_x_minmax": [
@@ -827,6 +890,13 @@ def make_eating_prop_exclusion_masks(
             float(centers[:, 1].max()),
         ],
         "prop_center_step_max": center_step_max,
+        "prop_center_step_p95": float(temporal_stability["center_step_p95"]),
+        "prop_center_x_span": float(temporal_stability["center_x_span"]),
+        "prop_center_y_span": float(temporal_stability["center_y_span"]),
+        "prop_bounded_stationary_jitter_accepted": bool(
+            temporal_stability["bounded_stationary_jitter_passed"]
+            and not temporal_stability["strict_step_passed"]
+        ),
     }
     return (
         [

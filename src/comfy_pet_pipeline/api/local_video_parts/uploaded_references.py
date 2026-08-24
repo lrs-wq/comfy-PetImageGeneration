@@ -8,6 +8,91 @@ from __future__ import annotations
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
+def prepare_static_eating_qwen_geometry_recovery_guide(
+    job_id: str,
+    action_config: dict[str, Any],
+    target: Path,
+    error: BaseException,
+) -> dict[str, Any]:
+    """Recover a failed temporal guide from the frozen action-frame silhouette."""
+    _sync_local_video_runtime(
+        globals(),
+        {"prepare_static_eating_qwen_geometry_recovery_guide"},
+    )
+    geometry_reference = Path(str(action_config.get("geometry_reference") or ""))
+    expected_sha256 = str(
+        action_config.get("geometry_reference_sha256") or ""
+    ).strip().lower()
+    if (
+        not geometry_reference.is_file()
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+        or file_sha256(geometry_reference) != expected_sha256
+    ):
+        raise RuntimeError(
+            "Eating geometry recovery reference is missing or changed."
+        ) from error
+
+    with Image.open(geometry_reference) as loaded:
+        rgba = loaded.convert("RGBA")
+        rgba.load()
+    if rgba.size != (TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE):
+        raise RuntimeError(
+            "Eating geometry recovery reference must be normalized to 512x512."
+        ) from error
+    alpha = rgba.getchannel("A")
+    alpha_minimum, alpha_maximum = alpha.getextrema()
+    if alpha_minimum == 255 or alpha_maximum == 0:
+        raise RuntimeError(
+            "Eating geometry recovery reference lacks a usable alpha matte."
+        ) from error
+
+    # Preserve only the digest-bound action silhouette.  No RGB, luma, coat,
+    # material, or white-maquette texture reaches Qwen through this recovery.
+    hard_alpha = alpha.point(lambda value: 255 if value >= 16 else 0)
+    guide = Image.new("RGB", rgba.size, (0, 255, 0))
+    guide.paste(Image.new("RGB", rgba.size, (144, 144, 144)), mask=hard_alpha)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    guide.save(target, format="PNG", optimize=True)
+    guide_sha256 = file_sha256(target)
+    metadata = {
+        "policy": "digest_bound_static_eating_geometry_recovery_v1",
+        "method": "single_tone_frozen_action_frame_silhouette_v1",
+        "guide_sha256": guide_sha256,
+        "source": str(geometry_reference),
+        "source_sha256": expected_sha256,
+        "selected_frame_index": int(
+            action_config.get("uploaded_identity_driving", {}).get(
+                "selected_frame_index",
+                40,
+            )
+        ),
+        "temporal_geometry_recovery": True,
+        "driver_rgb_preserved": False,
+        "driver_luma_preserved": False,
+        "driver_chroma_preserved": False,
+        "driver_alpha_silhouette_preserved": True,
+        "appearance_authority": False,
+        "original_error": f"{type(error).__name__}: {str(error)[:1000]}",
+    }
+    metadata_path = target.with_name(target.stem + "_metadata.json")
+    write_json_atomic(metadata_path, metadata)
+    metadata["metadata_path"] = str(metadata_path)
+    append_recovery_event(
+        job_id,
+        {
+            "stage": "eating_qwen_geometry_guide_preparation",
+            "reason": metadata["original_error"],
+            "strategy": metadata["policy"],
+            "result": "continued_with_digest_bound_static_geometry",
+            "source": str(geometry_reference),
+            "source_sha256": expected_sha256,
+            "guide": str(target),
+            "guide_sha256": guide_sha256,
+        },
+    )
+    return metadata
+
+
 def prepare_uploaded_subject_qwen_references(
     job_id: str,
     actions: list[str],
@@ -232,24 +317,55 @@ def prepare_uploaded_subject_qwen_references(
         )
         pose_guide = comfy_input_dir / f"{action}_qwen_pose_guide.png"
         if action == "eating":
-            guide_metadata = prepare_eating_qwen_geometry_guide(
-                job_id,
-                source_reference,
-                pose_guide,
-                frames=int(effective_subject_config["frames"]),
-                fps=float(effective_subject_config["fps"]),
+            try:
+                guide_metadata = prepare_eating_qwen_geometry_guide(
+                    job_id,
+                    source_reference,
+                    pose_guide,
+                    frames=int(effective_subject_config["frames"]),
+                    fps=float(effective_subject_config["fps"]),
+                )
+            except JobCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 - isolated action-guide recovery
+                LOGGER.warning(
+                    "%s eating geometry guide failed; using frozen static recovery: %s",
+                    job_id,
+                    exc,
+                    exc_info=True,
+                )
+                guide_metadata = prepare_static_eating_qwen_geometry_recovery_guide(
+                    job_id,
+                    action_config,
+                    pose_guide,
+                    exc,
+                )
+            eating_geometry_recovered = bool(
+                guide_metadata.get("temporal_geometry_recovery")
             )
             pose_reference_policies[action] = (
-                "main_case_eating_driver_geometry_image2_guide_v6"
+                "digest_bound_static_eating_geometry_image2_recovery_v1"
+                if eating_geometry_recovered
+                else "main_case_eating_driver_geometry_image2_guide_v6"
             )
             pose_reference_guide_styles[action] = (
-                "texture_free_compressed_neutral_anatomy_with_explicit_"
-                "muzzle_overlap_and_semantic_food_on_pure_green"
+                "single_tone_digest_bound_action_silhouette_on_pure_green"
+                if eating_geometry_recovered
+                else (
+                    "texture_free_compressed_neutral_anatomy_with_explicit_"
+                    "muzzle_overlap_and_semantic_food_on_pure_green"
+                )
             )
             pose_reference_metadata[action] = {
-                "policy": "main_case_eating_driver_geometry_image2_guide_v6",
+                "policy": pose_reference_policies[action],
                 "generator_policy": guide_metadata.get("policy"),
                 "generator_method": guide_metadata.get("method"),
+                "temporal_geometry_recovery": eating_geometry_recovered,
+                "temporal_geometry_recovery_original_error": (
+                    guide_metadata.get("original_error")
+                    if eating_geometry_recovered
+                    else None
+                ),
                 "image_role": "image2_action_geometry_guide",
                 "identity_role": "image1_qwen_full_body_canonical",
                 "palette_audit_role": "qwen_full_body_canonical",
