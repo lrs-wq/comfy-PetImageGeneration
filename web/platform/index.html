@@ -846,6 +846,9 @@
 
     function applySubjectProfile(profile, backendConfirmed = true) {
       if (!profile?.id) throw new Error('所选主体配置不存在');
+      const selectedBeforeApply = new Set(
+        [...document.querySelectorAll('.action:checked')].map(input => input.value)
+      );
       const profileActions = new Map(
         (Array.isArray(profile.actions) ? profile.actions : [])
           .map(action => typeof action === 'string' ? [action, {id: action}] : [action?.id, action])
@@ -858,7 +861,7 @@
           && Boolean(action)
           && action.reference_ready !== false;
         input.disabled = !enabled;
-        input.checked = false;
+        input.checked = enabled && selectedBeforeApply.has(input.value);
         const card = input.closest('label');
         if (card) card.hidden = !enabled;
         if (enabled) {
@@ -871,7 +874,11 @@
           }
         }
       });
-      if (enabledActions.length) {
+      const hasSelectedEnabledAction = enabledActions.some(action => {
+        const input = document.querySelector(`.action[value="${action}"]`);
+        return Boolean(input?.checked);
+      });
+      if (enabledActions.length && !hasSelectedEnabledAction) {
         const defaultAction = enabledActions.includes('eating') ? 'eating' : enabledActions[0];
         const input = document.querySelector(`.action[value="${defaultAction}"]`);
         if (input) input.checked = true;
@@ -897,7 +904,7 @@
         ? (subjectsReady
           ? `主体配置 ${profile.id} 已加载。可用动作：${enabledActions.map(action => actionLabels[action] || action).join('、')}。${defaultDrivingStandardsSummary}`
           : `主体配置 ${profile.id} 没有已就绪的动作链路，暂时不能提交任务。${defaultDrivingStandardsSummary}`)
-        : `体型与动作已经可以选择，正在自动重试服务器主体配置；确认完成后即可生成。`;
+        : `体型与动作已经可以选择和提交，正在自动重试服务器主体配置；提交接口会执行最终资产校验。`;
       if (!$('image').files[0] && uiMode === 'replacement') {
         $('subjectSourceHint').textContent = replacementSubjectHint();
       }
@@ -964,7 +971,7 @@
         $('dogSizeProfile').disabled = false;
         const fallbackProfile = selectedFallbackSubjectProfile();
         applySubjectProfile(fallbackProfile, false);
-        $('defaultSubjectStatus').textContent = `${error.message}；体型和动作仍可选择，系统将在 ${SUBJECTS_RETRY_MS / 1000} 秒后自动重试。`;
+        $('defaultSubjectStatus').textContent = `${error.message}；体型和动作仍可选择和提交，系统将在 ${SUBJECTS_RETRY_MS / 1000} 秒后自动重试。`;
         scheduleSubjectProfileRetry();
       } finally {
         subjectsLoading = false;
@@ -1265,10 +1272,6 @@
     }
 
     async function submitReplacementJob() {
-      if (!subjectsReady || !$('subjectProfile').value) {
-        alert('默认身份或 Main_case 动作链路尚未准备完成，系统正在自动重试，无需刷新页面');
-        return;
-      }
       const actions = selectedActions();
       if (!actions.length) {
         alert('至少选择当前主体支持的一个动作');
@@ -1301,7 +1304,8 @@
       if (identityRight) form.append('image_right', identityRight);
       form.append('prompt', $('prompt').value.trim());
       form.append('generation_mode', 'subject_replacement');
-      form.append('subject_profile', $('subjectProfile').value);
+      const subjectProfileId = $('dogSizeProfile').value || $('subjectProfile').value;
+      if (subjectProfileId) form.append('subject_profile', subjectProfileId);
       form.append('actions', JSON.stringify(actions));
       form.append('output_format', $('format').value);
       form.append('seed', $('seed').value || '20260726');
