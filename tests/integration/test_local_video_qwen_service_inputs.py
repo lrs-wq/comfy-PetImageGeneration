@@ -1866,6 +1866,35 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             ),
         )
 
+    def test_exhausted_action_candidate_never_reuses_identity_drift(self) -> None:
+        safe = {"identity_palette": {"acceptable": True}}
+        drifted = {"identity_palette": {"acceptable": False}}
+
+        self.assertEqual(
+            pipeline.exhausted_action_candidate_recovery_policy(
+                safe,
+                action="standing",
+                approved_canonical_available=True,
+            ),
+            "identity_safe_generated_candidate",
+        )
+        self.assertEqual(
+            pipeline.exhausted_action_candidate_recovery_policy(
+                drifted,
+                action="standing",
+                approved_canonical_available=True,
+            ),
+            "upload_anchored_canonical",
+        )
+        self.assertEqual(
+            pipeline.exhausted_action_candidate_recovery_policy(
+                drifted,
+                action="eating",
+                approved_canonical_available=True,
+            ),
+            "reject",
+        )
+
     def test_eating_transparent_output_starts_at_validated_contact_phase(
         self,
     ) -> None:

@@ -124,6 +124,21 @@ def action_candidate_degraded_selection_key(
     )
 
 
+def exhausted_action_candidate_recovery_policy(
+    record: dict[str, Any],
+    *,
+    action: str,
+    approved_canonical_available: bool,
+) -> str:
+    """Choose a successful retry recovery without re-admitting identity drift."""
+    palette = record.get("identity_palette")
+    if isinstance(palette, dict) and palette.get("acceptable") is True:
+        return "identity_safe_generated_candidate"
+    if action == "standing" and approved_canonical_available:
+        return "upload_anchored_canonical"
+    return "reject"
+
+
 POSE_ATTEMPT_PROVENANCE_FIELDS = (
     "identity_input_policy",
     "image1_input_name",
@@ -6198,57 +6213,283 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 and advisory_action_candidate_gate_required
                 and best_action_candidate_degraded_attempt is not None
             ):
-                best_attempt = best_action_candidate_degraded_attempt
-                selected_candidate_gate = dict(
-                    best_attempt.get("action_candidate_gate") or {}
+                approved_canonical_available = bool(
+                    action_key(pose) == "standing"
+                    and cartoon_is_transparent
+                    and cartoon_output.is_file()
                 )
-                selected_candidate_gate.update(
-                    strict_acceptable=bool(
-                        selected_candidate_gate.get("acceptable") is True
-                    ),
-                    degraded_fallback_accepted=True,
-                    degraded_reason="candidate_attempt_budget_exhausted",
-                    degraded_selection_policy=(
-                        "identity_first_structural_action_generated_candidate_v2"
-                    ),
-                    degraded_selection_key=list(
-                        best_attempt["action_candidate_degraded_selection_key"]
-                    ),
-                    returns_original_upload=False,
-                    blocks_job=False,
+                exhausted_recovery = exhausted_action_candidate_recovery_policy(
+                    best_action_candidate_degraded_attempt,
+                    action=action_key(pose),
+                    approved_canonical_available=approved_canonical_available,
                 )
-                best_attempt["action_candidate_gate"] = selected_candidate_gate
-                best_attempt["candidate_gate_degraded_fallback"] = True
-                append_recovery_event(
-                    job_id,
-                    {
-                        "stage": "cartoon_keyframe",
-                        "pose_index": index,
-                        "attempt": best_attempt["attempt"],
-                        "reason": "action_candidate_gate_attempts_exhausted",
-                        "strategy": (
-                            "select_identity_first_structural_action_generated_candidate"
+                if exhausted_recovery == "identity_safe_generated_candidate":
+                    best_attempt = best_action_candidate_degraded_attempt
+                    selected_candidate_gate = dict(
+                        best_attempt.get("action_candidate_gate") or {}
+                    )
+                    selected_candidate_gate.update(
+                        strict_acceptable=bool(
+                            selected_candidate_gate.get("acceptable") is True
                         ),
-                        "profile": best_attempt["profile"],
-                        "result": "accepted_degraded_generated_candidate",
+                        degraded_fallback_accepted=True,
+                        degraded_reason="candidate_attempt_budget_exhausted",
+                        degraded_selection_policy=(
+                            "identity_safe_structural_action_generated_candidate_v3"
+                        ),
+                        degraded_selection_key=list(
+                            best_attempt[
+                                "action_candidate_degraded_selection_key"
+                            ]
+                        ),
+                        returns_original_upload=False,
+                        returns_approved_canonical=False,
+                        blocks_job=False,
+                    )
+                    best_attempt["action_candidate_gate"] = (
+                        selected_candidate_gate
+                    )
+                    best_attempt["candidate_gate_degraded_fallback"] = True
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_keyframe",
+                            "pose_index": index,
+                            "attempt": best_attempt["attempt"],
+                            "reason": "action_candidate_gate_attempts_exhausted",
+                            "strategy": (
+                                "select_identity_safe_structural_action_generated_"
+                                "candidate"
+                            ),
+                            "profile": best_attempt["profile"],
+                            "result": "accepted_degraded_generated_candidate",
+                            "action_candidate_gate": selected_candidate_gate,
+                            "identity_palette": best_attempt.get(
+                                "identity_palette"
+                            ),
+                            "quality": best_attempt.get("quality"),
+                            "similarity": best_attempt.get("similarity"),
+                        },
+                    )
+                    update_job(
+                        job_id,
+                        action_candidate_gate_policy=(
+                            GENERATION_ACTION_CANDIDATE_GATE_POLICY
+                        ),
+                        action_candidate_gate_status=(
+                            "identity_safe_degraded_candidate_selected"
+                        ),
+                        action_candidate_gate_action=action_key(pose),
+                        action_candidate_gate_attempt_budget=len(
+                            active_pose_profiles
+                        ),
+                        action_candidate_gate_selected_attempt=(
+                            best_attempt["attempt"]
+                        ),
+                        action_candidate_gate_degraded_fallback_used=True,
+                        action_candidate_gate_returns_original_upload=False,
+                        action_candidate_gate_returns_approved_canonical=False,
+                    )
+                elif exhausted_recovery == "upload_anchored_canonical":
+                    canonical_fallback = (
+                        job_dir
+                        / f"pose_{index:02d}_upload_anchored_canonical_fallback.png"
+                    )
+                    canonical_normalization = (
+                        normalize_qwen_action_reference_rgba(
+                            cartoon_output,
+                            canonical_fallback,
+                            action=action_key(pose),
+                        )
+                    )
+                    canonical_edge_quality = canonical_normalization[
+                        "transparent_edge_quality"
+                    ]
+                    canonical_quality = pose_cutout_quality(
+                        canonical_fallback,
+                        pose,
+                        require_eating_mouth_contact=False,
+                    )
+                    canonical_palette = evaluate_pose_identity_palette(
+                        canonical_fallback,
+                        primary_reference=pose_reference_identity_palette,
+                        upper_body_reference=(
+                            pose_reference_upper_body_identity_palette
+                        ),
+                        bottom_exclusion=pose_palette_bottom_exclusion,
+                        bowl_action=False,
+                    )
+                    canonical_palette_quality = canonical_palette["quality"]
+                    if (
+                        canonical_edge_quality.get("acceptable") is not True
+                        or canonical_quality.get("acceptable") is not True
+                        or canonical_palette_quality.get("acceptable") is not True
+                    ):
+                        raise RuntimeError(
+                            "Upload-anchored canonical standing fallback failed "
+                            "its alpha, subject, or identity-palette contract."
+                        )
+                    rejected_attempt = best_action_candidate_degraded_attempt
+                    selected_candidate_gate = dict(
+                        rejected_attempt.get("action_candidate_gate") or {}
+                    )
+                    selected_candidate_gate.update(
+                        strict_acceptable=False,
+                        degraded_fallback_accepted=True,
+                        degraded_reason=(
+                            "all_generated_candidates_failed_identity_palette"
+                        ),
+                        degraded_selection_policy=(
+                            "upload_anchored_canonical_standing_reference_v1"
+                        ),
+                        degraded_selection_key=list(
+                            rejected_attempt[
+                                "action_candidate_degraded_selection_key"
+                            ]
+                        ),
+                        returns_original_upload=False,
+                        returns_approved_canonical=True,
+                        action_geometry_deferred_to_scail=True,
+                        blocks_job=False,
+                    )
+                    canonical_chroma = {
+                        "size": canonical_normalization["output_size"],
+                        "foreground_fraction": round(
+                            float(canonical_normalization["foreground_pixels"])
+                            / float(
+                                canonical_normalization["source_size"][0]
+                                * canonical_normalization["source_size"][1]
+                            ),
+                            6,
+                        ),
+                        "corners": canonical_normalization[
+                            "output_alpha_corners"
+                        ],
+                        "soft_alpha": True,
+                        "acceptable": True,
+                        "issues": [],
+                        "method": (
+                            "approved_upload_anchored_canonical_transparent_"
+                            "reference"
+                        ),
+                        "normalized_after_qwen": True,
+                        "matte_policy": (
+                            "approved_canonical_alpha_preserving_normalization_v1"
+                        ),
+                        "normalization_policy": (
+                            QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+                        ),
+                        "final_reference_normalization": (
+                            canonical_normalization
+                        ),
+                        "final_reference_sha256": canonical_normalization[
+                            "output_sha256"
+                        ],
+                        "transparent_edge_quality": canonical_edge_quality,
+                    }
+                    canonical_similarity = {
+                        "available": True,
+                        "acceptable": True,
+                        "warning": False,
+                        "issues": [],
+                        "comparisons": [],
+                        "penalty": 0.0,
+                        "policy": (
+                            "approved_canonical_self_reuse_for_standing_"
+                            "identity_recovery_v1"
+                        ),
+                        "canonical_self_reference_reuse": True,
+                        "action_geometry_deferred_to_scail": True,
+                    }
+                    best_attempt = {
+                        **rejected_attempt,
+                        "attempt": len(active_pose_profiles) + 1,
+                        "profile": (
+                            "upload_anchored_canonical_standing_recovery"
+                        ),
+                        "keyframe": canonical_fallback.name,
+                        "cutout": canonical_fallback.name,
+                        "chroma": canonical_chroma,
+                        "quality": canonical_quality,
+                        "similarity": canonical_similarity,
+                        "identity_palette": canonical_palette_quality,
+                        "candidate_identity_palette": canonical_palette[
+                            "candidate"
+                        ],
+                        "candidate_upper_body_identity_palette": (
+                            canonical_palette["upper_body_candidate"]
+                        ),
+                        "fur_silhouette": None,
+                        "fur_surface_gate": None,
+                        "combined_penalty": round(
+                            float(canonical_quality.get("penalty", 0.0))
+                            + float(
+                                canonical_palette_quality.get("penalty", 0.0)
+                            )
+                            + float(canonical_edge_quality.get("penalty", 0.0)),
+                            6,
+                        ),
+                        "transparent": True,
+                        "background_removal_failed": False,
                         "action_candidate_gate": selected_candidate_gate,
-                        "identity_palette": best_attempt.get("identity_palette"),
-                        "quality": best_attempt.get("quality"),
-                        "similarity": best_attempt.get("similarity"),
-                    },
-                )
-                update_job(
-                    job_id,
-                    action_candidate_gate_policy=(
-                        GENERATION_ACTION_CANDIDATE_GATE_POLICY
-                    ),
-                    action_candidate_gate_status="degraded_candidate_selected",
-                    action_candidate_gate_action=action_key(pose),
-                    action_candidate_gate_attempt_budget=len(active_pose_profiles),
-                    action_candidate_gate_selected_attempt=best_attempt["attempt"],
-                    action_candidate_gate_degraded_fallback_used=True,
-                    action_candidate_gate_returns_original_upload=False,
-                )
+                        "candidate_gate_degraded_fallback": True,
+                        "canonical_identity_fallback": {
+                            "policy": (
+                                "upload_anchored_canonical_standing_reference_v1"
+                            ),
+                            "source": str(cartoon_output),
+                            "source_sha256": file_sha256(cartoon_output),
+                            "selected_path": str(canonical_fallback),
+                            "selected_sha256": file_sha256(canonical_fallback),
+                            "rejected_generated_attempt": rejected_attempt[
+                                "attempt"
+                            ],
+                            "rejected_identity_palette": rejected_attempt.get(
+                                "identity_palette"
+                            ),
+                            "action_geometry_deferred_to_scail": True,
+                        },
+                    }
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_keyframe",
+                            "pose_index": index,
+                            "attempt": best_attempt["attempt"],
+                            "reason": (
+                                "all_generated_candidates_failed_identity_palette"
+                            ),
+                            "strategy": (
+                                "reuse_upload_anchored_canonical_and_defer_"
+                                "standing_geometry_to_scail"
+                            ),
+                            "profile": best_attempt["profile"],
+                            "result": "accepted_identity_safe_canonical",
+                            "action_candidate_gate": selected_candidate_gate,
+                            "canonical_identity_fallback": best_attempt[
+                                "canonical_identity_fallback"
+                            ],
+                        },
+                    )
+                    update_job(
+                        job_id,
+                        action_candidate_gate_policy=(
+                            GENERATION_ACTION_CANDIDATE_GATE_POLICY
+                        ),
+                        action_candidate_gate_status=(
+                            "upload_anchored_canonical_selected"
+                        ),
+                        action_candidate_gate_action=action_key(pose),
+                        action_candidate_gate_attempt_budget=len(
+                            active_pose_profiles
+                        ),
+                        action_candidate_gate_selected_attempt=(
+                            best_attempt["attempt"]
+                        ),
+                        action_candidate_gate_degraded_fallback_used=True,
+                        action_candidate_gate_returns_original_upload=False,
+                        action_candidate_gate_returns_approved_canonical=True,
+                    )
             if (
                 best_attempt is None
                 and advisory_grooming_minimum_gate_required
@@ -6827,6 +7068,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     semantic_palette_quality,
                     semantic_fur_silhouette_quality,
                     semantic_fur_surface_quality,
+                    identity_palette_blocking=(
+                        advisory_action_candidate_gate_required
+                    ),
                 )
                 if semantic_rejection_reason is not None:
                     append_recovery_event(
@@ -7220,6 +7464,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "selected_quality": best_attempt["quality"],
                     "selected_similarity": best_attempt["similarity"],
                     "selected_identity_palette": best_attempt.get("identity_palette"),
+                    "selected_action_candidate_gate": best_attempt.get(
+                        "action_candidate_gate"
+                    ),
+                    "selected_canonical_identity_fallback": best_attempt.get(
+                        "canonical_identity_fallback"
+                    ),
                     "selected_fur_silhouette": best_attempt.get("fur_silhouette"),
                     "fur_surface_gate_policy": FUR_SURFACE_GATE_POLICY,
                     "fur_surface_gate_version": FUR_SURFACE_GATE_VERSION,

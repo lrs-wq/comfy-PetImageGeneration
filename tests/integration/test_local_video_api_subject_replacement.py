@@ -1929,6 +1929,16 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
             ),
             "semantic_chroma_invalid",
         )
+        self.assertEqual(
+            pipeline.semantic_recovery_gate_failure(
+                {"acceptable": True},
+                {"acceptable": True},
+                {"acceptable": True},
+                failed_visual,
+                identity_palette_blocking=True,
+            ),
+            "semantic_identity_palette_invalid",
+        )
 
     def test_pre_scail_revalidation_needs_alpha_and_digests_not_surface_scores(
         self,

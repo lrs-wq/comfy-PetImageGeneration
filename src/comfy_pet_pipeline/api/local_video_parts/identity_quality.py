@@ -3027,11 +3027,19 @@ def semantic_recovery_gate_failure(
     palette: dict[str, Any] | None,
     fur_silhouette: dict[str, Any] | None = None,
     fur_surface_gate: dict[str, Any] | None = None,
+    *,
+    identity_palette_blocking: bool = False,
 ) -> str | None:
     """Return a technical rejection, plus visual rejection only in strict mode."""
     _sync_local_video_runtime(globals(), {"semantic_recovery_gate_failure"})
     if not bool(chroma.get("acceptable")):
         return "semantic_chroma_invalid"
+    if (
+        identity_palette_blocking
+        and palette is not None
+        and not bool(palette.get("acceptable"))
+    ):
+        return "semantic_identity_palette_invalid"
     if not GENERATION_VISUAL_AUDITS_BLOCKING:
         return None
     if not bool(quality.get("acceptable")):

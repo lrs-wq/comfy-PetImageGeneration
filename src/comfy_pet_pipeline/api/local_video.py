@@ -126,7 +126,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.5"
+API_VERSION = "2.26.6"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -203,7 +203,7 @@ GENERATION_ACTION_CANDIDATE_GATES_ENABLED = os.environ.get(
     "disabled",
 }
 GENERATION_ACTION_CANDIDATE_GATE_POLICY = (
-    "retry_strict_candidates_then_identity_first_generated_fallback_v1"
+    "retry_strict_candidates_then_upload_anchored_canonical_fallback_v2"
 )
 FUR_SURFACE_GATE_MAX_REJECTIONS = 3
 FUR_SURFACE_GATE_RETRY_POLICY = "preserve_configured_eating_bowl_surface_recovery_v1"
@@ -6621,6 +6621,9 @@ resolve_action_identity_palette_reference = (
 
 action_candidate_degraded_selection_key = (
     _local_video_job_runner.action_candidate_degraded_selection_key
+)
+exhausted_action_candidate_recovery_policy = (
+    _local_video_job_runner.exhausted_action_candidate_recovery_policy
 )
 run_job = _local_video_job_runner.run_job
 
