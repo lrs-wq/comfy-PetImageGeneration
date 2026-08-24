@@ -176,7 +176,7 @@ class GenerationPlatformProxyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("未上传图片时的 Main_case 标准主体", html)
         self.assertIn("同时决定主体、毛发、动作和道具", html)
-        self.assertIn("eating 使用 Main_case/eat.mp4", html)
+        self.assertIn("Main_case/eat.mp4", html)
         self.assertIn("grooming 使用 Main_case/TM.mp4", html)
         self.assertIn("上传图是身份来源", html)
         self.assertIn("standard_direct_reference", html)
@@ -197,14 +197,28 @@ class GenerationPlatformProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("record.source_sha256", html)
         self.assertIn("digest.slice(0, 8)", html)
         self.assertIn("主体与动作标准 ${revision}", html)
-        self.assertIn("actionSummary('eating', '吃饭')", html)
-        self.assertIn("actionSummary('grooming', '舔毛')", html)
+        self.assertIn("profileActionIds.map(action => actionSummary", html)
         self.assertIn("defaultDrivingStandardsSummary = drivingStandardsSummary(profile)", html)
         self.assertIn("$('defaultSubject').hidden = true", html)
         self.assertIn(
             "$('defaultSubject').hidden = uiMode === 'image'",
             html,
         )
+
+    def test_create_page_selects_medium_or_small_dog_test_profile(self) -> None:
+        html = platform.HOST_PAGE.read_text(encoding="utf-8")
+
+        self.assertIn('id="dogSizeProfile"', html)
+        self.assertIn("dog_medium_white_model_test_v1", html)
+        self.assertIn("dog_small_white_model_test_v1", html)
+        self.assertIn(">中型犬<", html)
+        self.assertIn(">小型犬<", html)
+        self.assertIn('value="standing"', html)
+        self.assertIn("standing: '站立'", html)
+        self.assertIn("function applySubjectProfile(profile)", html)
+        self.assertIn("const requestedProfileId = $('dogSizeProfile').value", html)
+        self.assertIn("form.append('subject_profile', $('subjectProfile').value)", html)
+        self.assertIn("本次将严格按该体型白膜生成", html)
 
 
 if __name__ == "__main__":

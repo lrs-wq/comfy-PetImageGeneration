@@ -333,6 +333,60 @@ def aggregate_identity_palette_signatures(
             6,
         )
 
+    marking_by_role = {
+        role: signature.get("marking_spatial_signature")
+        for role, signature in signatures.items()
+        if isinstance(signature.get("marking_spatial_signature"), dict)
+        and signature["marking_spatial_signature"].get("available") is True
+    }
+    if marking_by_role:
+        marking_spatial_signature = {
+            "available": True,
+            "policy": IDENTITY_MARKING_SPATIAL_POLICY,
+            "aggregation": "source_view_conservative_max_v1",
+            "source_view_roles": list(marking_by_role),
+            "stripe_component_count": max(
+                int(value.get("stripe_component_count", 0))
+                for value in marking_by_role.values()
+            ),
+            "stripe_area_fraction": round(
+                max(
+                    float(value.get("stripe_area_fraction", 0.0))
+                    for value in marking_by_role.values()
+                ),
+                6,
+            ),
+            "dark_contrast_fraction": round(
+                max(
+                    float(value.get("dark_contrast_fraction", 0.0))
+                    for value in marking_by_role.values()
+                ),
+                6,
+            ),
+            "per_view": {
+                role: {
+                    "stripe_component_count": int(
+                        value.get("stripe_component_count", 0)
+                    ),
+                    "stripe_area_fraction": round(
+                        float(value.get("stripe_area_fraction", 0.0)),
+                        6,
+                    ),
+                    "dark_contrast_fraction": round(
+                        float(value.get("dark_contrast_fraction", 0.0)),
+                        6,
+                    ),
+                }
+                for role, value in marking_by_role.items()
+            },
+        }
+    else:
+        marking_spatial_signature = {
+            "available": False,
+            "policy": IDENTITY_MARKING_SPATIAL_POLICY,
+            "reason": "source_view_marking_topology_unavailable",
+        }
+
     return {
         "available": True,
         "mask_method": "multi_view_equal_weight_consensus",
@@ -367,6 +421,7 @@ def aggregate_identity_palette_signatures(
             )
             for signature in signatures.values()
         ),
+        "marking_spatial_signature": marking_spatial_signature,
     }
 
 
@@ -397,6 +452,8 @@ def canonical_upper_body_palette_reference(
 
 def compose_uploaded_identity_view_audit(
     upload_integrity: dict[str, Any],
+    *,
+    species: str = "cat",
 ) -> dict[str, Any]:
     """Combine optional view-set checks with required front-view validation."""
     _sync_local_video_runtime(globals(), {"compose_uploaded_identity_view_audit"})
@@ -405,7 +462,8 @@ def compose_uploaded_identity_view_audit(
     if not isinstance(views, dict) or not isinstance(views.get("front"), dict):
         raise RuntimeError("Uploaded identity front view integrity is invalid.")
     front_view_audit = audit_uploaded_front_identity_view(
-        Path(views["front"]["input_path"])
+        Path(views["front"]["input_path"]),
+        species=species,
     )
     audit = audit_uploaded_identity_view_set(upload_integrity)
     detected_structural_issues = list(audit.get("issues") or [])
@@ -509,7 +567,7 @@ def compose_uploaded_identity_view_audit(
             "exact_duplicate_pairs": exact_duplicate_pairs,
             "near_duplicate_pairs": near_duplicate_pairs,
             "front_view_audit": front_view_audit,
-            "front_view_audit_required": True,
+            "front_view_audit_required": str(species).strip().lower() == "cat",
             "front_view_audit_blocking": front_blocking,
         }
     )

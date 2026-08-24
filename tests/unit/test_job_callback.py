@@ -117,6 +117,38 @@ class JobCallbackPayloadTests(unittest.TestCase):
             },
         )
 
+    def test_dog_callback_maps_standing_to_legacy_grooming_field(self):
+        payload = build_callback_payload(
+            {
+                "job_id": "dog-task",
+                "species": "dog",
+                "status": "completed",
+                "stage": "completed",
+                "outputs": [
+                    {
+                        "type": "transparent_gif",
+                        "action": "eating",
+                        "filename": "eating.gif",
+                    },
+                    {
+                        "type": "transparent_gif",
+                        "action": "standing",
+                        "filename": "standing.gif",
+                    },
+                ],
+            },
+            "http://39.106.120.253:8051",
+        )
+
+        self.assertEqual(
+            payload["gifs"],
+            {
+                "eating": "http://39.106.120.253:8051/file/dog-task/eating.gif",
+                "standing": "http://39.106.120.253:8051/file/dog-task/standing.gif",
+                "grooming": "http://39.106.120.253:8051/file/dog-task/standing.gif",
+            },
+        )
+
 
 class JobCallbackReporterTests(unittest.TestCase):
     def make_reporter(self, root, post, retry_delays=(0.01,)):

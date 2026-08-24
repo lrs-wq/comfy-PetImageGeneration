@@ -8,6 +8,85 @@ from __future__ import annotations
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
+def qwen_action_edge_clearance_quality(
+    path: Path,
+    *,
+    minimum_clearance_fraction: float = 0.01,
+) -> dict[str, Any]:
+    """Reject mattes whose visible subject reaches a canvas edge.
+
+    Action references are normalized only after this check.  A floor reflection
+    that runs to the bottom edge can otherwise be scaled into apparently healthy
+    padding and then become part of the SCAIL identity reference.  Treating the
+    pre-normalization alpha boundary as an integrity contract catches that case
+    without using a semantic visual-content audit.
+    """
+    _sync_local_video_runtime(globals(), {"qwen_action_edge_clearance_quality"})
+    rgba = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if rgba is None or rgba.ndim != 3 or rgba.shape[2] < 4:
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["action_matte_alpha_unavailable"],
+            "path": str(path),
+        }
+    alpha = rgba[:, :, 3]
+    foreground = alpha >= 64
+    ys, xs = np.nonzero(foreground)
+    if not xs.size:
+        return {
+            "available": True,
+            "acceptable": False,
+            "issues": ["action_matte_has_no_foreground"],
+            "path": str(path),
+        }
+    height, width = foreground.shape
+    bbox = [
+        int(xs.min()),
+        int(ys.min()),
+        int(xs.max()) + 1,
+        int(ys.max()) + 1,
+    ]
+    clearance_pixels = {
+        "left": bbox[0],
+        "top": bbox[1],
+        "right": width - bbox[2],
+        "bottom": height - bbox[3],
+    }
+    clearance_fractions = {
+        "left": clearance_pixels["left"] / float(width),
+        "top": clearance_pixels["top"] / float(height),
+        "right": clearance_pixels["right"] / float(width),
+        "bottom": clearance_pixels["bottom"] / float(height),
+    }
+    failing_edges = sorted(
+        edge
+        for edge, fraction in clearance_fractions.items()
+        if fraction < float(minimum_clearance_fraction)
+    )
+    issues = (
+        ["action_matte_foreground_touches_canvas_edge"]
+        if failing_edges
+        else []
+    )
+    return {
+        "available": True,
+        "acceptable": not issues,
+        "issues": issues,
+        "path": str(path),
+        "canvas": [width, height],
+        "foreground_bbox": bbox,
+        "clearance_pixels": clearance_pixels,
+        "clearance_fractions": {
+            edge: round(value, 6)
+            for edge, value in clearance_fractions.items()
+        },
+        "minimum_clearance_fraction": float(minimum_clearance_fraction),
+        "failing_edges": failing_edges,
+        "policy": "pre_normalization_action_matte_edge_clearance_v1",
+    }
+
+
 def finalize_qwen_action_reference_candidate(
     metrics: dict[str, Any],
     cutout: Path,
@@ -87,6 +166,44 @@ def normalize_qwen_action_candidate(
             "method": "chroma_key_exception",
         }
     if direct_metrics.get("acceptable"):
+        edge_clearance = qwen_action_edge_clearance_quality(
+            direct_cutout_target,
+        )
+        direct_metrics["edge_clearance"] = edge_clearance
+        if not edge_clearance["acceptable"]:
+            direct_cutout_target.unlink(missing_ok=True)
+            direct_metrics = {
+                **direct_metrics,
+                "acceptable": False,
+                "issues": list(
+                    dict.fromkeys(
+                        [
+                            *[
+                                str(issue)
+                                for issue in direct_metrics.get("issues", [])
+                            ],
+                            *[
+                                str(issue)
+                                for issue in edge_clearance.get("issues", [])
+                            ],
+                        ]
+                    )
+                ),
+            }
+            return (
+                {
+                    **direct_metrics,
+                    "direct_chroma": direct_metrics,
+                    "semantic_recovery_attempted": False,
+                    "semantic_recovery_acceptable": None,
+                    "normalized_after_qwen": False,
+                    "matte_policy": QWEN_ACTION_CANDIDATE_MATTE_POLICY,
+                    "normalization_policy": (
+                        QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+                    ),
+                },
+                direct_cutout_target,
+            )
         final_metrics, final_cutout = finalize_qwen_action_reference_candidate(
             direct_metrics,
             direct_cutout_target,
@@ -136,6 +253,42 @@ def normalize_qwen_action_candidate(
                 "normalization_policy": QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY,
             },
             direct_cutout_target,
+        )
+    semantic_edge_clearance = qwen_action_edge_clearance_quality(
+        semantic_cutout_target,
+    )
+    semantic_metrics["edge_clearance"] = semantic_edge_clearance
+    if not semantic_edge_clearance["acceptable"]:
+        semantic_cutout_target.unlink(missing_ok=True)
+        return (
+            {
+                **semantic_metrics,
+                "acceptable": False,
+                "issues": list(
+                    dict.fromkeys(
+                        [
+                            *[
+                                str(issue)
+                                for issue in semantic_metrics.get("issues", [])
+                            ],
+                            *[
+                                str(issue)
+                                for issue in semantic_edge_clearance.get(
+                                    "issues",
+                                    [],
+                                )
+                            ],
+                        ]
+                    )
+                ),
+                "direct_chroma": direct_metrics,
+                "semantic_recovery_attempted": True,
+                "semantic_recovery_acceptable": False,
+                "normalized_after_qwen": False,
+                "matte_policy": QWEN_ACTION_CANDIDATE_MATTE_POLICY,
+                "normalization_policy": QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY,
+            },
+            semantic_cutout_target,
         )
     final_metrics, final_cutout = finalize_qwen_action_reference_candidate(
         semantic_metrics,

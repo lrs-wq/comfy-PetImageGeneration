@@ -33,7 +33,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 PROJECT_ROOT = Path(
     os.environ.get(
         "PET_PIPELINE_PROJECT_ROOT",

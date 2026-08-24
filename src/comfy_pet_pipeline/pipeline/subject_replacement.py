@@ -70,7 +70,10 @@ EATING_MUZZLE_FOOD_OVERLAP_MIN_PX = 6
 EATING_MUZZLE_FOOD_OVERLAP_MAX_PX = 10
 EATING_FULL_POSE_OVERALL_CHANGE_RATIO_MIN = 0.02
 EATING_FULL_POSE_LOWER_HALF_CHANGE_RATIO_MIN = 0.01
-EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN = 0.012
+# The digest-bound dog loop keeps its paws planted while the head completes a
+# down-up-down eating cycle. Its audited lower-quarter XOR is 0.011581, so a
+# 1.1% floor preserves the anti-static gate without rejecting that motion.
+EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN = 0.011
 GROOMING_TEMPORAL_LOOP_POLICY = (
     "grooming_second_half_ping_pong_closed_loop_v1"
 )
@@ -181,6 +184,79 @@ EATING_NEGATIVE_PROMPT = (
     "green background, floor, shadow, gradient, texture, text, watermark"
 )
 
+DOG_EATING_PROMPT = (
+    "A complete full-body restrained stylized 3D dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve the exact "
+    "breed traits, apparent age, skull width, forehead slope, cheek width, exact "
+    "muzzle length, width and taper, eye size, color and spacing, "
+    "ear shape and carriage, nose, coat colors, localized markings, natural coat "
+    "length and volume, body proportions, paws, and complete tail. Use the "
+    "neutral-white dog anatomy driver only for eating motion timing, joint "
+    "trajectories, the fixed shallow kibble bowl, camera and framing. Never copy "
+    "the driver's white coat, face, eyes, proportions, smooth material, or lighting. "
+    "Follow the supplied eating sequence precisely: lower the dog's muzzle naturally "
+    "into exactly one fixed shallow bowl and raise it again. The bowl contains only a "
+    "small, low, level layer of ordinary brown dry kibble fully below the rim. Never "
+    "form a heap, mound, cone, pyramid, fused mass, oversized pile, overflow, or food "
+    "outside the bowl. The bowl, rim, low food surface and every kibble position remain "
+    "fixed and unchanged in every frame; only the muzzle may naturally occlude them. "
+    "Keep all four legs anatomically attached and stable. Keep identity, coat markings, "
+    "scale, camera and background temporally stable with the complete dog uncropped. "
+    "Preserve an adult as an adult: never shorten or round the muzzle, enlarge the "
+    "head or eyes, or add a puppy-like panting smile. The entire background remains "
+    "perfectly uniform pure #00FF00 chroma-key green in every frame, with no floor, "
+    "horizon, shadow, reflection, gradient, texture, flicker, or green spill on fur."
+)
+
+DOG_STANDING_PROMPT = (
+    "A complete full-body restrained stylized 3D dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve the exact "
+    "breed traits, apparent age, face, muzzle, eyes, ears, nose, coat colors and "
+    "markings, natural coat length and volume, body proportions, paws, and complete "
+    "tail. Use the neutral-white dog anatomy driver only for the standing action's "
+    "joint trajectories, driver-defined seated-or-upright idle geometry, gentle tail "
+    "motion, relaxed panting mouth motion, camera, scale and framing. The standing "
+    "idle has a visibly open natural mouth with a readable dark mouth cavity and "
+    "an anatomically attached pink tongue. Follow the driver so the tongue gently "
+    "extends, retracts and softly bobs in a periodic cycle; never freeze it, paste "
+    "it onto the muzzle, or show it passing through closed lips. Never copy the "
+    "driver's white coat, face, eyes, body "
+    "proportions, material, or lighting. Keep one complete unclothed dog, stable "
+    "identity, coherent anatomy and a static camera. No prop, collar, harness, "
+    "clothing, floor, shadow, text, logo, or extra subject. Preserve the exact muzzle "
+    "length, head-to-body ratio, eye size and apparent age while allowing only this "
+    "action-required open-mouth panting motion; never make an adult look like a puppy. "
+    "The entire background remains "
+    "perfectly uniform pure #00FF00 chroma-key green in every frame, with no floor, "
+    "horizon, shadow, reflection, gradient, texture, flicker, or green spill on fur."
+)
+
+DOG_NEGATIVE_PROMPT = (
+    "cat, feline, kitten, different dog, different breed, generic dog, copied "
+    "white-model identity, white-model face, white-model coat, changed face, changed "
+    "muzzle, shortened muzzle, shortened snout, rounded baby face, puppy when source "
+    "is adult, younger dog, enlarged head, oversized eyes, enlarged irises, panting "
+    "smile, tongue out, changed ears, changed eye color, changed coat color, changed markings, "
+    "changed coat length, changed body proportions, extra limb, missing limb, "
+    "duplicated limb, detached paw, fused legs, kibble heap, kibble mound, food cone, "
+    "food pyramid, oversized kibble, overfilled bowl, overflowing food, fused food "
+    "mass, food outside bowl, moving food, changing food surface, growing food, "
+    "shrinking food, disappearing food, extra tail, duplicate subject, "
+    "collar, harness, clothing, accessory, camera movement, zoom, scene cut, flicker, "
+    "white background, gray background, black background, non-green background, floor, "
+    "floor line, horizon, shadow, reflection, background gradient, background texture, "
+    "green bounce light, green color spill, green rim light, cyan rim light, text, logo, watermark"
+)
+DOG_EATING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT
+DOG_STANDING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT.replace(
+    "panting smile, tongue out, ",
+    "",
+) + (
+    ", closed lips around visible tongue, tongue through closed mouth, no mouth cavity, "
+    "static tongue, frozen tongue, pasted tongue, detached tongue, rigid tongue, "
+    "melting tongue, disappearing tongue"
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -198,9 +274,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--action",
-        choices=("grooming", "eating"),
+        choices=("grooming", "eating", "standing"),
         default="grooming",
     )
+    parser.add_argument("--species", choices=("cat", "dog"), default="cat")
     parser.add_argument("--prompt")
     parser.add_argument("--negative-prompt")
     parser.add_argument(
@@ -247,13 +324,27 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     if args.prompt is None:
-        args.prompt = EATING_PROMPT if args.action == "eating" else DEFAULT_PROMPT
+        if args.species == "dog":
+            args.prompt = (
+                DOG_EATING_PROMPT
+                if args.action == "eating"
+                else DOG_STANDING_PROMPT
+            )
+        else:
+            args.prompt = EATING_PROMPT if args.action == "eating" else DEFAULT_PROMPT
     if args.negative_prompt is None:
-        args.negative_prompt = (
-            EATING_NEGATIVE_PROMPT
-            if args.action == "eating"
-            else DEFAULT_NEGATIVE_PROMPT
-        )
+        if args.species == "dog":
+            args.negative_prompt = (
+                DOG_EATING_NEGATIVE_PROMPT
+                if args.action == "eating"
+                else DOG_STANDING_NEGATIVE_PROMPT
+            )
+        else:
+            args.negative_prompt = (
+                EATING_NEGATIVE_PROMPT
+                if args.action == "eating"
+                else DEFAULT_NEGATIVE_PROMPT
+            )
     if args.prompt_suffix and args.prompt_suffix.strip():
         args.prompt += (
             "\n\nAdditional user constraint. This may refine mood or secondary "
@@ -4383,6 +4474,14 @@ def build_unstabilized_transparent_gif(
     start_frame_index: int = 0,
 ) -> dict[str, Any]:
     """Extract one matte and publish clean GIF plus optional soft-alpha APNG."""
+    if source_fps <= 0 or gif_fps < 1 or gif_frames < 1:
+        raise ValueError(
+            "Transparent output timing requires positive FPS and frame counts"
+        )
+    if 100 % gif_fps != 0:
+        raise ValueError(
+            "Transparent GIF FPS must map exactly to GIF centisecond delays"
+        )
     frames_root = gif_target.parent / f".{gif_target.stem}.{uuid.uuid4().hex}.frames"
     binary_dir = frames_root / "gif"
     soft_dir = frames_root / "soft"
@@ -5053,6 +5152,10 @@ def build_unstabilized_transparent_gif(
                 size=output_size,
                 frame_count=len(source_frames),
             )
+            white_mp4_validation.update(
+                fps=source_fps,
+                duration_seconds=len(source_frames) / source_fps,
+            )
             white_mp4_target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(white_temporary, white_mp4_target)
         return {
@@ -5142,6 +5245,13 @@ def build_unstabilized_transparent_gif(
                 "rotated": bool(phase_start_index),
             },
             "temporal_cycle": temporal_cycle,
+            "output_playback": {
+                "policy": "post_generation_pts_only_playback_rate_v1",
+                "video_fps": source_fps,
+                "gif_fps": gif_fps,
+                "gif_frames": gif_frames,
+                "gif_duration_seconds": gif_frames / float(gif_fps),
+            },
             "sampled_source_indices": sampled_indices,
             "sampled_original_source_indices": sampled_original_source_indices,
             "foreground_fraction_min": min(foreground_fractions),
@@ -5492,6 +5602,14 @@ def gpu_snapshot() -> dict[str, Any]:
 
 def main() -> int:
     args = parse_args()
+    supported_actions = {
+        "cat": {"eating", "grooming"},
+        "dog": {"eating", "standing"},
+    }
+    if args.action not in supported_actions[args.species]:
+        raise ValueError(
+            f"{args.species} does not support the {args.action} action"
+        )
     if args.width % 32 or args.height % 32:
         raise ValueError("SCAIL width and height must be multiples of 32")
     if args.frames < 1 or (args.frames - 1) % 4:
@@ -5608,7 +5726,7 @@ def main() -> int:
         args.reference,
         (args.width, args.height),
         separate_eating_prop=args.action == "eating",
-        contain_fraction=0.88 if args.action == "grooming" else 0.84,
+        contain_fraction=0.88 if args.action in {"grooming", "standing"} else 0.84,
     )
     if args.action == "eating":
         pose_frames, pose_masks, pose_metadata = (
@@ -5663,6 +5781,7 @@ def main() -> int:
         "steps": args.steps,
         "seed": args.seed,
         "action": args.action,
+        "species": args.species,
         "prompt": args.prompt,
         "negative_prompt": args.negative_prompt,
         "pose_strength": args.pose_strength,

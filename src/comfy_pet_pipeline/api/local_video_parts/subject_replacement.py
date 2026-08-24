@@ -50,6 +50,615 @@ def resolve_transparent_output_phase_start_index(
     return selected_frame_index
 
 
+RECOVERABLE_OUTPUT_FALLBACK_POLICY = "identity_safe_breathing_gif_v1"
+
+
+def _recoverable_candidate_path(job_dir: Path, value: Any) -> Path | None:
+    selected = str(value or "").strip()
+    if not selected:
+        return None
+    path = Path(selected)
+    return path if path.is_absolute() else job_dir / path
+
+
+def _recoverable_reference_candidates(
+    job_dir: Path,
+    job: dict[str, Any],
+    action: str,
+    index: int,
+) -> list[tuple[Path, str]]:
+    candidates: list[tuple[Path, str]] = [
+        (
+            job_dir / f"pose_{index:02d}_qwen_reference_semantic_final.png",
+            "action_semantic_reference",
+        ),
+        (job_dir / f"pose_{index:02d}_qwen_cutout.png", "action_qwen_cutout"),
+        (
+            job_dir / f"pose_{index:02d}_keyframe_transparent.png",
+            "action_transparent_keyframe",
+        ),
+        (job_dir / "cartoon_reference_transparent.png", "canonical_transparent"),
+    ]
+    reference_paths = job.get("subject_reference_paths")
+    if isinstance(reference_paths, dict):
+        selected = _recoverable_candidate_path(job_dir, reference_paths.get(action))
+        if selected is not None:
+            candidates.append((selected, "persisted_action_reference"))
+    effective = job.get("effective_subject_config")
+    if isinstance(effective, dict):
+        action_config = effective.get("actions", {}).get(action)
+        if isinstance(action_config, dict):
+            for field, role in (
+                ("reference", "effective_action_reference"),
+                ("geometry_reference", "effective_geometry_reference"),
+            ):
+                selected = _recoverable_candidate_path(job_dir, action_config.get(field))
+                if selected is not None:
+                    candidates.append((selected, role))
+    candidates.extend(
+        [
+            (job_dir / "input.png", "normalized_upload"),
+            (job_dir / "input_identity_source.png", "original_upload"),
+        ]
+    )
+    unique: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for path, role in candidates:
+        key = str(path)
+        if key not in seen:
+            unique.append((path, role))
+            seen.add(key)
+    return unique
+
+
+def _load_recoverable_reference(
+    candidates: list[tuple[Path, str]],
+) -> tuple[Path, str, Image.Image]:
+    failures: list[str] = []
+    for path, role in candidates:
+        if not path.is_file():
+            continue
+        try:
+            with Image.open(path) as loaded:
+                rgba = loaded.convert("RGBA")
+                rgba.load()
+            if rgba.width < 2 or rgba.height < 2:
+                failures.append(f"{path}: image_too_small")
+                continue
+            alpha_bbox = rgba.getchannel("A").getbbox()
+            if alpha_bbox is None:
+                failures.append(f"{path}: empty_alpha")
+                continue
+            return path, role, rgba
+        except Exception as exc:  # noqa: BLE001 - try the next audited source
+            failures.append(f"{path}: {type(exc).__name__}: {str(exc)[:200]}")
+    raise RuntimeError(
+        "No readable source is available for degraded output fallback: "
+        + "; ".join(failures[-5:])
+    )
+
+
+def _normalize_recoverable_reference(
+    source: Image.Image,
+    target: Path,
+    *,
+    size: int,
+) -> dict[str, Any]:
+    alpha_bbox = source.getchannel("A").getbbox()
+    if alpha_bbox is None:
+        raise RuntimeError("Degraded output fallback source has empty alpha.")
+    subject = source.crop(alpha_bbox)
+    maximum_extent = max(32, int(round(size * 0.88)))
+    scale = min(
+        1.0,
+        maximum_extent / float(subject.width),
+        maximum_extent / float(subject.height),
+    )
+    if not np.isfinite(scale) or scale <= 0:
+        raise RuntimeError("Degraded output fallback source size is invalid.")
+    resized_size = (
+        max(1, int(round(subject.width * scale))),
+        max(1, int(round(subject.height * scale))),
+    )
+    subject = subject.resize(resized_size, Image.Resampling.LANCZOS)
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    offset = ((size - subject.width) // 2, (size - subject.height) // 2)
+    canvas.alpha_composite(subject, offset)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(target)
+    return {
+        "source_alpha_bbox": list(alpha_bbox),
+        "source_size": list(source.size),
+        "normalized_size": [size, size],
+        "subject_size": list(subject.size),
+        "subject_offset": list(offset),
+        "sha256": file_sha256(target),
+    }
+
+
+def _inspect_recoverable_gif(
+    path: Path,
+    *,
+    size: int,
+    frame_count: int,
+    fps: int,
+) -> dict[str, Any]:
+    expected_duration_ms = int(round(frame_count * 1000 / fps))
+    with Image.open(path) as animation:
+        actual_frames = int(getattr(animation, "n_frames", 1))
+        actual_size = animation.size
+        loop = animation.info.get("loop")
+        duration_ms = 0
+        transparent_pixel_seen = False
+        opaque_pixel_seen = False
+        for frame_index in range(actual_frames):
+            animation.seek(frame_index)
+            duration_ms += int(animation.info.get("duration") or 0)
+            if frame_index in {0, actual_frames - 1}:
+                alpha_extrema = animation.convert("RGBA").getchannel("A").getextrema()
+                transparent_pixel_seen = transparent_pixel_seen or alpha_extrema[0] == 0
+                opaque_pixel_seen = opaque_pixel_seen or alpha_extrema[1] >= 64
+    if actual_size != (size, size):
+        raise RuntimeError(
+            f"Degraded fallback GIF size changed: {actual_size} != {(size, size)}"
+        )
+    if actual_frames != frame_count:
+        raise RuntimeError(
+            "Degraded fallback GIF frame count changed: "
+            f"{actual_frames} != {frame_count}"
+        )
+    if abs(duration_ms - expected_duration_ms) > max(100, int(1000 / fps)):
+        raise RuntimeError(
+            "Degraded fallback GIF duration changed: "
+            f"{duration_ms} != {expected_duration_ms}"
+        )
+    if loop != 0:
+        raise RuntimeError(f"Degraded fallback GIF loop changed: {loop!r}")
+    if not transparent_pixel_seen or not opaque_pixel_seen:
+        raise RuntimeError(
+            "Degraded fallback GIF does not contain both transparent and visible pixels."
+        )
+    return {
+        "size": [size, size],
+        "frames": actual_frames,
+        "fps": fps,
+        "duration_ms": duration_ms,
+        "loop": loop,
+        "transparent": True,
+        "sha256": file_sha256(path),
+    }
+
+
+def _write_recoverable_breathing_gif(
+    reference: Path,
+    target: Path,
+    *,
+    size: int,
+    frame_count: int,
+    fps: int,
+) -> dict[str, Any]:
+    if frame_count < 2 or fps < 1:
+        raise ValueError("Degraded output fallback animation timing is invalid.")
+    with Image.open(reference) as loaded:
+        rgba = loaded.convert("RGBA")
+        rgba.load()
+    alpha_bbox = rgba.getchannel("A").getbbox()
+    if alpha_bbox is None:
+        raise RuntimeError("Degraded output fallback reference has empty alpha.")
+    subject = rgba.crop(alpha_bbox)
+    frame_dir = target.parent / f".{target.stem}.{uuid4().hex}.frames"
+    temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp.gif")
+    frame_dir.mkdir(parents=True)
+    encoding = "ffmpeg_palette"
+    try:
+        denominator = max(1, frame_count)
+        previous_transform: tuple[tuple[int, int], int, int] | None = None
+        for frame_index in range(frame_count):
+            phase = 2.0 * np.pi * frame_index / denominator
+            breath = (1.0 - float(np.cos(phase))) * 0.5
+            frame_scale = 1.0 + 0.012 * breath
+            frame_size = (
+                max(1, int(round(subject.width * frame_scale))),
+                max(1, int(round(subject.height * frame_scale))),
+            )
+            animated_subject = subject.resize(
+                frame_size,
+                Image.Resampling.LANCZOS,
+            )
+            frame = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            frame_x = (size - animated_subject.width) // 2 + int(
+                round(1.5 * float(np.sin(phase)))
+            )
+            frame_y = (size - animated_subject.height) // 2 - int(
+                round(1.5 * breath)
+            )
+            transform = (frame_size, frame_x, frame_y)
+            if transform == previous_transform:
+                for delta_x, delta_y in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    candidate_x = frame_x + delta_x
+                    candidate_y = frame_y + delta_y
+                    candidate = (frame_size, candidate_x, candidate_y)
+                    if (
+                        candidate != previous_transform
+                        and candidate_x >= 0
+                        and candidate_y >= 0
+                        and candidate_x + animated_subject.width <= size
+                        and candidate_y + animated_subject.height <= size
+                    ):
+                        frame_x = candidate_x
+                        frame_y = candidate_y
+                        transform = candidate
+                        break
+            frame.alpha_composite(animated_subject, (frame_x, frame_y))
+            frame.save(frame_dir / f"frame_{frame_index:03d}.png")
+            previous_transform = transform
+
+        gif_filter = (
+            "[0:v]format=rgba,split[gif][pal];"
+            "[pal]palettegen=reserve_transparent=1:"
+            "transparency_color=0x000000:stats_mode=diff[p];"
+            "[gif][p]paletteuse=dither=sierra2_4a:"
+            "alpha_threshold=128:diff_mode=rectangle[v]"
+        )
+        command = [
+            str(FFMPEG_BIN),
+            "-y",
+            "-loglevel",
+            "error",
+            "-framerate",
+            str(fps),
+            "-i",
+            str(frame_dir / "frame_%03d.png"),
+            "-filter_complex",
+            gif_filter,
+            "-map",
+            "[v]",
+            "-frames:v",
+            str(frame_count),
+            "-loop",
+            "0",
+            "-final_delay",
+            str(int(round(100 / fps))),
+            str(temporary),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    "ffmpeg degraded GIF encoding failed: "
+                    + (completed.stderr or completed.stdout or "unknown")[-1000:]
+                )
+            _inspect_recoverable_gif(
+                temporary,
+                size=size,
+                frame_count=frame_count,
+                fps=fps,
+            )
+        except Exception:  # noqa: BLE001 - Pillow is the dependency-free fallback
+            encoding = "pillow_multiframe"
+            frames: list[Image.Image] = []
+            try:
+                for index in range(frame_count):
+                    with Image.open(
+                        frame_dir / f"frame_{index:03d}.png"
+                    ) as loaded_frame:
+                        frame = loaded_frame.convert("RGBA")
+                        frame.load()
+                    frames.append(frame)
+                frames[0].save(
+                    temporary,
+                    format="GIF",
+                    save_all=True,
+                    append_images=frames[1:],
+                    duration=int(round(1000 / fps)),
+                    loop=0,
+                    disposal=2,
+                    optimize=False,
+                )
+            finally:
+                for frame in frames:
+                    frame.close()
+
+        inspected = _inspect_recoverable_gif(
+            temporary,
+            size=size,
+            frame_count=frame_count,
+            fps=fps,
+        )
+        os.replace(temporary, target)
+        return {
+            "policy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+            "encoding": encoding,
+            **inspected,
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
+        shutil.rmtree(frame_dir, ignore_errors=True)
+
+
+def recover_subject_replacement_job_with_fallback(
+    job_id: str,
+    error: BaseException,
+) -> bool:
+    """Return audited GIFs for every action after an otherwise fatal job error."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"recover_subject_replacement_job_with_fallback"},
+    )
+    job = get_job(job_id)
+    if (
+        job.get("generation_mode") != "subject_replacement"
+        or job.get("output_format") != "transparent_gif"
+        or job.get("cancel_requested")
+    ):
+        return False
+    actions = [str(action) for action in job.get("actions") or []]
+    if not actions:
+        return False
+    effective = job.get("effective_subject_config")
+    job_dir = OUTPUT_ROOT / job_id
+    existing_outputs = [
+        dict(output)
+        for output in job.get("outputs") or []
+        if isinstance(output, dict)
+    ]
+    existing_gifs: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    for output in existing_outputs:
+        action = str(output.get("action") or "")
+        filename = str(output.get("filename") or "")
+        if (
+            output.get("type") != "transparent_gif"
+            or action not in actions
+            or not filename
+            or Path(filename).name != filename
+        ):
+            continue
+        output_path = job_dir / filename
+        existing_action_timing = subject_replacement_action_output_timing(
+            effective,
+            action,
+        )
+        output_timing = existing_action_timing["transparent_gif"]
+        try:
+            metrics = _inspect_recoverable_gif(
+                output_path,
+                size=TRANSPARENT_GIF_SIZE,
+                frame_count=int(output_timing["frames"]),
+                fps=int(output_timing["fps"]),
+            )
+        except (OSError, RuntimeError, UnidentifiedImageError):
+            LOGGER.warning(
+                "Ignoring invalid existing GIF while recovering %s action %s: %s",
+                job_id,
+                action,
+                output_path,
+                exc_info=True,
+            )
+            continue
+        existing_gifs[action] = (output, metrics)
+    results_by_action = {
+        str(result.get("action")): dict(result)
+        for result in job.get("subject_replacement_results") or []
+        if isinstance(result, dict) and str(result.get("action") or "") in actions
+    }
+    recovered_actions: list[str] = []
+    recovery_sources: dict[str, dict[str, Any]] = {}
+    for index, action in enumerate(actions, start=1):
+        if action in existing_gifs:
+            existing_output, existing_metrics = existing_gifs[action]
+            results_by_action.setdefault(
+                action,
+                {
+                    "action": action,
+                    "action_label": SUBJECT_REPLACEMENT_ACTION_LABELS.get(
+                        action,
+                        action,
+                    ),
+                    "reference": None,
+                    "video": None,
+                    "transparent_gif": str(existing_output["filename"]),
+                    "transparent_metrics": existing_metrics,
+                    "output_playback": existing_action_timing,
+                    "degraded": bool(existing_output.get("degraded")),
+                    "preserved_during_terminal_recovery": True,
+                },
+            )
+            continue
+        source_path, source_role, source_image = _load_recoverable_reference(
+            _recoverable_reference_candidates(job_dir, job, action, index)
+        )
+        try:
+            fallback_reference = job_dir / f"{action}_degraded_fallback_reference.png"
+            normalization = _normalize_recoverable_reference(
+                source_image,
+                fallback_reference,
+                size=TRANSPARENT_GIF_SIZE,
+            )
+        finally:
+            source_image.close()
+        gif_target = job_dir / f"{action}_subject_replacement_transparent_512.gif"
+        action_timing = subject_replacement_action_output_timing(
+            effective,
+            action,
+        )
+        gif_timing = action_timing["transparent_gif"]
+        animation = _write_recoverable_breathing_gif(
+            fallback_reference,
+            gif_target,
+            size=TRANSPARENT_GIF_SIZE,
+            frame_count=int(gif_timing["frames"]),
+            fps=int(gif_timing["fps"]),
+        )
+        action_label = SUBJECT_REPLACEMENT_ACTION_LABELS.get(action, action)
+        append_output(
+            job_id,
+            {
+                "type": "degraded_fallback_reference",
+                "action": action,
+                "action_label": action_label,
+                "filename": fallback_reference.name,
+                "width": TRANSPARENT_GIF_SIZE,
+                "height": TRANSPARENT_GIF_SIZE,
+                "transparent": True,
+                "sha256": normalization["sha256"],
+                "fallback_source": str(source_path),
+                "fallback_source_role": source_role,
+                "primary": False,
+            },
+        )
+        append_output(
+            job_id,
+            {
+                "type": "transparent_gif",
+                "action": action,
+                "action_label": action_label,
+                "filename": gif_target.name,
+                "width": TRANSPARENT_GIF_SIZE,
+                "height": TRANSPARENT_GIF_SIZE,
+                "frames": int(gif_timing["frames"]),
+                "fps": int(gif_timing["fps"]),
+                "duration_seconds": float(gif_timing["duration_seconds"]),
+                "output_playback": action_timing,
+                "transparent": True,
+                "video_engine": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+                "degraded": True,
+                "sha256": animation["sha256"],
+                "fallback_source": str(source_path),
+                "fallback_source_role": source_role,
+                "primary": True,
+            },
+        )
+        results_by_action[action] = {
+            "action": action,
+            "action_label": action_label,
+            "reference": str(fallback_reference),
+            "reference_sha256": normalization["sha256"],
+            "video": None,
+            "transparent_gif": gif_target.name,
+            "transparent_metrics": animation,
+            "output_playback": action_timing,
+            "degraded": True,
+            "degraded_policy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+            "fallback_source": str(source_path),
+            "fallback_source_role": source_role,
+            "original_error": f"{type(error).__name__}: {str(error)[:1000]}",
+        }
+        recovered_actions.append(action)
+        recovery_sources[action] = {
+            "path": str(source_path),
+            "role": source_role,
+            "normalization": normalization,
+            "animation": animation,
+        }
+
+    refreshed = get_job(job_id)
+    produced_actions: set[str] = set()
+    for output in refreshed.get("outputs") or []:
+        if not isinstance(output, dict) or output.get("type") != "transparent_gif":
+            continue
+        action = str(output.get("action") or "")
+        filename = str(output.get("filename") or "")
+        if (
+            action not in actions
+            or not filename
+            or Path(filename).name != filename
+        ):
+            continue
+        try:
+            output_timing = subject_replacement_action_output_timing(
+                effective,
+                action,
+            )["transparent_gif"]
+            _inspect_recoverable_gif(
+                job_dir / filename,
+                size=TRANSPARENT_GIF_SIZE,
+                frame_count=int(output_timing["frames"]),
+                fps=int(output_timing["fps"]),
+            )
+        except (OSError, RuntimeError, UnidentifiedImageError):
+            continue
+        produced_actions.add(action)
+    missing_actions = [action for action in actions if action not in produced_actions]
+    if missing_actions:
+        raise RuntimeError(
+            "Degraded output fallback did not produce every requested action: "
+            + ", ".join(missing_actions)
+        )
+    append_recovery_event(
+        job_id,
+        {
+            "stage": "terminal_output_recovery",
+            "reason": f"{type(error).__name__}: {str(error)[:1000]}",
+            "strategy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+            "result": "accepted",
+            "actions": recovered_actions,
+            "sources": recovery_sources,
+        },
+    )
+    record_nonblocking_job_anomaly(
+        job_id,
+        code="degraded_output_fallback",
+        message=(
+            "主生成链路发生异常，系统已返回身份保持的降级循环 GIF；"
+            "动作幅度可能受限，请按需重试高质量生成。"
+        ),
+        stage="completed_with_degraded_output",
+        details={
+            "policy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+            "exception_type": type(error).__name__,
+            "error": str(error)[:1000],
+            "actions": actions,
+            "recovered_actions": recovered_actions,
+        },
+        expose_as_public_stage=True,
+    )
+    update_job(
+        job_id,
+        status="completed",
+        stage="completed_with_degraded_output",
+        progress=100,
+        current_action=None,
+        current_action_label=None,
+        current_action_index=None,
+        current_pose_index=None,
+        current_pose=None,
+        recovery_active=False,
+        recovery_attempt=None,
+        quality_retry=None,
+        active_prompt_id=None,
+        automatic_recovery_used=True,
+        recovered=True,
+        degraded_recovery=True,
+        degraded_output_fallback=True,
+        degraded_output_fallback_policy=RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+        transparent_outputs_complete=True,
+        original_generation_error=f"{type(error).__name__}: {str(error)[:4000]}",
+        subject_replacement_results=[
+            results_by_action[action]
+            for action in actions
+            if action in results_by_action
+        ],
+        reference_generation_status=(
+            "completed"
+            if job.get("reference_generation_completed")
+            else "degraded_output_fallback"
+        ),
+        reference_generation_completed=bool(
+            job.get("reference_generation_completed")
+        ),
+        error=nonblocking_result_error(job_id),
+        finished_at=utc_now(),
+    )
+    return True
+
+
 def run_profile_standard_direct_job(job_id: str) -> None:
     """Publish the approved Main_case standard without Qwen/SCAIL/GPU redraw."""
     _sync_local_video_runtime(globals(), {"run_profile_standard_direct_job"})
@@ -95,6 +704,9 @@ def run_profile_standard_direct_job(job_id: str) -> None:
     for index, action in enumerate(actions, start=1):
         raise_if_cancelled(job_id)
         action_label = SUBJECT_REPLACEMENT_ACTION_LABELS[action]
+        action_timing = subject_replacement_action_output_timing(effective, action)
+        video_timing = action_timing["video"]
+        gif_timing = action_timing["transparent_gif"]
         standard = direct["actions"][action]
         runtime_path = Path(standard["runtime"])
         source_path = Path(standard["source"])
@@ -139,15 +751,15 @@ def run_profile_standard_direct_job(job_id: str) -> None:
             apng_target,
             ffmpeg_bin=FFMPEG_BIN,
             size=512,
-            source_fps=int(effective["fps"]),
+            source_fps=int(video_timing["fps"]),
             source_frame_count=int(effective["frames"]),
-            gif_fps=TRANSPARENT_GIF_FPS,
-            gif_frame_count=TRANSPARENT_GIF_FRAMES,
+            gif_fps=int(gif_timing["fps"]),
+            gif_frame_count=int(gif_timing["frames"]),
         )
         output_contract = validate_standard_direct_runtime_video(
             video_target,
-            expected_frames=int(effective["frames"]),
-            expected_fps=float(effective["fps"]),
+            expected_frames=int(video_timing["frames"]),
+            expected_fps=float(video_timing["fps"]),
         )
 
         previews = write_standard_direct_preview_assets(standard, job_dir, action)
@@ -198,6 +810,7 @@ def run_profile_standard_direct_job(job_id: str) -> None:
             "output_sha256": file_sha256(video_target),
             "runtime_contract": runtime_contract,
             "output_contract": output_contract,
+            "output_playback": action_timing,
             "matte": matte_metrics,
             "foreground_rgb_redrawn": False,
             "spatial_transform_applied": False,
@@ -230,9 +843,11 @@ def run_profile_standard_direct_job(job_id: str) -> None:
             "filename": video_target.name,
             "width": 512,
             "height": 512,
-            "frames": int(effective["frames"]),
-            "fps": float(effective["fps"]),
-            "duration_seconds": int(effective["frames"]) / float(effective["fps"]),
+            "frames": int(video_timing["frames"]),
+            "fps": float(video_timing["fps"]),
+            "duration_seconds": float(video_timing["duration_seconds"]),
+            "output_playback": action_timing,
+            "playback_contract": output_contract,
             "video_engine": "deterministic-main-case-standard-direct",
             "driving_template": runtime_path.name,
             "sha256": file_sha256(video_target),
@@ -273,9 +888,10 @@ def run_profile_standard_direct_job(job_id: str) -> None:
                     "filename": gif_target.name,
                     "width": TRANSPARENT_GIF_SIZE,
                     "height": TRANSPARENT_GIF_SIZE,
-                    "frames": TRANSPARENT_GIF_FRAMES,
-                    "fps": TRANSPARENT_GIF_FPS,
-                    "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                    "frames": int(gif_timing["frames"]),
+                    "fps": int(gif_timing["fps"]),
+                    "duration_seconds": float(gif_timing["duration_seconds"]),
+                    "output_playback": action_timing,
                     "transparent": True,
                     "video_engine": "deterministic-main-case-standard-direct",
                     "driving_template": runtime_path.name,
@@ -342,6 +958,7 @@ def run_profile_standard_direct_job(job_id: str) -> None:
                     else None
                 ),
                 "transparent_metrics": transparent_metrics,
+                "output_playback": action_timing,
                 "gpu_required": False,
                 "gpu_submitted": False,
             }
@@ -419,6 +1036,10 @@ def revalidate_uploaded_qwen_references_before_scail(
     )
     canonical_qwen_image1_comfy_sha256 = (
         str(job.get("canonical_qwen_image1_comfy_sha256") or "").strip().lower()
+    )
+    uploaded_identity_source = job_dir / "input_identity_source.png"
+    uploaded_identity_source_sha256 = (
+        str(job.get("uploaded_identity_source_sha256") or "").strip().lower()
     )
     if (
         canonical_reference != job_dir / "cartoon_reference_transparent.png"
@@ -975,6 +1596,12 @@ def run_subject_replacement_job(job_id: str) -> None:
     for index, action in enumerate(actions, start=1):
         raise_if_cancelled(job_id)
         action_config = effective_subject_config["actions"][action]
+        action_timing = subject_replacement_action_output_timing(
+            effective_subject_config,
+            action,
+        )
+        video_timing = action_timing["video"]
+        gif_timing = action_timing["transparent_gif"]
         driving_animation_path = Path(action_config["driving_animation"])
         expected_driving_sha256 = str(
             action_config.get("driving_animation_sha256") or ""
@@ -1020,6 +1647,8 @@ def run_subject_replacement_job(job_id: str) -> None:
             str(reference_path),
             "--action",
             action,
+            "--species",
+            str(job.get("species") or "cat"),
             "--width",
             "512",
             "--height",
@@ -1203,7 +1832,11 @@ def run_subject_replacement_job(job_id: str) -> None:
             )
         scail_reference_policies[action] = reference_policy
         scail_scene_prop_policies[action] = (
-            "cat_blue_bowl_red_scail_object_mapping"
+            (
+                "dog_white_model_bowl_scail_object_mapping"
+                if job.get("species") == "dog"
+                else "cat_blue_bowl_red_scail_object_mapping"
+            )
             if action == "eating"
             else "no_scene_prop"
         )
@@ -1410,6 +2043,28 @@ def run_subject_replacement_job(job_id: str) -> None:
                     "final_video_frame_audit": False,
                 },
             )
+        video_playback_contract: dict[str, Any] | None = None
+        if job.get("output_format") != "transparent_gif":
+            if float(action_timing["playback_rate"]) != 1.0:
+                video_playback_contract = retime_video_playback(
+                    video_target,
+                    video_target,
+                    ffmpeg_bin=FFMPEG_BIN,
+                    source_fps=float(action_timing["generation"]["fps"]),
+                    output_fps=float(video_timing["fps"]),
+                    frame_count=int(video_timing["frames"]),
+                )
+            video_contract = validate_standard_direct_runtime_video(
+                video_target,
+                expected_frames=int(video_timing["frames"]),
+                expected_fps=float(video_timing["fps"]),
+            )
+            if video_playback_contract is None:
+                video_playback_contract = {
+                    "policy": action_timing["policy"],
+                    **video_contract,
+                }
+
         video_output = {
             "type": "subject_replacement_video",
             "action": action,
@@ -1417,10 +2072,11 @@ def run_subject_replacement_job(job_id: str) -> None:
             "filename": video_target.name,
             "width": 512,
             "height": 512,
-            "frames": int(effective_subject_config["frames"]),
-            "fps": float(effective_subject_config["fps"]),
-            "duration_seconds": float(effective_subject_config["frames"])
-            / float(effective_subject_config["fps"]),
+            "frames": int(video_timing["frames"]),
+            "fps": float(video_timing["fps"]),
+            "duration_seconds": float(video_timing["duration_seconds"]),
+            "output_playback": action_timing,
+            "playback_contract": video_playback_contract,
             "video_engine": "scail2-14b-fp8",
             "driving_template": Path(action_config["driving_animation"]).name,
             "final_video_fur_surface_audit": (
@@ -1474,6 +2130,12 @@ def run_subject_replacement_job(job_id: str) -> None:
                 str(apng_target),
                 "--start-frame-index",
                 str(transparent_phase_start_index),
+                "--source-fps",
+                str(video_timing["fps"]),
+                "--gif-fps",
+                str(gif_timing["fps"]),
+                "--gif-frames",
+                str(gif_timing["frames"]),
             ]
             update_job(
                 job_id,
@@ -1546,6 +2208,16 @@ def run_subject_replacement_job(job_id: str) -> None:
                     ),
                     grooming_temporal_loop_quality=temporal_cycle_output,
                 )
+            video_playback_contract = validate_standard_direct_runtime_video(
+                video_target,
+                expected_frames=int(video_timing["frames"]),
+                expected_fps=float(video_timing["fps"]),
+            )
+            transparent_metrics["output_playback"] = action_timing
+            transparent_metrics["video_playback_contract"] = (
+                video_playback_contract
+            )
+            video_output["playback_contract"] = video_playback_contract
             fur_contour_quality: dict[str, Any] | None = None
             fur_gate = action_config.get("fur_silhouette_gate")
             if (
@@ -1654,9 +2326,10 @@ def run_subject_replacement_job(job_id: str) -> None:
                     "filename": gif_target.name,
                     "width": TRANSPARENT_GIF_SIZE,
                     "height": TRANSPARENT_GIF_SIZE,
-                    "frames": TRANSPARENT_GIF_FRAMES,
-                    "fps": TRANSPARENT_GIF_FPS,
-                    "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                    "frames": int(gif_timing["frames"]),
+                    "fps": int(gif_timing["fps"]),
+                    "duration_seconds": float(gif_timing["duration_seconds"]),
+                    "output_playback": action_timing,
                     "transparent": True,
                     "video_engine": "scail2-14b-fp8",
                     "driving_template": Path(action_config["driving_animation"]).name,
@@ -1713,6 +2386,7 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "transparent_metrics": transparent_metrics,
                 "temporal_cycle": temporal_cycle_output,
                 "final_video_fur_surface": final_video_fur_surface,
+                "output_playback": action_timing,
             }
         )
         update_job(

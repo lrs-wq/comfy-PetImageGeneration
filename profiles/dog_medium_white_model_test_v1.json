@@ -1,0 +1,79 @@
+{
+  "schema_version": 2,
+  "id": "dog_medium_white_model_test_v1",
+  "species": "dog",
+  "supported_actions": ["eating", "standing"],
+  "display_name": "中型犬（测试平台）",
+  "status": "test_platform_only",
+  "preview_action": "eating",
+  "test_platform_only": true,
+  "morphology_category": "medium_dog",
+  "asset_alias": "neutral_dog",
+  "canonical_source_image": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/eating_white_model_reference_frame008_cutout.png",
+  "action_references": {
+    "eating": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/eating_white_model_reference_frame008_cutout.png",
+    "standing": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/standing_white_model_reference_frame040_cutout.png"
+  },
+  "reference_preparation": {
+    "method": "existing_digest_locked_neutral_dog_assets",
+    "runner": "/root/comfy-pet-pipeline/tools/assets/build_dog_white_model_driving_assets.py",
+    "role": "test_platform_medium_dog_alias_of_neutral_geometry"
+  },
+  "profile_asset_manifest": {
+    "path": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/manifest.json",
+    "sha256": "be6c764d85441c4ab072ecdb567f5c44092f65d66f875c96bd800cd6aa249b18",
+    "validation_scope": "existing_neutral_dog_runtime_reused_as_test_medium_dog"
+  },
+  "uploaded_identity_driving": {
+    "revision": "test-medium-alias-neutral-dog-20260824-v1",
+    "role": "identity_medium_dog_action_geometry_and_motion_test_only",
+    "appearance_authority": "uploaded_qwen_canonical_only",
+    "actions": {
+      "eating": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/source/eat.mp4",
+        "source_sha256": "2a4a2571aa1c8fd3f9e65c8f84c5d69205cedc366947d60b1f9144296bd3d7f4",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/eating_white_model_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "b6009f9ca7f12c5233c4e6b172b50d3fe6a69e8bc2faf97e6f2593843d5c7d20",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/eating_white_model_reference_frame008_cutout.png",
+        "geometry_reference_sha256": "3def4ba025bcc1627899955a3471b2a45b0281c0a65f9a00d88081b1ec4350ce",
+        "selected_frame_index": 8,
+        "selected_frame_timestamp_seconds": 0.5
+      },
+      "standing": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/source/stand.mp4",
+        "source_sha256": "7af21bd55744a11f6106aa735a6dbb18e8113671c881af2bb4951855ab9e0913",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/standing_white_model_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "9f2f951fdb46e08249e4b553dbdcd55e1940fded56e92cfe8462bd37ba40f1e0",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/standing_white_model_reference_frame040_cutout.png",
+        "geometry_reference_sha256": "bcead3695db03755619f78e097b2425dbbcd9732157e555dbe768ded1b89e593",
+        "selected_frame_index": 40,
+        "selected_frame_timestamp_seconds": 2.5
+      }
+    }
+  },
+  "runtime": {
+    "engine_profile": "scail2-14b-fp8-v1",
+    "prompt_profile": "uploaded-dog-medium-test-v1",
+    "default_base_seed": 20260817,
+    "steps": 6,
+    "frames": 81,
+    "fps": 16,
+    "actions": {
+      "eating": {
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/eating_white_model_driver_512x512_81f_16fps.mp4",
+        "driving_animation_sha256": "b6009f9ca7f12c5233c4e6b172b50d3fe6a69e8bc2faf97e6f2593843d5c7d20",
+        "pose_strength": 1.1,
+        "seed_offset": 0,
+        "output_playback_rate": 0.5,
+        "output_playback_policy": "restore_original_eating_source_tempo_v1"
+      },
+      "standing": {
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/standing_white_model_driver_512x512_81f_16fps.mp4",
+        "driving_animation_sha256": "9f2f951fdb46e08249e4b553dbdcd55e1940fded56e92cfe8462bd37ba40f1e0",
+        "pose_strength": 1.05,
+        "seed_offset": 2
+      }
+    }
+  },
+  "usage_note": "仅供测试平台显式选择中型犬时使用。它复用当前中性犬动作资产，不改变默认 API 路由。上传图片始终是外观与身份唯一标准。"
+}

@@ -124,6 +124,114 @@ def action_candidate_degraded_selection_key(
     )
 
 
+POSE_ATTEMPT_PROVENANCE_FIELDS = (
+    "identity_input_policy",
+    "image1_input_name",
+    "image2_input_name",
+    "image3_input_name",
+    "sampler_latent_input_name",
+    "sampler_noise_mask_input_name",
+    "identity_input_name",
+    "geometry_input_name",
+)
+POSE_ATTEMPT_REQUIRED_PROVENANCE_FIELDS = (
+    "image1_input_name",
+    "sampler_latent_input_name",
+    "identity_input_name",
+)
+
+
+def _pose_workflow_load_image_names(record: dict[str, Any]) -> list[str]:
+    workflow = record.get("workflow")
+    if not isinstance(workflow, dict):
+        return []
+    prompt = workflow.get("prompt")
+    if isinstance(prompt, dict):
+        workflow = prompt
+    names: list[str] = []
+    for node in workflow.values():
+        if not isinstance(node, dict) or node.get("class_type") != "LoadImage":
+            continue
+        inputs = node.get("inputs")
+        image_name = inputs.get("image") if isinstance(inputs, dict) else None
+        if isinstance(image_name, str) and image_name.strip():
+            names.append(image_name.strip())
+    return list(dict.fromkeys(names))
+
+
+def pose_attempt_provenance(record: dict[str, Any]) -> dict[str, Any]:
+    """Return a total, serialization-safe pose workflow provenance payload."""
+
+    settings = record.get("settings")
+    settings = settings if isinstance(settings, dict) else {}
+    workflow_input_names = _pose_workflow_load_image_names(record)
+    values: dict[str, str | None] = {}
+    field_sources: dict[str, str] = {}
+    for field in POSE_ATTEMPT_PROVENANCE_FIELDS:
+        raw_value = record.get(field)
+        source = "attempt_record"
+        if not str(raw_value or "").strip():
+            raw_value = settings.get(field)
+            source = "attempt_settings"
+        values[field] = (
+            str(raw_value).strip() if str(raw_value or "").strip() else None
+        )
+        field_sources[field] = source if values[field] else "absent_optional"
+    if not values["image1_input_name"] and workflow_input_names:
+        values["image1_input_name"] = workflow_input_names[0]
+        field_sources["image1_input_name"] = "workflow_load_image_1"
+    if not values["image2_input_name"] and len(workflow_input_names) >= 2:
+        values["image2_input_name"] = workflow_input_names[1]
+        field_sources["image2_input_name"] = "workflow_load_image_2"
+    if not values["image3_input_name"] and len(workflow_input_names) >= 3:
+        values["image3_input_name"] = workflow_input_names[2]
+        field_sources["image3_input_name"] = "workflow_load_image_3"
+    if not values["sampler_latent_input_name"]:
+        values["sampler_latent_input_name"] = values["image1_input_name"]
+        field_sources["sampler_latent_input_name"] = "inferred_from_image1"
+    if not values["identity_input_name"]:
+        values["identity_input_name"] = values["image1_input_name"]
+        field_sources["identity_input_name"] = "inferred_from_image1"
+    if (
+        not values["geometry_input_name"]
+        and values["image2_input_name"]
+    ):
+        values["geometry_input_name"] = values["image2_input_name"]
+        field_sources["geometry_input_name"] = "inferred_from_image2"
+    required_fields = list(POSE_ATTEMPT_REQUIRED_PROVENANCE_FIELDS)
+    if values["image2_input_name"] or values["image3_input_name"]:
+        required_fields.append("geometry_input_name")
+    missing_fields = [
+        field
+        for field in required_fields
+        if not str(values.get(field) or "").strip()
+    ]
+    mapped_inputs = {
+        str(value).strip()
+        for field, value in values.items()
+        if field.endswith("_input_name") and str(value or "").strip()
+    }
+    unmapped_workflow_inputs = [
+        name for name in workflow_input_names if name not in mapped_inputs
+    ]
+    return {
+        **values,
+        "complete": not missing_fields and not unmapped_workflow_inputs,
+        "required_fields": required_fields,
+        "missing_fields": missing_fields,
+        "field_sources": field_sources,
+        "workflow_load_image_names": workflow_input_names,
+        "unmapped_workflow_input_names": unmapped_workflow_inputs,
+        "issues": [
+            *missing_fields,
+            *[
+                f"unmapped_workflow_input:{name}"
+                for name in unmapped_workflow_inputs
+            ],
+        ],
+    }
+
+
 def resolve_action_identity_palette_reference(
     *,
     uploaded_reference_job: bool,
@@ -149,6 +257,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
     raise_if_cancelled(job_id)
     with JOBS_LOCK:
         job = dict(JOBS[job_id])
+    species = str(job.get("species") or "cat").strip().lower()
     if job.get("generation_mode") == "subject_replacement" and not force_qwen_reference:
         run_subject_replacement_job(job_id)
         return
@@ -794,7 +903,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             current_pose=None,
         )
         cartoon_negative_prompt = (
-            QWEN_NEGATIVE + ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
+            QWEN_NEGATIVE
+            + ", "
+            + (DOG_CARTOON_NEGATIVE if species == "dog" else CARTOON_NEGATIVE)
+            + ", "
+            + CHROMA_NEGATIVE
         )
         if profile_fur_negative:
             cartoon_negative_prompt += ", " + profile_fur_negative
@@ -834,6 +947,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 prompt_source,
                 palette_lock=palette_lock,
                 fur_lock=profile_fur_lock,
+                species=species,
             )
             if (
                 canonical_identity_reference_input_names
@@ -2150,6 +2264,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             pose_reference_available=pose_reference_input_name is not None,
             profile_fur_lock=profile_fur_lock,
             pose_identity_input_policy=effective_pose_identity_input_policy,
+            species=species,
         )
         canonical_action_reference = bool(
             effective_pose_identity_input_policy
@@ -2188,11 +2303,22 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         active_pose_profiles,
                         enabled=True,
                     )
+                elif species == "dog" and action_key(pose) == "standing":
+                    # Standing keyframes must be retried when the pre-normalization
+                    # alpha reaches an edge (most commonly a generated floor
+                    # reflection).  Later matte normalization would otherwise hide
+                    # the edge contact and pass that artifact into SCAIL.
+                    active_pose_profiles = active_pose_profiles[
+                        :QWEN_POSE_MAX_ATTEMPTS
+                    ]
                 elif not advisory_action_candidate_gate_required:
                     active_pose_profiles = active_pose_profiles[:1]
-            negative_prompt += ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
-            if source_palette_negative:
-                negative_prompt += ", " + source_palette_negative
+            negative_prompt += (
+                ", "
+                + (DOG_CARTOON_NEGATIVE if species == "dog" else CARTOON_NEGATIVE)
+                + ", "
+                + CHROMA_NEGATIVE
+            )
             if profile_fur_negative:
                 negative_prompt += ", " + profile_fur_negative
             if action_key(pose) == "running":
@@ -2267,6 +2393,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 uploaded_identity_source=identity_source_path,
                 canonical_reference=canonical_similarity_reference,
             )
+            grooming_identity_contract_reference_path = (
+                canonical_similarity_reference or pose_palette_reference_path
+            )
             pose_identity_palette_prompt_signature = (
                 identity_palette_signature(
                     pose_palette_reference_path,
@@ -2282,6 +2411,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 identity_palette_guard
                 or advisory_action_candidate_gate_required
             )
+            pose_palette_negative = (
+                identity_palette_negative_prompt(
+                    pose_identity_palette_prompt_signature
+                )
+                if pose_identity_palette_prompt_signature is not None
+                else source_palette_negative
+            )
+            pose_negative_prompt = negative_prompt
+            if pose_palette_negative:
+                pose_negative_prompt += ", " + pose_palette_negative
             pose_reference_identity_palette = (
                 identity_palette_signature(
                     pose_palette_reference_path,
@@ -2539,6 +2678,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     pose_reference_available=pose_reference_input_name is not None,
                     profile_fur_lock=profile_fur_lock,
                     pose_identity_input_policy=(effective_pose_identity_input_policy),
+                    species=species,
                 )
                 if pose_identity_palette_prompt_signature is not None:
                     attempt_prompt += "\n\n" + identity_palette_prompt(
@@ -3707,7 +3847,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     (
                         ""
                         if advisory_grooming_action_transfer_active
-                        else negative_prompt
+                        else pose_negative_prompt
                     ),
                     attempt_seed,
                     prefix,
@@ -4666,7 +4806,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             dict,
                         )
                         or pose_palette_reference_path is None
-                        or canonical_similarity_reference is None
+                        or grooming_identity_contract_reference_path is None
                         or grooming_pose_gate_guide_path is None
                         or grooming_pose_gate_metadata_path is None
                     ):
@@ -4680,11 +4820,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             identity_reference_palette=(
                                 advisory_grooming_identity_palette_reference
                             ),
-                            identity_reference_path=(
-                                canonical_similarity_reference
-                            ),
                             identity_palette_reference_path=(
                                 pose_palette_reference_path
+                            ),
+                            identity_reference_path=(
+                                grooming_identity_contract_reference_path
                             ),
                             geometry_guide=grooming_pose_gate_guide_path,
                             geometry_metadata=grooming_pose_gate_metadata_path,
@@ -6737,6 +6877,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         + ", ".join(issues)
                     )
                 best_attempt = {
+                    **{
+                        field: fallback_record.get(field)
+                        for field in POSE_ATTEMPT_PROVENANCE_FIELDS
+                    },
                     "attempt": len(attempts) + 1,
                     "profile": "rembg_u2net_fallback",
                     "seed": fallback_record["seed"],
@@ -6922,12 +7066,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     != GROOMING_ADVISORY_MINIMUM_GATE_VERSION
                     or selected_minimum_gate.get("candidate_sha256")
                     != selected_digest
-                    or canonical_similarity_reference is None
-                    or selected_minimum_gate.get("identity_reference_path")
-                    != str(canonical_similarity_reference)
-                    or selected_minimum_gate.get("identity_reference_sha256")
-                    != file_sha256(canonical_similarity_reference)
                     or pose_palette_reference_path is None
+                    or grooming_identity_contract_reference_path is None
+                    or selected_minimum_gate.get("identity_reference_path")
+                    != str(grooming_identity_contract_reference_path)
+                    or selected_minimum_gate.get("identity_reference_sha256")
+                    != file_sha256(grooming_identity_contract_reference_path)
                     or selected_minimum_gate.get(
                         "identity_palette_reference_path"
                     )
@@ -6996,6 +7140,38 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         grooming_advisory_minimum_gate_selected
                     ),
                 )
+            selected_pose_provenance = pose_attempt_provenance(best_attempt)
+            if not selected_pose_provenance["complete"]:
+                LOGGER.warning(
+                    "%s pose %s selected candidate has incomplete workflow "
+                    "provenance: %s",
+                    job_id,
+                    index,
+                    selected_pose_provenance["issues"],
+                )
+                record_nonblocking_job_anomaly(
+                    job_id,
+                    code=f"pose_{index:02d}_workflow_provenance_incomplete",
+                    message=(
+                        f"动作 {index} 已生成，但内部工作流来源记录不完整；"
+                        "生成继续，结果需保留降级审计。"
+                    ),
+                    stage="pose_workflow_provenance",
+                    details={
+                        "pose_index": index,
+                        "pose": pose,
+                        "selected_attempt": best_attempt.get("attempt"),
+                        "selected_profile": best_attempt.get("profile"),
+                        "missing_fields": selected_pose_provenance[
+                            "missing_fields"
+                        ],
+                        "unmapped_workflow_input_names": (
+                            selected_pose_provenance[
+                                "unmapped_workflow_input_names"
+                            ]
+                        ),
+                    },
+                )
             write_workflow(
                 job_dir, f"qwen_pose_{index:02d}.json", best_attempt["workflow"]
             )
@@ -7005,14 +7181,25 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "selected_attempt": best_attempt["attempt"],
                     "selected_profile": best_attempt["profile"],
                     "identity_input_policy": (effective_pose_identity_input_policy),
-                    "image1_input_name": best_attempt["image1_input_name"],
-                    "image2_input_name": best_attempt["image2_input_name"],
-                    "image3_input_name": best_attempt.get("image3_input_name"),
-                    "sampler_latent_input_name": best_attempt[
+                    "image1_input_name": selected_pose_provenance[
+                        "image1_input_name"
+                    ],
+                    "image2_input_name": selected_pose_provenance[
+                        "image2_input_name"
+                    ],
+                    "image3_input_name": selected_pose_provenance[
+                        "image3_input_name"
+                    ],
+                    "sampler_latent_input_name": selected_pose_provenance[
                         "sampler_latent_input_name"
                     ],
-                    "identity_input_name": best_attempt["identity_input_name"],
-                    "geometry_input_name": best_attempt["geometry_input_name"],
+                    "identity_input_name": selected_pose_provenance[
+                        "identity_input_name"
+                    ],
+                    "geometry_input_name": selected_pose_provenance[
+                        "geometry_input_name"
+                    ],
+                    "workflow_input_provenance": selected_pose_provenance,
                     "grooming_foreleg_repair": best_attempt.get(
                         "grooming_foreleg_repair"
                     ),
@@ -7086,14 +7273,30 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "attempt": best_attempt["attempt"],
                     "profile": best_attempt["profile"],
                     "identity_input_policy": (effective_pose_identity_input_policy),
-                    "image1_input_name": best_attempt["image1_input_name"],
-                    "image2_input_name": best_attempt["image2_input_name"],
-                    "image3_input_name": best_attempt.get("image3_input_name"),
-                    "sampler_latent_input_name": best_attempt[
+                    "image1_input_name": selected_pose_provenance[
+                        "image1_input_name"
+                    ],
+                    "image2_input_name": selected_pose_provenance[
+                        "image2_input_name"
+                    ],
+                    "image3_input_name": selected_pose_provenance[
+                        "image3_input_name"
+                    ],
+                    "sampler_latent_input_name": selected_pose_provenance[
                         "sampler_latent_input_name"
                     ],
-                    "identity_input_name": best_attempt["identity_input_name"],
-                    "geometry_input_name": best_attempt["geometry_input_name"],
+                    "identity_input_name": selected_pose_provenance[
+                        "identity_input_name"
+                    ],
+                    "geometry_input_name": selected_pose_provenance[
+                        "geometry_input_name"
+                    ],
+                    "workflow_input_provenance_complete": (
+                        selected_pose_provenance["complete"]
+                    ),
+                    "workflow_input_provenance_missing_fields": (
+                        selected_pose_provenance["missing_fields"]
+                    ),
                     "grooming_foreleg_repair": best_attempt.get(
                         "grooming_foreleg_repair"
                     ),
@@ -7357,7 +7560,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         )
         negative_prompt = WAN_NEGATIVE
         if transparent_gif:
-            negative_prompt += ", " + CARTOON_WAN_NEGATIVE + ", " + CHROMA_NEGATIVE
+            negative_prompt += (
+                ", "
+                + (
+                    DOG_CARTOON_WAN_NEGATIVE
+                    if species == "dog"
+                    else CARTOON_WAN_NEGATIVE
+                )
+                + ", "
+                + CHROMA_NEGATIVE
+            )
         source_output: Path | None = None
         video_engine = WAN_ENGINE
         video_engine_metadata: dict[str, Any] = wan_engine_metadata(

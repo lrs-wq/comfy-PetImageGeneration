@@ -211,18 +211,30 @@
           <p id="promptHint" class="hint">未上传图片：Main_case/eat.mp4 与 TM.mp4 同时决定主体、毛发、动作和道具并确定性直出。上传图片：上传图决定身份，Main_case 只提供动作几何。</p>
 
           <div id="replacementPanel">
+            <label class="title" for="dogSizeProfile">犬类体型白膜（仅测试平台）</label>
+            <select id="dogSizeProfile" disabled>
+              <option value="">保持当前默认主体</option>
+              <option value="dog_medium_white_model_test_v1">中型犬</option>
+              <option value="dog_small_white_model_test_v1">小型犬</option>
+            </select>
+            <p id="dogSizeHint" class="hint">不选择时保持现有默认主体与路由；选择中型犬或小型犬后，将严格按该测试白膜生成，生产 API 默认行为不变。</p>
+
             <label class="title">动作链路</label>
             <div class="checks">
               <label class="check action-check">
                 <input class="action" type="checkbox" value="eating" checked disabled>
-                <span><strong>吃饭</strong><small>eating 使用 Main_case/eat.mp4：未上传时同时作为黑白猫主体、毛发与进食动作标准；上传时只提供低头进食、碗和机位。</small></span>
+                <span><strong>吃饭</strong><small>使用当前所选主体配置的 eating 白膜；上传图片时白膜只提供低头进食、食盆、机位与时序。</small></span>
               </label>
               <label class="check action-check">
                 <input class="action" type="checkbox" value="grooming" disabled>
                 <span><strong>舔毛</strong><small>grooming 使用 Main_case/TM.mp4：未上传时同时作为黑白猫主体、毛发与舔毛动作标准；上传时只提供舔爪/擦脸和机位。</small></span>
               </label>
+              <label class="check action-check" hidden>
+                <input class="action" type="checkbox" value="standing" disabled>
+                <span><strong>站立</strong><small>使用所选中型犬或小型犬的 standing 白膜；上传图片时白膜只提供犬类体型、站姿动作几何、机位与时序。</small></span>
+              </label>
             </div>
-            <p id="actionHint" class="hint">至少选择一个动作；同时选择时按顺序生成两段视频。服务器会使用对应标准视频的标准化运行副本。</p>
+            <p id="actionHint" class="hint">至少选择一个当前主体支持的动作；同时选择时按顺序生成多段视频。服务器会使用对应标准视频的标准化运行副本。</p>
 
             <div class="row">
               <div>
@@ -341,9 +353,14 @@
     const MAX_LORA_FILE_BYTES = 2 * 1024 * 1024 * 1024;
     const MAX_LORA_TOTAL_BYTES = 4 * 1024 * 1024 * 1024;
     const DEFAULT_IMAGE_PROMPT = '以参考图片中的宠物为唯一身份标准，完整保留毛色和花纹位置、脸型、眼睛颜色与间距、耳形、鼻色、毛长、体型比例和尾巴特征；生成高品质萌系3D卡通角色，毛发细腻柔软，光照明亮柔和，保持自然无衣服无配饰的完整全身形象。不继承或固定参考图中的姿态、肢体坐标和构图，具体动作只由所选姿态决定。';
-    const actionLabels = {eating: '吃饭', grooming: '舔毛'};
+    const actionLabels = {eating: '吃饭', grooming: '舔毛', standing: '站立'};
+    const dogSizeProfileIds = new Set([
+      'dog_medium_white_model_test_v1',
+      'dog_small_white_model_test_v1'
+    ]);
     const loraItems = [];
     const imageProfiles = new Map();
+    const subjectProfiles = new Map();
     const promptByMode = {replacement: '', image: DEFAULT_IMAGE_PROMPT};
     const promptTouchedByMode = {replacement: false, image: false};
     let uiMode = 'replacement';
@@ -354,6 +371,8 @@
     let uploadedPreviewUrl = null;
     const sidePreviewUrls = {left: null, right: null};
     let subjectsReady = false;
+    let defaultSubjectProfileId = '';
+    let availableSubjectActions = new Map();
     let defaultSubjectDisplayName = '';
     let defaultDrivingStandardsSummary = '';
     let pollFailureCount = 0;
@@ -418,12 +437,18 @@
       return [...document.querySelectorAll('.action:checked:not(:disabled)')].map(input => input.value);
     }
 
+    function selectedSubjectProfile() {
+      return subjectProfiles.get($('subjectProfile').value) || null;
+    }
+
     function updateActionCopy() {
       const actions = selectedActions();
+      const profile = selectedSubjectProfile();
+      const standardName = profile?.display_name || defaultSubjectDisplayName || '当前主体配置';
       if (uiMode === 'replacement') $('submit').textContent = `生成 ${actions.length || 0} 个主体替换视频`;
       $('actionHint').textContent = actions.length
-        ? `将生成：${actions.map(action => actionLabels[action] || action).join('、')}。未上传时按 Main_case 主体与动作标准直出；上传时由上传图提供身份。`
-        : '至少选择一个动作；未上传时 Main_case 视频同时提供主体与动作标准。';
+        ? `将按“${standardName}”生成：${actions.map(action => actionLabels[action] || action).join('、')}。未上传时使用所选主体；上传时由上传图提供身份与外观。`
+        : '至少选择一个当前主体支持的动作。';
     }
 
     function selectedImagePoses() {
@@ -742,8 +767,15 @@
     }
 
     function drivingStandardsSummary(profile) {
+      const profileActionIds = (Array.isArray(profile?.actions) ? profile.actions : [])
+        .map(action => typeof action === 'string' ? action : action?.id)
+        .filter(Boolean);
       const standards = profile?.driving_standards;
-      if (!standards || typeof standards !== 'object') return '动作标准元数据未登记。';
+      if (!standards || typeof standards !== 'object') {
+        return profileActionIds.length
+          ? `已登记动作：${profileActionIds.map(action => actionLabels[action] || action).join('、')}。`
+          : '动作标准元数据未登记。';
+      }
       const records = standards.actions && typeof standards.actions === 'object'
         ? standards.actions
         : {};
@@ -759,13 +791,14 @@
       const revision = typeof standards.revision === 'string' && standards.revision.trim()
         ? standards.revision.trim()
         : '版本未登记';
-      return `主体与动作标准 ${revision}：${actionSummary('eating', '吃饭')}；${actionSummary('grooming', '舔毛')}。未上传时它们同时控制身份、毛发、动作和道具。`;
+      const summaries = profileActionIds.map(action => actionSummary(action, actionLabels[action] || action));
+      return `主体与动作标准 ${revision}：${summaries.join('；')}。未上传时它们同时控制身份、毛发、动作和道具。`;
     }
 
     function replacementSubjectHint() {
       return defaultSubjectDisplayName
-        ? `未上传图片，将直接使用 Main_case 标准主体：${defaultSubjectDisplayName}，并按所选标准动作输出。`
-        : '未上传图片，将直接使用服务器登记的 Main_case 主体与动作标准。';
+        ? `未上传图片，将直接使用当前所选主体：${defaultSubjectDisplayName}，并按所选标准动作输出。`
+        : '未上传图片，将直接使用服务器登记的默认主体与动作标准。';
     }
 
     function uploadedSubjectHint() {
@@ -782,72 +815,102 @@
       return `当前上传主体（单图兼容）：${front.name}。也可同时补充同一宠物的左侧和右侧视角。`;
     }
 
+    function applySubjectProfile(profile) {
+      if (!profile?.id) throw new Error('所选主体配置不存在');
+      const profileActions = new Map(
+        (Array.isArray(profile.actions) ? profile.actions : [])
+          .map(action => typeof action === 'string' ? [action, {id: action}] : [action?.id, action])
+          .filter(([id]) => id)
+      );
+      const enabledActions = [];
+      document.querySelectorAll('.action').forEach(input => {
+        const action = profileActions.get(input.value);
+        const enabled = availableSubjectActions.has(input.value)
+          && Boolean(action)
+          && action.reference_ready !== false;
+        input.disabled = !enabled;
+        input.checked = false;
+        const card = input.closest('label');
+        if (card) card.hidden = !enabled;
+        if (enabled) {
+          enabledActions.push(input.value);
+          const label = action.label || availableSubjectActions.get(input.value);
+          if (label) {
+            actionLabels[input.value] = label;
+            const labelNode = card?.querySelector('strong');
+            if (labelNode) labelNode.textContent = label;
+          }
+        }
+      });
+      if (enabledActions.length) {
+        const defaultAction = enabledActions.includes('eating') ? 'eating' : enabledActions[0];
+        const input = document.querySelector(`.action[value="${defaultAction}"]`);
+        if (input) input.checked = true;
+      }
+
+      $('subjectProfile').value = profile.id;
+      defaultSubjectDisplayName = profile.display_name || profile.id;
+      $('defaultSubjectName').textContent = defaultSubjectDisplayName;
+      $('defaultSubjectPreview').alt = `${defaultSubjectDisplayName} 主体预览`;
+      const previewRevision = profile?.driving_standards?.revision || profile?.profile_sha256 || Date.now();
+      setDefaultSubjectPreview(`api/subjects/${encodeURIComponent(profile.id)}/preview?v=${encodeURIComponent(previewRevision)}`);
+      subjectsReady = enabledActions.length > 0;
+      defaultDrivingStandardsSummary = drivingStandardsSummary(profile);
+      const isDogSizeProfile = dogSizeProfileIds.has(profile.id);
+      $('dogSizeHint').textContent = isDogSizeProfile
+        ? `已选择“${defaultSubjectDisplayName}”。本次将严格按该体型白膜生成；上传图仍是毛色、花纹、脸部和犬种的唯一外观标准。`
+        : '当前保持原有默认主体与路由；生产 API 默认行为不变。';
+      $('defaultSubjectStatus').textContent = subjectsReady
+        ? `主体配置 ${profile.id} 已加载。可用动作：${enabledActions.map(action => actionLabels[action] || action).join('、')}。${defaultDrivingStandardsSummary}`
+        : `主体配置 ${profile.id} 没有已就绪的动作链路，暂时不能提交任务。${defaultDrivingStandardsSummary}`;
+      if (!$('image').files[0] && uiMode === 'replacement') {
+        $('subjectSourceHint').textContent = replacementSubjectHint();
+      }
+      updateActionCopy();
+      updateEngineCopy();
+    }
+
     async function loadSubjects() {
       subjectsReady = false;
+      $('dogSizeProfile').disabled = true;
       document.querySelectorAll('.action').forEach(input => { input.disabled = true; });
       try {
         const response = await fetch('api/subjects', {cache: 'no-store'});
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || '主体配置读取失败');
         const items = Array.isArray(payload.items) ? payload.items : [];
-        const profile = items.find(item => item?.id === payload.default) || items[0];
-        if (!profile?.id) throw new Error('服务器没有返回可用的默认身份');
+        subjectProfiles.clear();
+        items.filter(item => item?.id).forEach(item => subjectProfiles.set(item.id, item));
+        defaultSubjectProfileId = subjectProfiles.has(payload.default)
+          ? payload.default
+          : (items[0]?.id || '');
+        const defaultProfile = subjectProfiles.get(defaultSubjectProfileId);
+        if (!defaultProfile?.id) throw new Error('服务器没有返回可用的默认身份');
 
-        const availableActions = new Map(
+        availableSubjectActions = new Map(
           (Array.isArray(payload.actions) ? payload.actions : [])
             .map(action => typeof action === 'string' ? [action, action] : [action?.id, action?.label])
             .filter(([id]) => id)
         );
-        const profileActions = new Map(
-          (Array.isArray(profile.actions) ? profile.actions : [])
-            .map(action => typeof action === 'string' ? [action, {id: action}] : [action?.id, action])
-            .filter(([id]) => id)
-        );
-        const enabledActions = [];
-        document.querySelectorAll('.action').forEach(input => {
-          const action = profileActions.get(input.value);
-          const enabled = availableActions.has(input.value)
-            && Boolean(action)
-            && action.reference_ready !== false;
-          input.disabled = !enabled;
-          if (!enabled) input.checked = false;
-          if (enabled) {
-            enabledActions.push(input.value);
-            const label = action.label || availableActions.get(input.value);
-            if (label) {
-              actionLabels[input.value] = label;
-              const labelNode = input.closest('label')?.querySelector('strong');
-              if (labelNode) labelNode.textContent = label;
-            }
+        [...$('dogSizeProfile').options].forEach(option => {
+          if (!option.value) {
+            option.textContent = `保持当前默认主体（${defaultProfile.display_name || defaultProfile.id}）`;
+            option.disabled = false;
+          } else {
+            option.disabled = !subjectProfiles.has(option.value);
           }
         });
-        if (!selectedActions().length && enabledActions.length) {
-          const defaultAction = enabledActions.includes('eating') ? 'eating' : enabledActions[0];
-          const input = document.querySelector(`.action[value="${defaultAction}"]`);
-          if (input) input.checked = true;
-        }
-
-        $('subjectProfile').value = profile.id;
-        defaultSubjectDisplayName = profile.display_name || profile.id;
-        $('defaultSubjectName').textContent = defaultSubjectDisplayName;
-        $('defaultSubjectPreview').alt = `${defaultSubjectDisplayName} 默认身份预览`;
-        const previewRevision = profile?.driving_standards?.revision || profile?.profile_sha256 || Date.now();
-        setDefaultSubjectPreview(`api/subjects/${encodeURIComponent(profile.id)}/preview?v=${encodeURIComponent(previewRevision)}`);
-        subjectsReady = enabledActions.length > 0;
-        defaultDrivingStandardsSummary = drivingStandardsSummary(profile);
-        $('defaultSubjectStatus').textContent = subjectsReady
-          ? `Main_case 标准配置 ${profile.id} 已加载。可用主体动作：${enabledActions.map(action => actionLabels[action] || action).join('、')}。${defaultDrivingStandardsSummary}`
-          : `Main_case 标准配置 ${profile.id} 没有已就绪的动作链路，暂时不能提交任务。${defaultDrivingStandardsSummary}`;
-        if (!$('image').files[0] && uiMode === 'replacement') {
-          $('subjectSourceHint').textContent = replacementSubjectHint();
-        }
-        updateActionCopy();
-        updateEngineCopy();
+        $('dogSizeProfile').disabled = ![...dogSizeProfileIds].some(id => subjectProfiles.has(id));
+        const requestedProfileId = $('dogSizeProfile').value || defaultSubjectProfileId;
+        const profile = subjectProfiles.get(requestedProfileId) || defaultProfile;
+        if (profile.id !== requestedProfileId) $('dogSizeProfile').value = '';
+        applySubjectProfile(profile);
       } catch (error) {
         document.querySelectorAll('.action').forEach(input => {
           input.checked = false;
           input.disabled = true;
         });
+        $('dogSizeProfile').disabled = true;
         $('subjectProfile').value = '';
         defaultSubjectDisplayName = '';
         defaultDrivingStandardsSummary = '';
@@ -860,7 +923,12 @@
 
     $('defaultSubjectPreview').addEventListener('error', () => {
       $('defaultSubjectPreview').hidden = true;
-      $('defaultSubjectStatus').textContent = `Main_case 标准主体已在服务器登记；预览暂时不可用，但仍可提交任务。${defaultDrivingStandardsSummary}`;
+      $('defaultSubjectStatus').textContent = `所选主体已在服务器登记；预览暂时不可用，但仍可提交任务。${defaultDrivingStandardsSummary}`;
+    });
+    $('dogSizeProfile').addEventListener('change', event => {
+      const profileId = event.target.value || defaultSubjectProfileId;
+      const profile = subjectProfiles.get(profileId);
+      if (profile) applySubjectProfile(profile);
     });
     $('image').addEventListener('change', event => useFile(event.target.files[0]));
     $('imageLeft').addEventListener('change', event => useSideFile('left', event.target.files[0]));
@@ -1149,7 +1217,7 @@
       }
       const actions = selectedActions();
       if (!actions.length) {
-        alert('至少选择吃饭或舔毛中的一个动作');
+        alert('至少选择当前主体支持的一个动作');
         return;
       }
       const steps = Number($('scailSteps').value);

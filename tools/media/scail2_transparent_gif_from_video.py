@@ -26,12 +26,18 @@ def main() -> int:
     parser.add_argument("--white-mp4-target", type=Path)
     parser.add_argument("--soft-apng-target", type=Path)
     parser.add_argument("--start-frame-index", type=int, default=0)
+    parser.add_argument("--source-fps", type=float, default=16.0)
+    parser.add_argument("--gif-fps", type=int, default=20)
+    parser.add_argument("--gif-frames", type=int, default=100)
     args = parser.parse_args()
     metrics = build_unstabilized_transparent_gif(
         args.video,
         args.gif_target,
         action=args.action,
         guidance_mask_video=args.guidance_mask_video,
+        source_fps=args.source_fps,
+        gif_fps=args.gif_fps,
+        gif_frames=args.gif_frames,
         white_mp4_target=args.white_mp4_target,
         soft_apng_target=args.soft_apng_target,
         start_frame_index=args.start_frame_index,

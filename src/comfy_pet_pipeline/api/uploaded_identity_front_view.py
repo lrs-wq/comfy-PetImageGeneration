@@ -10,7 +10,9 @@ import cv2
 
 LOGGER = logging.getLogger(__name__)
 
-UPLOADED_FRONT_VIEW_AUDIT_POLICY = "opencv_frontal_cat_face_advisory_v1"
+UPLOADED_FRONT_VIEW_AUDIT_POLICY = "species_aware_uploaded_front_view_advisory_v2"
+CAT_FRONT_VIEW_AUDIT_POLICY = "opencv_frontal_cat_face_advisory_v1"
+DOG_FRONT_VIEW_AUDIT_POLICY = "dog_frontality_detector_unavailable_fail_open_v1"
 FRONT_VIEW_NOT_RELIABLY_FRONTAL_STAGE = "front_view_not_reliably_frontal"
 UPLOADED_FRONT_VIEW_AUDIT_MAX_DIMENSION = 1280
 UPLOADED_FRONT_VIEW_AUDIT_MIN_FACE_AREA_FRACTION = 0.0125
@@ -21,18 +23,35 @@ UPLOADED_FRONT_VIEW_AUDIT_CASCADES = (
 )
 
 
-def _audit_uploaded_front_identity_view(image_path: Path) -> dict[str, Any]:
-    """Detect a plausible frontal cat face without blocking generation."""
+def _audit_uploaded_front_identity_view(
+    image_path: Path,
+    *,
+    species: str = "cat",
+) -> dict[str, Any]:
+    """Audit a front view without applying the cat-face detector to dogs."""
+
+    normalized_species = str(species or "cat").strip().lower()
+    if normalized_species not in {"cat", "dog"}:
+        raise ValueError(f"Unsupported front-view audit species: {species!r}")
+    cat_audit = normalized_species == "cat"
 
     audit: dict[str, Any] = {
         "policy": UPLOADED_FRONT_VIEW_AUDIT_POLICY,
+        "detector_policy": (
+            CAT_FRONT_VIEW_AUDIT_POLICY
+            if cat_audit
+            else DOG_FRONT_VIEW_AUDIT_POLICY
+        ),
+        "species": normalized_species,
         "role": "front",
         "blocking": False,
         "acceptable": False,
         "status": "unavailable_advisory",
         "issues": [],
         "image_path": str(image_path),
-        "classifiers_requested": list(UPLOADED_FRONT_VIEW_AUDIT_CASCADES),
+        "classifiers_requested": (
+            list(UPLOADED_FRONT_VIEW_AUDIT_CASCADES) if cat_audit else []
+        ),
         "classifiers_loaded": [],
         "detections": [],
         "qualified_detections": [],
@@ -54,6 +73,26 @@ def _audit_uploaded_front_identity_view(image_path: Path) -> dict[str, Any]:
         return audit
 
     original_height, original_width = image.shape[:2]
+    if not cat_audit:
+        # OpenCV ships frontal *cat* cascades but no equivalent dog-face
+        # classifier.  Running the cat cascade on a valid dog photograph caused
+        # a deterministic false warning in the dog E2E path.  Keep the audit
+        # explicitly fail-open until a validated dog-frontality model is added;
+        # species classification and ordinary upload integrity checks still run.
+        audit.update(
+            {
+                "image_width": original_width,
+                "image_height": original_height,
+                "audit_width": original_width,
+                "audit_height": original_height,
+                "acceptable": True,
+                "status": "skipped_advisory",
+                "issues": [],
+                "frontality_verified": False,
+                "reason": "validated_dog_frontality_detector_unavailable",
+            }
+        )
+        return audit
     scale = min(
         1.0,
         UPLOADED_FRONT_VIEW_AUDIT_MAX_DIMENSION
@@ -153,22 +192,36 @@ def _audit_uploaded_front_identity_view(image_path: Path) -> dict[str, Any]:
     return audit
 
 
-def audit_uploaded_front_identity_view(image_path: Path) -> dict[str, Any]:
+def audit_uploaded_front_identity_view(
+    image_path: Path,
+    *,
+    species: str = "cat",
+) -> dict[str, Any]:
     """Run the advisory detector and fail open on audit infrastructure errors."""
 
     try:
-        return _audit_uploaded_front_identity_view(image_path)
+        return _audit_uploaded_front_identity_view(image_path, species=species)
     except Exception:  # noqa: BLE001 - this audit is deliberately fail-open
         LOGGER.exception("Uploaded front-view audit failed for %s", image_path)
         return {
             "policy": UPLOADED_FRONT_VIEW_AUDIT_POLICY,
+            "detector_policy": (
+                CAT_FRONT_VIEW_AUDIT_POLICY
+                if str(species or "cat").strip().lower() == "cat"
+                else DOG_FRONT_VIEW_AUDIT_POLICY
+            ),
+            "species": str(species or "cat").strip().lower(),
             "role": "front",
             "blocking": False,
             "acceptable": False,
             "status": "unavailable_advisory",
             "issues": ["front_view_audit_internal_error"],
             "image_path": str(image_path),
-            "classifiers_requested": list(UPLOADED_FRONT_VIEW_AUDIT_CASCADES),
+            "classifiers_requested": (
+                list(UPLOADED_FRONT_VIEW_AUDIT_CASCADES)
+                if str(species or "cat").strip().lower() == "cat"
+                else []
+            ),
             "classifiers_loaded": [],
             "detections": [],
             "qualified_detections": [],

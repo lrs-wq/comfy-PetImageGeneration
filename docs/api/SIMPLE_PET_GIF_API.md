@@ -1,13 +1,15 @@
-# 宠物双姿态 GIF API
+# 猫狗双动作 GIF API
 
 服务地址：`http://39.106.120.253:8051`
 
-这个 API 固定生成两个 512×512 透明背景 GIF：
+上传后服务会强制二分类为 `cat` 或 `dog`，不返回 `unknown`，也不会因为画面不是动物而拒绝任务；分类器不可用或无法形成有效差值时回退到 `cat`。每个任务生成两个 512×512 透明背景 GIF：
 
-- `eating`：吃饭
-- `grooming`：舔毛
+| 分类 | 实际动作 | 查询字段 |
+| --- | --- | --- |
+| `cat` | `eating`、`grooming` | `gifs.eating`、`gifs.grooming` |
+| `dog` | `eating`、`standing` | `gifs.eating`、`gifs.standing`；兼容期内 `gifs.grooming` 与 `gifs.standing` 是同一 URL |
 
-调用方不能修改动作、提示词、尺寸或输出格式。所有业务请求都使用 `POST /api`，通过表单字段 `type` 区分上传和查询。
+调用方不能修改动作、提示词、尺寸或输出格式。上传、查询和兼容取消请求使用 `POST /api`，通过表单字段 `type` 区分；另提供显式终止接口 `POST /api/<key>/cancel`。
 
 ## 鉴权
 
@@ -133,6 +135,7 @@ curl -X POST 'http://39.106.120.253:8051/api' \
   "progress": 26.5,
   "stage": "front_view_not_reliably_frontal",
   "action": null,
+  "species": "cat",
   "error": null,
   "gifs": {
     "eating": null,
@@ -174,10 +177,30 @@ curl -X POST 'http://39.106.120.253:8051/api' \
   "progress": 100.0,
   "stage": "completed",
   "action": null,
+  "species": "cat",
   "error": null,
   "gifs": {
     "eating": "http://39.106.120.253:8051/file/20260807T120000Z-abcd1234/eating_subject_replacement_transparent_512.gif",
     "grooming": "http://39.106.120.253:8051/file/20260807T120000Z-abcd1234/grooming_subject_replacement_transparent_512.gif"
+  }
+}
+```
+
+狗任务完成示例；`standing` 是正式动作名，`grooming` 只是临时兼容别名，不会重复生成第三个 GIF：
+
+```json
+{
+  "key": "20260817T120000Z-dog123456",
+  "status": "completed",
+  "progress": 100.0,
+  "stage": "completed",
+  "action": null,
+  "species": "dog",
+  "error": null,
+  "gifs": {
+    "eating": "http://39.106.120.253:8051/file/20260817T120000Z-dog123456/eating_subject_replacement_transparent_512.gif",
+    "standing": "http://39.106.120.253:8051/file/20260817T120000Z-dog123456/standing_subject_replacement_transparent_512.gif",
+    "grooming": "http://39.106.120.253:8051/file/20260817T120000Z-dog123456/standing_subject_replacement_transparent_512.gif"
   }
 }
 ```
@@ -205,7 +228,7 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 | `waiting_for_gpu` | 正在等待 GPU 或 ComfyUI 空闲；Qwen 和 SCAIL 开始前都可能出现 |
 | `generating_cartoon_reference` | Qwen 正在根据上传视图生成宠物全身基准图 |
 | `retrying_cartoon_reference` | 全身基准图未满足要求，正在重新生成；仅特定审核配置下出现 |
-| `generating_cartoon_keyframes` | Qwen 正在生成吃饭或舔毛动作首帧 |
+| `generating_cartoon_keyframes` | Qwen 正在生成分类对应的动作首帧 |
 | `retrying_cartoon_keyframe` | 动作首帧未满足最低要求，正在重新生成 |
 | `restoring_grooming_identity` | 正在恢复舔毛首帧的面部及身份一致性 |
 | `finalizing_keyframes` | 正在对 Qwen 首帧进行抠图、归一化和结果固化 |
@@ -214,11 +237,11 @@ curl -X POST 'http://39.106.120.253:8051/api' \
 | `generating_subject_replacement` | SCAIL 正在生成当前动作视频 |
 | `auditing_final_video_fur_surface` | 正在检查最终视频的毛发表面；当前线上为非阻塞审核，通常不会出现 |
 | `extracting_transparent_animation` | 正在从动作视频提取透明背景 GIF |
-| `completed` | 吃饭和舔毛两个 GIF 均已生成 |
+| `completed` | 分类对应的两个正式动作 GIF 均已生成 |
 | `failed` | 任务失败，具体原因见 `error` |
 | `cancel_requested` | 底层已收到取消请求，正在停止任务 |
 | `cancelled` | 任务已取消 |
-| `output_contract_failed` | 8051 专用阶段：底层报告完成，但缺少 `eating` 或 `grooming` GIF，8051 将任务改判为失败 |
+| `output_contract_failed` | 8051 专用阶段：猫缺少 `eating/grooming`，或狗缺少 `eating/standing` 时改判为失败 |
 
 正常情况下，阶段顺序大致如下：
 
@@ -239,7 +262,7 @@ queued
 → completed
 ```
 
-重试、舔毛身份恢复和审核均为条件阶段。某些阶段持续时间很短，因此客户端轮询时可能观察不到。`action` 在 SCAIL 阶段通常为 `eating` 或 `grooming`，在 Qwen 首帧阶段可能为 `null`。
+重试、舔毛身份恢复和审核均为条件阶段。某些阶段持续时间很短，因此客户端轮询时可能观察不到。`action` 在 SCAIL 阶段，猫为 `eating/grooming`，狗为 `eating/standing`；在 Qwen 首帧阶段可能为 `null`。
 
 底层 8770 服务还保留以下兼容阶段。当前 8051 的“上传宠物图并生成两个 GIF”链路正常情况下不会进入这些阶段，但调用方应允许服务返回未知的 `stage` 字符串，以便兼容后续升级。
 
@@ -261,11 +284,34 @@ queued
 
 - 以 `status` 判断任务生命周期，使用 `stage` 展示细分进度。
 - 遇到未知 `stage` 时直接展示原值并继续轮询，不要将其自动判定为失败。
-- 当 `status=failed` 时读取 `error`；当 `status=completed` 时确认 `gifs.eating` 和 `gifs.grooming` 均不为 `null`。
+- 当 `status=failed` 时读取 `error`；完成时按 `species` 检查正式动作：猫检查 `eating/grooming`，狗检查 `eating/standing`。狗的 `grooming` 仅用于旧客户端兼容。
 
 生成期间尚未产出的 GIF URL 为 `null`。建议每 10～20 秒查询一次。
 
-## 3. 下载 GIF
+## 3. 终止任务
+
+推荐使用显式终止接口：
+
+```bash
+curl -X POST \
+  -H 'X-API-Key: <API_KEY>' \
+  'http://39.106.120.253:8051/api/<key>/cancel'
+```
+
+为兼容现有单入口调用方式，也可以使用 `type=cancel`：
+
+```bash
+curl -X POST 'http://39.106.120.253:8051/api' \
+  -H 'X-API-Key: <API_KEY>' \
+  -F 'type=cancel' \
+  -F 'key=<key>'
+```
+
+排队中的任务会直接返回 `status=cancelled, stage=cancelled`。运行中的任务先返回 `status=running, stage=cancel_requested`；调用方应继续使用查询接口轮询，直到 `status=cancelled`。`completed`、`failed` 或已经 `cancelled` 的任务重复调用终止接口不会改变原终态。
+
+终止操作不会删除已经生成并固化的文件。请求不存在的 key 返回 HTTP `404`，非法 key 或携带图片的取消请求返回 HTTP `422`。
+
+## 4. 下载 GIF
 
 查询结果中的 URL 仍需携带同一个 API Key：
 
@@ -276,7 +322,7 @@ curl \
   -o result.gif
 ```
 
-8051 服务只开放两个目标透明 GIF，不暴露中间 PNG、MP4 或内部服务地址。
+8051 服务只开放两个实际目标透明 GIF，不暴露中间 PNG、MP4 或内部服务地址。狗响应中的 `standing` 和 `grooming` 指向同一个实际文件。
 
 ## 错误格式
 
@@ -353,5 +399,7 @@ X-API-Key: <CALLBACK_API_KEY>
   }
 }
 ```
+
+狗任务完成回调会额外包含正式字段 `standing`，并把同一 URL 同时放入兼容字段 `grooming`。猫任务的回调结构保持原样。
 
 回调采用独立单线程发送，不阻塞生成链路。每个阶段事件会先写入任务目录的持久化 outbox，再发起网络请求；网络错误和 HTTP `408/429/5xx` 会按顺序持续重试，服务重启后也会恢复未发送事件。接收端返回 HTTP `401/403` 时，事件保留在 outbox，等待修正密钥并重启服务后补发；其他永久性 HTTP `4xx` 会转入 dead-letter 并记录日志。任何回调错误都不会把生成任务改为失败。

@@ -2,7 +2,9 @@
 
 服务地址：`http://39.106.120.253/api/local-video`
 
-当前候选主体替换版本为 `local-video-api v2.26.3`。上传任务采用 Qwen Image Edit 与 SCAIL-2 串行编排，单张 A10 GPU 通过异步队列执行。原始上传照只用于建立身份，不会直接注册为 SCAIL 参考；Main_case Profile 仅提供动作几何与时序，不再向上传宠物注入外观身份词。
+当前候选主体替换版本为 `local-video-api v2.26.4`。上传任务采用 Qwen Image Edit 与 SCAIL-2 串行编排，单张 A10 GPU 通过异步队列执行。原始上传照只用于建立身份，不会直接注册为 SCAIL 参考；动作 Profile 仅提供动作几何与时序，不再向上传宠物注入外观身份词。接口字段、默认 Profile 和自动物种路由保持不变；中型犬/小型犬只由测试平台通过既有 `subject_profile` 字段显式选择。
+
+`v2.26.4` 合并犬类 `eating / standing` 生成能力与当前身份、吃饭几何、软边和循环修复。测试平台新增中型犬与小型犬选择：中型犬引用现有中性犬生产白膜，小型犬引用 2026-08-24 上传并规格化的白膜。该选择不会进入简化 GIF API，也不会改变未显式选择时的默认路由。
 
 `v2.26.3` 修复任务 `20260822T074701Z-2ff0ed2039` 的吃饭首帧身份崩坏。第 3 轮已经得到口鼻接触食物、四肢与食盆均正确的白猫，只因暖色漂移被身份门拒绝；旧调度仍让第 4 轮以 `denoise=1.0` 从 canonical 和几何图全幅重画，结果变成圆耳、大黑鼻的熊/鼬类动物和方盒道具，却因黑色占比从 `0.83%` 增至 `9.80%` 仍低于旧 `22%` 扩张阈值而被选中。现在前三轮一旦保存“姿态与食盆安全、仅身份色盘失败”的摘要绑定候选，第 4 轮立即进入 `canonical_eating_pose_uploaded_front_identity_refine_v3`，第 5 轮仍持续使用同一姿态底稿做身份回正，禁止重新进入普通全幅重画。浅色无彩 canonical 另增加动作相对黑色特征扩张强阻断：源黑色占比不高于 `5%` 时，新增黑色面积超过 `6%` 即拒绝；深色宠物不适用该规则。身份回正提示同步锁定猫/狗物种、耳形、鼻口尺寸和脸部比例，最终仍在有限预算内选择生成候选返回，不回退上传原图。
 
@@ -118,7 +120,7 @@ API Key 不应提交到代码仓库或放入公开网页前端。当前接口为
 
 ## 当前生产链路：`subject_replacement`
 
-当前只开放 `eating`（吃饭）和 `grooming`（舔毛）两个动作。上传图片后的固定顺序为：
+上传主体现在先经过强制 `cat/dog` 二分类。猫继续使用 `sleek_tabby_cat_v1` 和 `eating/grooming`，原链路不变；狗自动切换到 `dog_white_model_v1` 和 `eating/standing`。为兼容旧的 8051 请求，分类为狗时，入参动作 `grooming` 会在入队前归一为正式动作 `standing`。分类没有 `unknown` 分支，分类器异常时回退到猫，因此有效图片即使不是动物也不会仅因分类而被拒绝。上传图片后的固定顺序为：
 
 `v2.21.0` 接受两种上传集合：仅 `image`，或完整的 `image`（正面）+ `image_left`（左侧）+ `image_right`（右侧）。不接受只传一个侧面或缺少任一视角。三视角逐张规范化并锁定原始/规范化 SHA-256，在 GPU 前检查角色集合、文件完整性、完全或近重复视角、可用主体分割和明显毛色类别冲突。三张图仅接入 Qwen 全身 canonical 的 `image1/image2/image3`；动作 Qwen 不读取原始三视角，只读取归一化 canonical 与 Main_case 几何，并按动作分配 Image 1/Image 2 角色。
 
@@ -255,13 +257,16 @@ GIF 格式本身只有 256 色和单级透明度，无法真正保存半透明�
 
 `pet-multipose-20260717-v1` / `multipose-v1` 保留为不启用毛色调色板保护的历史兼容配置。历史 ID `20260717T094459Z-f738613526` 仍保留为 `eating-v1` 兼容配置，仅用于显式复现旧进食任务；新请求默认使用 v2，避免同一 ID 在新旧任务间产生不同语义。
 
-v2 默认启用 `identity_palette_guard=true`，策略为 `source_palette_guard_v2`：
+v2 默认启用 `identity_palette_guard=true`，当前策略为 `source_palette_guard_v3`：
 
 1. 从上传原图分割宠物主体并提取黑、白、灰、暖棕/橙等主要毛色比例，形成源图调色板签名。黑/灰/白按“深色身份纹路”与“灰或白的中性浅色被毛”比较：允许摄影阴影中的白毛在 3D 风格化后变亮，但不允许深色纹路消失或扩成新黑斑。
 2. 把识别出的主毛色和源图中明确缺失的高风险颜色写入身份图与姿态图的动态提示词，要求先锁定毛色再改变画风或姿态。
 3. 每轮候选图都会重新提取毛色签名并与参考签名比较；新增显著橙棕色、把黑白猫改成暖色猫等高置信度身份漂移会被硬拒绝，并继续使用降低 LoRA 影响的重试结果。鼻头和耳内等局部红粉皮肤色单独统计，不再误判成整片暖色被毛。
 4. 吃饭和喝水先执行与其他姿态相同的完整主体毛色检查；若仅完整主体检查失败，再排除下部餐碗区域做一次上半身确认。只有上半身毛色保持时才把失败判为餐碗颜色污染并放行；上半身也漂色时仍然拒绝。奔跑和趴卧不做道具豁免。
 5. 如果主体分割不足以建立可靠签名，调色板保护按“不可用”记录告警，并保留原有身份、姿态和语义检查，不把“未检查”记作“已保持”。
+6. API 2.25.5 增加双向强阻断：除原有的“黑白灰宠物被改成暖色”外，暖色被毛占比显著流失并转成灰白、或低灰黑源图突然扩张出大面积灰黑纹路，也会直接拒绝。
+7. 全身签名额外统计主体内部的局部暗带拓扑；源图没有条纹时，候选新增多条细长高对比暗带会记录为 `invented_stripe_pattern`。该检测忽略眼鼻和主体轮廓阴影，并按组件数量、面积和局部对比联合判定。
+8. canonical 候选触发上述任一问题后会继续执行全部安全重试；没有任何候选通过时，使用原始上传图做语义抠图回退，回退结果仍必须通过同一套色板门禁。暖棕、浅金和奶油色统一按相邻暖色被毛家族描述，不再把金毛错误写入 `golden fur` 负面词。
 
 API 2.21.2 对“消色猫”使用以下条件：消色比例至少 `0.72`，且原图暖色比例不高于 `0.12`；或暖色比例不高于 `0.14` 且高饱和暖色比例不高于 `0.03`。第二条只吸收低饱和摄影光偏，不会把本身带高饱和橙棕色块的三花参考图误归为黑白灰猫；将灰白原图生成成暖棕/橙色角色仍会在进入姿态阶段前被拒绝并重试。
 
@@ -310,12 +315,16 @@ curl -L -H "X-API-Key: $API_KEY" -o pose.gif \
 
 curl -L -H "X-API-Key: $API_KEY" -o pose-soft.png \
   'http://39.106.120.253/api/local-video/jobs/JOB_ID/files/pose_01_transparent_512_soft.png'
+
+curl -X POST -H "X-API-Key: $API_KEY" \
+  'http://39.106.120.253/api/local-video/jobs/JOB_ID/cancel'
 ```
 
-任务状态为 `queued`、`running`、`completed` 或 `failed`。任务文件保存在 `/data/comfy-pet-pipeline/outputs/local_video_api/JOB_ID/`。
+任务状态为 `queued`、`running`、`completed`、`failed` 或 `cancelled`。排队任务取消后立即进入 `cancelled`；运行任务先进入 `stage=cancel_requested`，活动 ComfyUI prompt 或子进程停止后进入 `status=cancelled, stage=cancelled`。对终态任务重复调用取消接口是幂等操作。任务文件保存在 `/data/comfy-pet-pipeline/outputs/local_video_api/JOB_ID/`。
 
 ## 其他接口
 
 - 健康检查：`GET /api/local-video/health`
 - 最近任务：`GET /api/local-video/jobs?limit=20`，需要 API Key
+- 终止任务：`POST /api/local-video/jobs/{job_id}/cancel`，需要 API Key
 - Swagger：`GET /api/local-video/docs`

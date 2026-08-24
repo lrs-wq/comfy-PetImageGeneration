@@ -361,7 +361,7 @@ class ImageProfileTests(unittest.TestCase):
         self.assertTrue(current["identity_palette_guard"])
         self.assertEqual(
             current["identity_palette_policy"],
-            "source_palette_guard_v2",
+            "source_palette_guard_v3",
         )
         self.assertFalse(multipose_v1["identity_palette_guard"])
         self.assertIsNone(multipose_v1["identity_palette_policy"])
@@ -394,7 +394,7 @@ class ImageProfileTests(unittest.TestCase):
         self.assertTrue(public["identity_palette_guard"])
         self.assertEqual(
             public["identity_palette_policy"],
-            "source_palette_guard_v2",
+            "source_palette_guard_v3",
         )
         self.assertEqual(
             [preset["id"] for preset in public["pose_presets"]],
@@ -499,7 +499,7 @@ class GenerationPlatformFrontendTests(unittest.TestCase):
         self.assertIn('id="defaultSubjectName"', html)
         self.assertIn("async function loadSubjects()", html)
         self.assertIn("fetch('api/subjects', {cache: 'no-store'})", html)
-        self.assertIn("item?.id === payload.default", html)
+        self.assertIn("subjectProfiles.has(payload.default)", html)
         self.assertIn("encodeURIComponent(profile.id)", html)
         self.assertIn("action.reference_ready !== false", html)
         self.assertNotIn('src="api/subjects/sleek_tabby_cat_v1/preview"', html)
@@ -519,8 +519,9 @@ class GenerationPlatformFrontendTests(unittest.TestCase):
         self.assertIn('class="action" type="checkbox" value="eating" checked disabled', html)
         self.assertIn('class="action" type="checkbox" value="grooming" disabled', html)
         self.assertIn(".action:checked:not(:disabled)", html)
-        self.assertIn("eating 使用 Main_case/eat.mp4", html)
+        self.assertIn("使用当前所选主体配置的 eating 白膜", html)
         self.assertIn("grooming 使用 Main_case/TM.mp4", html)
+        self.assertIn('class="action" type="checkbox" value="standing" disabled', html)
         self.assertIn('data-pose-key="running"', html)
         self.assertIn('data-pose-key="eating"', html)
         self.assertIn('data-pose-key="drinking"', html)
@@ -617,6 +618,70 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         draw.rectangle((128, 32, 223, 223), fill=(*right, 255))
         image.save(path)
 
+    @staticmethod
+    def write_warm_subject(path: Path, *, striped: bool) -> None:
+        image = Image.new("RGBA", (320, 320), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.ellipse((44, 24, 276, 304), fill=(205, 151, 86, 255))
+        if striped:
+            for offset in range(6):
+                y = 104 + offset * 25
+                draw.polygon(
+                    (
+                        (156, y),
+                        (232, y + 7),
+                        (226, y + 18),
+                        (150, y + 11),
+                    ),
+                    fill=(38, 40, 48, 255),
+                )
+        image.save(path)
+
+    @staticmethod
+    def golden_task_palette(*, candidate: bool) -> dict[str, object]:
+        fractions = (
+            {
+                "black": 0.032821,
+                "white": 0.296911,
+                "gray": 0.210009,
+                "warm_brown_or_orange": 0.382841,
+                "red_or_pink": 0.040058,
+                "yellow_or_gold": 0.033792,
+                "green": 0.0,
+                "blue_or_cyan": 0.003502,
+                "purple": 0.000067,
+            }
+            if candidate
+            else {
+                "black": 0.009656,
+                "white": 0.245361,
+                "gray": 0.013629,
+                "warm_brown_or_orange": 0.716820,
+                "red_or_pink": 0.013043,
+                "yellow_or_gold": 0.001442,
+                "green": 0.0,
+                "blue_or_cyan": 0.000017,
+                "purple": 0.000034,
+            }
+        )
+        return {
+            "available": True,
+            "fractions": fractions,
+            "dominant": ["white", "gray", "warm_brown_or_orange"]
+            if candidate
+            else ["white", "warm_brown_or_orange"],
+            "achromatic_fraction": 0.539741 if candidate else 0.268646,
+            "chromatic_fraction": 0.460260 if candidate else 0.731356,
+            "warm_fraction": 0.456691 if candidate else 0.731305,
+            "saturated_warm_fraction": 0.336282 if candidate else 0.212788,
+            "red_or_pink_body_fraction": 0.002094 if candidate else 0.003118,
+            "red_or_pink_body_share": 0.052279 if candidate else 0.239075,
+            "red_or_pink_localized_to_head": candidate,
+            "green_or_cyan_body_fraction": 0.003451 if candidate else 0.0,
+            "green_or_cyan_body_share": 0.985646 if candidate else 0.0,
+            "green_or_cyan_localized_to_head": not candidate,
+        }
+
     def test_black_white_source_rejects_new_orange_coat(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -650,6 +715,112 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         self.assertTrue(quality["available"])
         self.assertTrue(quality["acceptable"])
         self.assertEqual(quality["issues"], [])
+
+    def test_golden_task_rejects_warm_loss_and_gray_dark_expansion(self) -> None:
+        source = self.golden_task_palette(candidate=False)
+        candidate = self.golden_task_palette(candidate=True)
+
+        quality = pipeline.identity_palette_quality(source, candidate)
+
+        self.assertFalse(quality["acceptable"])
+        self.assertTrue(quality["warm_coat_fraction_lost"])
+        self.assertTrue(quality["gray_or_dark_markings_expanded"])
+        self.assertIn("warm_source_recolored_achromatic", quality["issues"])
+        self.assertIn(
+            "new_gray_or_dark_markings_expanded",
+            quality["issues"],
+        )
+
+    def test_golden_source_is_not_negated_as_golden_fur(self) -> None:
+        source = self.golden_task_palette(candidate=False)
+
+        prompt = pipeline.identity_palette_prompt(source)
+        negative = pipeline.identity_palette_negative_prompt(source)
+
+        self.assertIn("golden/cream", prompt)
+        self.assertNotIn("yellow/gold", prompt.split("Do not introduce", 1)[-1])
+        self.assertNotIn("golden fur", negative)
+
+    def test_spatial_marking_gate_rejects_new_stripes_without_global_drift(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_path = root / "warm-source.png"
+            candidate_path = root / "new-stripes.png"
+            self.write_warm_subject(source_path, striped=False)
+            self.write_warm_subject(candidate_path, striped=True)
+
+            source = pipeline.identity_palette_signature(source_path)
+            candidate = pipeline.identity_palette_signature(candidate_path)
+            quality = pipeline.identity_palette_quality(source, candidate)
+
+        self.assertFalse(quality["warm_coat_fraction_lost"], quality)
+        self.assertFalse(quality["gray_or_dark_markings_expanded"], quality)
+        self.assertFalse(quality["acceptable"])
+        self.assertIn("invented_stripe_pattern", quality["issues"])
+        spatial = quality["marking_spatial_quality"]
+        self.assertTrue(spatial["available"])
+        self.assertGreaterEqual(
+            spatial["stripe_component_delta"],
+            pipeline.IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN,
+        )
+
+    def test_existing_stripe_topology_is_preserved_without_false_rejection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_path = root / "striped-source.png"
+            candidate_path = root / "matching-stripes.png"
+            self.write_warm_subject(source_path, striped=True)
+            self.write_warm_subject(candidate_path, striped=True)
+
+            source = pipeline.identity_palette_signature(source_path)
+            candidate = pipeline.identity_palette_signature(candidate_path)
+            quality = pipeline.identity_palette_quality(source, candidate)
+
+        self.assertTrue(quality["acceptable"], quality)
+        self.assertFalse(
+            quality["marking_spatial_quality"]["invented_stripe_pattern"]
+        )
+
+    def test_all_rejected_canonical_retries_require_uploaded_identity_fallback(
+        self,
+    ) -> None:
+        attempts = [
+            {
+                "attempt": attempt,
+                "identity_palette": {
+                    "acceptable": False,
+                    "issues": ["invented_stripe_pattern"],
+                },
+            }
+            for attempt in range(1, 4)
+        ]
+        recovery_profiles = pipeline.qwen_recovery_profiles(
+            user_lora=None,
+            user_lora_strength=0.0,
+            user_lora_mode="replace",
+            steps=6,
+            cfg=1.0,
+            denoise=1.0,
+        )
+
+        self.assertEqual(len(recovery_profiles), 3)
+        self.assertTrue(
+            pipeline.canonical_generated_attempts_require_uploaded_fallback(
+                attempts,
+                identity_palette_required=True,
+            )
+        )
+        attempts[-1]["identity_palette"] = {"acceptable": True, "issues": []}
+        self.assertFalse(
+            pipeline.canonical_generated_attempts_require_uploaded_fallback(
+                attempts,
+                identity_palette_required=True,
+            )
+        )
 
     def test_localized_head_skin_color_is_warning_but_body_spread_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -736,7 +907,9 @@ class IdentityPaletteGuardTests(unittest.TestCase):
             eye_color = (32, 154, 52, 255)
             draw.ellipse((72, 58, 99, 82), fill=eye_color)
             draw.ellipse((156, 58, 183, 82), fill=eye_color)
-            draw.rectangle((76, 138, 179, 208), fill=(82, 172, 94, 255))
+            # A low-hue, low-red-delta screen reflection like the pale green cast
+            # observed on the white-dog E2E canonical.
+            draw.rectangle((76, 138, 179, 208), fill=(163, 169, 125, 255))
             image.save(path)
             alpha_before = image.getchannel("A").tobytes()
             source_palette = {
@@ -758,6 +931,41 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         self.assertEqual(corrected.getpixel((85, 70)), eye_color)
         chest = corrected.getpixel((128, 170))
         self.assertLessEqual(max(chest[:3]) - min(chest[:3]), 3)
+        self.assertEqual(corrected.getchannel("A").tobytes(), alpha_before)
+
+    def test_identity_aware_despill_reconstructs_warm_local_coat_chroma(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "warm-dog-candidate.png"
+            image = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            warm_coat = (194, 158, 96, 255)
+            draw.rectangle((32, 24, 223, 231), fill=warm_coat)
+            draw.rectangle((76, 138, 179, 208), fill=(82, 172, 94, 255))
+            image.save(path)
+            alpha_before = image.getchannel("A").tobytes()
+            source_palette = {
+                "available": True,
+                "fractions": {"green": 0.0, "blue_or_cyan": 0.0},
+                "green_or_cyan_body_fraction": 0.0,
+            }
+
+            result = pipeline.neutralize_uploaded_identity_chroma_spill(
+                path,
+                source_palette,
+            )
+            with Image.open(path) as corrected_image:
+                corrected = corrected_image.convert("RGBA")
+
+        chest = corrected.getpixel((128, 170))
+        self.assertTrue(result["applied"], result)
+        self.assertEqual(
+            result["chroma_reconstruction"],
+            "local_lab_telea_inpaint",
+        )
+        self.assertGreater(result["chroma_donor_pixels"], 0)
+        self.assertGreater(chest[0], chest[1])
+        self.assertGreater(chest[1], chest[2])
+        self.assertGreater(max(chest[:3]) - min(chest[:3]), 20)
         self.assertEqual(corrected.getchannel("A").tobytes(), alpha_before)
 
     def test_unavailable_identity_palette_signature_fails_closed(self) -> None:
@@ -859,6 +1067,8 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         prompt = pipeline.identity_palette_prompt(source, retry=True)
         negative = pipeline.identity_palette_negative_prompt(source)
 
+        self.assertIn("uploaded pet", prompt)
+        self.assertNotIn("uploaded cat", prompt)
         self.assertIn("Red or pink is a small skin accent, never a fur color", prompt)
         self.assertIn("tiny low-saturation nose pad", prompt)
         self.assertIn("Do not enlarge, saturate, or spread it", prompt)

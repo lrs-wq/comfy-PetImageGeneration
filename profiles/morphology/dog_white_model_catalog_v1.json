@@ -8,7 +8,12 @@
     "enabled": false,
     "current_fallback_category": "neutral_dog",
     "future_size_categories": ["medium_dog", "small_dog"],
-    "activation_requirement": "normalize and validate each action, then add an explicit morphology router"
+    "activation_requirement": "normalize and validate each action, then add an explicit morphology router",
+    "test_platform_selection_enabled": true,
+    "test_platform_profiles": {
+      "medium_dog": "dog_medium_white_model_test_v1",
+      "small_dog": "dog_small_white_model_test_v1"
+    }
   },
   "categories": {
     "neutral_dog": {
@@ -47,8 +52,11 @@
     "small_dog": {
       "display_name": "小型犬",
       "size_class": "small",
-      "status": "source_uploaded_pending_runtime_normalization",
+      "status": "test_runtime_ready_for_eating_standing_other_sources_pending",
       "runtime_ready": false,
+      "test_platform_runtime_ready": true,
+      "test_platform_actions": ["eating", "standing"],
+      "test_platform_profile_id": "dog_small_white_model_test_v1",
       "source_batch": "wechat-2026-08-small-dog-six-actions",
       "source_bytes_preserved_exactly": true,
       "actions": {
@@ -78,7 +86,19 @@
           "duration_seconds": 8.0,
           "video_codec": "h264",
           "pixel_format": "yuv420p",
-          "audio_codec": "aac"
+          "audio_codec": "aac",
+          "test_runtime_action": "standing",
+          "test_runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_standing_driver_512x512_81f_16fps.mp4",
+          "test_runtime_sha256": "f35ae68b274f024ccd2789a9b4b555cf46918f71183544883cf42792a02e3295",
+          "test_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_standing_reference_frame040_cutout.png",
+          "test_reference_sha256": "541f96980132b66c00ba6cc51cb484afc9041721c4003c0913e895c56b004309",
+          "test_width": 512,
+          "test_height": 512,
+          "test_fps": 16,
+          "test_frames": 81,
+          "test_duration_seconds": 5.0625,
+          "test_audio": false,
+          "test_endpoint_ssim": 0.969743
         },
         "drinking": {
           "original_filename": "小型犬喝水_.mp4",
@@ -134,7 +154,19 @@
           "duration_seconds": 8.0,
           "video_codec": "h264",
           "pixel_format": "yuv420p",
-          "audio_codec": "aac"
+          "audio_codec": "aac",
+          "test_runtime_action": "eating",
+          "test_runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_eating_driver_512x512_81f_16fps.mp4",
+          "test_runtime_sha256": "ddc262394ce5ace01279d36aea98aaaa743818bb4dc93a628f35ec8ecaf991b6",
+          "test_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_eating_reference_frame040_cutout.png",
+          "test_reference_sha256": "101bec91929e92ca907e955365a3053aca0c25332f6a8cae4d6911ceb4c9cc55",
+          "test_width": 512,
+          "test_height": 512,
+          "test_fps": 16,
+          "test_frames": 81,
+          "test_duration_seconds": 5.0625,
+          "test_audio": false,
+          "test_endpoint_ssim": 0.970452
         }
       },
       "runtime_normalization_required": {
@@ -150,8 +182,12 @@
     "medium_dog": {
       "display_name": "中型犬",
       "size_class": "medium",
-      "status": "reserved_not_uploaded",
+      "status": "test_platform_alias_of_neutral_dog",
       "runtime_ready": false,
+      "test_platform_runtime_ready": true,
+      "test_platform_actions": ["eating", "standing"],
+      "test_platform_profile_id": "dog_medium_white_model_test_v1",
+      "asset_alias": "neutral_dog",
       "actions": {}
     }
   }

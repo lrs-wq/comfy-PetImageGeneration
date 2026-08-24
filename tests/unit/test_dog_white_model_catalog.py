@@ -18,9 +18,17 @@ class DogWhiteModelCatalogTest(unittest.TestCase):
 
     def test_categories_are_registered_without_changing_live_routing(self) -> None:
         self.assertFalse(self.catalog["routing"]["enabled"])
+        self.assertTrue(self.catalog["routing"]["test_platform_selection_enabled"])
         self.assertEqual(
             self.catalog["routing"]["current_fallback_category"],
             "neutral_dog",
+        )
+        self.assertEqual(
+            self.catalog["routing"]["test_platform_profiles"],
+            {
+                "medium_dog": "dog_medium_white_model_test_v1",
+                "small_dog": "dog_small_white_model_test_v1",
+            },
         )
         self.assertEqual(
             set(self.catalog["categories"]),
@@ -40,10 +48,16 @@ class DogWhiteModelCatalogTest(unittest.TestCase):
             self.assertEqual(action["fps"], 16)
             self.assertFalse(action["audio"])
 
-    def test_six_small_dog_sources_are_uploaded_but_not_runtime_ready(self) -> None:
+    def test_six_small_dog_sources_are_preserved_and_two_test_actions_are_ready(self) -> None:
         small = self.catalog["categories"]["small_dog"]
         self.assertEqual(small["display_name"], "小型犬")
         self.assertFalse(small["runtime_ready"])
+        self.assertTrue(small["test_platform_runtime_ready"])
+        self.assertEqual(small["test_platform_actions"], ["eating", "standing"])
+        self.assertEqual(
+            small["test_platform_profile_id"],
+            "dog_small_white_model_test_v1",
+        )
         self.assertEqual(
             set(small["actions"]),
             {
@@ -63,10 +77,33 @@ class DogWhiteModelCatalogTest(unittest.TestCase):
             hashes.add(action["source_sha256"])
         self.assertEqual(len(hashes), 6)
 
-    def test_medium_dog_is_reserved(self) -> None:
+        for source_action, test_action in (
+            ("eating", "eating"),
+            ("standing_head_turn", "standing"),
+        ):
+            action = small["actions"][source_action]
+            self.assertEqual(action["test_runtime_action"], test_action)
+            self.assertIn("/small_dog/runtime-v1/", action["test_runtime"])
+            self.assertIn("/small_dog/runtime-v1/", action["test_reference"])
+            self.assertEqual(len(action["test_runtime_sha256"]), 64)
+            self.assertEqual(len(action["test_reference_sha256"]), 64)
+            self.assertEqual((action["test_width"], action["test_height"]), (512, 512))
+            self.assertEqual(action["test_frames"], 81)
+            self.assertEqual(action["test_fps"], 16)
+            self.assertFalse(action["test_audio"])
+            self.assertGreaterEqual(action["test_endpoint_ssim"], 0.9)
+
+    def test_medium_dog_test_profile_aliases_neutral_assets(self) -> None:
         medium = self.catalog["categories"]["medium_dog"]
         self.assertEqual(medium["display_name"], "中型犬")
         self.assertFalse(medium["runtime_ready"])
+        self.assertTrue(medium["test_platform_runtime_ready"])
+        self.assertEqual(medium["test_platform_actions"], ["eating", "standing"])
+        self.assertEqual(
+            medium["test_platform_profile_id"],
+            "dog_medium_white_model_test_v1",
+        )
+        self.assertEqual(medium["asset_alias"], "neutral_dog")
         self.assertEqual(medium["actions"], {})
 
 

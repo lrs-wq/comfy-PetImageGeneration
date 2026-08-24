@@ -1,8 +1,8 @@
 # Comfy Pet Pipeline
 
-宠物图片与双动作 GIF 生成服务。调用方上传一张必选正面图，以及最多两张可选侧面图；系统先生成并归一化宠物 canonical 全身参考，再分别生成“吃饭”和“舔毛”动作首帧，最后驱动白模动作视频并输出两个 GIF。
+猫狗图片与双动作 GIF 生成服务。调用方上传一张必选正面图，以及最多两张可选侧面图；系统先强制二分类为猫或狗，再生成并归一化 canonical 全身参考。猫生成 `eating`、`grooming`，狗生成 `eating`、`standing`，其中狗的 `standing` 暂时同时映射到兼容字段 `grooming`。
 
-当前 API 版本：`2.26.3`。生产策略默认只对运行完整性失败关闭，生成物的细粒度视觉审核以 advisory 记录为主；上传动作候选仍执行保证身份与动作底线的有限重试和生成候选降级，不回退原始上传图。
+当前 API 版本：`2.26.4`。生产策略默认只对运行完整性失败关闭，生成物的细粒度视觉审核以 advisory 记录为主；上传动作候选仍执行保证身份与动作底线的有限重试和生成候选降级，不回退原始上传图。测试平台可显式选择中型犬或小型犬的 `eating / standing` 白膜；默认 API 路由和请求字段保持不变。
 
 ## 主要入口
 
@@ -11,7 +11,7 @@
 - 测试界面：`https://ai.hzzootech.com/pet-generation/`
 - ComfyUI：`http://127.0.0.1:8188`
 
-简化 API 使用同一个 `/api` 端点，以 `type=upload` 提交任务并返回查询 key，以 `type=query` 和 key 查询进度及最终 `eating.gif`、`grooming.gif`。请求字段和响应示例见 [简化 API 文档](docs/api/SIMPLE_PET_GIF_API.md)。底层接口见 [本地视频 API 文档](docs/api/LOCAL_VIDEO_API.md)。
+简化 API 使用同一个 `/api` 端点，以 `type=upload` 提交任务并返回查询 key，以 `type=query` 和 key 查询进度及最终 GIF。请求字段、猫狗字段差异和狗 `grooming → standing` 兼容映射见 [简化 API 文档](docs/api/SIMPLE_PET_GIF_API.md)。底层接口见 [本地视频 API 文档](docs/api/LOCAL_VIDEO_API.md)。
 
 ## 目录
 

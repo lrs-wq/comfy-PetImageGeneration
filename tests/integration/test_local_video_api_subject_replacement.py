@@ -199,6 +199,188 @@ class SubjectReplacementParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Only eating and grooming"):
             pipeline.parse_subject_actions('["running"]')
 
+    def test_dog_actions_use_standing_and_map_legacy_grooming_alias(self) -> None:
+        self.assertEqual(
+            pipeline.parse_subject_actions('["eating", "standing"]'),
+            ["eating", "standing"],
+        )
+        self.assertEqual(
+            pipeline.normalize_subject_actions_for_species(
+                ["eating", "grooming"],
+                "dog",
+            ),
+            ["eating", "standing"],
+        )
+        with self.assertRaisesRegex(ValueError, "cat subject replacement"):
+            pipeline.normalize_subject_actions_for_species(["standing"], "cat")
+
+    def test_dog_profile_exposes_digest_bound_eating_and_standing_assets(self) -> None:
+        profile = pipeline.load_subject_profile("dog_white_model_v1")
+        runtime = pipeline.subject_profile_runtime(profile)
+
+        self.assertEqual(profile["species"], "dog")
+        self.assertEqual(
+            list(pipeline.subject_profile_actions(profile)),
+            ["eating", "standing"],
+        )
+        self.assertEqual(set(runtime["actions"]), {"eating", "standing"})
+        self.assertEqual(
+            profile["uploaded_identity_driving"]["revision"],
+            "dog-stable-kibble-standing-pant-20260818-v4",
+        )
+        self.assertEqual(
+            profile["uploaded_identity_driving"]["actions"]["eating"]["loop_policy"],
+            "full_source_down_up_down_cycle_2x_v1",
+        )
+        self.assertGreaterEqual(
+            profile["uploaded_identity_driving"]["actions"]["eating"]["endpoint_ssim"],
+            0.95,
+        )
+        food_stabilization = profile["uploaded_identity_driving"]["actions"][
+            "eating"
+        ]["food_stabilization"]
+        self.assertEqual(
+            food_stabilization["policy"],
+            "fixed_low_level_small_kibble_below_rim_v1",
+        )
+        self.assertGreater(
+            food_stabilization["food_pattern_top_y"],
+            food_stabilization["bowl_rim_top_y"],
+        )
+        self.assertFalse(food_stabilization["food_above_rim_allowed"])
+        self.assertEqual(food_stabilization["frames_audited"], 81)
+        self.assertEqual(food_stabilization["forbidden_food_pixels_above_rim"], 0)
+        self.assertTrue(food_stabilization["passed"])
+        asset_manifest = json.loads(
+            Path(profile["profile_asset_manifest"]["path"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            asset_manifest["policy"],
+            "dog_white_model_action_specific_loop_normalization_standing_pant_v4",
+        )
+        manifest_food = asset_manifest["actions"]["eating"][
+            "food_stabilization"
+        ]
+        self.assertEqual(
+            manifest_food["food_pattern_sha256"],
+            food_stabilization["food_pattern_sha256"],
+        )
+        self.assertEqual(manifest_food["food_pattern_top_y"], 373)
+        self.assertEqual(manifest_food["forbidden_food_pixels_above_rim"], 0)
+        self.assertTrue(manifest_food["passed"])
+        manifest_mouth = asset_manifest["actions"]["standing"][
+            "mouth_tongue_motion"
+        ]
+        self.assertEqual(
+            manifest_mouth["policy"],
+            "relaxed_open_mouth_attached_tongue_extension_retraction_v1",
+        )
+        self.assertGreaterEqual(
+            manifest_mouth["tongue_tip_y_span_pixels"],
+            manifest_mouth["minimum_tongue_tip_y_span_pixels"],
+        )
+        self.assertGreaterEqual(
+            manifest_mouth["visible_mouth_cavity_dark_pixels_min"],
+            manifest_mouth["minimum_visible_mouth_cavity_dark_pixels"],
+        )
+        self.assertEqual(manifest_mouth["frames_audited"], 81)
+        self.assertTrue(manifest_mouth["passed"])
+        effective = pipeline.resolve_effective_subject_config(
+            profile,
+            ["eating", "standing"],
+            seed=None,
+            scail_steps=None,
+            pose_strength=None,
+        )
+        self.assertEqual(effective["actions"]["eating"]["output_playback_rate"], 0.5)
+        self.assertEqual(
+            effective["actions"]["eating"]["output_playback_policy"],
+            "restore_original_eating_source_tempo_v1",
+        )
+        self.assertEqual(
+            effective["actions"]["standing"]["output_playback_rate"], 1.0
+        )
+        eating_timing = pipeline.subject_replacement_action_output_timing(
+            effective,
+            "eating",
+        )
+        standing_timing = pipeline.subject_replacement_action_output_timing(
+            effective,
+            "standing",
+        )
+        self.assertEqual(
+            eating_timing["generation"],
+            {"frames": 81, "fps": 16.0, "duration_seconds": 5.0625},
+        )
+        self.assertEqual(
+            eating_timing["video"],
+            {"frames": 81, "fps": 8.0, "duration_seconds": 10.125},
+        )
+        self.assertEqual(
+            eating_timing["transparent_gif"],
+            {"frames": 100, "fps": 10, "duration_seconds": 10.0},
+        )
+        self.assertEqual(standing_timing["video"]["fps"], 16.0)
+        self.assertEqual(standing_timing["transparent_gif"]["fps"], 20)
+        self.assertEqual(standing_timing["transparent_gif"]["duration_seconds"], 5.0)
+        public_actions = {
+            action["id"]: action
+            for action in pipeline.subject_profile_public(profile)["actions"]
+        }
+        self.assertEqual(public_actions["eating"]["output_playback_rate"], 0.5)
+        self.assertEqual(public_actions["standing"]["output_playback_rate"], 1.0)
+        eating_driver = effective["actions"]["eating"][
+            "uploaded_identity_driving"
+        ]
+        self.assertEqual(
+            eating_driver["loop_policy"],
+            "full_source_down_up_down_cycle_2x_v1",
+        )
+        self.assertEqual(eating_driver["selected_frame_index"], 8)
+        self.assertEqual(eating_driver["minimum_endpoint_ssim"], 0.95)
+        frozen, _ = pipeline.configure_uploaded_subject_validation(
+            effective,
+            ["eating", "standing"],
+        )
+        self.assertEqual(
+            frozen["actions"]["eating"]["geometry_reference_kind"],
+            "uploaded_white_maquette_frame008_rgba",
+        )
+        self.assertEqual(
+            frozen["actions"]["standing"]["geometry_reference_kind"],
+            "uploaded_white_maquette_frame040_rgba",
+        )
+        self.assertTrue(
+            runtime["actions"]["eating"]["driving_animation"].endswith(
+                "20260818-standing-pant-v4/"
+                "eating_white_model_driver_512x512_81f_16fps.mp4"
+            )
+        )
+        self.assertEqual(
+            runtime["actions"]["eating"]["driving_animation_sha256"],
+            "b6009f9ca7f12c5233c4e6b172b50d3fe6a69e8bc2faf97e6f2593843d5c7d20",
+        )
+        self.assertEqual(
+            runtime["actions"]["standing"]["driving_animation_sha256"],
+            "9f2f951fdb46e08249e4b553dbdcd55e1940fded56e92cfe8462bd37ba40f1e0",
+        )
+        for action in ("eating", "standing"):
+            action_runtime = runtime["actions"][action]
+            self.assertTrue(Path(action_runtime["driving_animation"]).is_file())
+            self.assertRegex(
+                action_runtime["driving_animation_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
+
+    def test_profile_rejects_out_of_range_output_playback_rate(self) -> None:
+        profile = pipeline.load_subject_profile("dog_white_model_v1")
+        profile["runtime"]["actions"]["eating"]["output_playback_rate"] = 0.1
+
+        with self.assertRaisesRegex(ValueError, "output_playback_rate"):
+            pipeline.subject_profile_runtime(profile)
+
     def test_profile_exposes_action_specific_references(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1120,6 +1302,110 @@ class CanonicalChromaIntegrityTests(unittest.TestCase):
 
 
 class SubjectReplacementJobCreationTests(unittest.TestCase):
+    def test_test_platform_dog_size_profile_selection_is_authoritative(self) -> None:
+        for requested in (
+            "dog_medium_white_model_test_v1",
+            "dog_small_white_model_test_v1",
+        ):
+            with self.subTest(requested=requested):
+                self.assertEqual(
+                    pipeline.uploaded_subject_profile_selection("cat", requested),
+                    (requested, "test_platform_explicit_dog_size_v1"),
+                )
+
+    def test_ordinary_profile_requests_keep_species_classifier_routing(self) -> None:
+        self.assertEqual(
+            pipeline.uploaded_subject_profile_selection(
+                "dog",
+                "sleek_tabby_cat_v1",
+            ),
+            ("dog_white_model_v1", "species_classifier_default_v1"),
+        )
+        self.assertEqual(
+            pipeline.uploaded_subject_profile_selection(
+                "cat",
+                "dog_white_model_v1",
+            ),
+            ("sleek_tabby_cat_v1", "species_classifier_default_v1"),
+        )
+
+    def test_uploaded_dog_routes_to_standing_profile_and_legacy_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary) / "outputs"
+            jobs: dict[str, dict[str, object]] = {}
+            job_queue: queue.Queue[str] = queue.Queue(maxsize=4)
+            image_bytes = io.BytesIO()
+            Image.new("RGB", (512, 512), (130, 90, 60)).save(
+                image_bytes,
+                format="PNG",
+            )
+            upload = pipeline.UploadFile(
+                filename="dog.png",
+                file=io.BytesIO(image_bytes.getvalue()),
+            )
+            classification = {
+                "species": "dog",
+                "scores": {"cat": 0.02, "dog": 0.91},
+                "margin": 0.89,
+                "forced_binary": True,
+                "unknown_class": False,
+                "fallback": False,
+            }
+            with (
+                patch.multiple(
+                    pipeline,
+                    OUTPUT_ROOT=output_root,
+                    JOBS=jobs,
+                    JOB_QUEUE=job_queue,
+                ),
+                patch.object(
+                    pipeline,
+                    "classify_pet_species",
+                    return_value=classification,
+                ),
+                patch.object(pipeline, "require_subject_replacement_assets"),
+            ):
+                result = asyncio.run(
+                    pipeline.create_subject_replacement_api_job(
+                        image=upload,
+                        prompt="",
+                        actions_raw='["eating", "grooming"]',
+                        subject_profile_id="sleek_tabby_cat_v1",
+                        output_format="transparent_gif",
+                        scail_steps=6,
+                        pose_strength=None,
+                        seed=123,
+                    )
+                )
+
+        self.assertEqual(result["species"], "dog")
+        self.assertEqual(result["species_classification"], classification)
+        self.assertEqual(result["subject_profile"], "dog_white_model_v1")
+        self.assertEqual(result["requested_subject_profile"], "sleek_tabby_cat_v1")
+        self.assertTrue(result["subject_profile_routed_by_species"])
+        self.assertEqual(
+            result["subject_profile_selection_policy"],
+            "species_classifier_default_v1",
+        )
+        self.assertEqual(result["actions"], ["eating", "standing"])
+        self.assertTrue(result["output_timing_is_action_specific"])
+        self.assertEqual(
+            result["output_timing_by_action"]["eating"]["transparent_gif"],
+            {"frames": 100, "fps": 10, "duration_seconds": 10.0},
+        )
+        self.assertEqual(
+            result["output_timing_by_action"]["standing"]["transparent_gif"],
+            {"frames": 100, "fps": 20, "duration_seconds": 5.0},
+        )
+        self.assertEqual(
+            result["reference_image_profile"],
+            pipeline.DOG_SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE,
+        )
+        self.assertEqual(
+            set(result["effective_subject_config"]["actions"]),
+            {"eating", "standing"},
+        )
+
     def test_default_profile_job_needs_no_uploaded_image(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1170,6 +1456,11 @@ class SubjectReplacementJobCreationTests(unittest.TestCase):
         self.assertEqual(result["subject_profile"], "sleek_tabby_cat_v1")
         self.assertEqual(result["frames"], 100)
         self.assertEqual(result["fps"], 20.0)
+        self.assertFalse(result["output_timing_is_action_specific"])
+        self.assertEqual(
+            result["output_timing_by_action"]["eating"]["transparent_gif"],
+            {"frames": 100, "fps": 20, "duration_seconds": 5.0},
+        )
         self.assertEqual(result["seed"], 123)
         self.assertEqual(result["seed_mode"], "base_plus_action_offset")
         self.assertEqual(
@@ -1854,6 +2145,20 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
                         "qwen_reference_pre_scail_minimum_contract_status"
                     ],
                     "passed",
+                )
+                selected_minimum["identity_palette_reference_sha256"] = "0" * 64
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "minimum action/identity contract",
+                ):
+                    pipeline.revalidate_uploaded_qwen_references_before_scail(
+                        job_id,
+                        jobs[job_id],
+                        effective_config,
+                        ["grooming"],
+                    )
+                selected_minimum["identity_palette_reference_sha256"] = (
+                    uploaded_identity_digest
                 )
                 selected_minimum["acceptable"] = False
                 selected_minimum["degraded_fallback_accepted"] = True

@@ -22,7 +22,11 @@ def prepare_uploaded_subject_qwen_references(
         job = dict(JOBS[job_id])
     job_dir = OUTPUT_ROOT / job_id
     upload_integrity = verify_uploaded_identity_submission(job, job_dir)
-    identity_view_audit = compose_uploaded_identity_view_audit(upload_integrity)
+    species = str(job.get("species") or "cat").strip().lower()
+    identity_view_audit = compose_uploaded_identity_view_audit(
+        upload_integrity,
+        species=species,
+    )
     write_json_atomic(
         job_dir / "workflows" / "uploaded_identity_view_set_audit.json",
         identity_view_audit,
@@ -137,7 +141,15 @@ def prepare_uploaded_subject_qwen_references(
             identity_view_audit["issues"],
         )
 
-    image_profile = IMAGE_PROFILES[SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE]
+    image_profile_id = str(
+        job.get("reference_image_profile")
+        or (
+            DOG_SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE
+            if species == "dog"
+            else SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE
+        )
+    )
+    image_profile = IMAGE_PROFILES[image_profile_id]
     user_loras, user_lora_mode, lora_source = merge_image_profile_loras(
         image_profile,
         [],
@@ -167,6 +179,7 @@ def prepare_uploaded_subject_qwen_references(
         )
     profile = {
         "id": effective_subject_config.get("profile_id"),
+        "species": species,
         "fur_constraints": json.loads(
             json.dumps(effective_subject_config.get("profile_fur_constraints") or {})
         ),
@@ -175,9 +188,9 @@ def prepare_uploaded_subject_qwen_references(
     if (
         not isinstance(upload_validation, dict)
         or upload_validation.get("policy") != QWEN_FULL_BODY_FIRST_FRAME_PIPELINE
-        or (
-            GENERATION_VISUAL_AUDITS_BLOCKING
-            and upload_validation.get("expected_surface_gate_actions") != actions
+        or not isinstance(
+            upload_validation.get("expected_surface_gate_actions"),
+            list,
         )
     ):
         raise RuntimeError(
@@ -185,7 +198,7 @@ def prepare_uploaded_subject_qwen_references(
             "surface validation contract."
         )
     if GENERATION_VISUAL_AUDITS_BLOCKING:
-        for action in actions:
+        for action in upload_validation["expected_surface_gate_actions"]:
             require_uploaded_fur_surface_gate(
                 effective_subject_config["actions"][action],
                 action,
@@ -565,6 +578,50 @@ def prepare_uploaded_subject_qwen_references(
                 "private_completion_mask_exposed_to_qwen": False,
                 "generator_metadata": guide_metadata,
             }
+        elif action == "standing":
+            geometry_reference = Path(
+                str(action_config.get("geometry_reference") or "")
+            )
+            expected_geometry_sha256 = str(
+                action_config.get("geometry_reference_sha256") or ""
+            ).strip()
+            if (
+                not geometry_reference.is_file()
+                or not expected_geometry_sha256
+                or file_sha256(geometry_reference) != expected_geometry_sha256
+            ):
+                raise RuntimeError(
+                    "Standing white-model geometry reference is missing or changed."
+                )
+            with Image.open(geometry_reference) as loaded_geometry:
+                geometry_rgba = loaded_geometry.convert("RGBA")
+                alpha = geometry_rgba.getchannel("A")
+                guide = Image.new("RGB", geometry_rgba.size, (0, 255, 0))
+                guide.paste(
+                    Image.new("RGB", geometry_rgba.size, (144, 144, 144)),
+                    mask=alpha,
+                )
+                guide.save(pose_guide, format="PNG", optimize=True)
+            guide_sha256 = file_sha256(pose_guide)
+            pose_reference_policies[action] = (
+                "dog_standing_white_model_silhouette_image2_v1"
+            )
+            pose_reference_guide_styles[action] = (
+                "single_tone_appearance_free_dog_standing_geometry_on_pure_green"
+            )
+            pose_reference_metadata[action] = {
+                "policy": pose_reference_policies[action],
+                "image_role": "image2_action_geometry_guide",
+                "identity_role": "image1_qwen_full_body_canonical",
+                "palette_audit_role": "qwen_full_body_canonical",
+                "source_rgb_preserved": False,
+                "driver_silhouette_used": True,
+                "uploaded_white_maquette_driver_used": True,
+                "driver_appearance_authority": False,
+                "source_sha256": source_digest,
+                "geometry_reference_sha256": expected_geometry_sha256,
+                "guide_sha256": guide_sha256,
+            }
         else:
             raise ValueError(f"Unsupported subject replacement action: {action}")
         pose_reference_inputs[action] = (
@@ -616,21 +673,32 @@ def prepare_uploaded_subject_qwen_references(
         subject_profile_identity_terms_applied=False,
         uploaded_identity_appearance_authority=True,
         qwen_reference_poses=[
-            subject_replacement_pose_prompt(action) for action in actions
+            subject_replacement_pose_prompt(action, species=species)
+            for action in actions
         ],
         pose_reference_inputs=pose_reference_inputs,
         pose_reference_source_paths=pose_reference_source_paths,
         pose_reference_source_sha256s=pose_reference_source_sha256s,
         pose_reference_input_sha256s=pose_reference_input_sha256s,
         pose_reference_metadata=pose_reference_metadata,
-        reference_pose_source="per_action_main_case_driver_geometry",
+        reference_pose_source=(
+            "per_action_main_case_driver_geometry"
+            if species == "cat"
+            else "per_action_species_profile_driver_geometry"
+        ),
         pose_reference_policy=pose_reference_policies,
-        pose_reference_guide_style="per_action_main_case_driver_geometry_v2",
+        pose_reference_guide_style=(
+            "per_action_main_case_driver_geometry_v2"
+            if species == "cat"
+            else "per_action_dog_white_model_driver_geometry_v1"
+        ),
         pose_reference_guide_styles=pose_reference_guide_styles,
         pose_reference_role="per_action_geometry_input_role",
         pose_identity_input_policy=POSE_IDENTITY_INPUT_POLICY_CANONICAL,
         pose_identity_input_policy_scope=(
             "eating_and_grooming_canonical_image1_geometry_image2"
+            if species == "cat"
+            else "eating_and_standing_canonical_image1_geometry_image2"
         ),
         pose_identity_input_policies={
             action: POSE_IDENTITY_INPUT_POLICY_CANONICAL for action in actions
@@ -639,9 +707,18 @@ def prepare_uploaded_subject_qwen_references(
             action: "image1_qwen_full_body_canonical" for action in actions
         },
         pose_identity_geometry_roles={
-            action: "image2_main_case_driver_geometry_guide" for action in actions
+            action: (
+                "image2_main_case_driver_geometry_guide"
+                if species == "cat"
+                else "image2_dog_white_model_driver_geometry_guide"
+            )
+            for action in actions
         },
-        eating_pose_lora_policy=("canonical_identity_plus_main_case_geometry_v1"),
+        eating_pose_lora_policy=(
+            "canonical_identity_plus_main_case_geometry_v1"
+            if species == "cat"
+            else "canonical_identity_plus_dog_white_model_geometry_v1"
+        ),
         eating_identity_refine_enabled=True,
         eating_identity_refine_active=False,
         eating_identity_refine_policy=(EATING_CANONICAL_IDENTITY_REFINE_POLICY),
@@ -991,22 +1068,21 @@ def prepare_uploaded_subject_qwen_references(
         if isinstance(upload_validation, dict)
         else []
     )
-    if (
-        GENERATION_VISUAL_AUDITS_BLOCKING
-        and expected_surface_gate_actions != actions
+    if GENERATION_VISUAL_AUDITS_BLOCKING and any(
+        action not in actions for action in expected_surface_gate_actions
     ):
         raise RuntimeError(
             "Uploaded Qwen references lost their complete per-action fur surface "
             "gate contract."
         )
     if GENERATION_VISUAL_AUDITS_BLOCKING:
-        for action in actions:
+        for action in expected_surface_gate_actions:
             require_uploaded_fur_surface_gate(
                 effective_subject_config["actions"][action],
                 action,
             )
     gated_surface_actions = (
-        list(actions) if GENERATION_VISUAL_AUDITS_BLOCKING else []
+        expected_surface_gate_actions if GENERATION_VISUAL_AUDITS_BLOCKING else []
     )
     fur_surface_quality_by_action: dict[str, Any] = {}
     selected_surface_metrics = refreshed.get("fur_surface_gate_selected_metrics")

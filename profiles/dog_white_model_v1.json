@@ -1,0 +1,135 @@
+{
+  "schema_version": 2,
+  "id": "dog_white_model_v1",
+  "species": "dog",
+  "supported_actions": ["eating", "standing"],
+  "display_name": "狗狗白模（eat.mp4 / stand.mp4 动作标准）",
+  "status": "active",
+  "preview_action": "eating",
+  "canonical_source_image": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/eating_white_model_reference_frame008_cutout.png",
+  "action_references": {
+    "eating": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/eating_white_model_reference_frame008_cutout.png",
+    "standing": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/standing_white_model_reference_frame040_cutout.png"
+  },
+  "reference_preparation": {
+    "method": "deterministic_action_specific_green_screen_chromakey_rgba_stable_kibble_standing_pant_v4",
+    "runner": "/root/comfy-pet-pipeline/tools/assets/build_dog_white_model_driving_assets.py",
+    "role": "identity_neutral_dog_action_geometry_only"
+  },
+  "profile_asset_manifest": {
+    "path": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/manifest.json",
+    "sha256": "be6c764d85441c4ab072ecdb567f5c44092f65d66f875c96bd800cd6aa249b18",
+    "validation_scope": "deterministic_cpu_driver_rgba_geometry_endpoint_loop_low_fixed_kibble_and_standing_open_mouth_moving_tongue_assets",
+    "full_gpu_generation_validation": "passed:20260818-standing-pant-v4-direct2",
+    "end_to_end_api_validation": "passed:20260818T090538Z-4bdc09ba56"
+  },
+  "uploaded_identity_driving": {
+    "revision": "dog-stable-kibble-standing-pant-20260818-v4",
+    "role": "identity_neutral_dog_action_geometry_and_motion",
+    "appearance_authority": "uploaded_qwen_canonical_only",
+    "normalization": {
+      "source_segment_policy": "action_specific",
+      "crop": "center_720x720_from_960x720",
+      "size": [512, 512],
+      "frames": 81,
+      "fps": 16,
+      "audio_removed": true,
+      "last_frame_padding": "clone_source_endpoint_to_81_frames",
+      "eating_loop_policy": "full_source_down_up_down_cycle_2x_v1",
+      "eating_endpoint_ssim": 0.968964,
+      "eating_minimum_endpoint_ssim": 0.95,
+      "eating_food_policy": "fixed_low_level_small_kibble_below_rim_v1",
+      "eating_food_surface_top_y": 373,
+      "eating_bowl_rim_top_y": 366,
+      "standing_mouth_tongue_policy": "relaxed_open_mouth_attached_tongue_extension_retraction_v1",
+      "standing_tongue_extension_cycles": 2,
+      "standing_tongue_tip_y_span_pixels": 9,
+      "standing_visible_mouth_cavity_dark_pixels_min": 230
+    },
+    "actions": {
+      "eating": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/source/eat.mp4",
+        "source_sha256": "2a4a2571aa1c8fd3f9e65c8f84c5d69205cedc366947d60b1f9144296bd3d7f4",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/eating_white_model_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "b6009f9ca7f12c5233c4e6b172b50d3fe6a69e8bc2faf97e6f2593843d5c7d20",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/eating_white_model_reference_frame008_cutout.png",
+        "geometry_reference_sha256": "3def4ba025bcc1627899955a3471b2a45b0281c0a65f9a00d88081b1ec4350ce",
+        "source_segment_start_seconds": 0.0,
+        "source_segment_duration_seconds": 10.041667,
+        "pts_scale": 0.5,
+        "loop_policy": "full_source_down_up_down_cycle_2x_v1",
+        "endpoint_ssim": 0.968964,
+        "minimum_endpoint_ssim": 0.95,
+        "selected_frame_index": 8,
+        "selected_frame_timestamp_seconds": 0.5,
+        "action_contract": "dog_down_up_down_eating_cycle_with_one_fixed_shallow_bowl_and_low_level_kibble_below_rim",
+        "food_stabilization": {
+          "policy": "fixed_low_level_small_kibble_below_rim_v1",
+          "food_pattern_sha256": "7a4fca27802cc6606abc0760629f9b204635343c8ce8b05018d0f8cb84295036",
+          "food_pattern_top_y": 373,
+          "food_pattern_bottom_y_exclusive": 386,
+          "bowl_rim_top_y": 366,
+          "food_above_rim_allowed": false,
+          "frames_audited": 81,
+          "forbidden_food_pixels_above_rim": 0,
+          "passed": true
+        }
+      },
+      "standing": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260817-user-white-model-v1/source/stand.mp4",
+        "source_sha256": "7af21bd55744a11f6106aa735a6dbb18e8113671c881af2bb4951855ab9e0913",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/standing_white_model_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "9f2f951fdb46e08249e4b553dbdcd55e1940fded56e92cfe8462bd37ba40f1e0",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/standing_white_model_reference_frame040_cutout.png",
+        "geometry_reference_sha256": "bcead3695db03755619f78e097b2425dbbcd9732157e555dbe768ded1b89e593",
+        "selected_frame_index": 40,
+        "selected_frame_timestamp_seconds": 2.5,
+        "source_segment_start_seconds": 5.0175,
+        "source_segment_duration_seconds": 5.0625,
+        "pts_scale": 1.0,
+        "loop_policy": "existing_second_half_idle_window_v1",
+        "endpoint_ssim": 0.967114,
+        "action_contract": "driver_defined_stable_dog_idle_pose_with_gentle_tail_motion_visible_open_mouth_and_periodic_attached_tongue_motion",
+        "mouth_tongue_motion": {
+          "policy": "relaxed_open_mouth_attached_tongue_extension_retraction_v1",
+          "tongue_extension_cycles": 2,
+          "tongue_extension_scale_min": 1.0,
+          "tongue_extension_scale_max": 1.16,
+          "tongue_tip_y_span_pixels": 9,
+          "minimum_tongue_tip_y_span_pixels": 4,
+          "visible_mouth_cavity_dark_pixels_min": 230,
+          "minimum_visible_mouth_cavity_dark_pixels": 120,
+          "loop_endpoints_share_motion_phase": true,
+          "frames_audited": 81,
+          "passed": true
+        },
+        "observed_pose_note": "The supplied stand.mp4 depicts a seated idle dog; standing remains the formal action key and grooming compatibility alias."
+      }
+    }
+  },
+  "runtime": {
+    "engine_profile": "scail2-14b-fp8-v1",
+    "prompt_profile": "uploaded-dog-white-model-v2-standing-pant",
+    "default_base_seed": 20260817,
+    "steps": 6,
+    "frames": 81,
+    "fps": 16,
+    "actions": {
+      "eating": {
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/eating_white_model_driver_512x512_81f_16fps.mp4",
+        "driving_animation_sha256": "b6009f9ca7f12c5233c4e6b172b50d3fe6a69e8bc2faf97e6f2593843d5c7d20",
+        "pose_strength": 1.1,
+        "seed_offset": 0,
+        "output_playback_rate": 0.5,
+        "output_playback_policy": "restore_original_eating_source_tempo_v1"
+      },
+      "standing": {
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/standing_white_model_driver_512x512_81f_16fps.mp4",
+        "driving_animation_sha256": "9f2f951fdb46e08249e4b553dbdcd55e1940fded56e92cfe8462bd37ba40f1e0",
+        "pose_strength": 1.05,
+        "seed_offset": 2
+      }
+    }
+  },
+  "usage_note": "仅用于分类为 dog 的上传主体。白模只提供 eating / standing 的动作几何与时序，上传图片始终是身份、犬种、脸部、毛色、花纹、毛长和体型的唯一外观标准。eating 在生成完成后以 0.5 倍速播放，恢复原始 10 秒白模动作节奏；standing 保持原速并使用张嘴、舌头周期伸缩的自然轻喘动作。"
+}

@@ -17,7 +17,9 @@ from uuid import uuid4
 import requests
 
 
-EXPECTED_GIF_ACTIONS = ("eating", "grooming")
+CAT_GIF_ACTIONS = ("eating", "grooming")
+DOG_GIF_ACTIONS = ("eating", "standing")
+ALL_GIF_ACTIONS = ("eating", "grooming", "standing")
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 WAITING_STAGES = {"queued", "waiting_for_gpu"}
 CALLBACK_OUTBOX_DIRECTORY = "callback_outbox"
@@ -71,8 +73,15 @@ def _gif_urls(
     public_base_url: str,
     job_id: str,
 ) -> dict[str, str]:
+    species = str(job.get("species") or "").strip().lower()
+    if species not in {"cat", "dog"}:
+        species = "dog" if any(
+            isinstance(output, dict)
+            and str(output.get("action") or "").strip().lower() == "standing"
+            for output in job.get("outputs") or []
+        ) else "cat"
     candidates: dict[str, list[dict[str, Any]]] = {
-        action: [] for action in EXPECTED_GIF_ACTIONS
+        action: [] for action in ALL_GIF_ACTIONS
     }
     for output in job.get("outputs") or []:
         if not isinstance(output, dict):
@@ -89,7 +98,7 @@ def _gif_urls(
         candidates[action].append(output)
 
     gifs: dict[str, str] = {}
-    for action in EXPECTED_GIF_ACTIONS:
+    for action in ALL_GIF_ACTIONS:
         records = sorted(
             candidates[action],
             key=lambda item: bool(item.get("primary")),
@@ -102,7 +111,18 @@ def _gif_urls(
             f"{public_base_url}/file/{quote(job_id, safe='')}/"
             f"{quote(filename, safe='')}"
         )
-    return gifs
+    if species == "dog" and "standing" in gifs:
+        gifs["grooming"] = gifs["standing"]
+        return {
+            action: gifs[action]
+            for action in ("eating", "standing", "grooming")
+            if action in gifs
+        }
+    return {
+        action: gifs[action]
+        for action in CAT_GIF_ACTIONS
+        if action in gifs
+    }
 
 
 def build_callback_payload(

@@ -1,6 +1,8 @@
 {
   "schema_version": 2,
   "id": "sleek_tabby_cat_v1",
+  "species": "cat",
+  "supported_actions": ["eating", "grooming"],
   "display_name": "Main_case 黑白猫（eat.mp4 / TM.mp4 主体身份与动作标准）",
   "status": "default",
   "preview_action": "eating",

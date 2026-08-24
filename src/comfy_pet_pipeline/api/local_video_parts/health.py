@@ -55,6 +55,38 @@ def health() -> dict[str, Any]:
     translator_ok = not PROMPT_TRANSLATION_ENABLED or not translator_missing
     subject_profile_items: list[dict[str, Any]] = []
     subject_replacement_missing: list[str] = []
+    species_route_missing: list[str] = []
+    dog_profile_health: dict[str, Any] = {"status": "unavailable"}
+    classifier_paths = {
+        "python": Path(
+            os.environ.get(
+                "PET_SPECIES_CLASSIFIER_PYTHON",
+                "/opt/miniconda3/envs/yolo/bin/python",
+            )
+        ),
+        "model": Path(
+            os.environ.get("PET_SPECIES_CLASSIFIER_MODEL", "/root/yolo26n.pt")
+        ),
+        "runner": (
+            PROJECT_ROOT / "tools" / "classification" / "classify_pet_species.py"
+        ),
+    }
+    classifier_missing = [
+        str(path) for path in classifier_paths.values() if not path.is_file()
+    ]
+    species_classifier_health = {
+        "status": "ready" if not classifier_missing else "fallback_cat",
+        "policy": "yolo_coco_cat_dog_forced_argmax_v1",
+        "forced_binary": True,
+        "unknown_class": False,
+        "fallback_species": "cat",
+        "missing": classifier_missing,
+    }
+    if classifier_missing:
+        species_route_missing.extend(
+            f"species classifier asset is missing: {path}"
+            for path in classifier_missing
+        )
     default_effective_subject_config: dict[str, Any] | None = None
     standard_direct_health: dict[str, Any] = {
         "enabled": False,
@@ -498,7 +530,42 @@ def health() -> dict[str, Any]:
                 }
             )
         subject_replacement_missing.append(str(exc))
+    try:
+        dog_subject_profile = load_subject_profile(DOG_SUBJECT_PROFILE)
+        dog_effective_config = resolve_effective_subject_config(
+            dog_subject_profile,
+            list(DOG_SUBJECT_REPLACEMENT_ACTIONS),
+            seed=None,
+            scail_steps=None,
+            pose_strength=None,
+        )
+        dog_upload_config, dog_pose_policies = configure_uploaded_subject_validation(
+            dog_effective_config,
+            list(DOG_SUBJECT_REPLACEMENT_ACTIONS),
+        )
+        require_subject_replacement_assets(
+            dog_subject_profile,
+            list(DOG_SUBJECT_REPLACEMENT_ACTIONS),
+            effective_config=dog_upload_config,
+            expected_pose_policies=dog_pose_policies,
+        )
+        subject_profile_items.append(subject_profile_public(dog_subject_profile))
+        dog_profile_health = {
+            "status": "ready",
+            "profile_id": DOG_SUBJECT_PROFILE,
+            "species": "dog",
+            "actions": list(DOG_SUBJECT_REPLACEMENT_ACTIONS),
+            "legacy_alias": {"grooming": "standing"},
+        }
+    except (ValueError, FileNotFoundError, RuntimeError) as exc:
+        dog_profile_health = {
+            "status": "failed",
+            "profile_id": DOG_SUBJECT_PROFILE,
+            "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+        }
+        species_route_missing.append(f"dog profile health failed: {exc}")
     subject_replacement_ok = not subject_replacement_missing
+    all_species_ready = subject_replacement_ok and not species_route_missing
     return {
         "status": (
             "ok"
@@ -508,7 +575,7 @@ def health() -> dict[str, Any]:
                 and API_KEY
                 and ffmpeg_ok
                 and translator_ok
-                and subject_replacement_ok
+                and all_species_ready
             )
             else "degraded"
         ),
@@ -564,6 +631,21 @@ def health() -> dict[str, Any]:
             "default": True,
             "enabled": subject_replacement_ok,
             "ok": subject_replacement_ok,
+            "all_species_ready": all_species_ready,
+            "species_route_missing": species_route_missing,
+            "species_classifier": species_classifier_health,
+            "dog_profile": dog_profile_health,
+            "species_routes": {
+                "cat": {
+                    "profile": CAT_SUBJECT_PROFILE,
+                    "actions": list(CAT_SUBJECT_REPLACEMENT_ACTIONS),
+                },
+                "dog": {
+                    "profile": DOG_SUBJECT_PROFILE,
+                    "actions": list(DOG_SUBJECT_REPLACEMENT_ACTIONS),
+                    "legacy_alias": {"grooming": "standing"},
+                },
+            },
             "engine": "scail2-14b-fp8",
             "engine_profile": (
                 default_effective_subject_config["engine_profile"]
@@ -672,6 +754,18 @@ def health() -> dict[str, Any]:
                 "frames": TRANSPARENT_GIF_FRAMES,
                 "fps": TRANSPARENT_GIF_FPS,
                 "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                "recoverable_fallback": {
+                    "enabled": True,
+                    "policy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+                    "scope": "accepted_subject_replacement_transparent_gif_jobs",
+                    "per_requested_action": True,
+                    "triggers": [
+                        "generation_exception",
+                        "service_restart_during_generation",
+                        "restored_queue_capacity_exceeded",
+                    ],
+                    "cancelled_jobs_excluded": True,
+                },
             },
             "missing": subject_replacement_missing,
         },
@@ -794,10 +888,42 @@ def health() -> dict[str, Any]:
                 "canonical_raw_palette_retained_for_audit": True,
                 "canonical_identity_palette_gate": {
                     "enabled": True,
+                    "policy": IDENTITY_PALETTE_POLICY,
                     "fail_closed_for_generated_candidates": True,
                     "retry_all_canonical_profiles": True,
                     "terminal_recovery": "original_uploaded_identity_safe_matte",
                     "terminal_recovery_must_pass_same_palette_gate": True,
+                    "bidirectional_drift": {
+                        "policy": IDENTITY_PALETTE_BIDIRECTIONAL_DRIFT_POLICY,
+                        "warm_coat_source_min": IDENTITY_WARM_COAT_SOURCE_MIN,
+                        "warm_coat_loss_delta_min": (
+                            IDENTITY_WARM_COAT_LOSS_DELTA_MIN
+                        ),
+                        "achromatic_expansion_delta_min": (
+                            IDENTITY_ACHROMATIC_EXPANSION_DELTA_MIN
+                        ),
+                        "gray_or_dark_source_max": (
+                            IDENTITY_GRAY_OR_DARK_SOURCE_MAX
+                        ),
+                        "gray_or_dark_expansion_delta_min": (
+                            IDENTITY_GRAY_OR_DARK_EXPANSION_DELTA_MIN
+                        ),
+                    },
+                    "spatial_marking_gate": {
+                        "policy": IDENTITY_MARKING_SPATIAL_POLICY,
+                        "source_stripe_area_max": (
+                            IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX
+                        ),
+                        "stripe_component_delta_min": (
+                            IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN
+                        ),
+                        "stripe_area_delta_min": (
+                            IDENTITY_NEW_STRIPE_AREA_DELTA_MIN
+                        ),
+                        "dark_contrast_delta_min": (
+                            IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN
+                        ),
+                    },
                 },
                 "canonical_chroma_despill": (
                     "alpha_boundary_plus_source_palette_guarded_interior_v1"

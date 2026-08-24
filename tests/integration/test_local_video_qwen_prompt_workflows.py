@@ -3,12 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 from PIL import Image
 
 import local_video_api as pipeline
+from src.comfy_pet_pipeline.pipeline import subject_replacement as scail_pipeline
 
 from tests.integration.local_video_subject_replacement_test_support import (
     SubjectReplacementQwenReferenceTestBase,
@@ -16,6 +18,210 @@ from tests.integration.local_video_subject_replacement_test_support import (
 
 
 class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceTestBase):
+    def test_dog_scail_cli_uses_action_specific_negative_prompt(self) -> None:
+        with patch(
+            "sys.argv",
+            ["subject_replacement", "--action", "standing", "--species", "dog"],
+        ):
+            standing = scail_pipeline.parse_args()
+        with patch(
+            "sys.argv",
+            ["subject_replacement", "--action", "eating", "--species", "dog"],
+        ):
+            eating = scail_pipeline.parse_args()
+
+        self.assertEqual(
+            standing.negative_prompt,
+            scail_pipeline.DOG_STANDING_NEGATIVE_PROMPT,
+        )
+        self.assertIn("static tongue", standing.negative_prompt)
+        self.assertNotIn("tongue out", standing.negative_prompt)
+        self.assertEqual(
+            eating.negative_prompt,
+            scail_pipeline.DOG_EATING_NEGATIVE_PROMPT,
+        )
+        self.assertIn("tongue out", eating.negative_prompt)
+
+    def test_dog_eating_driver_keeps_compressed_kibble_below_rim(self) -> None:
+        profile = pipeline.load_subject_profile("dog_white_model_v1")
+        driver_path = Path(
+            profile["runtime"]["actions"]["eating"]["driving_animation"]
+        )
+        capture = cv2.VideoCapture(str(driver_path))
+        above_rim_counts: list[int] = []
+        food_band_counts: list[int] = []
+        try:
+            while True:
+                decoded, frame = capture.read()
+                if not decoded:
+                    break
+                blue, green, red = cv2.split(frame)
+                red16 = red.astype(np.int16)
+                green16 = green.astype(np.int16)
+                blue16 = blue.astype(np.int16)
+                kibble = (
+                    (red >= 65)
+                    & (red16 > green16 + 10)
+                    & (green16 > blue16 + 3)
+                    & (red16 - blue16 >= 26)
+                )
+                above_rim_counts.append(int(kibble[360:367, 65:205].sum()))
+                food_band_counts.append(int(kibble[373:386, 77:191].sum()))
+        finally:
+            capture.release()
+
+        self.assertEqual(len(above_rim_counts), 81)
+        # H.264 chroma subsampling can bleed a few edge pixels across the rim;
+        # a visible mound produces hundreds here in the old white model.
+        self.assertLessEqual(max(above_rim_counts), 8)
+        self.assertLessEqual(sum(above_rim_counts), 150)
+        self.assertGreaterEqual(min(food_band_counts), 750)
+        self.assertLessEqual(max(food_band_counts), 1100)
+
+    def test_digest_bound_dog_eating_loop_passes_full_pose_motion_gate(self) -> None:
+        profile = pipeline.load_subject_profile("dog_white_model_v1")
+        driver_path = Path(
+            profile["runtime"]["actions"]["eating"]["driving_animation"]
+        )
+        frames, durations = scail_pipeline.read_animation_frames(driver_path)
+        sampled = scail_pipeline.sample_timed_frames(frames, durations, 81, 16.0)
+
+        _, _, metadata = scail_pipeline.make_full_eating_pose_and_mask_frames(
+            sampled,
+            (512, 512),
+        )
+
+        audit = metadata["identity_motion_audit"]
+        self.assertGreaterEqual(
+            audit["overall_change_ratio_max"],
+            scail_pipeline.EATING_FULL_POSE_OVERALL_CHANGE_RATIO_MIN,
+        )
+        self.assertGreaterEqual(
+            audit["lower_half_change_ratio_max"],
+            scail_pipeline.EATING_FULL_POSE_LOWER_HALF_CHANGE_RATIO_MIN,
+        )
+        self.assertGreaterEqual(
+            audit["lower_quarter_change_ratio_max"],
+            scail_pipeline.EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN,
+        )
+        # Flattening the mound changes a narrow band of the separated prop/muzzle
+        # silhouette without changing the digest-bound down/up/down timing. Keep a
+        # tight v3 fingerprint instead of treating that expected mask delta as speed.
+        self.assertLess(audit["lower_quarter_change_ratio_max"], 0.015)
+
+    def test_dog_eating_prompts_require_low_fixed_kibble_below_rim(self) -> None:
+        pose = pipeline.subject_replacement_pose_prompt("eating", species="dog")
+        rules = pipeline.action_first_frame_rules(pose, species="dog")
+        qwen_prompt = pipeline.build_qwen_prompt(
+            "",
+            pose,
+            transparent_gif=True,
+            pose_reference_available=True,
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+            species="dog",
+        )
+
+        for prompt in (pose, rules, qwen_prompt):
+            self.assertIn("small, low, level layer", prompt)
+            self.assertIn("fully below", prompt)
+            self.assertIn("mound", prompt)
+            self.assertIn("pyramid", prompt)
+        self.assertIn(
+            "low food surface and every kibble position remain fixed",
+            scail_pipeline.DOG_EATING_PROMPT,
+        )
+        self.assertIn(
+            "only the muzzle may naturally occlude",
+            scail_pipeline.DOG_EATING_PROMPT,
+        )
+        self.assertIn("kibble mound", scail_pipeline.DOG_NEGATIVE_PROMPT)
+        self.assertIn("changing food surface", scail_pipeline.DOG_NEGATIVE_PROMPT)
+
+    def test_dog_prompts_lock_age_muzzle_chroma_and_driver_defined_idle_pose(
+        self,
+    ) -> None:
+        canonical = pipeline.build_cartoon_reference_prompt(species="dog")
+        standing_pose = pipeline.subject_replacement_pose_prompt(
+            "standing",
+            species="dog",
+        )
+        standing_rules = pipeline.action_first_frame_rules(
+            standing_pose,
+            species="dog",
+        )
+        action_prompt = pipeline.build_qwen_prompt(
+            "",
+            standing_pose,
+            transparent_gif=True,
+            pose_reference_available=True,
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+            species="dog",
+        )
+
+        self.assertIn("muzzle length", canonical)
+        self.assertIn("Preserve an adult as an adult", canonical)
+        self.assertIn("front view is authoritative for the face", canonical)
+        self.assertIn("seated or upright", standing_pose)
+        self.assertNotIn("stable upright", standing_pose)
+        self.assertIn("mouth is visibly open", standing_pose)
+        self.assertIn("anatomically attached pink tongue", standing_pose)
+        self.assertIn("seated-or-upright torso state", standing_rules)
+        self.assertIn("explicitly requires relaxed panting", standing_rules)
+        self.assertIn("readable dark mouth cavity", standing_rules)
+        self.assertIn("uninterrupted green band below", standing_rules)
+        self.assertIn("Never draw a floor", standing_rules)
+        self.assertIn("Face and age contract", action_prompt)
+        self.assertIn("Never make an adult dog look like a puppy", action_prompt)
+        self.assertIn("explicitly overrides only Image 1's still mouth state", action_prompt)
+        self.assertIn("Never paste the tongue onto a closed muzzle", action_prompt)
+        standing_retry = pipeline.build_qwen_prompt(
+            "",
+            standing_pose,
+            transparent_gif=True,
+            quality_retry=2,
+            pose_reference_available=True,
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+            species="dog",
+        )
+        self.assertIn("FLOOR-ARTIFACT RETRY", standing_retry)
+        self.assertIn("nothing may continue downward", standing_retry)
+        self.assertIn("pure #00FF00", scail_pipeline.DOG_EATING_PROMPT)
+        self.assertIn("pure #00FF00", scail_pipeline.DOG_STANDING_PROMPT)
+        self.assertIn("tongue gently extends", scail_pipeline.DOG_STANDING_PROMPT)
+        self.assertIn("static tongue", scail_pipeline.DOG_STANDING_NEGATIVE_PROMPT)
+        self.assertNotIn("tongue out", scail_pipeline.DOG_STANDING_NEGATIVE_PROMPT)
+        self.assertIn("non-green background", scail_pipeline.DOG_NEGATIVE_PROMPT)
+
+    def test_action_matte_edge_clearance_rejects_floor_reflection_before_resize(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            clean_path = Path(temporary) / "clean.png"
+            reflected_path = Path(temporary) / "reflected.png"
+            clean = np.zeros((512, 512, 4), dtype=np.uint8)
+            clean[70:430, 145:370, :3] = (210, 190, 150)
+            clean[70:430, 145:370, 3] = 255
+            reflected = clean.copy()
+            reflected[430:512, 185:335, :3] = (80, 70, 55)
+            reflected[430:512, 185:335, 3] = 220
+            Image.fromarray(clean, mode="RGBA").save(clean_path)
+            Image.fromarray(reflected, mode="RGBA").save(reflected_path)
+
+            clean_quality = pipeline.qwen_action_edge_clearance_quality(
+                clean_path,
+            )
+            reflected_quality = pipeline.qwen_action_edge_clearance_quality(
+                reflected_path,
+            )
+
+        self.assertTrue(clean_quality["acceptable"])
+        self.assertFalse(reflected_quality["acceptable"])
+        self.assertIn("bottom", reflected_quality["failing_edges"])
+        self.assertIn(
+            "action_matte_foreground_touches_canvas_edge",
+            reflected_quality["issues"],
+        )
+
     def test_direct_uploaded_eating_prompt_assigns_image_roles(self) -> None:
         prompt = pipeline.build_qwen_prompt(
             "",
