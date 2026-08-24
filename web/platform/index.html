@@ -212,7 +212,7 @@
 
           <div id="replacementPanel">
             <label class="title" for="dogSizeProfile">犬类体型白膜（仅测试平台）</label>
-            <select id="dogSizeProfile" disabled>
+            <select id="dogSizeProfile">
               <option value="">保持当前默认主体</option>
               <option value="dog_medium_white_model_test_v1">中型犬</option>
               <option value="dog_small_white_model_test_v1">小型犬</option>
@@ -222,11 +222,11 @@
             <label class="title">动作链路</label>
             <div class="checks">
               <label class="check action-check">
-                <input class="action" type="checkbox" value="eating" checked disabled>
+                <input class="action" type="checkbox" value="eating" checked>
                 <span><strong>吃饭</strong><small>使用当前所选主体配置的 eating 白膜；上传图片时白膜只提供低头进食、食盆、机位与时序。</small></span>
               </label>
               <label class="check action-check">
-                <input class="action" type="checkbox" value="grooming" disabled>
+                <input class="action" type="checkbox" value="grooming">
                 <span><strong>舔毛</strong><small>grooming 使用 Main_case/TM.mp4：未上传时同时作为黑白猫主体、毛发与舔毛动作标准；上传时只提供舔爪/擦脸和机位。</small></span>
               </label>
               <label class="check action-check" hidden>
@@ -358,6 +358,33 @@
       'dog_medium_white_model_test_v1',
       'dog_small_white_model_test_v1'
     ]);
+    const fallbackSubjectProfiles = new Map([
+      ['sleek_tabby_cat_v1', {
+        id: 'sleek_tabby_cat_v1',
+        display_name: '默认猫咪',
+        actions: [
+          {id: 'eating', label: '吃饭', reference_ready: true},
+          {id: 'grooming', label: '舔毛', reference_ready: true}
+        ]
+      }],
+      ['dog_medium_white_model_test_v1', {
+        id: 'dog_medium_white_model_test_v1',
+        display_name: '中型犬（测试平台）',
+        actions: [
+          {id: 'eating', label: '吃饭', reference_ready: true},
+          {id: 'standing', label: '站立', reference_ready: true}
+        ]
+      }],
+      ['dog_small_white_model_test_v1', {
+        id: 'dog_small_white_model_test_v1',
+        display_name: '小型犬（测试平台）',
+        actions: [
+          {id: 'eating', label: '吃饭', reference_ready: true},
+          {id: 'standing', label: '站立', reference_ready: true}
+        ]
+      }]
+    ]);
+    const SUBJECTS_RETRY_MS = 3000;
     const loraItems = [];
     const imageProfiles = new Map();
     const subjectProfiles = new Map();
@@ -368,11 +395,13 @@
     let imageProfilesInitialized = false;
     let pollTimer = null;
     let currentJob = null;
+    let subjectsLoadRetryTimer = null;
+    let subjectsLoading = false;
     let uploadedPreviewUrl = null;
     const sidePreviewUrls = {left: null, right: null};
     let subjectsReady = false;
-    let defaultSubjectProfileId = '';
-    let availableSubjectActions = new Map();
+    let defaultSubjectProfileId = 'sleek_tabby_cat_v1';
+    let availableSubjectActions = new Map(Object.entries(actionLabels));
     let defaultSubjectDisplayName = '';
     let defaultDrivingStandardsSummary = '';
     let pollFailureCount = 0;
@@ -815,7 +844,7 @@
       return `当前上传主体（单图兼容）：${front.name}。也可同时补充同一宠物的左侧和右侧视角。`;
     }
 
-    function applySubjectProfile(profile) {
+    function applySubjectProfile(profile, backendConfirmed = true) {
       if (!profile?.id) throw new Error('所选主体配置不存在');
       const profileActions = new Map(
         (Array.isArray(profile.actions) ? profile.actions : [])
@@ -852,17 +881,23 @@
       defaultSubjectDisplayName = profile.display_name || profile.id;
       $('defaultSubjectName').textContent = defaultSubjectDisplayName;
       $('defaultSubjectPreview').alt = `${defaultSubjectDisplayName} 主体预览`;
-      const previewRevision = profile?.driving_standards?.revision || profile?.profile_sha256 || Date.now();
-      setDefaultSubjectPreview(`api/subjects/${encodeURIComponent(profile.id)}/preview?v=${encodeURIComponent(previewRevision)}`);
-      subjectsReady = enabledActions.length > 0;
+      if (backendConfirmed) {
+        const previewRevision = profile?.driving_standards?.revision || profile?.profile_sha256 || Date.now();
+        setDefaultSubjectPreview(`api/subjects/${encodeURIComponent(profile.id)}/preview?v=${encodeURIComponent(previewRevision)}`);
+      } else {
+        $('defaultSubjectPreview').hidden = true;
+      }
+      subjectsReady = backendConfirmed && enabledActions.length > 0;
       defaultDrivingStandardsSummary = drivingStandardsSummary(profile);
       const isDogSizeProfile = dogSizeProfileIds.has(profile.id);
       $('dogSizeHint').textContent = isDogSizeProfile
-        ? `已选择“${defaultSubjectDisplayName}”。本次将严格按该体型白膜生成；上传图仍是毛色、花纹、脸部和犬种的唯一外观标准。`
+        ? `已选择“${defaultSubjectDisplayName}”。本次将严格按该体型白膜生成；上传图仍是毛色、花纹、脸部和犬种的唯一外观标准。${backendConfirmed ? '' : '正在连接服务器确认资产。'}`
         : '当前保持原有默认主体与路由；生产 API 默认行为不变。';
-      $('defaultSubjectStatus').textContent = subjectsReady
-        ? `主体配置 ${profile.id} 已加载。可用动作：${enabledActions.map(action => actionLabels[action] || action).join('、')}。${defaultDrivingStandardsSummary}`
-        : `主体配置 ${profile.id} 没有已就绪的动作链路，暂时不能提交任务。${defaultDrivingStandardsSummary}`;
+      $('defaultSubjectStatus').textContent = backendConfirmed
+        ? (subjectsReady
+          ? `主体配置 ${profile.id} 已加载。可用动作：${enabledActions.map(action => actionLabels[action] || action).join('、')}。${defaultDrivingStandardsSummary}`
+          : `主体配置 ${profile.id} 没有已就绪的动作链路，暂时不能提交任务。${defaultDrivingStandardsSummary}`)
+        : `体型与动作已经可以选择，正在自动重试服务器主体配置；确认完成后即可生成。`;
       if (!$('image').files[0] && uiMode === 'replacement') {
         $('subjectSourceHint').textContent = replacementSubjectHint();
       }
@@ -870,54 +905,69 @@
       updateEngineCopy();
     }
 
+    function selectedFallbackSubjectProfile() {
+      const profileId = $('dogSizeProfile').value || defaultSubjectProfileId;
+      return fallbackSubjectProfiles.get(profileId)
+        || fallbackSubjectProfiles.get('sleek_tabby_cat_v1');
+    }
+
+    function scheduleSubjectProfileRetry() {
+      clearTimeout(subjectsLoadRetryTimer);
+      subjectsLoadRetryTimer = setTimeout(loadSubjects, SUBJECTS_RETRY_MS);
+    }
+
     async function loadSubjects() {
-      subjectsReady = false;
-      $('dogSizeProfile').disabled = true;
-      document.querySelectorAll('.action').forEach(input => { input.disabled = true; });
+      if (subjectsLoading) return;
+      subjectsLoading = true;
       try {
         const response = await fetch('api/subjects', {cache: 'no-store'});
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || '主体配置读取失败');
         const items = Array.isArray(payload.items) ? payload.items : [];
-        subjectProfiles.clear();
-        items.filter(item => item?.id).forEach(item => subjectProfiles.set(item.id, item));
-        defaultSubjectProfileId = subjectProfiles.has(payload.default)
+        const candidateProfiles = new Map(
+          items.filter(item => item?.id).map(item => [item.id, item])
+        );
+        const missingDogProfiles = [...dogSizeProfileIds]
+          .filter(profileId => !candidateProfiles.has(profileId));
+        if (missingDogProfiles.length) {
+          throw new Error(`服务器尚未返回犬类体型配置：${missingDogProfiles.join('、')}`);
+        }
+        const candidateDefaultId = candidateProfiles.has(payload.default)
           ? payload.default
           : (items[0]?.id || '');
-        const defaultProfile = subjectProfiles.get(defaultSubjectProfileId);
+        const defaultProfile = candidateProfiles.get(candidateDefaultId);
         if (!defaultProfile?.id) throw new Error('服务器没有返回可用的默认身份');
 
+        subjectProfiles.clear();
+        candidateProfiles.forEach((profile, profileId) => subjectProfiles.set(profileId, profile));
+        defaultSubjectProfileId = candidateDefaultId;
         availableSubjectActions = new Map(
           (Array.isArray(payload.actions) ? payload.actions : [])
             .map(action => typeof action === 'string' ? [action, action] : [action?.id, action?.label])
             .filter(([id]) => id)
         );
         [...$('dogSizeProfile').options].forEach(option => {
+          option.disabled = false;
           if (!option.value) {
             option.textContent = `保持当前默认主体（${defaultProfile.display_name || defaultProfile.id}）`;
-            option.disabled = false;
-          } else {
-            option.disabled = !subjectProfiles.has(option.value);
           }
         });
-        $('dogSizeProfile').disabled = ![...dogSizeProfileIds].some(id => subjectProfiles.has(id));
+        $('dogSizeProfile').disabled = false;
         const requestedProfileId = $('dogSizeProfile').value || defaultSubjectProfileId;
         const profile = subjectProfiles.get(requestedProfileId) || defaultProfile;
         if (profile.id !== requestedProfileId) $('dogSizeProfile').value = '';
-        applySubjectProfile(profile);
+        clearTimeout(subjectsLoadRetryTimer);
+        subjectsLoadRetryTimer = null;
+        applySubjectProfile(profile, true);
       } catch (error) {
-        document.querySelectorAll('.action').forEach(input => {
-          input.checked = false;
-          input.disabled = true;
-        });
-        $('dogSizeProfile').disabled = true;
-        $('subjectProfile').value = '';
-        defaultSubjectDisplayName = '';
-        defaultDrivingStandardsSummary = '';
-        $('defaultSubjectName').textContent = '默认身份读取失败';
-        $('defaultSubjectStatus').textContent = `${error.message}；请等待服务恢复后刷新页面。`;
-        $('defaultSubjectPreview').hidden = true;
-        updateActionCopy();
+        subjectsReady = false;
+        $('dogSizeProfile').disabled = false;
+        const fallbackProfile = selectedFallbackSubjectProfile();
+        applySubjectProfile(fallbackProfile, false);
+        $('defaultSubjectStatus').textContent = `${error.message}；体型和动作仍可选择，系统将在 ${SUBJECTS_RETRY_MS / 1000} 秒后自动重试。`;
+        scheduleSubjectProfileRetry();
+      } finally {
+        subjectsLoading = false;
       }
     }
 
@@ -927,8 +977,11 @@
     });
     $('dogSizeProfile').addEventListener('change', event => {
       const profileId = event.target.value || defaultSubjectProfileId;
-      const profile = subjectProfiles.get(profileId);
-      if (profile) applySubjectProfile(profile);
+      const profile = subjectProfiles.get(profileId)
+        || fallbackSubjectProfiles.get(profileId)
+        || fallbackSubjectProfiles.get('sleek_tabby_cat_v1');
+      applySubjectProfile(profile, subjectProfiles.has(profile.id));
+      if (!subjectsReady) loadSubjects();
     });
     $('image').addEventListener('change', event => useFile(event.target.files[0]));
     $('imageLeft').addEventListener('change', event => useSideFile('left', event.target.files[0]));
@@ -1000,6 +1053,7 @@
             : '生成服务降级');
         registerImageProfiles(pipeline.image_profiles || data.image_profiles);
         updateEngineCopy();
+        if (!subjectsReady) loadSubjects();
       } catch (error) {
         $('healthDot').className = 'dot';
         $('healthText').textContent = '模型服务不可用';
@@ -1212,7 +1266,7 @@
 
     async function submitReplacementJob() {
       if (!subjectsReady || !$('subjectProfile').value) {
-        alert('默认身份或 Main_case 动作链路尚未准备完成，请等待服务恢复后刷新页面');
+        alert('默认身份或 Main_case 动作链路尚未准备完成，系统正在自动重试，无需刷新页面');
         return;
       }
       const actions = selectedActions();

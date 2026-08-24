@@ -20,7 +20,7 @@ from uuid import uuid4
 
 import requests
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, status
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from PIL import Image
 from starlette.background import BackgroundTask
 
@@ -33,7 +33,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-VERSION = "1.13.0"
+VERSION = "1.13.1"
 PROJECT_ROOT = Path(
     os.environ.get(
         "PET_PIPELINE_PROJECT_ROOT",
@@ -76,6 +76,11 @@ HISTORY_VIDEO_OUTPUT_TYPES = frozenset(
     }
 )
 HISTORY_VIDEO_SUFFIXES = frozenset({".mp4", ".webm", ".mov", ".mkv"})
+NO_STORE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
 
 IMAGE_JOBS: dict[str, dict[str, Any]] = {}
 IMAGE_JOBS_LOCK = threading.RLock()
@@ -902,14 +907,20 @@ def shutdown() -> None:
 def index(_: None = Depends(require_auth)) -> HTMLResponse:
     if not HOST_PAGE.is_file():
         raise HTTPException(status_code=500, detail="Platform HTML is missing.")
-    return HTMLResponse(HOST_PAGE.read_text(encoding="utf-8"))
+    return HTMLResponse(
+        HOST_PAGE.read_text(encoding="utf-8"),
+        headers=NO_STORE_HEADERS,
+    )
 
 
 @app.get("/history", response_class=HTMLResponse)
 def history_page(_: None = Depends(require_auth)) -> HTMLResponse:
     if not HISTORY_PAGE.is_file():
         raise HTTPException(status_code=500, detail="History HTML is missing.")
-    return HTMLResponse(HISTORY_PAGE.read_text(encoding="utf-8"))
+    return HTMLResponse(
+        HISTORY_PAGE.read_text(encoding="utf-8"),
+        headers=NO_STORE_HEADERS,
+    )
 
 
 @app.get("/api/health")
@@ -946,7 +957,7 @@ def subjects(_: None = Depends(require_auth)) -> Any:
     if response.status_code != 200:
         raise HTTPException(status_code=response.status_code, detail=response.text[:1000])
     try:
-        return response.json()
+        return JSONResponse(response.json(), headers=NO_STORE_HEADERS)
     except requests.JSONDecodeError as exc:
         raise HTTPException(
             status_code=502,

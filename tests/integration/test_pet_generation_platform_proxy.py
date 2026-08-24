@@ -209,16 +209,48 @@ class GenerationPlatformProxyTests(unittest.IsolatedAsyncioTestCase):
         html = platform.HOST_PAGE.read_text(encoding="utf-8")
 
         self.assertIn('id="dogSizeProfile"', html)
+        self.assertNotIn('id="dogSizeProfile" disabled', html)
         self.assertIn("dog_medium_white_model_test_v1", html)
         self.assertIn("dog_small_white_model_test_v1", html)
         self.assertIn(">中型犬<", html)
         self.assertIn(">小型犬<", html)
         self.assertIn('value="standing"', html)
         self.assertIn("standing: '站立'", html)
-        self.assertIn("function applySubjectProfile(profile)", html)
+        self.assertIn("function applySubjectProfile(profile, backendConfirmed = true)", html)
         self.assertIn("const requestedProfileId = $('dogSizeProfile').value", html)
         self.assertIn("form.append('subject_profile', $('subjectProfile').value)", html)
         self.assertIn("本次将严格按该体型白膜生成", html)
+        self.assertIn("fallbackSubjectProfiles", html)
+        self.assertIn("scheduleSubjectProfileRetry()", html)
+        self.assertIn("setTimeout(loadSubjects, SUBJECTS_RETRY_MS)", html)
+        self.assertIn("if (!subjectsReady) loadSubjects()", html)
+
+    def test_create_page_disables_browser_caching(self) -> None:
+        page = platform.index(None)
+
+        self.assertEqual(
+            page.headers["cache-control"],
+            "no-store, no-cache, must-revalidate, max-age=0",
+        )
+        self.assertEqual(page.headers["pragma"], "no-cache")
+        self.assertEqual(page.headers["expires"], "0")
+
+    def test_subject_response_disables_browser_caching(self) -> None:
+        response = Mock()
+        response.status_code = 200
+        response.json.return_value = {"default": "sleek_tabby_cat_v1", "items": []}
+        with (
+            patch.object(platform, "video_headers", return_value={"X-API-Key": "test"}),
+            patch.object(platform.requests, "get", return_value=response),
+        ):
+            result = platform.subjects(None)
+
+        self.assertEqual(
+            result.headers["cache-control"],
+            "no-store, no-cache, must-revalidate, max-age=0",
+        )
+        self.assertEqual(result.headers["pragma"], "no-cache")
+        self.assertEqual(result.headers["expires"], "0")
 
 
 if __name__ == "__main__":

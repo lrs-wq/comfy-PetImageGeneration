@@ -499,7 +499,7 @@ class GenerationPlatformFrontendTests(unittest.TestCase):
         self.assertIn('id="defaultSubjectName"', html)
         self.assertIn("async function loadSubjects()", html)
         self.assertIn("fetch('api/subjects', {cache: 'no-store'})", html)
-        self.assertIn("subjectProfiles.has(payload.default)", html)
+        self.assertIn("candidateProfiles.has(payload.default)", html)
         self.assertIn("encodeURIComponent(profile.id)", html)
         self.assertIn("action.reference_ready !== false", html)
         self.assertNotIn('src="api/subjects/sleek_tabby_cat_v1/preview"', html)
@@ -516,8 +516,8 @@ class GenerationPlatformFrontendTests(unittest.TestCase):
     def test_frontend_scopes_actions_and_image_poses_by_tab(self) -> None:
         html = PLATFORM_PAGE.read_text(encoding="utf-8")
 
-        self.assertIn('class="action" type="checkbox" value="eating" checked disabled', html)
-        self.assertIn('class="action" type="checkbox" value="grooming" disabled', html)
+        self.assertIn('class="action" type="checkbox" value="eating" checked', html)
+        self.assertIn('class="action" type="checkbox" value="grooming">', html)
         self.assertIn(".action:checked:not(:disabled)", html)
         self.assertIn("使用当前所选主体配置的 eating 白膜", html)
         self.assertIn("grooming 使用 Main_case/TM.mp4", html)
