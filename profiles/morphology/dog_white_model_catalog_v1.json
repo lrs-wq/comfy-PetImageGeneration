@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "id": "dog_white_model_catalog_v1",
+  "species": "dog",
+  "catalog_revision": "20260824-v1",
+  "asset_root": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1",
+  "routing": {
+    "enabled": false,
+    "current_fallback_category": "neutral_dog",
+    "future_size_categories": ["medium_dog", "small_dog"],
+    "activation_requirement": "normalize and validate each action, then add an explicit morphology router"
+  },
+  "categories": {
+    "neutral_dog": {
+      "display_name": "中性犬",
+      "size_class": "neutral",
+      "status": "active_existing_runtime",
+      "runtime_ready": true,
+      "existing_profile_id": "dog_white_model_v1",
+      "existing_profile_commit": "3b34ba91c0aa6697d6bd5d1e7e8b0241bd8b4f00",
+      "migration_policy": "reference existing immutable files without moving or rewriting them",
+      "actions": {
+        "eating": {
+          "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/eating_white_model_driver_512x512_81f_16fps.mp4",
+          "runtime_sha256": "b6009f9ca7f12c5233c4e6b172b50d3fe6a69e8bc2faf97e6f2593843d5c7d20",
+          "bytes": 176800,
+          "width": 512,
+          "height": 512,
+          "fps": 16,
+          "frames": 81,
+          "duration_seconds": 5.0625,
+          "audio": false
+        },
+        "standing": {
+          "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_v1/driving/20260818-standing-pant-v4/standing_white_model_driver_512x512_81f_16fps.mp4",
+          "runtime_sha256": "9f2f951fdb46e08249e4b553dbdcd55e1940fded56e92cfe8462bd37ba40f1e0",
+          "bytes": 90187,
+          "width": 512,
+          "height": 512,
+          "fps": 16,
+          "frames": 81,
+          "duration_seconds": 5.0625,
+          "audio": false
+        }
+      }
+    },
+    "small_dog": {
+      "display_name": "小型犬",
+      "size_class": "small",
+      "status": "source_uploaded_pending_runtime_normalization",
+      "runtime_ready": false,
+      "source_batch": "wechat-2026-08-small-dog-six-actions",
+      "source_bytes_preserved_exactly": true,
+      "actions": {
+        "sleeping": {
+          "original_filename": "小型犬-睡觉_.mp4",
+          "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/sleeping.mp4",
+          "source_sha256": "67fea02a7c99c133c7e62b2a71abcf66567c2c8f48a819427b8de45bad9249e6",
+          "bytes": 469226,
+          "width": 736,
+          "height": 576,
+          "fps": 24,
+          "frames": 243,
+          "duration_seconds": 10.125,
+          "video_codec": "h264",
+          "pixel_format": "yuv420p",
+          "audio_codec": "aac"
+        },
+        "standing_head_turn": {
+          "original_filename": "站姿扭头_.mp4",
+          "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/standing_head_turn.mp4",
+          "source_sha256": "1de916b209409aed0cdcbfccc4db77e7d32d298c6c88d35625ae50b59fbac06f",
+          "bytes": 720017,
+          "width": 736,
+          "height": 576,
+          "fps": 24,
+          "frames": 192,
+          "duration_seconds": 8.0,
+          "video_codec": "h264",
+          "pixel_format": "yuv420p",
+          "audio_codec": "aac"
+        },
+        "drinking": {
+          "original_filename": "小型犬喝水_.mp4",
+          "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/drinking.mp4",
+          "source_sha256": "bfa3426a646a17b910b195d08026ef04446337dea68d606e9fda7a7ffd986044",
+          "bytes": 431837,
+          "width": 736,
+          "height": 576,
+          "fps": 24,
+          "frames": 192,
+          "duration_seconds": 8.0,
+          "video_codec": "h264",
+          "pixel_format": "yuv420p",
+          "audio_codec": "aac"
+        },
+        "running": {
+          "original_filename": "小狗奔跑_.mp4",
+          "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/running.mp4",
+          "source_sha256": "489fa8edb31d14441dc593bed8c76642aead7e3b9c183cd03b76e59d8fa2f8ef",
+          "bytes": 1116499,
+          "width": 736,
+          "height": 576,
+          "fps": 24,
+          "frames": 243,
+          "duration_seconds": 10.125,
+          "video_codec": "h264",
+          "pixel_format": "yuv420p",
+          "audio_codec": "aac"
+        },
+        "toileting": {
+          "original_filename": "小型犬-上厕所.mp4",
+          "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/toileting.mp4",
+          "source_sha256": "4eea9f22ad55c2875c31d57070882c9d3d8803189c154cf479b8c54e29fc1f1f",
+          "bytes": 451559,
+          "width": 736,
+          "height": 576,
+          "fps": 24,
+          "frames": 192,
+          "duration_seconds": 8.0,
+          "video_codec": "h264",
+          "pixel_format": "yuv420p",
+          "audio_codec": "aac"
+        },
+        "eating": {
+          "original_filename": "小狗吃饭_.mp4",
+          "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/eating.mp4",
+          "source_sha256": "f1bc84b241d42fec559d8f9fa22d2c5a7d77ac9943ae66a29813f6f6c3b058c9",
+          "bytes": 710064,
+          "width": 736,
+          "height": 576,
+          "fps": 24,
+          "frames": 192,
+          "duration_seconds": 8.0,
+          "video_codec": "h264",
+          "pixel_format": "yuv420p",
+          "audio_codec": "aac"
+        }
+      },
+      "runtime_normalization_required": {
+        "size": [512, 512],
+        "frames": 81,
+        "fps": 16,
+        "audio_removed": true,
+        "action_specific_cycle_selection": true,
+        "green_background_and_watermark_cleanup": true,
+        "geometry_and_contact_validation": true
+      }
+    },
+    "medium_dog": {
+      "display_name": "中型犬",
+      "size_class": "medium",
+      "status": "reserved_not_uploaded",
+      "runtime_ready": false,
+      "actions": {}
+    }
+  }
+}
