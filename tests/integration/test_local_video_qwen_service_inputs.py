@@ -1886,6 +1886,16 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             ),
             "upload_anchored_canonical",
         )
+        for action in ("drinking", "running", "sleeping", "toileting"):
+            with self.subTest(action=action):
+                self.assertEqual(
+                    pipeline.exhausted_action_candidate_recovery_policy(
+                        drifted,
+                        action=action,
+                        approved_canonical_available=True,
+                    ),
+                    "upload_anchored_canonical",
+                )
         self.assertEqual(
             pipeline.exhausted_action_candidate_recovery_policy(
                 drifted,

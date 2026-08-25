@@ -134,7 +134,13 @@ def exhausted_action_candidate_recovery_policy(
     palette = record.get("identity_palette")
     if isinstance(palette, dict) and palette.get("acceptable") is True:
         return "identity_safe_generated_candidate"
-    if action == "standing" and approved_canonical_available:
+    if action in {
+        "standing",
+        "drinking",
+        "running",
+        "sleeping",
+        "toileting",
+    } and approved_canonical_available:
         return "upload_anchored_canonical"
     return "reject"
 
@@ -6287,8 +6293,17 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 and advisory_action_candidate_gate_required
                 and best_action_candidate_degraded_attempt is not None
             ):
+                fallback_action = action_key(pose)
                 approved_canonical_available = bool(
-                    action_key(pose) == "standing"
+                    species == "dog"
+                    and fallback_action
+                    in {
+                        "standing",
+                        "drinking",
+                        "running",
+                        "sleeping",
+                        "toileting",
+                    }
                     and cartoon_is_transparent
                     and cartoon_output.is_file()
                 )
@@ -6365,6 +6380,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         action_candidate_gate_returns_approved_canonical=False,
                     )
                 elif exhausted_recovery == "upload_anchored_canonical":
+                    standing_fallback = fallback_action == "standing"
+                    canonical_fallback_policy = (
+                        "upload_anchored_canonical_standing_reference_v1"
+                        if standing_fallback
+                        else "upload_anchored_canonical_dog_action_reference_v1"
+                    )
                     canonical_fallback = (
                         job_dir
                         / f"pose_{index:02d}_upload_anchored_canonical_fallback.png"
@@ -6400,7 +6421,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         or canonical_palette_quality.get("acceptable") is not True
                     ):
                         raise RuntimeError(
-                            "Upload-anchored canonical standing fallback failed "
+                            "Upload-anchored canonical "
+                            f"{fallback_action} fallback failed "
                             "its alpha, subject, or identity-palette contract."
                         )
                     rejected_attempt = best_action_candidate_degraded_attempt
@@ -6414,7 +6436,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "all_generated_candidates_failed_identity_palette"
                         ),
                         degraded_selection_policy=(
-                            "upload_anchored_canonical_standing_reference_v1"
+                            canonical_fallback_policy
                         ),
                         degraded_selection_key=list(
                             rejected_attempt[
@@ -6471,6 +6493,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "policy": (
                             "approved_canonical_self_reuse_for_standing_"
                             "identity_recovery_v1"
+                            if standing_fallback
+                            else "approved_canonical_self_reuse_for_dog_action_"
+                            "identity_recovery_v1"
                         ),
                         "canonical_self_reference_reuse": True,
                         "action_geometry_deferred_to_scail": True,
@@ -6480,6 +6505,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "attempt": len(active_pose_profiles) + 1,
                         "profile": (
                             "upload_anchored_canonical_standing_recovery"
+                            if standing_fallback
+                            else f"upload_anchored_canonical_{fallback_action}_recovery"
                         ),
                         "keyframe": canonical_fallback.name,
                         "cutout": canonical_fallback.name,
@@ -6509,7 +6536,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "candidate_gate_degraded_fallback": True,
                         "canonical_identity_fallback": {
                             "policy": (
-                                "upload_anchored_canonical_standing_reference_v1"
+                                canonical_fallback_policy
                             ),
                             "source": str(cartoon_output),
                             "source_sha256": file_sha256(cartoon_output),
@@ -6536,6 +6563,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "strategy": (
                                 "reuse_upload_anchored_canonical_and_defer_"
                                 "standing_geometry_to_scail"
+                                if standing_fallback
+                                else "reuse_upload_anchored_canonical_and_defer_"
+                                f"{fallback_action}_geometry_to_scail"
                             ),
                             "profile": best_attempt["profile"],
                             "result": "accepted_identity_safe_canonical",
