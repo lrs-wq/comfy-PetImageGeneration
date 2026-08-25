@@ -48,12 +48,22 @@ class DogWhiteModelCatalogTest(unittest.TestCase):
             self.assertEqual(action["fps"], 16)
             self.assertFalse(action["audio"])
 
-    def test_six_small_dog_sources_are_preserved_and_two_test_actions_are_ready(self) -> None:
+    def test_six_small_dog_sources_and_test_actions_are_ready(self) -> None:
         small = self.catalog["categories"]["small_dog"]
         self.assertEqual(small["display_name"], "小型犬")
         self.assertFalse(small["runtime_ready"])
         self.assertTrue(small["test_platform_runtime_ready"])
-        self.assertEqual(small["test_platform_actions"], ["eating", "standing"])
+        self.assertEqual(
+            small["test_platform_actions"],
+            [
+                "eating",
+                "drinking",
+                "running",
+                "sleeping",
+                "toileting",
+                "standing",
+            ],
+        )
         self.assertEqual(
             small["test_platform_profile_id"],
             "dog_small_white_model_test_v1",
@@ -79,12 +89,16 @@ class DogWhiteModelCatalogTest(unittest.TestCase):
 
         for source_action, test_action in (
             ("eating", "eating"),
+            ("drinking", "drinking"),
+            ("running", "running"),
+            ("sleeping", "sleeping"),
+            ("toileting", "toileting"),
             ("standing_head_turn", "standing"),
         ):
             action = small["actions"][source_action]
             self.assertEqual(action["test_runtime_action"], test_action)
-            self.assertIn("/small_dog/runtime-v1/", action["test_runtime"])
-            self.assertIn("/small_dog/runtime-v1/", action["test_reference"])
+            self.assertIn("/small_dog/runtime-v2/", action["test_runtime"])
+            self.assertIn("/small_dog/runtime-v2/", action["test_reference"])
             self.assertEqual(len(action["test_runtime_sha256"]), 64)
             self.assertEqual(len(action["test_reference_sha256"]), 64)
             self.assertEqual((action["test_width"], action["test_height"]), (512, 512))

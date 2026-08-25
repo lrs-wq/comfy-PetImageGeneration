@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the test-only small-dog eating and standing white-model assets."""
+"""Build all six test-only small-dog white-model action assets."""
 
 from __future__ import annotations
 
@@ -21,38 +21,85 @@ DEFAULT_SOURCE_ROOT = Path(
 )
 DEFAULT_ASSET_ROOT = Path(
     "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/"
-    "20260824-v1/small_dog/runtime-v1"
+    "20260824-v1/small_dog/runtime-v2"
 )
 SOURCE_FILENAMES = {
+    "drinking": "drinking.mp4",
     "eating": "eating.mp4",
+    "running": "running.mp4",
+    "sleeping": "sleeping.mp4",
     "standing": "standing_head_turn.mp4",
+    "toileting": "toileting.mp4",
 }
 EXPECTED_SOURCE_SHA256 = {
+    "drinking": "bfa3426a646a17b910b195d08026ef04446337dea68d606e9fda7a7ffd986044",
     "eating": "f1bc84b241d42fec559d8f9fa22d2c5a7d77ac9943ae66a29813f6f6c3b058c9",
+    "running": "489fa8edb31d14441dc593bed8c76642aead7e3b9c183cd03b76e59d8fa2f8ef",
+    "sleeping": "67fea02a7c99c133c7e62b2a71abcf66567c2c8f48a819427b8de45bad9249e6",
     "standing": "1de916b209409aed0cdcbfccc4db77e7d32d298c6c88d35625ae50b59fbac06f",
+    "toileting": "4eea9f22ad55c2875c31d57070882c9d3d8803189c154cf479b8c54e29fc1f1f",
 }
 RUNTIME_FILENAMES = {
     action: f"small_dog_{action}_driver_512x512_81f_16fps.mp4"
     for action in SOURCE_FILENAMES
 }
-REFERENCE_FILENAMES = {
-    action: f"small_dog_{action}_reference_frame040_cutout.png"
-    for action in SOURCE_FILENAMES
-}
 OUTPUT_SIZE = 512
 OUTPUT_FRAMES = 81
 OUTPUT_FPS = 16
-SOURCE_DURATION_SECONDS = 8.0
-PTS_SCALE = 0.625
-REFERENCE_FRAME_INDEX = 40
+SOURCE_DURATION_SECONDS = {
+    "drinking": 8.0,
+    "eating": 8.0,
+    "running": 10.125,
+    "sleeping": 10.125,
+    "standing": 8.0,
+    "toileting": 8.0,
+}
+PTS_SCALE = {
+    "drinking": 0.625,
+    "eating": 0.625,
+    "running": 0.5,
+    "sleeping": 0.5,
+    "standing": 0.625,
+    "toileting": 0.625,
+}
+LOOP_POLICY = {
+    "drinking": "first_half_ping_pong_closed_loop_v1",
+    "eating": "full_source_cycle_speed_normalized_v1",
+    "running": "full_source_cycle_speed_normalized_v1",
+    "sleeping": "full_source_cycle_speed_normalized_v1",
+    "standing": "full_source_cycle_speed_normalized_v1",
+    "toileting": "full_source_cycle_speed_normalized_v1",
+}
+REFERENCE_FRAME_INDEX = {
+    "drinking": 40,
+    "eating": 40,
+    "running": 40,
+    # The source contains one natural yawn near its midpoint.  Use an earlier
+    # calm sleeping frame as Qwen geometry authority while retaining the full
+    # yawn cycle in the motion driver.
+    "sleeping": 16,
+    "standing": 40,
+    "toileting": 40,
+}
+REFERENCE_FILENAMES = {
+    action: (
+        f"small_dog_{action}_reference_"
+        f"frame{REFERENCE_FRAME_INDEX[action]:03d}_cutout.png"
+    )
+    for action in SOURCE_FILENAMES
+}
 MINIMUM_ENDPOINT_SSIM = 0.90
 CHROMA_KEY = "0x55A74E"
 CHROMA_SIMILARITY = {
+    "drinking": 0.18,
     "eating": 0.12,
+    "running": 0.16,
+    "sleeping": 0.16,
     "standing": 0.21,
+    "toileting": 0.18,
 }
 CHROMA_BLEND = 0.05
-POLICY = "small_dog_test_platform_square_full_cycle_v1"
+POLICY = "small_dog_test_platform_six_action_square_full_cycle_v2"
 
 
 def sha256_file(path: Path) -> str:
@@ -116,17 +163,14 @@ def assert_runtime_contract(observed: dict[str, Any], path: Path) -> None:
             )
 
 
-def build_runtime(ffmpeg: str, source: Path, target: Path) -> None:
+def build_runtime(ffmpeg: str, source: Path, target: Path, *, action: str) -> None:
     temporary = target.with_name(f".{target.stem}.tmp{target.suffix}")
     temporary.unlink(missing_ok=True)
-    filters = (
+    base_filters = (
         "crop=min(iw\\,ih):min(iw\\,ih):(iw-ow)/2:(ih-oh)/2,"
-        f"scale={OUTPUT_SIZE}:{OUTPUT_SIZE}:flags=lanczos,"
-        f"setpts={PTS_SCALE:.9f}*PTS,fps={OUTPUT_FPS},"
-        "tpad=stop_mode=clone:stop=1"
+        f"scale={OUTPUT_SIZE}:{OUTPUT_SIZE}:flags=lanczos"
     )
-    run(
-        [
+    command = [
             ffmpeg,
             "-hide_banner",
             "-loglevel",
@@ -135,9 +179,42 @@ def build_runtime(ffmpeg: str, source: Path, target: Path) -> None:
             "-i",
             str(source),
             "-t",
-            str(SOURCE_DURATION_SECONDS),
-            "-vf",
-            filters,
+            str(SOURCE_DURATION_SECONDS[action]),
+    ]
+    if action == "drinking":
+        # The supplied drinking clip is a one-way high-head-to-low-head motion,
+        # unlike the other five closed cycles.  Use its first half as the natural
+        # lowering phase and reverse that phase back to the exact start.  Dropping
+        # the duplicated pivot produces 41 + 40 = 81 continuous loop frames.
+        command.extend(
+            [
+                "-filter_complex",
+                (
+                    f"[0:v]{base_filters},trim=duration=4,"
+                    f"setpts={PTS_SCALE[action]:.9f}*(PTS-STARTPTS),"
+                    f"fps={OUTPUT_FPS},tpad=stop_mode=clone:stop=1,"
+                    "trim=end_frame=41,"
+                    f"setpts=N/({OUTPUT_FPS}*TB),split=2[forward][reverse_source];"
+                    "[reverse_source]reverse,trim=start_frame=1,"
+                    f"setpts=N/({OUTPUT_FPS}*TB)[reverse];"
+                    "[forward][reverse]concat=n=2:v=1:a=0[outv]"
+                ),
+                "-map",
+                "[outv]",
+            ]
+        )
+    else:
+        command.extend(
+            [
+                "-vf",
+                (
+                    f"{base_filters},setpts={PTS_SCALE[action]:.9f}*PTS,"
+                    f"fps={OUTPUT_FPS},tpad=stop_mode=clone:stop=1"
+                ),
+            ]
+        )
+    command.extend(
+        [
             "-frames:v",
             str(OUTPUT_FRAMES),
             "-an",
@@ -154,6 +231,7 @@ def build_runtime(ffmpeg: str, source: Path, target: Path) -> None:
             str(temporary),
         ]
     )
+    run(command)
     os.replace(temporary, target)
 
 
@@ -177,7 +255,7 @@ def build_reference(
             str(runtime),
             "-vf",
             (
-                f"select=eq(n\\,{REFERENCE_FRAME_INDEX}),"
+                f"select=eq(n\\,{REFERENCE_FRAME_INDEX[action]}),"
                 f"colorkey={CHROMA_KEY}:{CHROMA_SIMILARITY[action]}:{CHROMA_BLEND},"
                 "format=rgba"
             ),
@@ -331,7 +409,7 @@ def main() -> int:
     asset_root = args.asset_root.expanduser().resolve()
     asset_root.mkdir(parents=True, exist_ok=True)
     actions: dict[str, dict[str, Any]] = {}
-    for action in ("eating", "standing"):
+    for action in SOURCE_FILENAMES:
         source = source_root / SOURCE_FILENAMES[action]
         if not source.is_file():
             raise FileNotFoundError(f"Missing small-dog source: {source}")
@@ -343,7 +421,7 @@ def main() -> int:
             )
         runtime = asset_root / RUNTIME_FILENAMES[action]
         reference = asset_root / REFERENCE_FILENAMES[action]
-        build_runtime(args.ffmpeg, source, runtime)
+        build_runtime(args.ffmpeg, source, runtime, action=action)
         observed_runtime = probe_video(args.ffprobe, runtime)
         assert_runtime_contract(observed_runtime, runtime)
         endpoint_ssim = probe_endpoint_ssim(args.ffmpeg, runtime)
@@ -361,13 +439,13 @@ def main() -> int:
             "runtime_sha256": sha256_file(runtime),
             "geometry_reference": str(reference),
             "geometry_reference_sha256": sha256_file(reference),
-            "selected_frame_index": REFERENCE_FRAME_INDEX,
+            "selected_frame_index": REFERENCE_FRAME_INDEX[action],
             "selected_frame_timestamp_seconds": (
-                REFERENCE_FRAME_INDEX / OUTPUT_FPS
+                REFERENCE_FRAME_INDEX[action] / OUTPUT_FPS
             ),
-            "source_duration_seconds": SOURCE_DURATION_SECONDS,
-            "pts_scale": PTS_SCALE,
-            "loop_policy": "full_source_cycle_speed_normalized_v1",
+            "source_duration_seconds": SOURCE_DURATION_SECONDS[action],
+            "pts_scale": PTS_SCALE[action],
+            "loop_policy": LOOP_POLICY[action],
             "endpoint_ssim": endpoint_ssim,
             "minimum_endpoint_ssim": MINIMUM_ENDPOINT_SSIM,
             "observed_runtime": observed_runtime,

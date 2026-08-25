@@ -231,6 +231,71 @@ DOG_STANDING_PROMPT = (
     "horizon, shadow, reflection, gradient, texture, flicker, or green spill on fur."
 )
 
+DOG_DRINKING_PROMPT = (
+    "A complete full-body restrained stylized 3D dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve the exact "
+    "breed traits, apparent age, face and muzzle geometry, eyes, ears, nose, coat "
+    "colors and localized markings, natural coat length and volume, body "
+    "proportions, paws, and complete tail. Use the neutral-white dog anatomy driver "
+    "only for the low-head drinking motion, joint trajectories, one fixed shallow "
+    "water bowl, camera, scale and framing. Never copy the driver's white coat, face, "
+    "eyes, proportions, material, or lighting. Keep the bowl and still water fixed. "
+    "Animate one restrained natural lapping cycle with only a tiny anatomically "
+    "attached pink tongue tip touching the water, subtle muzzle and neck movement, "
+    "and no splash, drool or long tongue. Keep all four legs attached and stable. "
+    "The entire background remains perfectly uniform pure #00FF00 chroma-key green "
+    "with no floor, horizon, shadow, reflection, gradient, texture, flicker, or "
+    "green spill on fur."
+)
+
+DOG_RUNNING_PROMPT = (
+    "A complete full-body restrained stylized 3D dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve the exact "
+    "breed traits, apparent age, face, muzzle, eyes, ears, nose, coat colors and "
+    "localized markings, natural coat length and volume, body proportions, paws, "
+    "and complete tail. Use the neutral-white dog anatomy driver only for the "
+    "quadruped running-in-place gait, joint trajectories, camera, scale and framing. "
+    "Never copy the driver's white coat, face, proportions, material, or lighting. "
+    "Follow the supplied gait precisely with exactly four distinct anatomically "
+    "attached legs and complete paws, coherent spine flexion, stable identity, and "
+    "the tail continuously attached from base to tip. Keep the global body center "
+    "stable with no forward travel, scene cut, fused legs, missing paw or extra limb. "
+    "No prop. The entire background remains perfectly uniform pure #00FF00 green "
+    "with no floor, horizon, shadow, reflection, gradient, texture or flicker."
+)
+
+DOG_SLEEPING_PROMPT = (
+    "A complete full-body restrained stylized 3D dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve the exact "
+    "breed traits, apparent age, face and muzzle geometry, eyes, ears, nose, coat "
+    "colors and localized markings, natural coat length and volume, body "
+    "proportions, paws, and complete tail. Use the neutral-white dog anatomy driver "
+    "only for its compact curled sleeping geometry, slow breathing, subtle head and "
+    "ear motion, one natural restrained yawn, camera, scale and framing. Never copy "
+    "the driver's white coat, face, proportions, material, or lighting. Keep all "
+    "legs anatomically attached and naturally tucked, eyes peacefully closed outside "
+    "the brief yawn, and the complete tail curled continuously beside the body. No "
+    "bed, cushion, blanket or other prop. The entire background remains perfectly "
+    "uniform pure #00FF00 green with no floor, shadow, reflection, gradient, texture "
+    "or flicker."
+)
+
+DOG_TOILETING_PROMPT = (
+    "A complete full-body restrained stylized 3D dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve the exact "
+    "breed traits, apparent age, face, muzzle, eyes, ears, nose, coat colors and "
+    "localized markings, natural coat length and volume, body proportions, paws, "
+    "and complete tail. Use the neutral-white dog anatomy driver only for the stable "
+    "seated toilet action, joint trajectories, one fixed clean rectangular pet toilet "
+    "tray with grid insert, camera, scale and framing. Never copy the driver's white "
+    "coat, face, proportions, material, or lighting. Keep the tray fixed, complete "
+    "and unchanged beneath the dog; show no urine, feces, mess, litter or extra prop. "
+    "Keep all four legs anatomically attached, identity stable and the complete tail "
+    "visible. The entire background outside the dog and tray remains perfectly "
+    "uniform pure #00FF00 green with no floor continuation, shadow, reflection, "
+    "gradient, texture or flicker."
+)
+
 DOG_NEGATIVE_PROMPT = (
     "cat, feline, kitten, different dog, different breed, generic dog, copied "
     "white-model identity, white-model face, white-model coat, changed face, changed "
@@ -256,6 +321,42 @@ DOG_STANDING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT.replace(
     "static tongue, frozen tongue, pasted tongue, detached tongue, rigid tongue, "
     "melting tongue, disappearing tongue"
 )
+DOG_DRINKING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT.replace(
+    "panting smile, tongue out, ",
+    "panting smile, ",
+) + (
+    ", long tongue, detached tongue, transparent tongue, splash, drool, water "
+    "strand, moving bowl, changing bowl, duplicate bowl, food in water bowl"
+)
+DOG_RUNNING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT + (
+    ", two-legged run, bipedal pose, fused legs, hidden far-side leg, missing paw, "
+    "detached paw, body translation, forward travel, long airborne suspension"
+)
+DOG_SLEEPING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT + (
+    ", open alert eyes, standing pose, sitting upright, walking, running, bed, "
+    "cushion, blanket, detached tucked paw, missing tail"
+)
+DOG_TOILETING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT + (
+    ", urine, feces, excrement, mess, litter, dirty tray, duplicate tray, litter box, "
+    "moving tray, changing tray, tray fused into body"
+)
+
+DOG_ACTION_PROMPTS = {
+    "eating": DOG_EATING_PROMPT,
+    "drinking": DOG_DRINKING_PROMPT,
+    "running": DOG_RUNNING_PROMPT,
+    "sleeping": DOG_SLEEPING_PROMPT,
+    "standing": DOG_STANDING_PROMPT,
+    "toileting": DOG_TOILETING_PROMPT,
+}
+DOG_ACTION_NEGATIVE_PROMPTS = {
+    "eating": DOG_EATING_NEGATIVE_PROMPT,
+    "drinking": DOG_DRINKING_NEGATIVE_PROMPT,
+    "running": DOG_RUNNING_NEGATIVE_PROMPT,
+    "sleeping": DOG_SLEEPING_NEGATIVE_PROMPT,
+    "standing": DOG_STANDING_NEGATIVE_PROMPT,
+    "toileting": DOG_TOILETING_NEGATIVE_PROMPT,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -274,7 +375,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--action",
-        choices=("grooming", "eating", "standing"),
+        choices=(
+            "grooming",
+            "eating",
+            "drinking",
+            "running",
+            "sleeping",
+            "standing",
+            "toileting",
+        ),
         default="grooming",
     )
     parser.add_argument("--species", choices=("cat", "dog"), default="cat")
@@ -325,19 +434,14 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.prompt is None:
         if args.species == "dog":
-            args.prompt = (
-                DOG_EATING_PROMPT
-                if args.action == "eating"
-                else DOG_STANDING_PROMPT
-            )
+            args.prompt = DOG_ACTION_PROMPTS.get(args.action, DOG_STANDING_PROMPT)
         else:
             args.prompt = EATING_PROMPT if args.action == "eating" else DEFAULT_PROMPT
     if args.negative_prompt is None:
         if args.species == "dog":
-            args.negative_prompt = (
-                DOG_EATING_NEGATIVE_PROMPT
-                if args.action == "eating"
-                else DOG_STANDING_NEGATIVE_PROMPT
+            args.negative_prompt = DOG_ACTION_NEGATIVE_PROMPTS.get(
+                args.action,
+                DOG_STANDING_NEGATIVE_PROMPT,
             )
         else:
             args.negative_prompt = (
@@ -387,7 +491,11 @@ def read_gif_frames(path: Path) -> tuple[list[Image.Image], list[int]]:
     return frames, durations
 
 
-def read_animation_frames(path: Path) -> tuple[list[Image.Image], list[int]]:
+def read_animation_frames(
+    path: Path,
+    *,
+    extract_green_screen: bool = True,
+) -> tuple[list[Image.Image], list[int]]:
     """Decode a GIF or a constant-frame-rate video into timed RGBA frames."""
     if path.suffix.lower() == ".gif":
         return read_gif_frames(path)
@@ -415,7 +523,15 @@ def read_animation_frames(path: Path) -> tuple[list[Image.Image], list[int]]:
             if not decoded:
                 break
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            clean_rgb, alpha = _subject_mask(rgb)
+            if extract_green_screen:
+                clean_rgb, alpha = _subject_mask(rgb)
+            else:
+                # The white-maquette semantic pass needs the original green
+                # direction to distinguish a connected floor shadow from the
+                # neutral dog and action prop.  The generic extractor removes
+                # that evidence while de-spilling its matte boundary.
+                clean_rgb = rgb
+                alpha = np.full(rgb.shape[:2], 255, dtype=np.uint8)
             rgba = np.dstack((clean_rgb, alpha))
             frames.append(Image.fromarray(rgba, mode="RGBA"))
     finally:
@@ -500,6 +616,94 @@ def contain_rgba(
     )
     canvas.alpha_composite(resized, position)
     return canvas
+
+
+def white_maquette_semantic_silhouette(
+    rgba: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Keep neutral model/action geometry while removing green floor shadows."""
+    pixels = np.asarray(rgba, dtype=np.uint8)
+    if pixels.ndim != 3 or pixels.shape[2] != 4:
+        raise ValueError("White-maquette cleanup requires an RGBA image")
+    rgb = pixels[:, :, :3]
+    alpha = pixels[:, :, 3]
+    red = rgb[:, :, 0].astype(np.int16)
+    green = rgb[:, :, 1].astype(np.int16)
+    blue = rgb[:, :, 2].astype(np.int16)
+    channel_span = rgb.max(axis=2).astype(np.int16) - rgb.min(axis=2).astype(
+        np.int16
+    )
+    luma = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    green_shadow = ((green - red) >= 12) & ((green - blue) >= 24)
+    seed = (
+        (alpha >= 16)
+        & (luma >= 55)
+        & (channel_span <= 72)
+        & ~green_shadow
+    ).astype(np.uint8)
+    # Thin neutral/green contact shadows can survive chroma extraction and
+    # connect every paw to a fake floor shelf.  A vertical opening removes
+    # those shelves while retaining legs, tails and substantial action props
+    # such as a toilet tray.  Skipping this opening for horizontal props also
+    # preserves the floor whenever it touches the prop.
+    seed = cv2.morphologyEx(
+        seed,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 9)),
+        iterations=1,
+    )
+    seed = cv2.morphologyEx(
+        seed,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+        iterations=2,
+    )
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        seed,
+        connectivity=8,
+    )
+    areas = [
+        int(stats[label, cv2.CC_STAT_AREA])
+        for label in range(1, component_count)
+    ]
+    largest_area = max(areas, default=0)
+    minimum_area = max(64, int(largest_area * 0.004))
+    semantic_seed = np.zeros_like(seed)
+    retained_components = 0
+    for label in range(1, component_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        if area < minimum_area:
+            continue
+        if width >= height * 6 and height <= 32:
+            continue
+        semantic_seed[labels == label] = 255
+        retained_components += 1
+    contours, _ = cv2.findContours(
+        semantic_seed,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    silhouette = np.zeros_like(semantic_seed)
+    cv2.drawContours(silhouette, contours, -1, 255, thickness=cv2.FILLED)
+    visible_fraction = float(np.count_nonzero(silhouette)) / float(
+        silhouette.size
+    )
+    if retained_components < 1 or not 0.03 <= visible_fraction <= 0.75:
+        raise ValueError(
+            "White-maquette cleanup produced an unusable silhouette: "
+            f"components={retained_components}, "
+            f"visible_fraction={visible_fraction:.6f}"
+        )
+    return silhouette, {
+        "policy": "neutral_material_floor_shadow_rejection_v1",
+        "retained_components": retained_components,
+        "visible_fraction": round(visible_fraction, 6),
+        "green_shadow_pixels_rejected": int(
+            np.count_nonzero((alpha >= 16) & green_shadow)
+        ),
+    }
 
 
 def sha256_file(path: Path) -> str:
@@ -912,7 +1116,21 @@ def make_pose_and_mask_frames(
     canvas_size: tuple[int, int],
     pose_background: tuple[int, int, int] = (255, 255, 255),
     separate_eating_prop: bool = False,
+    white_maquette_cleanup: bool = False,
 ) -> tuple[list[Image.Image], list[Image.Image], dict[str, Any]]:
+    cleanup_records: list[dict[str, Any]] = []
+    if white_maquette_cleanup:
+        cleaned_frames: list[Image.Image] = []
+        for frame in sampled_frames:
+            rgba = np.asarray(frame.convert("RGBA"), dtype=np.uint8).copy()
+            silhouette, cleanup = white_maquette_semantic_silhouette(rgba)
+            neutral_luma = cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_RGB2GRAY)
+            rgba[:, :, :3] = np.repeat(neutral_luma[:, :, None], 3, axis=2)
+            rgba[:, :, 3] = silhouette
+            rgba[silhouette == 0, :3] = 0
+            cleaned_frames.append(Image.fromarray(rgba, mode="RGBA"))
+            cleanup_records.append(cleanup)
+        sampled_frames = cleaned_frames
     source_bbox = expand_bbox(
         union_alpha_bbox(sampled_frames),
         sampled_frames[0].size,
@@ -992,7 +1210,17 @@ def make_pose_and_mask_frames(
         "identity_fraction_max": max(identity_fractions),
         "identity_fraction_mean": sum(identity_fractions) / len(identity_fractions),
         "scene_prop_separated": separate_eating_prop,
+        "white_maquette_cleanup": white_maquette_cleanup,
     }
+    if cleanup_records:
+        metadata["white_maquette_cleanup_policy"] = cleanup_records[0]["policy"]
+        metadata["white_maquette_visible_fraction_min"] = min(
+            float(record["visible_fraction"]) for record in cleanup_records
+        )
+        metadata["white_maquette_visible_fraction_max"] = max(
+            float(record["visible_fraction"]) for record in cleanup_records
+        )
+        metadata["white_maquette_source_chroma_preserved"] = False
     if separate_eating_prop:
         metadata.update(
             {
@@ -5816,7 +6044,14 @@ def main() -> int:
     args = parse_args()
     supported_actions = {
         "cat": {"eating", "grooming"},
-        "dog": {"eating", "standing"},
+        "dog": {
+            "eating",
+            "drinking",
+            "running",
+            "sleeping",
+            "standing",
+            "toileting",
+        },
     }
     if args.action not in supported_actions[args.species]:
         raise ValueError(
@@ -5932,13 +6167,21 @@ def main() -> int:
     run_dir.mkdir(parents=True, exist_ok=False)
     input_dir.mkdir(parents=True, exist_ok=False)
 
-    frames, durations = read_animation_frames(args.source)
+    white_maquette_cleanup = args.species == "dog" and args.action != "eating"
+    frames, durations = read_animation_frames(
+        args.source,
+        extract_green_screen=not white_maquette_cleanup,
+    )
     sampled = sample_timed_frames(frames, durations, args.frames, args.fps)
     reference, reference_mask, reference_metadata = make_reference_assets(
         args.reference,
         (args.width, args.height),
         separate_eating_prop=args.action == "eating",
-        contain_fraction=0.88 if args.action in {"grooming", "standing"} else 0.84,
+        contain_fraction=(
+            0.88
+            if args.action in {"grooming", "sleeping", "standing", "toileting"}
+            else 0.84
+        ),
     )
     if args.action == "eating":
         if args.species == "dog":
@@ -5978,6 +6221,7 @@ def main() -> int:
             (args.width, args.height),
             pose_background=(255, 255, 255),
             separate_eating_prop=False,
+            white_maquette_cleanup=white_maquette_cleanup,
         )
     prop_metadata = pose_metadata.get("scene_prop_metadata")
     if isinstance(prop_metadata, dict):

@@ -18,6 +18,92 @@ from tests.integration.local_video_subject_replacement_test_support import (
 
 
 class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceTestBase):
+    def test_white_maquette_cleanup_removes_floor_but_preserves_toilet_tray(
+        self,
+    ) -> None:
+        rgba = np.zeros((128, 128, 4), dtype=np.uint8)
+        rgba[22:94, 42:88] = (220, 220, 216, 255)
+        rgba[90:112, 4:124] = (59, 76, 36, 210)
+
+        clean, metadata = scail_pipeline.white_maquette_semantic_silhouette(
+            rgba,
+        )
+
+        self.assertEqual(int(clean[100, 8]), 0)
+        self.assertEqual(int(clean[60, 60]), 255)
+        self.assertEqual(
+            metadata["policy"],
+            "neutral_material_floor_shadow_rejection_v1",
+        )
+
+        tray_rgba = rgba.copy()
+        tray_rgba[88:108, 16:112] = (205, 190, 145, 255)
+        tray, _ = scail_pipeline.white_maquette_semantic_silhouette(
+            tray_rgba,
+        )
+        self.assertEqual(int(tray[100, 20]), 255)
+
+        pose_frames, _, pose_metadata = (
+            scail_pipeline.make_pose_and_mask_frames(
+                [Image.fromarray(tray_rgba, mode="RGBA")],
+                (128, 128),
+                white_maquette_cleanup=True,
+            )
+        )
+        pose_rgb = np.asarray(pose_frames[0], dtype=np.uint8)
+        colored = np.any(pose_rgb != pose_rgb[:, :, :1], axis=2)
+        self.assertFalse(np.any(colored))
+        self.assertFalse(
+            pose_metadata["white_maquette_source_chroma_preserved"]
+        )
+
+    def test_small_dog_extended_actions_have_qwen_and_scail_contracts(self) -> None:
+        expected_tokens = {
+            "drinking": ("water bowl", "water surface"),
+            "running": ("quadruped", "four distinct"),
+            "sleeping": ("curled sleeping", "eyes peacefully closed"),
+            "toileting": ("toilet tray", "grid insert"),
+        }
+        for action, tokens in expected_tokens.items():
+            with self.subTest(action=action):
+                pose = pipeline.subject_replacement_pose_prompt(
+                    action,
+                    species="dog",
+                )
+                rules = pipeline.action_first_frame_rules(
+                    pose,
+                    species="dog",
+                )
+                prompt = pipeline.build_qwen_prompt(
+                    "",
+                    pose,
+                    transparent_gif=True,
+                    pose_reference_available=True,
+                    profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+                    species="dog",
+                )
+                for token in tokens:
+                    self.assertIn(token, f"{pose} {rules} {prompt}")
+                with patch(
+                    "sys.argv",
+                    [
+                        "subject_replacement",
+                        "--action",
+                        action,
+                        "--species",
+                        "dog",
+                    ],
+                ):
+                    parsed = scail_pipeline.parse_args()
+                self.assertIs(
+                    parsed.prompt,
+                    scail_pipeline.DOG_ACTION_PROMPTS[action],
+                )
+                self.assertIs(
+                    parsed.negative_prompt,
+                    scail_pipeline.DOG_ACTION_NEGATIVE_PROMPTS[action],
+                )
+
     def test_dog_scail_cli_uses_action_specific_negative_prompt(self) -> None:
         with patch(
             "sys.argv",

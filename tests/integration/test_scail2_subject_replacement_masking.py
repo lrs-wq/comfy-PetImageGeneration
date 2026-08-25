@@ -1400,14 +1400,25 @@ class DrivingAnimationDecodeTests(unittest.TestCase):
                 writer.release()
 
             frames, durations = scail.read_animation_frames(path)
+            raw_frames, raw_durations = scail.read_animation_frames(
+                path,
+                extract_green_screen=False,
+            )
 
         self.assertEqual(len(frames), 3)
         self.assertEqual(durations, [100, 100, 100])
+        self.assertEqual(raw_durations, durations)
         self.assertTrue(all(frame.mode == "RGBA" for frame in frames))
         self.assertTrue(all(frame.size == (32, 24) for frame in frames))
         first_rgba = np.asarray(frames[0], dtype=np.uint8)
         self.assertEqual(int(first_rgba[1, 1, 3]), 0)
         self.assertGreater(int(first_rgba[12, 16, 3]), 250)
+        first_raw_rgba = np.asarray(raw_frames[0], dtype=np.uint8)
+        self.assertEqual(int(first_raw_rgba[10, 2, 3]), 255)
+        self.assertGreater(
+            int(first_raw_rgba[10, 2, 1]),
+            int(first_raw_rgba[10, 2, 0]),
+        )
         decoded_means = [
             float(np.asarray(frame.convert("RGB"), dtype=np.uint8).mean())
             for frame in frames

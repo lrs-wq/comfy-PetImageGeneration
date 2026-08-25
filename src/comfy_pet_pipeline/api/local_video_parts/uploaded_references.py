@@ -8,6 +8,67 @@ from __future__ import annotations
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
+def prepare_static_white_maquette_geometry_guide(
+    action: str,
+    action_config: dict[str, Any],
+    target: Path,
+) -> dict[str, Any]:
+    """Convert a frozen white model into a texture-free, floor-free guide."""
+    _sync_local_video_runtime(
+        globals(),
+        {"prepare_static_white_maquette_geometry_guide"},
+    )
+    geometry_reference = Path(
+        str(action_config.get("geometry_reference") or "")
+    )
+    expected_sha256 = str(
+        action_config.get("geometry_reference_sha256") or ""
+    ).strip()
+    if (
+        not geometry_reference.is_file()
+        or not expected_sha256
+        or file_sha256(geometry_reference) != expected_sha256
+    ):
+        raise RuntimeError(
+            f"{action} white-model geometry reference is missing or changed."
+        )
+    with Image.open(geometry_reference) as loaded_geometry:
+        geometry_rgba = loaded_geometry.convert("RGBA")
+        geometry_rgba.load()
+    if geometry_rgba.size != (TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE):
+        raise RuntimeError(
+            f"{action} white-model geometry reference must be 512x512."
+        )
+
+    # The supplied model and its action props are neutral white/cream.  Green
+    # floor shadows have high channel span even when colorkey leaves partial
+    # alpha.  Seed from neutral opaque material, close small articulation gaps,
+    # then fill external contours so darker eyes, mouths and tray grids remain
+    # geometry without exposing any RGB texture to Qwen.
+    silhouette, cleanup = white_maquette_semantic_silhouette(
+        np.asarray(geometry_rgba, dtype=np.uint8)
+    )
+
+    guide_array = np.zeros((*silhouette.shape, 3), dtype=np.uint8)
+    guide_array[:, :] = (0, 255, 0)
+    guide_array[silhouette > 0] = (144, 144, 144)
+    guide = Image.fromarray(guide_array, mode="RGB")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    guide.save(target, format="PNG", optimize=True)
+    return {
+        "policy": "static_white_maquette_floor_free_silhouette_v1",
+        "source": str(geometry_reference),
+        "source_sha256": expected_sha256,
+        "guide_sha256": file_sha256(target),
+        "source_rgb_preserved": False,
+        "source_luma_preserved": False,
+        "source_chroma_preserved": False,
+        "retained_components": cleanup["retained_components"],
+        "visible_fraction": cleanup["visible_fraction"],
+        "floor_shadow_rejection": "neutral_material_components_no_thin_horizontal_shelf_v1",
+    }
+
+
 def prepare_static_eating_qwen_geometry_recovery_guide(
     job_id: str,
     action_config: dict[str, Any],
@@ -694,36 +755,25 @@ def prepare_uploaded_subject_qwen_references(
                 "private_completion_mask_exposed_to_qwen": False,
                 "generator_metadata": guide_metadata,
             }
-        elif action == "standing":
-            geometry_reference = Path(
-                str(action_config.get("geometry_reference") or "")
+        elif action in {
+            "standing",
+            "drinking",
+            "running",
+            "sleeping",
+            "toileting",
+        }:
+            guide_metadata = prepare_static_white_maquette_geometry_guide(
+                action,
+                action_config,
+                pose_guide,
             )
-            expected_geometry_sha256 = str(
-                action_config.get("geometry_reference_sha256") or ""
-            ).strip()
-            if (
-                not geometry_reference.is_file()
-                or not expected_geometry_sha256
-                or file_sha256(geometry_reference) != expected_geometry_sha256
-            ):
-                raise RuntimeError(
-                    "Standing white-model geometry reference is missing or changed."
-                )
-            with Image.open(geometry_reference) as loaded_geometry:
-                geometry_rgba = loaded_geometry.convert("RGBA")
-                alpha = geometry_rgba.getchannel("A")
-                guide = Image.new("RGB", geometry_rgba.size, (0, 255, 0))
-                guide.paste(
-                    Image.new("RGB", geometry_rgba.size, (144, 144, 144)),
-                    mask=alpha,
-                )
-                guide.save(pose_guide, format="PNG", optimize=True)
-            guide_sha256 = file_sha256(pose_guide)
             pose_reference_policies[action] = (
                 "dog_standing_white_model_silhouette_image2_v1"
+                if action == "standing"
+                else f"dog_{action}_white_model_floor_free_silhouette_image2_v1"
             )
             pose_reference_guide_styles[action] = (
-                "single_tone_appearance_free_dog_standing_geometry_on_pure_green"
+                "single_tone_appearance_free_dog_action_geometry_on_pure_green"
             )
             pose_reference_metadata[action] = {
                 "policy": pose_reference_policies[action],
@@ -735,8 +785,10 @@ def prepare_uploaded_subject_qwen_references(
                 "uploaded_white_maquette_driver_used": True,
                 "driver_appearance_authority": False,
                 "source_sha256": source_digest,
-                "geometry_reference_sha256": expected_geometry_sha256,
-                "guide_sha256": guide_sha256,
+                "geometry_reference_sha256": guide_metadata["source_sha256"],
+                "guide_sha256": guide_metadata["guide_sha256"],
+                "floor_shadow_removed": True,
+                "generator_metadata": guide_metadata,
             }
         else:
             raise ValueError(f"Unsupported subject replacement action: {action}")

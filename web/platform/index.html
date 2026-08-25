@@ -225,6 +225,22 @@
                 <input class="action" type="checkbox" value="eating" checked>
                 <span><strong>吃饭</strong><small>使用当前所选主体配置的 eating 白膜；上传图片时白膜只提供低头进食、食盆、机位与时序。</small></span>
               </label>
+              <label class="check action-check" hidden>
+                <input class="action" type="checkbox" value="drinking" disabled>
+                <span><strong>喝水</strong><small>小型犬专属 drinking 白膜；只提供低头喝水、水碗位置与闭环时序，上传图始终控制犬种与外观。</small></span>
+              </label>
+              <label class="check action-check" hidden>
+                <input class="action" type="checkbox" value="running" disabled>
+                <span><strong>奔跑</strong><small>小型犬专属 running 白膜；提供完整四足原地奔跑步态、机位与时序。</small></span>
+              </label>
+              <label class="check action-check" hidden>
+                <input class="action" type="checkbox" value="sleeping" disabled>
+                <span><strong>睡觉</strong><small>小型犬专属 sleeping 白膜；提供蜷卧、呼吸与自然哈欠动作，首帧使用闭眼睡姿。</small></span>
+              </label>
+              <label class="check action-check" hidden>
+                <input class="action" type="checkbox" value="toileting" disabled>
+                <span><strong>上厕所</strong><small>小型犬专属 toileting 白膜；提供坐姿、干净宠物尿垫托盘、机位与时序。</small></span>
+              </label>
               <label class="check action-check">
                 <input class="action" type="checkbox" value="grooming">
                 <span><strong>舔毛</strong><small>grooming 使用 Main_case/TM.mp4：未上传时同时作为黑白猫主体、毛发与舔毛动作标准；上传时只提供舔爪/擦脸和机位。</small></span>
@@ -353,7 +369,15 @@
     const MAX_LORA_FILE_BYTES = 2 * 1024 * 1024 * 1024;
     const MAX_LORA_TOTAL_BYTES = 4 * 1024 * 1024 * 1024;
     const DEFAULT_IMAGE_PROMPT = '以参考图片中的宠物为唯一身份标准，完整保留毛色和花纹位置、脸型、眼睛颜色与间距、耳形、鼻色、毛长、体型比例和尾巴特征；生成高品质萌系3D卡通角色，毛发细腻柔软，光照明亮柔和，保持自然无衣服无配饰的完整全身形象。不继承或固定参考图中的姿态、肢体坐标和构图，具体动作只由所选姿态决定。';
-    const actionLabels = {eating: '吃饭', grooming: '舔毛', standing: '站立'};
+    const actionLabels = {
+      eating: '吃饭',
+      grooming: '舔毛',
+      standing: '站立',
+      drinking: '喝水',
+      running: '奔跑',
+      sleeping: '睡觉',
+      toileting: '上厕所'
+    };
     const dogSizeProfileIds = new Set([
       'dog_medium_white_model_test_v1',
       'dog_small_white_model_test_v1'
@@ -380,6 +404,10 @@
         display_name: '小型犬（测试平台）',
         actions: [
           {id: 'eating', label: '吃饭', reference_ready: true},
+          {id: 'drinking', label: '喝水', reference_ready: true},
+          {id: 'running', label: '奔跑', reference_ready: true},
+          {id: 'sleeping', label: '睡觉', reference_ready: true},
+          {id: 'toileting', label: '上厕所', reference_ready: true},
           {id: 'standing', label: '站立', reference_ready: true}
         ]
       }]

@@ -23,11 +23,22 @@ class DogSizeTestProfilesTest(unittest.TestCase):
             "medium": "dog_medium_white_model_test_v1",
             "small": "dog_small_white_model_test_v1",
         }
+        expected_actions = {
+            "medium": ["eating", "standing"],
+            "small": [
+                "eating",
+                "drinking",
+                "running",
+                "sleeping",
+                "toileting",
+                "standing",
+            ],
+        }
         for size, profile in self.profiles.items():
             self.assertEqual(profile["schema_version"], 2)
             self.assertEqual(profile["id"], expected_ids[size])
             self.assertEqual(profile["species"], "dog")
-            self.assertEqual(profile["supported_actions"], ["eating", "standing"])
+            self.assertEqual(profile["supported_actions"], expected_actions[size])
             self.assertEqual(profile["status"], "test_platform_only")
             self.assertTrue(profile["test_platform_only"])
             self.assertEqual(profile["morphology_category"], f"{size}_dog")
@@ -50,11 +61,18 @@ class DogSizeTestProfilesTest(unittest.TestCase):
         normalization = profile["uploaded_identity_driving"]["normalization"]
         self.assertEqual(normalization["size"], [512, 512])
         self.assertTrue(normalization["audio_removed"])
-        for action in ("eating", "standing"):
+        for action in (
+            "eating",
+            "drinking",
+            "running",
+            "sleeping",
+            "toileting",
+            "standing",
+        ):
             driving = profile["uploaded_identity_driving"]["actions"][action]
             runtime = profile["runtime"]["actions"][action]
-            self.assertIn("/small_dog/runtime-v1/", driving["runtime"])
-            self.assertIn("/small_dog/runtime-v1/", driving["geometry_reference"])
+            self.assertIn("/small_dog/runtime-v2/", driving["runtime"])
+            self.assertIn("/small_dog/runtime-v2/", driving["geometry_reference"])
             self.assertEqual(runtime["driving_animation"], driving["runtime"])
             self.assertEqual(
                 runtime["driving_animation_sha256"],
@@ -63,6 +81,12 @@ class DogSizeTestProfilesTest(unittest.TestCase):
             self.assertEqual(len(driving["runtime_sha256"]), 64)
             self.assertEqual(len(driving["geometry_reference_sha256"]), 64)
             self.assertGreaterEqual(driving["endpoint_ssim"], 0.9)
+        self.assertEqual(
+            profile["uploaded_identity_driving"]["actions"]["drinking"][
+                "loop_policy"
+            ],
+            "first_half_ping_pong_closed_loop_v1",
+        )
 
 
 if __name__ == "__main__":

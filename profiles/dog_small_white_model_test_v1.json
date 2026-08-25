@@ -2,29 +2,33 @@
   "schema_version": 2,
   "id": "dog_small_white_model_test_v1",
   "species": "dog",
-  "supported_actions": ["eating", "standing"],
+  "supported_actions": ["eating", "drinking", "running", "sleeping", "toileting", "standing"],
   "display_name": "小型犬（测试平台）",
   "status": "test_platform_only",
   "preview_action": "eating",
   "test_platform_only": true,
   "morphology_category": "small_dog",
-  "canonical_source_image": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_eating_reference_frame040_cutout.png",
+  "canonical_source_image": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_eating_reference_frame040_cutout.png",
   "action_references": {
-    "eating": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_eating_reference_frame040_cutout.png",
-    "standing": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_standing_reference_frame040_cutout.png"
+    "eating": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_eating_reference_frame040_cutout.png",
+    "drinking": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_drinking_reference_frame040_cutout.png",
+    "running": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_running_reference_frame040_cutout.png",
+    "sleeping": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_sleeping_reference_frame016_cutout.png",
+    "toileting": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_toileting_reference_frame040_cutout.png",
+    "standing": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_standing_reference_frame040_cutout.png"
   },
   "reference_preparation": {
-    "method": "center_square_full_cycle_colorkey_rgba_v1",
+    "method": "center_square_action_specific_closed_loop_colorkey_rgba_v2",
     "runner": "/root/comfy-pet-pipeline/tools/assets/build_dog_size_test_assets.py",
     "role": "test_platform_small_dog_action_geometry_only"
   },
   "profile_asset_manifest": {
-    "path": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/manifest.json",
-    "sha256": "55d6764fe1929606a14e18f9737c3290e58ca43e3346265d3551cab6c0041405",
-    "validation_scope": "test_platform_small_dog_512_square_81_frame_eating_standing"
+    "path": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/manifest.json",
+    "sha256": "97235ccddf597d3000fd9bf884095bf897210738ddeb44120acf6970a708570d",
+    "validation_scope": "test_platform_small_dog_512_square_81_frame_six_actions"
   },
   "uploaded_identity_driving": {
-    "revision": "small-dog-test-platform-20260824-v1",
+    "revision": "small-dog-test-platform-20260825-v2-six-actions",
     "role": "identity_small_dog_action_geometry_and_motion_test_only",
     "appearance_authority": "uploaded_qwen_canonical_only",
     "normalization": {
@@ -33,30 +37,106 @@
       "frames": 81,
       "fps": 16,
       "audio_removed": true,
-      "source_duration_seconds": 8.0,
-      "pts_scale": 0.625,
-      "eating_endpoint_ssim": 0.970452,
-      "standing_endpoint_ssim": 0.969743
+      "source_duration_seconds_by_action": {
+        "eating": 8.0,
+        "drinking": 8.0,
+        "running": 10.125,
+        "sleeping": 10.125,
+        "toileting": 8.0,
+        "standing": 8.0
+      },
+      "pts_scale_by_action": {
+        "eating": 0.625,
+        "drinking": 0.625,
+        "running": 0.5,
+        "sleeping": 0.5,
+        "toileting": 0.625,
+        "standing": 0.625
+      },
+      "reference_frame_index_by_action": {
+        "eating": 40,
+        "drinking": 40,
+        "running": 40,
+        "sleeping": 16,
+        "toileting": 40,
+        "standing": 40
+      },
+      "endpoint_ssim_by_action": {
+        "eating": 0.970452,
+        "drinking": 0.983881,
+        "running": 0.960189,
+        "sleeping": 0.976043,
+        "toileting": 0.97607,
+        "standing": 0.969743
+      }
     },
     "actions": {
       "eating": {
         "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/eating.mp4",
         "source_sha256": "f1bc84b241d42fec559d8f9fa22d2c5a7d77ac9943ae66a29813f6f6c3b058c9",
-        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_eating_driver_512x512_81f_16fps.mp4",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_eating_driver_512x512_81f_16fps.mp4",
         "runtime_sha256": "ddc262394ce5ace01279d36aea98aaaa743818bb4dc93a628f35ec8ecaf991b6",
-        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_eating_reference_frame040_cutout.png",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_eating_reference_frame040_cutout.png",
         "geometry_reference_sha256": "101bec91929e92ca907e955365a3053aca0c25332f6a8cae4d6911ceb4c9cc55",
         "selected_frame_index": 40,
         "selected_frame_timestamp_seconds": 2.5,
         "loop_policy": "full_source_cycle_speed_normalized_v1",
         "endpoint_ssim": 0.970452
       },
+      "drinking": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/drinking.mp4",
+        "source_sha256": "bfa3426a646a17b910b195d08026ef04446337dea68d606e9fda7a7ffd986044",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_drinking_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "82c19127d8d453f2c803b424472bfb235dc4b751d426a3e4ddcacd96a32a00cb",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_drinking_reference_frame040_cutout.png",
+        "geometry_reference_sha256": "c65c2cbba25b865cfc308413c80ac6a1f50e683eabe9dd3527fe75a33993f80f",
+        "selected_frame_index": 40,
+        "selected_frame_timestamp_seconds": 2.5,
+        "loop_policy": "first_half_ping_pong_closed_loop_v1",
+        "endpoint_ssim": 0.983881
+      },
+      "running": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/running.mp4",
+        "source_sha256": "489fa8edb31d14441dc593bed8c76642aead7e3b9c183cd03b76e59d8fa2f8ef",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_running_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "a17d6e9588d508bc42b3df81acfcb8ca4e94c7e2c1a11b29e4223d4c507f98c6",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_running_reference_frame040_cutout.png",
+        "geometry_reference_sha256": "3149991da027d1310b0746ef98241fceda31ea63614942cb91f6a09319ace2ba",
+        "selected_frame_index": 40,
+        "selected_frame_timestamp_seconds": 2.5,
+        "loop_policy": "full_source_cycle_speed_normalized_v1",
+        "endpoint_ssim": 0.960189
+      },
+      "sleeping": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/sleeping.mp4",
+        "source_sha256": "67fea02a7c99c133c7e62b2a71abcf66567c2c8f48a819427b8de45bad9249e6",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_sleeping_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "68b4a3f94ac1676beec0aee8f04d62758eda86614738ab952702994de6202b90",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_sleeping_reference_frame016_cutout.png",
+        "geometry_reference_sha256": "cf4a8e01931bbe0d629a4f4b723891cc0cd79bbeb058a7632fcedc3f4dea7049",
+        "selected_frame_index": 16,
+        "selected_frame_timestamp_seconds": 1.0,
+        "loop_policy": "full_source_cycle_speed_normalized_v1",
+        "endpoint_ssim": 0.976043
+      },
+      "toileting": {
+        "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/toileting.mp4",
+        "source_sha256": "4eea9f22ad55c2875c31d57070882c9d3d8803189c154cf479b8c54e29fc1f1f",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_toileting_driver_512x512_81f_16fps.mp4",
+        "runtime_sha256": "029f0949fa04a9ec3372cec93e7dbdef8c452d5c6202c87c5aa565a0bea93e4e",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_toileting_reference_frame040_cutout.png",
+        "geometry_reference_sha256": "a6cc2eec9f6cc4e2b23d188cdebab1ffad6da62a05416c6f3abf7cfb7d080854",
+        "selected_frame_index": 40,
+        "selected_frame_timestamp_seconds": 2.5,
+        "loop_policy": "full_source_cycle_speed_normalized_v1",
+        "endpoint_ssim": 0.97607
+      },
       "standing": {
         "source": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/source/standing_head_turn.mp4",
         "source_sha256": "1de916b209409aed0cdcbfccc4db77e7d32d298c6c88d35625ae50b59fbac06f",
-        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_standing_driver_512x512_81f_16fps.mp4",
+        "runtime": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_standing_driver_512x512_81f_16fps.mp4",
         "runtime_sha256": "f35ae68b274f024ccd2789a9b4b555cf46918f71183544883cf42792a02e3295",
-        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_standing_reference_frame040_cutout.png",
+        "geometry_reference": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_standing_reference_frame040_cutout.png",
         "geometry_reference_sha256": "541f96980132b66c00ba6cc51cb484afc9041721c4003c0913e895c56b004309",
         "selected_frame_index": 40,
         "selected_frame_timestamp_seconds": 2.5,
@@ -67,25 +147,49 @@
   },
   "runtime": {
     "engine_profile": "scail2-14b-fp8-v1",
-    "prompt_profile": "uploaded-dog-small-test-v1",
+    "prompt_profile": "uploaded-dog-small-test-six-actions-v2",
     "default_base_seed": 20260824,
     "steps": 6,
     "frames": 81,
     "fps": 16,
     "actions": {
       "eating": {
-        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_eating_driver_512x512_81f_16fps.mp4",
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_eating_driver_512x512_81f_16fps.mp4",
         "driving_animation_sha256": "ddc262394ce5ace01279d36aea98aaaa743818bb4dc93a628f35ec8ecaf991b6",
         "pose_strength": 1.1,
         "seed_offset": 0
       },
+      "drinking": {
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_drinking_driver_512x512_81f_16fps.mp4",
+        "driving_animation_sha256": "82c19127d8d453f2c803b424472bfb235dc4b751d426a3e4ddcacd96a32a00cb",
+        "pose_strength": 1.05,
+        "seed_offset": 4
+      },
+      "running": {
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_running_driver_512x512_81f_16fps.mp4",
+        "driving_animation_sha256": "a17d6e9588d508bc42b3df81acfcb8ca4e94c7e2c1a11b29e4223d4c507f98c6",
+        "pose_strength": 1.15,
+        "seed_offset": 6
+      },
+      "sleeping": {
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_sleeping_driver_512x512_81f_16fps.mp4",
+        "driving_animation_sha256": "68b4a3f94ac1676beec0aee8f04d62758eda86614738ab952702994de6202b90",
+        "pose_strength": 1.05,
+        "seed_offset": 8
+      },
+      "toileting": {
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_toileting_driver_512x512_81f_16fps.mp4",
+        "driving_animation_sha256": "029f0949fa04a9ec3372cec93e7dbdef8c452d5c6202c87c5aa565a0bea93e4e",
+        "pose_strength": 1.05,
+        "seed_offset": 10
+      },
       "standing": {
-        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v1/small_dog_standing_driver_512x512_81f_16fps.mp4",
+        "driving_animation": "/data/comfy-pet-pipeline/profile_assets/dog_white_model_catalog/20260824-v1/small_dog/runtime-v2/small_dog_standing_driver_512x512_81f_16fps.mp4",
         "driving_animation_sha256": "f35ae68b274f024ccd2789a9b4b555cf46918f71183544883cf42792a02e3295",
         "pose_strength": 1.05,
         "seed_offset": 2
       }
     }
   },
-  "usage_note": "仅供测试平台显式选择小型犬时使用。白膜只提供 eating / standing 的几何和时序；上传图片始终是犬种、体型、脸部、毛色、花纹和毛长的唯一外观标准。"
+  "usage_note": "仅供测试平台显式选择小型犬时使用。六条白膜只提供 eating / drinking / running / sleeping / toileting / standing 的几何、道具和时序；上传图片始终是犬种、体型、脸部、毛色、花纹和毛长的唯一外观标准。"
 }

@@ -216,6 +216,14 @@ class GenerationPlatformProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(">小型犬<", html)
         self.assertIn('value="standing"', html)
         self.assertIn("standing: '站立'", html)
+        for action, label in (
+            ("drinking", "喝水"),
+            ("running", "奔跑"),
+            ("sleeping", "睡觉"),
+            ("toileting", "上厕所"),
+        ):
+            self.assertIn(f'value="{action}"', html)
+            self.assertIn(f"{action}: '{label}'", html)
         self.assertIn("function applySubjectProfile(profile, backendConfirmed = true)", html)
         self.assertIn("const selectedBeforeApply = new Set(", html)
         self.assertIn("input.checked = enabled && selectedBeforeApply.has(input.value)", html)

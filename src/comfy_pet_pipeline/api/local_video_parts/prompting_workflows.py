@@ -103,6 +103,43 @@ def subject_replacement_pose_prompt(action: str, *, species: str = "cat") -> str
             "place a tongue through closed lips. No prop, clothing, collar, harness, "
             "floor, or extra subject."
         )
+    if action == "drinking" and species == "dog":
+        return (
+            "drinking | A complete full-body dog in the low-head drinking pose "
+            "shown by the supplied action geometry at a three-quarter front angle. "
+            "Exactly one shallow water bowl stays immediately in front of the paws. "
+            "The muzzle is lowered to the water and one tiny anatomically attached "
+            "pink tongue tip touches the water surface. Keep all four legs attached, "
+            "both ears and the complete tail readable. No food, collar, clothing, "
+            "floor, shadow, or extra subject."
+        )
+    if action == "running" and species == "dog":
+        return (
+            "running | A complete full-body dog at a three-quarter side angle in "
+            "the exact quadruped running contact phase shown by the supplied action "
+            "geometry. Keep exactly four distinct anatomically attached legs and "
+            "complete paws, a coherent torso, both ears, and the tail continuously "
+            "visible from base to tip. No prop, floor, shadow, clothing, collar, "
+            "harness, or extra subject."
+        )
+    if action == "sleeping" and species == "dog":
+        return (
+            "sleeping | A complete full-body dog in the compact curled sleeping pose "
+            "shown by the supplied action geometry. The torso rests low, the head "
+            "rests naturally beside or on the front paws, the eyes are peacefully "
+            "closed, the legs remain anatomically attached, and the complete tail "
+            "curls continuously beside the body. No bed, cushion, floor, shadow, "
+            "collar, clothing, or extra subject."
+        )
+    if action == "toileting" and species == "dog":
+        return (
+            "toileting | A complete full-body dog in the stable seated toilet pose "
+            "shown by the supplied action geometry, centered on exactly one clean "
+            "rectangular pet toilet tray with a visible grid insert. Keep all four "
+            "legs anatomically attached, both ears, the complete tail, and the tray "
+            "fully visible. The clean tray is the only prop. Show no urine, feces, "
+            "mess, floor, shadow, collar, clothing, or extra subject."
+        )
     raise ValueError(f"Unsupported subject-replacement action: {action}")
 
 
@@ -172,6 +209,40 @@ def action_first_frame_rules(pose: str, *, species: str = "cat") -> str:
             "paw and the tail must end cleanly against pure green, with an "
             "uninterrupted green band below them. Never draw a floor, contact shadow, "
             "mirrored continuation, glossy patch or reflection beneath the dog."
+        )
+    if species == "dog" and action == "drinking":
+        return (
+            "Include exactly one small shallow matte water bowl directly in front "
+            "of the dog. Match Image 2's low-head drinking geometry, bowl placement, "
+            "camera, scale and framing. Lower the muzzle naturally to the still water "
+            "and show exactly one tiny attached pink tongue tip touching the water; "
+            "no air gap, long tongue, splash, drool, food, extra bowl or extra prop. "
+            "Keep all four legs attached and the complete tail readable."
+        )
+    if species == "dog" and action == "running":
+        return (
+            "No prop. Match Image 2's quadruped running contact phase, camera, scale "
+            "and framing. Show exactly four distinct anatomically attached legs, "
+            "each ending in one complete paw; keep the torso coherent and the full "
+            "tail connected from base to tip. Do not fuse or hide the far-side legs, "
+            "turn the dog into a two-legged leap, crop a paw, add a floor, or add a "
+            "second subject."
+        )
+    if species == "dog" and action == "sleeping":
+        return (
+            "No prop. Match Image 2's compact curled sleeping geometry exactly. Keep "
+            "the head resting naturally by the front paws, eyes peacefully closed, "
+            "all legs anatomically attached and tucked with plausible occlusion, and "
+            "the tail continuous from base to tip beside the body. Do not add a bed, "
+            "cushion, blanket, floor, shadow, open alert eyes, or extra subject."
+        )
+    if species == "dog" and action == "toileting":
+        return (
+            "Match Image 2's stable seated toilet geometry and keep exactly one clean "
+            "rectangular pet toilet tray with its grid insert fully visible beneath "
+            "the dog. The tray is the only prop. Keep all four legs attached, both "
+            "ears and the complete tail readable. Show no urine, feces, mess, extra "
+            "tray, litter box, floor continuation, shadow, clothing, or extra subject."
         )
     if action == "running":
         return (

@@ -190,14 +190,20 @@ class SubjectReplacementParsingTests(unittest.TestCase):
             r"^[0-9a-f]{64}$",
         )
 
-    def test_actions_default_to_eating_and_accept_only_open_actions(self) -> None:
+    def test_actions_default_to_eating_and_parse_small_dog_action_vocabulary(self) -> None:
         self.assertEqual(pipeline.parse_subject_actions(None), ["eating"])
         self.assertEqual(
             pipeline.parse_subject_actions('["吃饭", "舔毛", "eating"]'),
             ["eating", "grooming"],
         )
-        with self.assertRaisesRegex(ValueError, "Only eating and grooming"):
-            pipeline.parse_subject_actions('["running"]')
+        self.assertEqual(
+            pipeline.parse_subject_actions(
+                '["喝水", "running", "睡觉", "上厕所"]'
+            ),
+            ["drinking", "running", "sleeping", "toileting"],
+        )
+        with self.assertRaisesRegex(ValueError, "Unsupported"):
+            pipeline.parse_subject_actions('["dancing"]')
 
     def test_dog_actions_use_standing_and_map_legacy_grooming_alias(self) -> None:
         self.assertEqual(
@@ -213,6 +219,19 @@ class SubjectReplacementParsingTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "cat subject replacement"):
             pipeline.normalize_subject_actions_for_species(["standing"], "cat")
+        with self.assertRaisesRegex(ValueError, "dog subject replacement"):
+            pipeline.normalize_subject_actions_for_species(["running"], "dog")
+        small_profile = pipeline.load_subject_profile(
+            "dog_small_white_model_test_v1"
+        )
+        self.assertEqual(
+            pipeline.normalize_subject_actions_for_species(
+                ["drinking", "running", "sleeping", "toileting"],
+                "dog",
+                supported_actions=pipeline.subject_profile_actions(small_profile),
+            ),
+            ["drinking", "running", "sleeping", "toileting"],
+        )
 
     def test_dog_profile_exposes_digest_bound_eating_and_standing_assets(self) -> None:
         profile = pipeline.load_subject_profile("dog_white_model_v1")

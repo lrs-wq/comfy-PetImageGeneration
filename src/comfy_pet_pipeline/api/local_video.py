@@ -92,6 +92,7 @@ from ..media.transparent_animation import (
 from ..pipeline.subject_replacement import (
     GROOMING_TEMPORAL_LOOP_POLICY,
     clean_transparent_edge_halo,
+    white_maquette_semantic_silhouette,
 )
 from ..identity.uploaded_identity import (
     POLICY as UPLOADED_IDENTITY_SCAIL_REFERENCE_POLICY,
@@ -126,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.8"
+API_VERSION = "2.26.9"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -815,15 +816,33 @@ DOG_SUBJECT_PROFILES = frozenset(
 )
 CAT_SUBJECT_REPLACEMENT_ACTIONS = ("eating", "grooming")
 DOG_SUBJECT_REPLACEMENT_ACTIONS = ("eating", "standing")
+SMALL_DOG_SUBJECT_REPLACEMENT_ACTIONS = (
+    "eating",
+    "drinking",
+    "running",
+    "sleeping",
+    "toileting",
+    "standing",
+)
 # Existing imports and the default profile UI continue to use the cat contract.
 SUBJECT_REPLACEMENT_ACTIONS = CAT_SUBJECT_REPLACEMENT_ACTIONS
 ALL_SUBJECT_REPLACEMENT_ACTIONS = tuple(
-    dict.fromkeys((*CAT_SUBJECT_REPLACEMENT_ACTIONS, *DOG_SUBJECT_REPLACEMENT_ACTIONS))
+    dict.fromkeys(
+        (
+            *CAT_SUBJECT_REPLACEMENT_ACTIONS,
+            *DOG_SUBJECT_REPLACEMENT_ACTIONS,
+            *SMALL_DOG_SUBJECT_REPLACEMENT_ACTIONS,
+        )
+    )
 )
 SUBJECT_REPLACEMENT_ACTION_LABELS = {
     "eating": "吃饭",
     "grooming": "舔毛",
     "standing": "站立",
+    "drinking": "喝水",
+    "running": "奔跑",
+    "sleeping": "睡觉",
+    "toileting": "上厕所",
 }
 SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE = "pet-multipose-20260717-v2"
 DOG_SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE = "pet-dog-multipose-20260817-v1"
@@ -1677,6 +1696,7 @@ def subject_profile_species(profile: dict[str, Any]) -> str:
 
 def subject_profile_actions(profile: dict[str, Any]) -> tuple[str, ...]:
     species = subject_profile_species(profile)
+    profile_id = str(profile.get("id") or "").strip()
     raw_actions = profile.get("supported_actions")
     if raw_actions is None:
         return (
@@ -1687,14 +1707,18 @@ def subject_profile_actions(profile: dict[str, Any]) -> tuple[str, ...]:
     if not isinstance(raw_actions, list) or not raw_actions:
         raise ValueError("Subject profile supported_actions must be a non-empty array")
     actions = tuple(str(action).strip().lower() for action in raw_actions)
-    expected = (
-        CAT_SUBJECT_REPLACEMENT_ACTIONS
-        if species == "cat"
-        else DOG_SUBJECT_REPLACEMENT_ACTIONS
-    )
+    if profile_id == "dog_small_white_model_test_v1":
+        expected = SMALL_DOG_SUBJECT_REPLACEMENT_ACTIONS
+    else:
+        expected = (
+            CAT_SUBJECT_REPLACEMENT_ACTIONS
+            if species == "cat"
+            else DOG_SUBJECT_REPLACEMENT_ACTIONS
+        )
     if actions != expected:
         raise ValueError(
-            f"Subject profile {species} actions must be {list(expected)!r}"
+            f"Subject profile {profile_id or species} actions must be "
+            f"{list(expected)!r}"
         )
     return actions
 
@@ -3050,14 +3074,29 @@ def parse_subject_actions(raw: str | None) -> list[str]:
         "stand": "standing",
         "standing": "standing",
         "站立": "standing",
+        "drink": "drinking",
+        "drinking": "drinking",
+        "喝水": "drinking",
+        "run": "running",
+        "running": "running",
+        "奔跑": "running",
+        "跑步": "running",
+        "sleep": "sleeping",
+        "sleeping": "sleeping",
+        "睡觉": "sleeping",
+        "toilet": "toileting",
+        "toileting": "toileting",
+        "potty": "toileting",
+        "上厕所": "toileting",
     }
     actions: list[str] = []
     for value in values:
         key = aliases.get(value.strip().lower()) or aliases.get(value.strip())
         if key is None:
             raise ValueError(
-                "Only eating and grooming subject-replacement actions are available "
-                "for cats; standing is additionally available for dogs."
+                "Unsupported subject-replacement action. Cats support eating and "
+                "grooming; the explicit small-dog test profile additionally supports "
+                "drinking, running, sleeping, toileting, and standing."
             )
         if key not in actions:
             actions.append(key)
@@ -3069,14 +3108,16 @@ def parse_subject_actions(raw: str | None) -> list[str]:
 def normalize_subject_actions_for_species(
     actions: list[str],
     species: str,
+    *,
+    supported_actions: tuple[str, ...] | None = None,
 ) -> list[str]:
     """Apply the temporary dog grooming alias without changing the cat route."""
 
     if species == "dog":
-        supported = DOG_SUBJECT_REPLACEMENT_ACTIONS
+        supported = supported_actions or DOG_SUBJECT_REPLACEMENT_ACTIONS
         aliases = {"grooming": "standing"}
     elif species == "cat":
-        supported = CAT_SUBJECT_REPLACEMENT_ACTIONS
+        supported = supported_actions or CAT_SUBJECT_REPLACEMENT_ACTIONS
         aliases = {}
     else:
         raise ValueError(f"Unsupported subject species: {species!r}")
@@ -4087,40 +4128,58 @@ def build_dog_qwen_prompt(
             "identity, anatomy and green background while keeping Image 1 unchanged "
             "as the sole appearance authority."
         )
-        if action == "standing":
+        if action in {"standing", "drinking", "running", "sleeping", "toileting"}:
             retry += (
                 " FLOOR-ARTIFACT RETRY: the previous matte reached a canvas edge. "
                 "Remove the entire floor, shadow and mirrored reflection. End every "
-                "paw and the tail cleanly, then leave a broad uninterrupted pure-green "
-                "band beneath the lowest dog pixel; nothing may continue downward."
+                "paw, allowed action prop and the tail cleanly, then leave a broad "
+                "uninterrupted pure-green band beneath the lowest foreground pixel; "
+                "nothing may continue downward."
             )
     if quality_retry >= 3:
         retry += (
             " Keep at least 12% pure-green clearance on all sides. Remove every "
             "floor, shadow, accessory, extra prop, duplicate limb and extra subject."
         )
-    foreground = (
-        "the dog and exactly one shallow food bowl"
-        if action == "eating"
-        else "the dog"
-    )
+    foreground = {
+        "eating": "the dog and exactly one shallow food bowl",
+        "drinking": "the dog and exactly one shallow water bowl",
+        "toileting": "the dog and exactly one clean rectangular pet toilet tray",
+    }.get(action, "the dog")
     fur_contract = profile_fur_lock.strip() or (
         "Preserve Image 1's exact natural coat length, volume, strand direction, "
         "genuine tufts and source-bounded outer silhouette."
     )
-    face_motion_contract = (
-        "This standing action explicitly overrides only Image 1's still mouth state: "
-        "show relaxed natural panting with visibly separated lips and lower jaw, a "
-        "readable dark mouth cavity, and one anatomically attached pink tongue at a "
-        "neutral mid-extension. Never paste the tongue onto a closed muzzle or detach "
-        "it from the mouth cavity."
-        if action == "standing"
-        else (
+    if action == "standing":
+        face_motion_contract = (
+            "This standing action explicitly overrides only Image 1's still mouth "
+            "state: show relaxed natural panting with visibly separated lips and "
+            "lower jaw, a readable dark mouth cavity, and one anatomically attached "
+            "pink tongue at a neutral mid-extension. Never paste the tongue onto a "
+            "closed muzzle or detach it from the mouth cavity."
+        )
+    elif action == "drinking":
+        face_motion_contract = (
+            "Preserve Image 1's face and muzzle geometry while lowering the muzzle to "
+            "the water. Show only one tiny anatomically attached pink tongue tip at "
+            "the water surface; never add a panting smile, long tongue, splash or drool."
+        )
+    elif action == "sleeping":
+        face_motion_contract = (
+            "Use a peaceful sleeping expression with naturally closed eyes and a "
+            "relaxed closed mouth. Never add a panting smile or visible tongue."
+        )
+    elif action == "eating":
+        face_motion_contract = (
             "Preserve Image 1's exact closed- or open-mouth posture unless physical "
             "muzzle contact with the food requires a small natural adjustment. Never "
             "add a panting smile or visible tongue."
         )
-    )
+    else:
+        face_motion_contract = (
+            "Preserve Image 1's exact natural mouth posture and expression. Never add "
+            "a panting smile or visible tongue unless the action contract requires it."
+        )
     return f"""CRITICAL DOG ACTION TRANSFER CONTRACT:
 Image 1 is the approved canonical dog and the only identity and appearance authority. Preserve its exact apparent age, breed traits, head and muzzle silhouette, eyes, ears, nose, coat base colors, localized markings, natural coat length and volume, body proportions, paws, complete tail, and restrained stylized 3D material.
 {geometry_role}
@@ -6912,6 +6971,7 @@ def subject_profile_preview(
                 action or str(profile.get("preview_action") or "eating")
             ),
             subject_profile_species(profile),
+            supported_actions=subject_profile_actions(profile),
         )[0]
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -7056,6 +7116,7 @@ async def create_subject_replacement_api_job(
         actions = normalize_subject_actions_for_species(
             requested_actions,
             species,
+            supported_actions=subject_profile_actions(profile),
         )
         effective_subject_config = resolve_effective_subject_config(
             profile,
