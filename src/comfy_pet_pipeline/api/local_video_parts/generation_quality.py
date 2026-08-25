@@ -2773,6 +2773,7 @@ def pose_cutout_quality(
     pose: str,
     *,
     require_eating_mouth_contact: bool = False,
+    validate_action_geometry: bool = True,
 ) -> dict[str, Any]:
     _sync_local_video_runtime(globals(), {"pose_cutout_quality"})
     rgba = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
@@ -2819,7 +2820,7 @@ def pose_cutout_quality(
     issues: list[str] = []
     if min(margins.values()) < 0.025:
         issues.append("subject_too_close_to_canvas_edge")
-    action = action_key(pose)
+    action = action_key(pose) if validate_action_geometry else "identity_only"
     if action in {"running", "lying", "lying down"} and minor_fraction > 0.003:
         issues.append("disconnected_body_or_paw_fragment")
     foreground_fraction = total_area / float(width * height)

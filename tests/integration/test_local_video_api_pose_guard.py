@@ -806,6 +806,22 @@ class RunningGroundContactTests(unittest.TestCase):
         self.assertFalse(result["acceptable"])
         self.assertIn("fewer_than_three_distinct_grounded_paws", result["issues"])
 
+    def test_identity_only_canonical_recovery_defers_running_geometry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "canonical.png"
+            _save_grounded_subject(candidate, 2)
+            result = pipeline.pose_cutout_quality(
+                candidate,
+                "running | first frame: ready",
+                validate_action_geometry=False,
+            )
+
+        self.assertTrue(result["acceptable"], result)
+        self.assertNotIn(
+            "fewer_than_three_distinct_grounded_paws",
+            result["issues"],
+        )
+
     def test_three_grounded_legs_are_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             candidate = Path(temporary) / "three.png"

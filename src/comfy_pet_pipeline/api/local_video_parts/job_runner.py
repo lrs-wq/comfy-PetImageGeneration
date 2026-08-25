@@ -6404,6 +6404,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         canonical_fallback,
                         pose,
                         require_eating_mouth_contact=False,
+                        validate_action_geometry=False,
                     )
                     canonical_palette = evaluate_pose_identity_palette(
                         canonical_fallback,
