@@ -17,7 +17,10 @@ from src.comfy_pet_pipeline.media.transparent_animation import (
     validate_animation,
 )
 from src.comfy_pet_pipeline.pipeline.subject_replacement import (
+    transparent_guidance_component_area_fraction_minimum,
     transparent_guidance_component_coverage_minimum,
+    transparent_guidance_dynamic_component_area_fraction_maximum,
+    transparent_guidance_dynamic_component_radius,
 )
 
 
@@ -60,10 +63,24 @@ class TransparentVideoCliTests(unittest.TestCase):
                 )
                 self.assertEqual(args.action, action)
 
-    def test_running_uses_dynamic_paw_component_coverage_floor(self):
+    def test_running_uses_bounded_dynamic_paw_proximity(self):
         self.assertEqual(
             transparent_guidance_component_coverage_minimum("running"),
-            0.30,
+            0.45,
+        )
+        self.assertEqual(
+            transparent_guidance_component_area_fraction_minimum("running"),
+            0.005,
+        )
+        self.assertEqual(
+            transparent_guidance_dynamic_component_area_fraction_maximum(
+                "running"
+            ),
+            0.10,
+        )
+        self.assertEqual(
+            transparent_guidance_dynamic_component_radius("running"),
+            8,
         )
         for action in (
             "eating",
@@ -78,6 +95,20 @@ class TransparentVideoCliTests(unittest.TestCase):
                 self.assertEqual(
                     transparent_guidance_component_coverage_minimum(action),
                     0.45,
+                )
+                self.assertEqual(
+                    transparent_guidance_component_area_fraction_minimum(action),
+                    0.005,
+                )
+                self.assertEqual(
+                    transparent_guidance_dynamic_component_area_fraction_maximum(
+                        action
+                    ),
+                    0.0,
+                )
+                self.assertEqual(
+                    transparent_guidance_dynamic_component_radius(action),
+                    0,
                 )
 
 

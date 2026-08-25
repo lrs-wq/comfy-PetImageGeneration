@@ -4901,7 +4901,26 @@ def transparent_animation_loop_quality(
 
 def transparent_guidance_component_coverage_minimum(action: str | None) -> float:
     """Return the per-component overlap floor for pose-guided extraction."""
-    return 0.30 if str(action or "").strip().lower() == "running" else 0.45
+    return 0.45
+
+
+def transparent_guidance_component_area_fraction_minimum(
+    action: str | None,
+) -> float:
+    """Return the minimum meaningful pose-guidance component area."""
+    return 0.005
+
+
+def transparent_guidance_dynamic_component_area_fraction_maximum(
+    action: str | None,
+) -> float:
+    """Return the largest component eligible for gait-phase proximity."""
+    return 0.10 if str(action or "").strip().lower() == "running" else 0.0
+
+
+def transparent_guidance_dynamic_component_radius(action: str | None) -> int:
+    """Return the pixel radius allowed for a detached running-paw phase shift."""
+    return 8 if str(action or "").strip().lower() == "running" else 0
 
 
 def build_unstabilized_transparent_gif(
@@ -4930,11 +4949,24 @@ def build_unstabilized_transparent_gif(
     normalized_action = str(action or "").strip().lower()
     # A running driver's airborne paw can be a small detached guidance
     # component. SCAIL preserves the quadruped but may shift that paw with the
-    # gait phase, so require real overlap without applying the static-action
-    # floor. Overall guidance coverage, area ratio, semantic-core retention,
-    # and local grid retention remain unchanged and fail closed.
+    # gait phase. Keep every meaningful component in the 45% coverage gate, but
+    # permit an eight-pixel proximity match only for non-primary running limb
+    # components occupying at most 10% of the guidance subject.
+    # Overall guidance coverage, area ratio, semantic-core retention, and local
+    # grid retention remain unchanged and fail closed.
     guidance_component_coverage_required_min = (
         transparent_guidance_component_coverage_minimum(normalized_action)
+    )
+    guidance_component_area_fraction_required_min = (
+        transparent_guidance_component_area_fraction_minimum(normalized_action)
+    )
+    guidance_dynamic_component_area_fraction_max = (
+        transparent_guidance_dynamic_component_area_fraction_maximum(
+            normalized_action
+        )
+    )
+    guidance_dynamic_component_radius_px = (
+        transparent_guidance_dynamic_component_radius(normalized_action)
     )
     frames_root = gif_target.parent / f".{gif_target.stem}.{uuid.uuid4().hex}.frames"
     binary_dir = frames_root / "gif"
@@ -5327,6 +5359,11 @@ def build_unstabilized_transparent_gif(
                 )
                 guidance_coverage = 1.0
                 guidance_component_coverage_min = 1.0
+                guidance_component_direct_coverage_min = 1.0
+                guidance_dynamic_component_count = 0
+                guidance_dynamic_component_proximity_coverage_min = 1.0
+                ignored_guidance_component_count = 0
+                ignored_guidance_component_fraction = 0.0
                 area_ratio = 1.0
                 if guidance is not None:
                     guidance_pixels = max(1, int(np.count_nonzero(guidance)))
@@ -5343,25 +5380,98 @@ def build_unstabilized_transparent_gif(
                         )
                     )
                     guidance_component_coverages: list[float] = []
+                    guidance_component_direct_coverages: list[float] = []
+                    guidance_dynamic_component_proximity_coverages: list[
+                        float
+                    ] = []
                     minimum_guidance_component = max(
                         64,
-                        int(guidance_pixels * 0.005),
+                        int(
+                            guidance_pixels
+                            * guidance_component_area_fraction_required_min
+                        ),
+                    )
+                    ignored_guidance_component_pixels = 0
+                    largest_guidance_component_label = (
+                        1
+                        + int(
+                            np.argmax(
+                                guidance_stats[
+                                    1:guidance_component_count,
+                                    cv2.CC_STAT_AREA,
+                                ]
+                            )
+                        )
+                        if guidance_component_count > 1
+                        else None
+                    )
+                    proximity_foreground = (
+                        cv2.dilate(
+                            foreground.astype(np.uint8),
+                            cv2.getStructuringElement(
+                                cv2.MORPH_ELLIPSE,
+                                (
+                                    guidance_dynamic_component_radius_px * 2 + 1,
+                                    guidance_dynamic_component_radius_px * 2 + 1,
+                                ),
+                            ),
+                            iterations=1,
+                        )
+                        if guidance_dynamic_component_radius_px > 0
+                        else foreground.astype(np.uint8)
                     )
                     for label in range(1, guidance_component_count):
                         component_area = int(
                             guidance_stats[label, cv2.CC_STAT_AREA]
                         )
                         if component_area < minimum_guidance_component:
+                            ignored_guidance_component_count += 1
+                            ignored_guidance_component_pixels += component_area
                             continue
                         component = guidance_labels == label
-                        guidance_component_coverages.append(
-                            float(np.count_nonzero(foreground & component))
-                            / float(component_area)
+                        direct_coverage = float(
+                            np.count_nonzero(foreground & component)
+                        ) / float(component_area)
+                        effective_coverage = direct_coverage
+                        component_area_fraction = float(component_area) / float(
+                            guidance_pixels
                         )
+                        if (
+                            guidance_dynamic_component_area_fraction_max > 0
+                            and label != largest_guidance_component_label
+                            and component_area_fraction
+                            <= guidance_dynamic_component_area_fraction_max
+                        ):
+                            proximity_coverage = float(
+                                np.count_nonzero(
+                                    (proximity_foreground > 0) & component
+                                )
+                            ) / float(component_area)
+                            effective_coverage = max(
+                                direct_coverage,
+                                proximity_coverage,
+                            )
+                            guidance_dynamic_component_count += 1
+                            guidance_dynamic_component_proximity_coverages.append(
+                                proximity_coverage
+                            )
+                        guidance_component_direct_coverages.append(direct_coverage)
+                        guidance_component_coverages.append(effective_coverage)
                     guidance_component_coverage_min = min(
                         guidance_component_coverages,
                         default=guidance_coverage,
                     )
+                    guidance_component_direct_coverage_min = min(
+                        guidance_component_direct_coverages,
+                        default=guidance_coverage,
+                    )
+                    guidance_dynamic_component_proximity_coverage_min = min(
+                        guidance_dynamic_component_proximity_coverages,
+                        default=1.0,
+                    )
+                    ignored_guidance_component_fraction = float(
+                        ignored_guidance_component_pixels
+                    ) / float(guidance_pixels)
                     if guidance_coverage < 0.55 or not 0.55 <= area_ratio <= 1.85:
                         raise RuntimeError(
                             "Semantic mask diverged from pose guidance at frame "
@@ -5378,6 +5488,13 @@ def build_unstabilized_transparent_gif(
                             f"{guidance_component_coverage_min:.4f}, required="
                             f"{guidance_component_coverage_required_min:.4f}, "
                             f"action={normalized_action or 'unspecified'}"
+                        )
+                    if ignored_guidance_component_fraction > 0.02:
+                        raise RuntimeError(
+                            "Pose guidance contains too much ignored fragment area "
+                            f"at frame {index}: ignored_fraction="
+                            f"{ignored_guidance_component_fraction:.4f}, "
+                            "maximum=0.0200"
                         )
                 if not 0.02 <= foreground_fraction <= 0.85:
                     raise RuntimeError(
@@ -5399,6 +5516,30 @@ def build_unstabilized_transparent_gif(
                         ),
                         "guidance_component_coverage_required_min": (
                             guidance_component_coverage_required_min
+                        ),
+                        "guidance_component_direct_coverage_min": (
+                            guidance_component_direct_coverage_min
+                        ),
+                        "guidance_component_area_fraction_required_min": (
+                            guidance_component_area_fraction_required_min
+                        ),
+                        "guidance_dynamic_component_area_fraction_max": (
+                            guidance_dynamic_component_area_fraction_max
+                        ),
+                        "guidance_dynamic_component_radius": float(
+                            guidance_dynamic_component_radius_px
+                        ),
+                        "guidance_dynamic_component_count": float(
+                            guidance_dynamic_component_count
+                        ),
+                        "guidance_dynamic_component_proximity_coverage_min": (
+                            guidance_dynamic_component_proximity_coverage_min
+                        ),
+                        "ignored_guidance_component_count": float(
+                            ignored_guidance_component_count
+                        ),
+                        "ignored_guidance_component_fraction": (
+                            ignored_guidance_component_fraction
                         ),
                         "area_ratio": area_ratio,
                         "semantic_core_retention": (
@@ -5720,12 +5861,59 @@ def build_unstabilized_transparent_gif(
             "foreground_fraction_max": max(foreground_fractions),
             "semantic_metrics": {
                 "guidance_component_coverage_policy": (
-                    "dynamic_running_paw_component_v1"
+                    "dynamic_running_paw_proximity_v3"
                     if normalized_action == "running"
                     else "static_action_component_v1"
                 ),
                 "guidance_component_coverage_required_min": (
                     guidance_component_coverage_required_min
+                ),
+                "guidance_component_area_fraction_required_min": (
+                    guidance_component_area_fraction_required_min
+                ),
+                "guidance_dynamic_component_area_fraction_max": (
+                    guidance_dynamic_component_area_fraction_max
+                ),
+                "guidance_dynamic_component_radius": (
+                    guidance_dynamic_component_radius_px
+                ),
+                "guidance_component_direct_coverage_min": min(
+                    (
+                        item["guidance_component_direct_coverage_min"]
+                        for item in semantic_metrics
+                    ),
+                    default=None,
+                ),
+                "guidance_dynamic_component_count_max": max(
+                    (
+                        item["guidance_dynamic_component_count"]
+                        for item in semantic_metrics
+                    ),
+                    default=None,
+                ),
+                "guidance_dynamic_component_proximity_coverage_min": min(
+                    (
+                        item[
+                            "guidance_dynamic_component_proximity_coverage_min"
+                        ]
+                        for item in semantic_metrics
+                        if item["guidance_dynamic_component_count"] > 0
+                    ),
+                    default=None,
+                ),
+                "ignored_guidance_component_fraction_max": max(
+                    (
+                        item["ignored_guidance_component_fraction"]
+                        for item in semantic_metrics
+                    ),
+                    default=None,
+                ),
+                "ignored_guidance_component_count_max": max(
+                    (
+                        item["ignored_guidance_component_count"]
+                        for item in semantic_metrics
+                    ),
+                    default=None,
                 ),
                 "guidance_coverage_min": min(
                     (
