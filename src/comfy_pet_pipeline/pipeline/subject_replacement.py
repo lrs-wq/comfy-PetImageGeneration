@@ -4914,13 +4914,21 @@ def transparent_guidance_component_area_fraction_minimum(
 def transparent_guidance_dynamic_component_area_fraction_maximum(
     action: str | None,
 ) -> float:
-    """Return the largest component eligible for gait-phase proximity."""
-    return 0.10 if str(action or "").strip().lower() == "running" else 0.0
+    """Return the largest component eligible for bounded limb proximity."""
+    return (
+        0.10
+        if str(action or "").strip().lower() in {"drinking", "running"}
+        else 0.0
+    )
 
 
 def transparent_guidance_dynamic_component_radius(action: str | None) -> int:
-    """Return the pixel radius allowed for a detached running-paw phase shift."""
-    return 12 if str(action or "").strip().lower() == "running" else 0
+    """Return the pixel radius allowed for a detached limb phase shift."""
+    return (
+        12
+        if str(action or "").strip().lower() in {"drinking", "running"}
+        else 0
+    )
 
 
 def build_unstabilized_transparent_gif(
@@ -4947,10 +4955,11 @@ def build_unstabilized_transparent_gif(
             "Transparent GIF FPS must map exactly to GIF centisecond delays"
         )
     normalized_action = str(action or "").strip().lower()
-    # A running driver's airborne paw can be a small detached guidance
-    # component. SCAIL preserves the quadruped but may shift that paw with the
-    # gait phase. Keep every meaningful component in the 45% coverage gate, but
-    # permit a twelve-pixel proximity match only for non-primary running limb
+    # A running driver's airborne paw or a drinking driver's separated foreleg
+    # can be a small detached guidance component. SCAIL preserves the quadruped
+    # but may shift that limb with gait phase or transferred body proportions.
+    # Keep every meaningful component in the 45% coverage gate, but permit a
+    # twelve-pixel proximity match only for non-primary drinking/running limb
     # components occupying at most 10% of the guidance subject.
     # Overall guidance coverage, area ratio, semantic-core retention, and local
     # grid retention remain unchanged and fail closed.
@@ -5861,8 +5870,8 @@ def build_unstabilized_transparent_gif(
             "foreground_fraction_max": max(foreground_fractions),
             "semantic_metrics": {
                 "guidance_component_coverage_policy": (
-                    "dynamic_running_paw_proximity_v4"
-                    if normalized_action == "running"
+                    "dynamic_drinking_running_limb_proximity_v1"
+                    if normalized_action in {"drinking", "running"}
                     else "static_action_component_v1"
                 ),
                 "guidance_component_coverage_required_min": (

@@ -63,29 +63,30 @@ class TransparentVideoCliTests(unittest.TestCase):
                 )
                 self.assertEqual(args.action, action)
 
-    def test_running_uses_bounded_dynamic_paw_proximity(self):
-        self.assertEqual(
-            transparent_guidance_component_coverage_minimum("running"),
-            0.45,
-        )
-        self.assertEqual(
-            transparent_guidance_component_area_fraction_minimum("running"),
-            0.005,
-        )
-        self.assertEqual(
-            transparent_guidance_dynamic_component_area_fraction_maximum(
-                "running"
-            ),
-            0.10,
-        )
-        self.assertEqual(
-            transparent_guidance_dynamic_component_radius("running"),
-            12,
-        )
+    def test_drinking_and_running_use_bounded_limb_proximity(self):
+        for action in ("drinking", "running"):
+            with self.subTest(action=action):
+                self.assertEqual(
+                    transparent_guidance_component_coverage_minimum(action),
+                    0.45,
+                )
+                self.assertEqual(
+                    transparent_guidance_component_area_fraction_minimum(action),
+                    0.005,
+                )
+                self.assertEqual(
+                    transparent_guidance_dynamic_component_area_fraction_maximum(
+                        action
+                    ),
+                    0.10,
+                )
+                self.assertEqual(
+                    transparent_guidance_dynamic_component_radius(action),
+                    12,
+                )
         for action in (
             "eating",
             "grooming",
-            "drinking",
             "sleeping",
             "standing",
             "toileting",
