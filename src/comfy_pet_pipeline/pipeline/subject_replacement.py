@@ -4899,6 +4899,11 @@ def transparent_animation_loop_quality(
     }
 
 
+def transparent_guidance_component_coverage_minimum(action: str | None) -> float:
+    """Return the per-component overlap floor for pose-guided extraction."""
+    return 0.30 if str(action or "").strip().lower() == "running" else 0.45
+
+
 def build_unstabilized_transparent_gif(
     source_video: Path,
     gif_target: Path,
@@ -4922,6 +4927,15 @@ def build_unstabilized_transparent_gif(
         raise ValueError(
             "Transparent GIF FPS must map exactly to GIF centisecond delays"
         )
+    normalized_action = str(action or "").strip().lower()
+    # A running driver's airborne paw can be a small detached guidance
+    # component. SCAIL preserves the quadruped but may shift that paw with the
+    # gait phase, so require real overlap without applying the static-action
+    # floor. Overall guidance coverage, area ratio, semantic-core retention,
+    # and local grid retention remain unchanged and fail closed.
+    guidance_component_coverage_required_min = (
+        transparent_guidance_component_coverage_minimum(normalized_action)
+    )
     frames_root = gif_target.parent / f".{gif_target.stem}.{uuid.uuid4().hex}.frames"
     binary_dir = frames_root / "gif"
     soft_dir = frames_root / "soft"
@@ -5354,11 +5368,16 @@ def build_unstabilized_transparent_gif(
                             f"{index}: coverage={guidance_coverage:.4f}, "
                             f"area_ratio={area_ratio:.4f}"
                         )
-                    if guidance_component_coverage_min < 0.45:
+                    if (
+                        guidance_component_coverage_min
+                        < guidance_component_coverage_required_min
+                    ):
                         raise RuntimeError(
                             "Semantic mask missed a guided foreground component "
                             f"at frame {index}: minimum component coverage="
-                            f"{guidance_component_coverage_min:.4f}"
+                            f"{guidance_component_coverage_min:.4f}, required="
+                            f"{guidance_component_coverage_required_min:.4f}, "
+                            f"action={normalized_action or 'unspecified'}"
                         )
                 if not 0.02 <= foreground_fraction <= 0.85:
                     raise RuntimeError(
@@ -5377,6 +5396,9 @@ def build_unstabilized_transparent_gif(
                         "guidance_coverage": guidance_coverage,
                         "guidance_component_coverage_min": (
                             guidance_component_coverage_min
+                        ),
+                        "guidance_component_coverage_required_min": (
+                            guidance_component_coverage_required_min
                         ),
                         "area_ratio": area_ratio,
                         "semantic_core_retention": (
@@ -5697,6 +5719,14 @@ def build_unstabilized_transparent_gif(
             "foreground_fraction_min": min(foreground_fractions),
             "foreground_fraction_max": max(foreground_fractions),
             "semantic_metrics": {
+                "guidance_component_coverage_policy": (
+                    "dynamic_running_paw_component_v1"
+                    if normalized_action == "running"
+                    else "static_action_component_v1"
+                ),
+                "guidance_component_coverage_required_min": (
+                    guidance_component_coverage_required_min
+                ),
                 "guidance_coverage_min": min(
                     (
                         item["guidance_coverage"]

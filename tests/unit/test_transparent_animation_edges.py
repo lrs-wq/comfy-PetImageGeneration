@@ -16,6 +16,9 @@ from src.comfy_pet_pipeline.media.transparent_animation import (
     _gif_alpha,
     validate_animation,
 )
+from src.comfy_pet_pipeline.pipeline.subject_replacement import (
+    transparent_guidance_component_coverage_minimum,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -56,6 +59,26 @@ class TransparentVideoCliTests(unittest.TestCase):
                     ["video.mp4", "mask.mp4", "output.gif", "--action", action]
                 )
                 self.assertEqual(args.action, action)
+
+    def test_running_uses_dynamic_paw_component_coverage_floor(self):
+        self.assertEqual(
+            transparent_guidance_component_coverage_minimum("running"),
+            0.30,
+        )
+        for action in (
+            "eating",
+            "grooming",
+            "drinking",
+            "sleeping",
+            "standing",
+            "toileting",
+            None,
+        ):
+            with self.subTest(action=action):
+                self.assertEqual(
+                    transparent_guidance_component_coverage_minimum(action),
+                    0.45,
+                )
 
 
 class CleanGifAlphaTests(unittest.TestCase):
