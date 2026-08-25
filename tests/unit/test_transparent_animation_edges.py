@@ -80,7 +80,7 @@ class TransparentVideoCliTests(unittest.TestCase):
         )
         self.assertEqual(
             transparent_guidance_dynamic_component_radius("running"),
-            8,
+            12,
         )
         for action in (
             "eating",

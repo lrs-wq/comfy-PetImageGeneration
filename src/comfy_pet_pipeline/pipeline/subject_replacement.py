@@ -4920,7 +4920,7 @@ def transparent_guidance_dynamic_component_area_fraction_maximum(
 
 def transparent_guidance_dynamic_component_radius(action: str | None) -> int:
     """Return the pixel radius allowed for a detached running-paw phase shift."""
-    return 8 if str(action or "").strip().lower() == "running" else 0
+    return 12 if str(action or "").strip().lower() == "running" else 0
 
 
 def build_unstabilized_transparent_gif(
@@ -4950,7 +4950,7 @@ def build_unstabilized_transparent_gif(
     # A running driver's airborne paw can be a small detached guidance
     # component. SCAIL preserves the quadruped but may shift that paw with the
     # gait phase. Keep every meaningful component in the 45% coverage gate, but
-    # permit an eight-pixel proximity match only for non-primary running limb
+    # permit a twelve-pixel proximity match only for non-primary running limb
     # components occupying at most 10% of the guidance subject.
     # Overall guidance coverage, area ratio, semantic-core retention, and local
     # grid retention remain unchanged and fail closed.
@@ -5861,7 +5861,7 @@ def build_unstabilized_transparent_gif(
             "foreground_fraction_max": max(foreground_fractions),
             "semantic_metrics": {
                 "guidance_component_coverage_policy": (
-                    "dynamic_running_paw_proximity_v3"
+                    "dynamic_running_paw_proximity_v4"
                     if normalized_action == "running"
                     else "static_action_component_v1"
                 ),
