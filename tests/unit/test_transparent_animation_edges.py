@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,46 @@ from src.comfy_pet_pipeline.media.transparent_animation import (
     _gif_alpha,
     validate_animation,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def load_transparent_video_cli():
+    script_path = PROJECT_ROOT / "tools/media/scail2_transparent_gif_from_video.py"
+    spec = importlib.util.spec_from_file_location(
+        "scail2_transparent_gif_from_video",
+        script_path,
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TransparentVideoCliTests(unittest.TestCase):
+    def test_all_subject_replacement_actions_are_accepted(self):
+        cli = load_transparent_video_cli()
+
+        self.assertEqual(
+            set(cli.SUPPORTED_ACTIONS),
+            {
+                "eating",
+                "grooming",
+                "drinking",
+                "running",
+                "sleeping",
+                "standing",
+                "toileting",
+            },
+        )
+        for action in cli.SUPPORTED_ACTIONS:
+            with self.subTest(action=action):
+                args = cli.build_parser().parse_args(
+                    ["video.mp4", "mask.mp4", "output.gif", "--action", action]
+                )
+                self.assertEqual(args.action, action)
 
 
 class CleanGifAlphaTests(unittest.TestCase):

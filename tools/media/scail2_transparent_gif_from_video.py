@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -16,20 +17,34 @@ from src.comfy_pet_pipeline.pipeline.subject_replacement import (  # noqa: E402
     build_unstabilized_transparent_gif,
 )
 
+SUPPORTED_ACTIONS = (
+    "eating",
+    "grooming",
+    "drinking",
+    "running",
+    "sleeping",
+    "standing",
+    "toileting",
+)
 
-def main() -> int:
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("video", type=Path)
     parser.add_argument("guidance_mask_video", type=Path)
     parser.add_argument("gif_target", type=Path)
-    parser.add_argument("--action", choices=("eating", "grooming", "standing"))
+    parser.add_argument("--action", choices=SUPPORTED_ACTIONS)
     parser.add_argument("--white-mp4-target", type=Path)
     parser.add_argument("--soft-apng-target", type=Path)
     parser.add_argument("--start-frame-index", type=int, default=0)
     parser.add_argument("--source-fps", type=float, default=16.0)
     parser.add_argument("--gif-fps", type=int, default=20)
     parser.add_argument("--gif-frames", type=int, default=100)
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     metrics = build_unstabilized_transparent_gif(
         args.video,
         args.gif_target,
