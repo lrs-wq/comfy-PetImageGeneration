@@ -1019,6 +1019,64 @@ class SubjectReplacementQwenQualityGateTests(SubjectReplacementQwenReferenceTest
         self.assertAlmostEqual(quality["source_black_fraction"], 0.01)
         self.assertAlmostEqual(quality["candidate_black_fraction"], 0.10)
 
+    def test_canonical_action_palette_gate_rejects_broad_warm_expansion(self) -> None:
+        source = self._identity_palette_signature_for_test(
+            {
+                "black": 0.08,
+                "white": 0.26,
+                "gray": 0.16,
+                "warm_brown_or_orange": 0.15,
+                "red_or_pink": 0.10,
+                "yellow_or_gold": 0.15,
+                "green": 0.04,
+                "blue_or_cyan": 0.03,
+                "purple": 0.03,
+            },
+            saturated_warm_fraction=0.02,
+        )
+        candidate = self._identity_palette_signature_for_test(
+            {
+                "black": 0.03,
+                "white": 0.04,
+                "gray": 0.03,
+                "warm_brown_or_orange": 0.48,
+                "red_or_pink": 0.14,
+                "yellow_or_gold": 0.20,
+                "green": 0.03,
+                "blue_or_cyan": 0.03,
+                "purple": 0.02,
+            },
+            saturated_warm_fraction=0.22,
+        )
+
+        general_quality = pipeline.identity_palette_quality(source, candidate)
+        quality = pipeline.canonical_action_identity_palette_quality(general_quality)
+
+        self.assertTrue(general_quality["acceptable"], general_quality)
+        self.assertTrue(general_quality["broad_warm_drift"])
+        self.assertFalse(quality["acceptable"], quality)
+        self.assertTrue(quality["canonical_action_warm_expansion_drift"])
+        self.assertIn("canonical_action_warm_expansion_drift", quality["issues"])
+
+    def test_partial_bowl_palette_keeps_spatial_stripe_detection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "striped-upper-body.png"
+            rgba = np.zeros((256, 256, 4), dtype=np.uint8)
+            rgba[20:236, 24:232] = (205, 205, 205, 255)
+            for x in (60, 96, 132, 168):
+                rgba[78:158, x : x + 8] = (35, 35, 35, 255)
+            Image.fromarray(rgba, mode="RGBA").save(candidate)
+
+            signature = pipeline.identity_palette_signature(
+                candidate,
+                exclude_bottom_fraction=0.22,
+            )
+
+        spatial = signature["marking_spatial_signature"]
+        self.assertTrue(spatial["available"], spatial)
+        self.assertTrue(spatial["partial_subject_palette"])
+        self.assertGreaterEqual(spatial["stripe_component_count"], 1)
+
     def test_canonical_action_dark_feature_gate_does_not_target_dark_identity(
         self,
     ) -> None:

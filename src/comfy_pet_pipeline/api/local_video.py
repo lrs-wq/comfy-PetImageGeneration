@@ -127,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.9"
+API_VERSION = "2.26.10"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -288,7 +288,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.19"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.20"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -303,7 +303,7 @@ GROOMING_QWEN_GUIDE_STYLE = (
     "single_tone_achromatic_open_foreleg_channel_plus_private_cv_v5"
 )
 CANONICAL_ACTION_IDENTITY_PALETTE_POLICY = (
-    "canonical_action_identity_palette_continuity_v1"
+    "canonical_action_identity_palette_continuity_v2"
 )
 # Historical accepted canonical-first action candidates top out at 0.358322,
 # while every observed grooming guide-copy failure starts at 0.489248. Keep a
@@ -645,6 +645,8 @@ FINAL_VIDEO_VALIDATED_ACTION_REFERENCE_POLICIES = {
     "grooming": "qwen_action_specific_identity",
 }
 EATING_MOUTH_BOWL_CONTACT_POLICY = "warm_face_component_above_detected_bowl_v4"
+DRINKING_MOUTH_BOWL_CONTACT_POLICY = "detached_bowl_subject_proximity_v1"
+DRINKING_MOUTH_BOWL_GAP_MAX_PX = 12
 EATING_BOWL_SPLIT_FALLBACK_POLICY = (
     "food_anchored_beige_bowl_after_eroded_warm_core_miss_v2"
 )
@@ -1192,6 +1194,16 @@ MULTIPOSE_SEED_OFFSETS = {
     "eating": 211,
     "drinking": 307,
     "lying down": 401,
+    # Preserve the seeds of the validated two-action chains while making them
+    # independent of request order and of any newly inserted action.
+    "grooming": 2,
+    "sleeping": 1,
+    "standing": 2,
+    "toileting": 2,
+}
+MULTIPOSE_PROFILE_SEED_OFFSETS = {
+    preset["action_key"]: MULTIPOSE_SEED_OFFSETS[preset["action_key"]]
+    for preset in MULTIPOSE_PRESETS
 }
 DEFAULT_POSES = [preset["prompt_zh"] for preset in MULTIPOSE_PRESETS]
 LEGACY_DEFAULT_POSES = [
@@ -1244,7 +1256,7 @@ IMAGE_PROFILES: dict[str, dict[str, Any]] = {
         "default_prompt_en": BASELINE_IMAGE_PROMPT_EN,
         "pose_prompt_source": "verified_profile_presets",
         "pose_presets": [dict(preset) for preset in MULTIPOSE_PRESETS],
-        "pose_seed_offsets": dict(MULTIPOSE_SEED_OFFSETS),
+        "pose_seed_offsets": dict(MULTIPOSE_PROFILE_SEED_OFFSETS),
         "default_poses": list(DEFAULT_POSES),
         "identity_palette_guard": True,
         "identity_palette_policy": IDENTITY_PALETTE_POLICY,
@@ -1262,7 +1274,7 @@ IMAGE_PROFILES: dict[str, dict[str, Any]] = {
         "default_prompt_en": BASELINE_IMAGE_PROMPT_EN,
         "pose_prompt_source": "verified_profile_presets",
         "pose_presets": [dict(preset) for preset in MULTIPOSE_PRESETS],
-        "pose_seed_offsets": dict(MULTIPOSE_SEED_OFFSETS),
+        "pose_seed_offsets": dict(MULTIPOSE_PROFILE_SEED_OFFSETS),
         "default_poses": list(DEFAULT_POSES),
         "identity_palette_guard": False,
         "identity_palette_policy": None,
@@ -7464,6 +7476,7 @@ async def create_subject_replacement_api_job(
             "fps": final_fps,
             "duration_seconds": final_duration,
             "seed": resolved_seed,
+            "scail_base_seed": resolved_seed,
             "visual_style": (
                 (
                     "uploaded_dog_identity_qwen_full_body_action_keyframes_scail"

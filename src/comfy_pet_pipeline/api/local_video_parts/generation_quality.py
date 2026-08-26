@@ -2781,7 +2781,7 @@ def pose_cutout_quality(
         raise RuntimeError(f"Could not inspect transparent pose output {path.name}.")
     alpha = rgba[:, :, 3]
     foreground = (alpha >= 64).astype(np.uint8)
-    component_count, _, stats, _ = cv2.connectedComponentsWithStats(
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
         foreground, connectivity=8
     )
     area_records = sorted(
@@ -2837,6 +2837,7 @@ def pose_cutout_quality(
     ):
         issues.append("pose_not_low_or_wide_enough_for_bowl_action")
     bowl_components: list[dict[str, Any]] = []
+    drinking_contact: dict[str, Any] | None = None
     eating_horizontal_shelf = None
     if action in {"eating", "drinking"}:
         for label in meaningful_labels[1:]:
@@ -2858,6 +2859,7 @@ def pose_cutout_quality(
             ):
                 bowl_components.append(
                     {
+                        "label": label,
                         "area": component_area,
                         "fraction": round(component_fraction, 6),
                         "bbox": [
@@ -2882,6 +2884,45 @@ def pose_cutout_quality(
         )
         if not eating_horizontal_shelf["acceptable"]:
             issues.extend(eating_horizontal_shelf["issues"])
+    if action == "drinking":
+        if bowl_components:
+            subject_label = meaningful_labels[0]
+            subject = labels == subject_label
+            distance_to_subject = cv2.distanceTransform(
+                (~subject).astype(np.uint8),
+                cv2.DIST_L2,
+                5,
+            )
+            minimum_gap = min(
+                float(np.min(distance_to_subject[labels == component["label"]]))
+                for component in bowl_components
+            )
+            contact_acceptable = minimum_gap <= DRINKING_MOUTH_BOWL_GAP_MAX_PX
+            drinking_contact = {
+                "acceptable": contact_acceptable,
+                "issues": []
+                if contact_acceptable
+                else ["drinking_muzzle_not_at_bowl"],
+                "penalty": 0.0 if contact_acceptable else 125.0,
+                "method": DRINKING_MOUTH_BOWL_CONTACT_POLICY,
+                "separate_bowl_detected": True,
+                "minimum_subject_bowl_gap_px": round(minimum_gap, 6),
+                "maximum_gap_px": DRINKING_MOUTH_BOWL_GAP_MAX_PX,
+            }
+            if not contact_acceptable:
+                issues.extend(drinking_contact["issues"])
+        else:
+            # A correct drinking bowl commonly touches the muzzle/water stream
+            # and is therefore part of the main alpha component.
+            drinking_contact = {
+                "acceptable": True,
+                "issues": [],
+                "penalty": 0.0,
+                "method": DRINKING_MOUTH_BOWL_CONTACT_POLICY,
+                "separate_bowl_detected": False,
+                "connected_contact_assumed": True,
+                "maximum_gap_px": DRINKING_MOUTH_BOWL_GAP_MAX_PX,
+            }
     if action in {"lying", "lying down"} and bbox_aspect_ratio < 0.90:
         issues.append("pose_not_low_or_wide_enough_for_lying")
     eating_contact = None
@@ -2930,6 +2971,7 @@ def pose_cutout_quality(
         "bowl_components": bowl_components,
         "eating_horizontal_shelf": eating_horizontal_shelf,
         "eating_mouth_bowl_contact": eating_contact,
+        "drinking_mouth_bowl_contact": drinking_contact,
     }
 
 

@@ -1653,6 +1653,8 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                     "subject_source": "upload_pending_qwen",
                     "prompt": "fluffy long soft fur",
                     "prompt_en": "fluffy long soft fur",
+                    "seed": 20260825,
+                    "scail_base_seed": 20260825,
                     "outputs": [],
                     "cancel_requested": False,
                     "effective_subject_config": effective_config,
@@ -1850,6 +1852,14 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                 self.assertEqual(target_job_id, job_id)
                 self.assertTrue(force_qwen_reference)
                 prepared_job = jobs[job_id]
+                self.assertEqual(prepared_job["seed"], 20260825)
+                self.assertEqual(prepared_job["scail_base_seed"], 20260825)
+                self.assertEqual(
+                    prepared_job["qwen_seed"],
+                    pipeline.IMAGE_PROFILES[
+                        pipeline.SUBJECT_REPLACEMENT_REFERENCE_IMAGE_PROFILE
+                    ]["seed"],
+                )
                 self.assertEqual(
                     prepared_job["pose_identity_input_policy"],
                     pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL,
@@ -1991,6 +2001,8 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                 eating_reference.write_bytes(eating_reference_bytes)
 
             final_job = jobs[job_id]
+            self.assertEqual(final_job["seed"], 20260825)
+            self.assertEqual(final_job["scail_base_seed"], 20260825)
             qwen_output_types = [output["type"] for output in final_job["outputs"]]
             self.assertEqual(qwen_output_types[0], "cartoon_reference")
             self.assertEqual(
@@ -2119,7 +2131,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
         self.assertEqual(final_job["qwen_cfg"], 1.0)
         self.assertEqual(final_job["qwen_denoise"], 1.0)
         self.assertEqual(
-            final_job["seed"],
+            final_job["qwen_seed"],
             pipeline.IMAGE_PROFILES["pet-multipose-20260717-v2"]["seed"],
         )
         self.assertFalse(final_job["lock_canonical_retry_lora_strengths"])

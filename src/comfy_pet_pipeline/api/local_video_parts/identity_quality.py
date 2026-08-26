@@ -475,14 +475,15 @@ def identity_palette_signature(
             np.ones((3, 3), dtype=np.uint8),
             iterations=1,
         )
-    marking_spatial_signature = (
-        _identity_marking_spatial_signature(rgb, foreground_u8 > 0)
-        if exclude_bottom_fraction == 0.0
-        else {
-            "available": False,
-            "policy": IDENTITY_MARKING_SPATIAL_POLICY,
-            "reason": "partial_subject_palette_excludes_spatial_marking_gate",
-        }
+    # Bowl actions exclude the lower subject band from palette statistics, but
+    # the remaining head/torso region is precisely where invented stripes must
+    # still be detected.  Run the spatial marking gate on that retained mask.
+    marking_spatial_signature = _identity_marking_spatial_signature(
+        rgb,
+        foreground_u8 > 0,
+    )
+    marking_spatial_signature["partial_subject_palette"] = bool(
+        exclude_bottom_fraction > 0.0
     )
     foreground_rows, foreground_columns = np.where(foreground_u8 > 0)
     pixels = rgb[foreground_rows, foreground_columns]
@@ -1440,8 +1441,18 @@ def canonical_action_identity_palette_quality(
     )
     if dark_feature_expansion and dark_feature_issue not in issues:
         issues.append(dark_feature_issue)
+    warm_expansion_drift = bool(
+        quality.get("available") is True
+        and (
+            quality.get("broad_warm_drift") is True
+            or quality.get("saturated_warm_drift") is True
+        )
+    )
+    warm_expansion_issue = "canonical_action_warm_expansion_drift"
+    if warm_expansion_drift and warm_expansion_issue not in issues:
+        issues.append(warm_expansion_issue)
     acceptable = bool(quality.get("acceptable")) and not (
-        balance_drift or dark_feature_expansion
+        balance_drift or dark_feature_expansion or warm_expansion_drift
     )
     return {
         **quality,
@@ -1452,7 +1463,8 @@ def canonical_action_identity_palette_quality(
         "penalty": round(
             float(quality.get("penalty", 0.0))
             + (100.0 if balance_drift else 0.0)
-            + (100.0 if dark_feature_expansion else 0.0),
+            + (100.0 if dark_feature_expansion else 0.0)
+            + (100.0 if warm_expansion_drift else 0.0),
             6,
         ),
         "canonical_action_identity_palette_policy": (
@@ -1470,6 +1482,8 @@ def canonical_action_identity_palette_quality(
             CANONICAL_ACTION_DARK_FEATURE_EXPANSION_MAX
         ),
         "canonical_action_dark_feature_expansion": dark_feature_expansion,
+        "canonical_action_warm_expansion_enforced": True,
+        "canonical_action_warm_expansion_drift": warm_expansion_drift,
     }
 
 

@@ -17,6 +17,7 @@ from src.comfy_pet_pipeline.media.transparent_animation import (
     validate_animation,
 )
 from src.comfy_pet_pipeline.pipeline.subject_replacement import (
+    transparent_guidance_area_ratio_minimum,
     transparent_guidance_component_area_fraction_minimum,
     transparent_guidance_component_coverage_minimum,
     transparent_guidance_dynamic_component_area_fraction_maximum,
@@ -71,6 +72,10 @@ class TransparentVideoCliTests(unittest.TestCase):
                     0.45,
                 )
                 self.assertEqual(
+                    transparent_guidance_area_ratio_minimum(action),
+                    0.55,
+                )
+                self.assertEqual(
                     transparent_guidance_component_area_fraction_minimum(action),
                     0.005,
                 )
@@ -89,13 +94,16 @@ class TransparentVideoCliTests(unittest.TestCase):
             "grooming",
             "sleeping",
             "standing",
-            "toileting",
             None,
         ):
             with self.subTest(action=action):
                 self.assertEqual(
                     transparent_guidance_component_coverage_minimum(action),
                     0.45,
+                )
+                self.assertEqual(
+                    transparent_guidance_area_ratio_minimum(action),
+                    0.55,
                 )
                 self.assertEqual(
                     transparent_guidance_component_area_fraction_minimum(action),
@@ -111,6 +119,27 @@ class TransparentVideoCliTests(unittest.TestCase):
                     transparent_guidance_dynamic_component_radius(action),
                     0,
                 )
+
+    def test_toileting_requires_the_validated_tray_footprint(self):
+        self.assertEqual(
+            transparent_guidance_component_coverage_minimum("toileting"),
+            0.70,
+        )
+        self.assertEqual(
+            transparent_guidance_area_ratio_minimum("toileting"),
+            0.78,
+        )
+        self.assertEqual(
+            transparent_guidance_component_area_fraction_minimum("toileting"),
+            0.005,
+        )
+        self.assertEqual(
+            transparent_guidance_dynamic_component_area_fraction_maximum(
+                "toileting"
+            ),
+            0.0,
+        )
+        self.assertEqual(transparent_guidance_dynamic_component_radius("toileting"), 0)
 
 
 class CleanGifAlphaTests(unittest.TestCase):

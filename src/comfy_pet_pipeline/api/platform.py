@@ -1099,7 +1099,7 @@ async def create_job(
     wan_shift: float = Form(default=pipeline.WAN_SHIFT, ge=1.0, le=12.0),
     scail_steps: int = Form(default=6, ge=4, le=12),
     pose_strength: float | None = Form(default=None, ge=0.0, le=2.0),
-    seed: int = Form(default=20260726),
+    seed: int = Form(default=20260825),
     _: None = Depends(require_auth),
 ) -> dict[str, Any]:
     generation_mode = generation_mode.strip().lower()

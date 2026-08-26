@@ -1863,7 +1863,9 @@ def run_subject_replacement_job(job_id: str) -> None:
             )
         scail_reference_policies[action] = reference_policy
         scail_scene_prop_policies[action] = (
-            (
+            "dog_toileting_tray_terminal_geometry_contract_v1"
+            if action == "toileting"
+            else (
                 "dog_white_model_bowl_scail_object_mapping"
                 if job.get("species") == "dog"
                 else "cat_blue_bowl_red_scail_object_mapping"

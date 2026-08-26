@@ -262,7 +262,7 @@
               </div>
               <div>
                 <label class="title" for="seed">基础随机种子</label>
-                <input id="seed" type="number" min="0" value="20260726">
+                <input id="seed" type="number" min="0" value="20260825">
               </div>
             </div>
 
@@ -1336,7 +1336,7 @@
       if (subjectProfileId) form.append('subject_profile', subjectProfileId);
       form.append('actions', JSON.stringify(actions));
       form.append('output_format', $('format').value);
-      form.append('seed', $('seed').value || '20260726');
+      form.append('seed', $('seed').value || '20260825');
       form.append('scail_steps', String(steps));
       if (poseStrength !== null) form.append('pose_strength', String(poseStrength));
 

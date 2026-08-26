@@ -4901,7 +4901,12 @@ def transparent_animation_loop_quality(
 
 def transparent_guidance_component_coverage_minimum(action: str | None) -> float:
     """Return the per-component overlap floor for pose-guided extraction."""
-    return 0.45
+    return 0.70 if str(action or "").strip().lower() == "toileting" else 0.45
+
+
+def transparent_guidance_area_ratio_minimum(action: str | None) -> float:
+    """Require the toilet tray footprint to survive final matte extraction."""
+    return 0.78 if str(action or "").strip().lower() == "toileting" else 0.55
 
 
 def transparent_guidance_component_area_fraction_minimum(
@@ -4965,6 +4970,9 @@ def build_unstabilized_transparent_gif(
     # grid retention remain unchanged and fail closed.
     guidance_component_coverage_required_min = (
         transparent_guidance_component_coverage_minimum(normalized_action)
+    )
+    guidance_area_ratio_required_min = transparent_guidance_area_ratio_minimum(
+        normalized_action
     )
     guidance_component_area_fraction_required_min = (
         transparent_guidance_component_area_fraction_minimum(normalized_action)
@@ -5481,11 +5489,19 @@ def build_unstabilized_transparent_gif(
                     ignored_guidance_component_fraction = float(
                         ignored_guidance_component_pixels
                     ) / float(guidance_pixels)
-                    if guidance_coverage < 0.55 or not 0.55 <= area_ratio <= 1.85:
+                    if (
+                        guidance_coverage < 0.55
+                        or not guidance_area_ratio_required_min
+                        <= area_ratio
+                        <= 1.85
+                    ):
                         raise RuntimeError(
                             "Semantic mask diverged from pose guidance at frame "
                             f"{index}: coverage={guidance_coverage:.4f}, "
-                            f"area_ratio={area_ratio:.4f}"
+                            f"area_ratio={area_ratio:.4f}, "
+                            f"required_area_ratio_min="
+                            f"{guidance_area_ratio_required_min:.4f}, "
+                            f"action={normalized_action or 'unspecified'}"
                         )
                     if (
                         guidance_component_coverage_min
@@ -5945,6 +5961,10 @@ def build_unstabilized_transparent_gif(
                 "area_ratio_max": max(
                     (item["area_ratio"] for item in semantic_metrics),
                     default=None,
+                ),
+                "area_ratio_required_min": guidance_area_ratio_required_min,
+                "toileting_tray_retention_required": (
+                    normalized_action == "toileting"
                 ),
                 "semantic_core_retention_min": min(
                     (

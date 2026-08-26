@@ -58,6 +58,7 @@ class DogSizeTestProfilesTest(unittest.TestCase):
         profile = self.profiles["small"]
         self.assertEqual(profile["runtime"]["frames"], 81)
         self.assertEqual(profile["runtime"]["fps"], 16)
+        self.assertEqual(profile["runtime"]["default_base_seed"], 20260825)
         normalization = profile["uploaded_identity_driving"]["normalization"]
         self.assertEqual(normalization["size"], [512, 512])
         self.assertTrue(normalization["audio_removed"])

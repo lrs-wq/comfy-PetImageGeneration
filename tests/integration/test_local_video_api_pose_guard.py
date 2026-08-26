@@ -142,6 +142,21 @@ def _save_mouth_bowl_contact_subject(
     image.save(path, format="PNG")
 
 
+def _save_drinking_subject_with_separate_bowl(path: Path, *, gap: int) -> None:
+    image = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    coat = (124, 124, 124, 255)
+    draw.rounded_rectangle((20, 55, 220, 168), radius=42, fill=coat)
+    draw.ellipse((92, 80, 164, 164), fill=coat)
+    bowl_top = 169 + gap
+    draw.rounded_rectangle(
+        (96, bowl_top, 170, bowl_top + 28),
+        radius=8,
+        fill=(190, 190, 190, 255),
+    )
+    image.save(path, format="PNG")
+
+
 class UserLoraCapTests(unittest.TestCase):
     def test_cap_preserves_ratios_and_obeys_total_cap(self) -> None:
         specs = [_lora("a", 0.8), _lora("b", 0.8)]
@@ -920,6 +935,41 @@ class BowlActionSilhouetteTests(unittest.TestCase):
         self.assertGreaterEqual(
             shelf["blocking_events"][0]["persistent_rows"],
             shelf["thresholds"]["persistent_rows_min"],
+        )
+
+    def test_drinking_rejects_a_detached_bowl_beyond_contact_range(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "detached-drinking-bowl.png"
+            _save_drinking_subject_with_separate_bowl(candidate, gap=18)
+            result = pipeline.pose_cutout_quality(
+                candidate,
+                "drinking | first frame: muzzle at a water bowl",
+            )
+
+        self.assertFalse(result["acceptable"], result)
+        self.assertIn("drinking_muzzle_not_at_bowl", result["issues"])
+        contact = result["drinking_mouth_bowl_contact"]
+        self.assertTrue(contact["separate_bowl_detected"])
+        self.assertGreater(
+            contact["minimum_subject_bowl_gap_px"],
+            pipeline.DRINKING_MOUTH_BOWL_GAP_MAX_PX,
+        )
+
+    def test_drinking_accepts_a_separate_bowl_within_contact_range(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = Path(temporary) / "contact-drinking-bowl.png"
+            _save_drinking_subject_with_separate_bowl(candidate, gap=6)
+            result = pipeline.pose_cutout_quality(
+                candidate,
+                "drinking | first frame: muzzle at a water bowl",
+            )
+
+        self.assertTrue(result["acceptable"], result)
+        contact = result["drinking_mouth_bowl_contact"]
+        self.assertTrue(contact["acceptable"], contact)
+        self.assertLessEqual(
+            contact["minimum_subject_bowl_gap_px"],
+            pipeline.DRINKING_MOUTH_BOWL_GAP_MAX_PX,
         )
 
     def test_synthetic_low_muzzle_bowl_contact_passes_strict_guard(self) -> None:

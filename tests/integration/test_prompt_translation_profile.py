@@ -414,6 +414,18 @@ class ImageProfileTests(unittest.TestCase):
         self.assertEqual(offsets, [101, 211, 307, 401])
         self.assertEqual(len(set(offsets)), 4)
 
+    def test_dog_action_seed_offsets_do_not_depend_on_chain_order(self) -> None:
+        for action, expected in {
+            "grooming": 2,
+            "sleeping": 1,
+            "standing": 2,
+            "toileting": 2,
+        }.items():
+            with self.subTest(action=action):
+                pose = f"{action} | first frame: validated geometry"
+                self.assertEqual(pipeline.pose_seed_offset(pose, 1), expected)
+                self.assertEqual(pipeline.pose_seed_offset(pose, 6), expected)
+
     def test_uploaded_loras_replace_or_stack_profile(self) -> None:
         replaced, replaced_mode, replaced_source = pipeline.merge_image_profile_loras(
             self.profile,
@@ -542,7 +554,7 @@ class GenerationPlatformFrontendTests(unittest.TestCase):
         self.assertNotIn("form.append('action_count'", html)
         self.assertIn('id="scailSteps" type="number" min="4" max="12" value="6"', html)
         self.assertIn('id="poseStrength" type="number" min="0" max="2"', html)
-        self.assertIn('id="seed" type="number" min="0" value="20260726"', html)
+        self.assertIn('id="seed" type="number" min="0" value="20260825"', html)
         self.assertIn('for="seed">基础随机种子</label>', html)
         self.assertIn("preparing_subject_replacement", html)
         self.assertIn("subject_references_ready", html)

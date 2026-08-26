@@ -814,7 +814,7 @@ def prepare_uploaded_subject_qwen_references(
         reference_image_profile_revision=image_profile.get("revision"),
         reference_image_profile_label=image_profile["label"],
         reference_image_profile_source_job_id=image_profile.get("source_job_id"),
-        seed=int(image_profile["seed"]),
+        qwen_seed=int(image_profile["seed"]),
         qwen_reference_prompt_en=qwen_reference_prompt_en,
         canonical_prompt_source="uploaded_identity_qwen_full_body",
         canonical_identity_view_mode=upload_integrity["view_mode"],

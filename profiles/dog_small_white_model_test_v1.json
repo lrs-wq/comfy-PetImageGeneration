@@ -148,7 +148,7 @@
   "runtime": {
     "engine_profile": "scail2-14b-fp8-v1",
     "prompt_profile": "uploaded-dog-small-test-six-actions-v2",
-    "default_base_seed": 20260824,
+    "default_base_seed": 20260825,
     "steps": 6,
     "frames": 81,
     "fps": 16,

@@ -357,7 +357,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
     wan_steps = int(job.get("wan_steps", WAN_STEPS))
     wan_cfg = float(job.get("wan_cfg", WAN_CFG))
     wan_shift = float(job.get("wan_shift", WAN_SHIFT))
-    base_seed = int(job["seed"])
+    # Queue-time SCAIL seeds and Qwen image-edit seeds are separate contracts.
+    # Older persisted jobs have only ``seed`` and retain their historic behavior.
+    base_seed = int(
+        job.get("qwen_seed", job["seed"])
+        if force_qwen_reference
+        else job["seed"]
+    )
     comfy_relative_dir = Path("local_video_api") / job_id
     comfy_input_dir = COMFY_INPUT / comfy_relative_dir
     comfy_input_dir.mkdir(parents=True, exist_ok=True)
