@@ -127,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.13"
+API_VERSION = "2.26.14"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -288,7 +288,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.23"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.24"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -879,6 +879,9 @@ SCAIL_PYTHON = Path(
 ).resolve()
 SCAIL_RUNNER = PROJECT_ROOT / "scail2_subject_replacement_test.py"
 SCAIL_TRANSPARENT_RUNNER = PROJECT_ROOT / "scail2_transparent_gif_from_video.py"
+SCAIL_STATIC_MASK_RUNNER = (
+    PROJECT_ROOT / "tools" / "media" / "encode_static_mask_video.py"
+)
 SCAIL_EXPERIMENT_ROOT = DATA_ROOT / "experiments" / "scail2_tm_test"
 SCAIL_UNET = "wan2.1_14B_SCAIL_2_fp8_scaled.safetensors"
 SCAIL_DPO_LORA = "wan2.1_SCAIL_2_DPO_lora_bf16.safetensors"
@@ -1599,6 +1602,7 @@ def scail_model_paths() -> list[Path]:
         MODEL_ROOT / "clip_vision" / "clip_vision_h.safetensors",
         SCAIL_PYTHON,
         SCAIL_RUNNER,
+        SCAIL_STATIC_MASK_RUNNER,
         SCAIL_TRANSPARENT_RUNNER,
     ]
 
@@ -6743,6 +6747,18 @@ run_subject_replacement_job = (
 
 resolve_transparent_output_phase_start_index = (
     _local_video_subject_replacement.resolve_transparent_output_phase_start_index
+)
+select_transparent_guidance_policy = (
+    _local_video_subject_replacement.select_transparent_guidance_policy
+)
+TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY = (
+    _local_video_subject_replacement.TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY
+)
+TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY = (
+    _local_video_subject_replacement.TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY
+)
+TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = (
+    _local_video_subject_replacement.TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO
 )
 pose_attempt_provenance = _local_video_job_runner.pose_attempt_provenance
 

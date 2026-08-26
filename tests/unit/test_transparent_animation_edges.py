@@ -17,6 +17,9 @@ from src.comfy_pet_pipeline.media.transparent_animation import (
     validate_animation,
 )
 from src.comfy_pet_pipeline.pipeline.subject_replacement import (
+    REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY,
+    _reference_guided_uniform_background_mask,
+    encode_static_mask_video,
     transparent_guidance_area_ratio_minimum,
     transparent_guidance_component_area_fraction_minimum,
     transparent_guidance_component_coverage_minimum,
@@ -63,6 +66,26 @@ class TransparentVideoCliTests(unittest.TestCase):
                     ["video.mp4", "mask.mp4", "output.gif", "--action", action]
                 )
                 self.assertEqual(args.action, action)
+
+    def test_reference_aligned_uniform_background_flag_is_opt_in(self):
+        cli = load_transparent_video_cli()
+
+        default = cli.build_parser().parse_args(
+            ["video.mp4", "mask.mp4", "output.gif", "--action", "toileting"]
+        )
+        enabled = cli.build_parser().parse_args(
+            [
+                "video.mp4",
+                "mask.mp4",
+                "output.gif",
+                "--action",
+                "toileting",
+                "--reference-aligned-uniform-background",
+            ]
+        )
+
+        self.assertFalse(default.reference_aligned_uniform_background)
+        self.assertTrue(enabled.reference_aligned_uniform_background)
 
     def test_drinking_and_running_use_bounded_limb_proximity(self):
         for action in ("drinking", "running"):
@@ -140,6 +163,64 @@ class TransparentVideoCliTests(unittest.TestCase):
             0.0,
         )
         self.assertEqual(transparent_guidance_dynamic_component_radius("toileting"), 0)
+
+    def test_uniform_background_extraction_retains_dog_and_wide_tray(self):
+        rgb = np.full((128, 128, 3), (234, 245, 246), dtype=np.uint8)
+        guidance_u8 = np.zeros((128, 128), dtype=np.uint8)
+        cv2.rectangle(rgb, (16, 82), (112, 112), (178, 184, 181), thickness=-1)
+        cv2.rectangle(guidance_u8, (16, 82), (112, 112), 1, thickness=-1)
+        cv2.ellipse(rgb, (64, 58), (27, 43), 0, 0, 360, (224, 188, 132), -1)
+        cv2.ellipse(guidance_u8, (64, 58), (27, 43), 0, 0, 360, 1, -1)
+        cv2.circle(rgb, (54, 48), 4, (30, 24, 18), thickness=-1)
+        cv2.circle(rgb, (74, 48), 4, (30, 24, 18), thickness=-1)
+        guidance = guidance_u8.astype(bool)
+
+        output_rgb, alpha, metrics = _reference_guided_uniform_background_mask(
+            rgb,
+            guidance,
+            frame_index=0,
+            guidance_component_coverage_required_min=0.70,
+            guidance_area_ratio_required_min=0.78,
+            guidance_component_area_fraction_required_min=0.005,
+        )
+
+        self.assertEqual(
+            REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY,
+            "reference_guided_uniform_background_subject_and_prop_matte_v1",
+        )
+        self.assertEqual(int(alpha[0, 0]), 0)
+        self.assertGreaterEqual(int(alpha[96, 24]), 128)
+        self.assertGreaterEqual(int(alpha[58, 64]), 128)
+        self.assertGreater(metrics["guidance_coverage"], 0.95)
+        self.assertGreater(metrics["area_ratio"], 0.95)
+        self.assertLess(metrics["background_border_distance_p999"], 1.0)
+        self.assertTrue(np.all(output_rgb[alpha == 0] == 0))
+
+    @unittest.skipUnless(importlib.util.find_spec("av"), "PyAV is not installed")
+    def test_static_reference_mask_normalizes_black_background_losslessly(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "reference-mask.png"
+            target = root / "reference-mask.mp4"
+            mask = np.zeros((512, 512, 3), dtype=np.uint8)
+            cv2.rectangle(mask, (54, 56), (458, 460), (0, 0, 255), -1)
+            Image.fromarray(mask, mode="RGB").save(source)
+
+            metrics = encode_static_mask_video(
+                source,
+                target,
+                frame_count=3,
+                fps=16.0,
+            )
+
+        self.assertEqual(metrics["decoded_frames"], 3)
+        self.assertEqual(metrics["unknown_fraction"], 0.0)
+        self.assertGreater(metrics["blue_fraction"], 0.60)
+        self.assertGreater(metrics["white_fraction"], 0.30)
+        self.assertEqual(
+            metrics["normalization"],
+            "blue_red_roles_on_pure_white_background_v1",
+        )
 
 
 class CleanGifAlphaTests(unittest.TestCase):

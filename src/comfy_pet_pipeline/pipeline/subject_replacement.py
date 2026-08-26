@@ -5270,12 +5270,248 @@ def transparent_guidance_dynamic_component_radius(action: str | None) -> int:
     )
 
 
+REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY = (
+    "reference_guided_uniform_background_subject_and_prop_matte_v1"
+)
+
+
+def _reference_guided_uniform_background_mask(
+    rgb: np.ndarray,
+    guidance: np.ndarray,
+    *,
+    frame_index: int,
+    guidance_component_coverage_required_min: float,
+    guidance_area_ratio_required_min: float,
+    guidance_component_area_fraction_required_min: float,
+) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
+    """Extract a complete subject+prop matte from a uniform generated canvas.
+
+    U2Net reliably isolates an animal, but it can omit a broad rectangular pet
+    toilet tray. SCAIL canvases are generated on a uniform background, so for a
+    reference-aligned toileting guide we estimate that background from a clean
+    border and retain every connected foreground component that overlaps the
+    immutable dog+tray reference mask. This is intentionally opt-in; callers
+    must first prove that the reference already contains the complete tray.
+    """
+
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError("Uniform-background extraction requires an RGB frame")
+    if guidance.shape != rgb.shape[:2]:
+        raise ValueError(
+            "Uniform-background guidance dimensions do not match the source frame"
+        )
+    guidance = guidance.astype(bool)
+    guidance_pixels = int(np.count_nonzero(guidance))
+    if guidance_pixels < 64:
+        raise RuntimeError(
+            "Reference-aligned uniform-background guidance is empty or too small"
+        )
+
+    height, width = rgb.shape[:2]
+    border_width = max(4, min(8, min(height, width) // 32))
+    pixels = rgb.astype(np.float32)
+    border_pixels = np.concatenate(
+        (
+            pixels[:border_width, :, :].reshape(-1, 3),
+            pixels[-border_width:, :, :].reshape(-1, 3),
+            pixels[:, :border_width, :].reshape(-1, 3),
+            pixels[:, -border_width:, :].reshape(-1, 3),
+        ),
+        axis=0,
+    )
+    background_rgb = np.median(border_pixels, axis=0)
+    border_distance = np.sqrt(
+        np.sum((border_pixels - background_rgb) ** 2, axis=1)
+    )
+    border_distance_p999 = float(np.percentile(border_distance, 99.9))
+    if border_distance_p999 > 8.0:
+        raise RuntimeError(
+            "Reference-aligned toileting background is not uniform at frame "
+            f"{frame_index}: border_distance_p999={border_distance_p999:.4f}"
+        )
+
+    distance = np.sqrt(
+        np.sum((pixels - background_rgb.reshape(1, 1, 3)) ** 2, axis=2)
+    )
+    alpha_low = max(6.0, border_distance_p999 + 2.0)
+    alpha_high = max(20.0, alpha_low + 12.0)
+    alpha = np.clip(
+        (distance - alpha_low) * (255.0 / (alpha_high - alpha_low)),
+        0.0,
+        255.0,
+    ).astype(np.uint8)
+
+    hard = (alpha >= 16).astype(np.uint8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        hard,
+        connectivity=8,
+    )
+    selected_labels: list[int] = []
+    for label in range(1, component_count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        component = labels == label
+        overlap = int(np.count_nonzero(component & guidance))
+        if area >= 64 and overlap >= 32 and overlap / float(area) >= 0.10:
+            selected_labels.append(label)
+    if not selected_labels:
+        raise RuntimeError(
+            "Uniform-background extraction found no reference-aligned subject "
+            f"at frame {frame_index}"
+        )
+    selected = np.isin(labels, selected_labels).astype(np.uint8)
+    support = cv2.dilate(
+        selected,
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    )
+    alpha = np.where(support > 0, alpha, 0).astype(np.uint8)
+    alpha[:2, :] = 0
+    alpha[-2:, :] = 0
+    alpha[:, :2] = 0
+    alpha[:, -2:] = 0
+
+    foreground = alpha >= 64
+    foreground_pixels = int(np.count_nonzero(foreground))
+    foreground_fraction = float(foreground_pixels) / float(alpha.size)
+    guidance_coverage = float(np.count_nonzero(foreground & guidance)) / float(
+        guidance_pixels
+    )
+    area_ratio = float(foreground_pixels) / float(guidance_pixels)
+
+    guidance_component_count, guidance_labels, guidance_stats, _ = (
+        cv2.connectedComponentsWithStats(
+            guidance.astype(np.uint8),
+            connectivity=8,
+        )
+    )
+    minimum_guidance_component = max(
+        64,
+        int(
+            guidance_pixels
+            * guidance_component_area_fraction_required_min
+        ),
+    )
+    guidance_component_coverages: list[float] = []
+    ignored_guidance_component_count = 0
+    ignored_guidance_component_pixels = 0
+    for label in range(1, guidance_component_count):
+        component_area = int(guidance_stats[label, cv2.CC_STAT_AREA])
+        if component_area < minimum_guidance_component:
+            ignored_guidance_component_count += 1
+            ignored_guidance_component_pixels += component_area
+            continue
+        component = guidance_labels == label
+        guidance_component_coverages.append(
+            float(np.count_nonzero(foreground & component))
+            / float(component_area)
+        )
+    guidance_component_coverage_min = min(
+        guidance_component_coverages,
+        default=guidance_coverage,
+    )
+    ignored_guidance_component_fraction = float(
+        ignored_guidance_component_pixels
+    ) / float(guidance_pixels)
+
+    if (
+        guidance_coverage < 0.55
+        or not guidance_area_ratio_required_min <= area_ratio <= 1.85
+    ):
+        raise RuntimeError(
+            "Uniform-background mask diverged from reference guidance at frame "
+            f"{frame_index}: coverage={guidance_coverage:.4f}, "
+            f"area_ratio={area_ratio:.4f}, required_area_ratio_min="
+            f"{guidance_area_ratio_required_min:.4f}"
+        )
+    if (
+        guidance_component_coverage_min
+        < guidance_component_coverage_required_min
+    ):
+        raise RuntimeError(
+            "Uniform-background mask missed a reference foreground component at "
+            f"frame {frame_index}: minimum component coverage="
+            f"{guidance_component_coverage_min:.4f}, required="
+            f"{guidance_component_coverage_required_min:.4f}"
+        )
+    if ignored_guidance_component_fraction > 0.02:
+        raise RuntimeError(
+            "Reference guidance contains too much ignored fragment area at frame "
+            f"{frame_index}: ignored_fraction="
+            f"{ignored_guidance_component_fraction:.4f}"
+        )
+    if not 0.02 <= foreground_fraction <= 0.85:
+        raise RuntimeError(
+            "Uniform-background foreground fraction is invalid at frame "
+            f"{frame_index}: {foreground_fraction:.4f}"
+        )
+
+    # Remove the estimated canvas color from soft edge pixels. Limiting the
+    # correction keeps pale fur stable while preventing a cyan/gray fringe when
+    # the transparent animation is shown on a dark background.
+    output_rgb = pixels.copy()
+    alpha_float = alpha.astype(np.float32) / 255.0
+    soft_edge = (alpha > 0) & (alpha < 250)
+    denominator = np.maximum(alpha_float, 0.08)[..., None]
+    unblended = (
+        pixels
+        - background_rgb.reshape(1, 1, 3)
+        * (1.0 - alpha_float[..., None])
+    ) / denominator
+    bounded_delta = np.clip(unblended - pixels, -48.0, 48.0)
+    output_rgb[soft_edge] = np.clip(
+        pixels[soft_edge] + bounded_delta[soft_edge],
+        0.0,
+        255.0,
+    )
+    output_rgb = output_rgb.astype(np.uint8)
+    output_rgb[alpha == 0] = 0
+
+    return output_rgb, alpha, {
+        "foreground_fraction": foreground_fraction,
+        "guidance_coverage": guidance_coverage,
+        "guidance_component_coverage_min": (
+            guidance_component_coverage_min
+        ),
+        "guidance_component_coverage_required_min": (
+            guidance_component_coverage_required_min
+        ),
+        "guidance_component_direct_coverage_min": (
+            guidance_component_coverage_min
+        ),
+        "guidance_component_area_fraction_required_min": (
+            guidance_component_area_fraction_required_min
+        ),
+        "guidance_dynamic_component_area_fraction_max": 0.0,
+        "guidance_dynamic_component_radius": 0.0,
+        "guidance_dynamic_component_count": 0.0,
+        "guidance_dynamic_component_proximity_coverage_min": 1.0,
+        "ignored_guidance_component_count": float(
+            ignored_guidance_component_count
+        ),
+        "ignored_guidance_component_fraction": (
+            ignored_guidance_component_fraction
+        ),
+        "area_ratio": area_ratio,
+        "semantic_core_retention": 1.0,
+        "semantic_upper_core_retention": 1.0,
+        "semantic_grid_core_retention_min": 1.0,
+        "semantic_fragment_recovery_count": 0.0,
+        "background_red": float(background_rgb[0]),
+        "background_green": float(background_rgb[1]),
+        "background_blue": float(background_rgb[2]),
+        "background_border_distance_p999": border_distance_p999,
+        "background_alpha_low": alpha_low,
+        "background_alpha_high": alpha_high,
+    }
+
+
 def build_unstabilized_transparent_gif(
     source_video: Path,
     gif_target: Path,
     *,
     action: str | None = None,
     guidance_mask_video: Path | None = None,
+    reference_aligned_uniform_background: bool = False,
     output_size: tuple[int, int] = (512, 512),
     source_fps: float = 16.0,
     gif_fps: int = 20,
@@ -5453,6 +5689,39 @@ def build_unstabilized_transparent_gif(
         semantic_metrics: list[dict[str, float]] = []
         if chroma_usable and len(chroma_masks) == len(normalized_source):
             extracted_frames = chroma_masks
+        elif reference_aligned_uniform_background:
+            if guidance_frames is None:
+                raise RuntimeError(
+                    "Reference-aligned uniform-background extraction requires "
+                    "a guidance mask video"
+                )
+            extraction_method = REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY
+            extracted_frames = []
+            for index, frame in enumerate(normalized_source):
+                guidance_rgb = normalized_rgb(guidance_frames[index])
+                guidance = (
+                    (guidance_rgb[:, :, 2] >= 225)
+                    & (guidance_rgb[:, :, 0] <= 30)
+                    & (guidance_rgb[:, :, 1] <= 30)
+                )
+                extracted_rgb, extracted_alpha, frame_metrics = (
+                    _reference_guided_uniform_background_mask(
+                        frame.copy(),
+                        guidance,
+                        frame_index=index,
+                        guidance_component_coverage_required_min=(
+                            guidance_component_coverage_required_min
+                        ),
+                        guidance_area_ratio_required_min=(
+                            guidance_area_ratio_required_min
+                        ),
+                        guidance_component_area_fraction_required_min=(
+                            guidance_component_area_fraction_required_min
+                        ),
+                    )
+                )
+                extracted_frames.append((extracted_rgb, extracted_alpha))
+                semantic_metrics.append(frame_metrics)
         else:
             extraction_method = "rembg_u2net_guided_by_pose_mask"
             from rembg import new_session, remove
@@ -6123,6 +6392,21 @@ def build_unstabilized_transparent_gif(
         return {
             "mode": "per_frame_foreground_extraction_no_spatial_stabilization",
             "extraction_method": extraction_method,
+            "reference_aligned_uniform_background": {
+                "requested": bool(reference_aligned_uniform_background),
+                "applied": (
+                    extraction_method
+                    == REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY
+                ),
+                "policy": REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY,
+                "border_distance_p999_max": max(
+                    (
+                        item.get("background_border_distance_p999", 0.0)
+                        for item in semantic_metrics
+                    ),
+                    default=None,
+                ),
+            },
             "silhouette_edge_cleanup": {
                 "policy": "local_inward_color_alpha_dark_halo_v2",
                 "action": action,
@@ -6222,7 +6506,11 @@ def build_unstabilized_transparent_gif(
                 "guidance_component_coverage_policy": (
                     "dynamic_drinking_running_limb_proximity_v1"
                     if normalized_action in {"drinking", "running"}
-                    else "static_action_component_v1"
+                    else (
+                        "reference_aligned_subject_and_tray_component_v1"
+                        if reference_aligned_uniform_background
+                        else "static_action_component_v1"
+                    )
                 ),
                 "guidance_component_coverage_required_min": (
                     guidance_component_coverage_required_min
@@ -6370,6 +6658,85 @@ def encode_video(
             container.mux(packet)
     finally:
         container.close()
+
+
+def encode_static_mask_video(
+    mask_path: Path,
+    output_path: Path,
+    *,
+    frame_count: int,
+    fps: float,
+) -> dict[str, Any]:
+    """Repeat one immutable RGB identity mask in a lossless video stream."""
+
+    if av is None:
+        raise RuntimeError("PyAV is required to encode a static mask video")
+    if frame_count < 1 or fps <= 0:
+        raise ValueError("Static mask video timing must be positive")
+    if not mask_path.is_file():
+        raise FileNotFoundError(f"Static mask source is missing: {mask_path}")
+    with Image.open(mask_path) as loaded:
+        source_mask = np.asarray(loaded.convert("RGB")).copy()
+    blue = (
+        (source_mask[:, :, 2] >= 225)
+        & (source_mask[:, :, 0] <= 30)
+        & (source_mask[:, :, 1] <= 30)
+    )
+    red = (
+        (source_mask[:, :, 0] >= 225)
+        & (source_mask[:, :, 1] <= 30)
+        & (source_mask[:, :, 2] <= 30)
+    )
+    mask = np.full(source_mask.shape, 255, dtype=np.uint8)
+    mask[blue] = (0, 0, 255)
+    mask[red] = (255, 0, 0)
+    if mask.shape[:2] != (512, 512):
+        raise ValueError(
+            "Static subject guidance mask must be 512x512, got "
+            f"{mask.shape[1]}x{mask.shape[0]}"
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_name(
+        f".{output_path.stem}.{uuid.uuid4().hex}.mp4"
+    )
+    try:
+        container = av.open(str(temporary), mode="w")
+        try:
+            stream = container.add_stream(
+                "libx264rgb",
+                rate=max(1, int(round(fps))),
+            )
+            stream.width = int(mask.shape[1])
+            stream.height = int(mask.shape[0])
+            stream.pix_fmt = "rgb24"
+            stream.options = {"crf": "0", "preset": "medium"}
+            for _ in range(frame_count):
+                video_frame = av.VideoFrame.from_ndarray(mask, format="rgb24")
+                for packet in stream.encode(video_frame):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+        finally:
+            container.close()
+        verification = verify_mask_video(temporary, frame_count)
+        if float(verification.get("blue_fraction") or 0.0) < 0.02:
+            raise ValueError("Static subject guidance mask has no usable blue subject")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(temporary, output_path)
+        return {
+            "policy": "lossless_rgb_static_reference_mask_video_v1",
+            "source": str(mask_path),
+            "source_sha256": sha256_file(mask_path),
+            "normalization": "blue_red_roles_on_pure_white_background_v1",
+            "output": str(output_path),
+            "output_sha256": sha256_file(output_path),
+            "frames": frame_count,
+            "fps": fps,
+            **verification,
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def verify_mask_video(path: Path, expected_count: int) -> dict[str, Any]:

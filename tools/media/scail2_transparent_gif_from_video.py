@@ -40,6 +40,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-fps", type=float, default=16.0)
     parser.add_argument("--gif-fps", type=int, default=20)
     parser.add_argument("--gif-frames", type=int, default=100)
+    parser.add_argument(
+        "--reference-aligned-uniform-background",
+        action="store_true",
+        help=(
+            "Extract a complete subject+prop matte from a uniform canvas using "
+            "the supplied immutable reference mask."
+        ),
+    )
     return parser
 
 
@@ -50,6 +58,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.gif_target,
         action=args.action,
         guidance_mask_video=args.guidance_mask_video,
+        reference_aligned_uniform_background=(
+            args.reference_aligned_uniform_background
+        ),
         source_fps=args.source_fps,
         gif_fps=args.gif_fps,
         gif_frames=args.gif_frames,

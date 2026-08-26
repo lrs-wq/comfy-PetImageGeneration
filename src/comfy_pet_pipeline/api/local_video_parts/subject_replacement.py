@@ -52,6 +52,82 @@ def resolve_transparent_output_phase_start_index(
 
 RECOVERABLE_OUTPUT_FALLBACK_POLICY = "identity_anchored_breathing_gif_v2"
 
+TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY = (
+    "reference_aligned_static_subject_and_tray_mask_with_"
+    "uniform_background_extraction_v1"
+)
+TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY = (
+    "driver_pose_mask_for_narrow_toileting_reference_v1"
+)
+TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = 0.72
+
+
+def select_transparent_guidance_policy(
+    action: str,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Choose reference guidance only when a toilet tray is already prebound.
+
+    A broad toileting reference contains both the uploaded animal and its tray.
+    Reusing the narrower white-model pose mask for that reference compares two
+    different silhouettes and can reject an otherwise correct SCAIL video.
+    Other actions, and legacy narrow toileting references, keep their existing
+    frame-varying driver guidance.
+    """
+
+    normalized_action = str(action or "").strip().lower()
+    default = {
+        "policy": (
+            TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY
+            if normalized_action == "toileting"
+            else "driver_pose_mask_v1"
+        ),
+        "source_key": "pose_mask_video",
+        "static_reference_mask": False,
+        "reference_aligned_uniform_background": False,
+        "reference_alpha_bbox": None,
+        "reference_alpha_bbox_aspect_ratio": None,
+        "minimum_reference_aspect_ratio": (
+            TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO
+            if normalized_action == "toileting"
+            else None
+        ),
+    }
+    if normalized_action != "toileting":
+        return default
+
+    reference_metadata = manifest.get("reference_metadata")
+    bbox = (
+        reference_metadata.get("reference_alpha_bbox")
+        if isinstance(reference_metadata, dict)
+        else None
+    )
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return default
+    try:
+        left, top, right, bottom = (int(value) for value in bbox)
+    except (TypeError, ValueError):
+        return default
+    width = right - left
+    height = bottom - top
+    if width < 1 or height < 1:
+        return default
+    aspect_ratio = float(width) / float(height)
+    plan = {
+        **default,
+        "reference_alpha_bbox": [left, top, right, bottom],
+        "reference_alpha_bbox_aspect_ratio": aspect_ratio,
+    }
+    if aspect_ratio < TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO:
+        return plan
+    return {
+        **plan,
+        "policy": TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY,
+        "source_key": "reference_mask",
+        "static_reference_mask": True,
+        "reference_aligned_uniform_background": True,
+    }
+
 
 def _recoverable_candidate_path(job_dir: Path, value: Any) -> Path | None:
     selected = str(value or "").strip()
@@ -1594,6 +1670,14 @@ def run_subject_replacement_job(job_id: str) -> None:
     final_video_fur_surface_by_action: dict[str, Any] = {}
     scail_reference_policies = dict(job.get("scail_reference_policy") or {})
     scail_scene_prop_policies = dict(job.get("scail_scene_prop_policy") or {})
+    stored_transparent_guidance_policies = job.get(
+        "transparent_guidance_policy"
+    )
+    transparent_guidance_policies = (
+        dict(stored_transparent_guidance_policies)
+        if isinstance(stored_transparent_guidance_policies, dict)
+        else {}
+    )
     reference_generation_chain = bool(job.get("reference_generation_completed"))
     progress_base = 38.0 if reference_generation_chain else 3.0
     progress_total = 59.0 if reference_generation_chain else 94.0
@@ -2135,7 +2219,79 @@ def run_subject_replacement_job(job_id: str) -> None:
                 stage="extracting_transparent_animation",
                 progress=action_start + action_span * 0.82,
             )
-            guidance_path = Path(manifest["input_files"]["pose_mask_video"])
+            transparent_guidance_plan = select_transparent_guidance_policy(
+                action,
+                manifest,
+            )
+            guidance_source_key = str(
+                transparent_guidance_plan["source_key"]
+            )
+            guidance_path = Path(
+                str(manifest["input_files"][guidance_source_key])
+            )
+            if transparent_guidance_plan["static_reference_mask"]:
+                static_guidance_path = (
+                    job_dir
+                    / f"{action}_transparent_reference_guidance_mask.mp4"
+                )
+                static_guidance_log = (
+                    job_dir
+                    / f"{action}_transparent_reference_guidance_mask.log"
+                )
+                run_cancelable_process(
+                    job_id,
+                    [
+                        str(SCAIL_PYTHON),
+                        str(SCAIL_STATIC_MASK_RUNNER),
+                        str(guidance_path),
+                        str(static_guidance_path),
+                        "--frames",
+                        str(effective_subject_config["frames"]),
+                        "--fps",
+                        str(effective_subject_config["fps"]),
+                    ],
+                    log_path=static_guidance_log,
+                    stage_name=(
+                        f"{action} static reference guidance encoding"
+                    ),
+                    timeout=180,
+                )
+                if not static_guidance_path.is_file():
+                    raise RuntimeError(
+                        f"{action} static reference guidance produced no video."
+                    )
+                static_guidance_metrics = logged_json(
+                    static_guidance_log
+                )
+                guidance_path = static_guidance_path
+                transparent_guidance_plan = {
+                    **transparent_guidance_plan,
+                    "static_mask_video": static_guidance_path.name,
+                    "static_mask_video_sha256": file_sha256(
+                        static_guidance_path
+                    ),
+                    "static_mask_video_metrics": static_guidance_metrics,
+                }
+                append_output(
+                    job_id,
+                    {
+                        "type": "transparent_guidance_mask_video",
+                        "action": action,
+                        "action_label": action_label,
+                        "filename": static_guidance_path.name,
+                        "frames": int(effective_subject_config["frames"]),
+                        "fps": float(effective_subject_config["fps"]),
+                        "sha256": file_sha256(static_guidance_path),
+                        "policy": transparent_guidance_plan["policy"],
+                        "primary": False,
+                    },
+                )
+            transparent_guidance_policies[action] = transparent_guidance_plan
+            manifest["transparent_guidance"] = transparent_guidance_plan
+            write_json_atomic(
+                job_dir / f"{action}_prepare_manifest.json",
+                manifest,
+            )
             gif_target = job_dir / f"{action}_subject_replacement_transparent_512.gif"
             apng_target = (
                 job_dir
@@ -2170,6 +2326,12 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "--gif-frames",
                 str(gif_timing["frames"]),
             ]
+            if transparent_guidance_plan[
+                "reference_aligned_uniform_background"
+            ]:
+                transparent_command.append(
+                    "--reference-aligned-uniform-background"
+                )
             update_job(
                 job_id,
                 transparent_output_phase_policy=(
@@ -2179,6 +2341,9 @@ def run_subject_replacement_job(job_id: str) -> None:
                     transparent_phase_start_index
                 ),
                 transparent_output_phase_action=action,
+                transparent_guidance_policy=dict(
+                    transparent_guidance_policies
+                ),
             )
             run_cancelable_process(
                 job_id,
@@ -2193,6 +2358,9 @@ def run_subject_replacement_job(job_id: str) -> None:
                 )
             apng_available = apng_target.is_file()
             transparent_metrics = logged_json(transparent_log)
+            transparent_metrics["guidance_policy"] = (
+                transparent_guidance_plan
+            )
             if action == "grooming":
                 temporal_cycle = transparent_metrics.get("temporal_cycle")
                 published_loop_quality = (

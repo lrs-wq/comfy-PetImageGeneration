@@ -672,6 +672,19 @@ def health() -> dict[str, Any]:
                 "identity_safe_terminal_fallback": (
                     TOILETING_CANONICAL_TRAY_FALLBACK_POLICY
                 ),
+                "transparent_guidance": {
+                    "policy": (
+                        TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY
+                    ),
+                    "reference_alpha_bbox_aspect_ratio_min": (
+                        TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO
+                    ),
+                    "static_reference_subject_and_tray_mask": True,
+                    "driver_pose_mask_used_for_scail_generation": True,
+                    "reference_mask_used_only_for_transparent_extraction": True,
+                    "uniform_background_prop_retention": True,
+                    "fail_closed": True,
+                },
             },
             "dog_drinking_scail_pose": {
                 "policy": DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
