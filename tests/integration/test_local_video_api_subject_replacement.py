@@ -1390,6 +1390,70 @@ class TransparentGuidanceSelectionTests(unittest.TestCase):
         self.assertTrue(plan["reference_aligned_uniform_background"])
 
 
+class ToiletingScailTemporalIdentityArtifactTests(unittest.TestCase):
+    @staticmethod
+    def _frame(*, invented_tail_band: bool) -> np.ndarray:
+        frame = np.full((512, 512, 3), 255, dtype=np.uint8)
+        coat = (226, 201, 160)
+        cv2.ellipse(frame, (245, 245), (88, 170), 0, 0, 360, coat, -1)
+        cv2.rectangle(frame, (91, 398), (421, 461), (205, 200, 190), -1)
+        cv2.ellipse(frame, (344, 270), (52, 82), 0, 0, 360, coat, -1)
+        cv2.rectangle(frame, (292, 246), (344, 294), coat, -1)
+        if invented_tail_band:
+            cv2.rectangle(frame, (349, 234), (357, 302), (8, 8, 8), -1)
+        return frame
+
+    def test_temporal_gate_rejects_repeated_invented_tail_band(self) -> None:
+        clean = self._frame(invented_tail_band=False)
+        bad = self._frame(invented_tail_band=True)
+
+        quality = pipeline.toileting_temporal_identity_artifact_quality(
+            [bad.copy() for _ in range(6)]
+            + [clean.copy() for _ in range(6)]
+        )
+
+        self.assertFalse(quality["acceptable"], quality)
+        self.assertEqual(quality["flagged_frame_count"], 6)
+        self.assertIn(
+            "toileting_temporal_lateral_dark_band_or_symbol",
+            quality["issues"],
+        )
+
+    def test_temporal_gate_tolerates_sparse_natural_lateral_shadow(self) -> None:
+        clean = self._frame(invented_tail_band=False)
+        isolated = self._frame(invented_tail_band=True)
+
+        quality = pipeline.toileting_temporal_identity_artifact_quality(
+            [isolated.copy() for _ in range(3)]
+            + [clean.copy() for _ in range(9)]
+        )
+
+        self.assertTrue(quality["acceptable"], quality)
+        self.assertEqual(quality["flagged_frame_count"], 3)
+        self.assertEqual(quality["permitted_flagged_frames"], 4)
+
+    def test_retry_seed_copy_does_not_mutate_prepared_workflow(self) -> None:
+        workflow = {
+            "20": {
+                "class_type": "SamplerCustom",
+                "inputs": {"noise_seed": 20260835, "cfg": 1.0},
+            },
+            "23": {
+                "class_type": "SaveVideo",
+                "inputs": {"filename_prefix": "subject_replacement"},
+            },
+        }
+
+        candidate, updated = pipeline.scail_workflow_with_retry_seed(
+            workflow,
+            seed=20260836,
+        )
+
+        self.assertEqual(updated, ["20"])
+        self.assertEqual(candidate["20"]["inputs"]["noise_seed"], 20260836)
+        self.assertEqual(workflow["20"]["inputs"]["noise_seed"], 20260835)
+
+
 class CanonicalChromaIntegrityTests(unittest.TestCase):
     def test_canonical_cutout_rejects_large_central_neck_hole(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

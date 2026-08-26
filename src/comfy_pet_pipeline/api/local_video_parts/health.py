@@ -672,6 +672,18 @@ def health() -> dict[str, Any]:
                 "identity_safe_terminal_fallback": (
                     TOILETING_CANONICAL_TRAY_FALLBACK_POLICY
                 ),
+                "scail_temporal_identity_artifact_gate": {
+                    "policy": (
+                        TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY
+                    ),
+                    "scope": "internal_lateral_tail_corridor_all_frames",
+                    "blocks_invented_dark_band_arrow_or_symbol": True,
+                    "max_attempts": TOILETING_SCAIL_MAX_ATTEMPTS,
+                    "retry_seed_step": TOILETING_SCAIL_RETRY_SEED_STEP,
+                    "retry_preserves_reference_driver_and_prompt": True,
+                    "required_before_transparent_extraction": True,
+                    "fail_closed": True,
+                },
                 "transparent_guidance": {
                     "policy": (
                         TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY

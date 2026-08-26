@@ -127,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.22"
+API_VERSION = "2.26.23"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -288,7 +288,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.32"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.33"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -6755,6 +6755,15 @@ resolve_transparent_output_phase_start_index = (
 select_transparent_guidance_policy = (
     _local_video_subject_replacement.select_transparent_guidance_policy
 )
+toileting_temporal_identity_artifact_quality = (
+    _local_video_subject_replacement.toileting_temporal_identity_artifact_quality
+)
+evaluate_toileting_scail_video_identity_artifacts = (
+    _local_video_subject_replacement.evaluate_toileting_scail_video_identity_artifacts
+)
+scail_workflow_with_retry_seed = (
+    _local_video_subject_replacement.scail_workflow_with_retry_seed
+)
 TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY = (
     _local_video_subject_replacement.TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY
 )
@@ -6763,6 +6772,15 @@ TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY = (
 )
 TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = (
     _local_video_subject_replacement.TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO
+)
+TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY = (
+    _local_video_subject_replacement.TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY
+)
+TOILETING_SCAIL_MAX_ATTEMPTS = (
+    _local_video_subject_replacement.TOILETING_SCAIL_MAX_ATTEMPTS
+)
+TOILETING_SCAIL_RETRY_SEED_STEP = (
+    _local_video_subject_replacement.TOILETING_SCAIL_RETRY_SEED_STEP
 )
 pose_attempt_provenance = _local_video_job_runner.pose_attempt_provenance
 merge_identity_chroma_spill_cleanup = (

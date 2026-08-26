@@ -61,6 +61,14 @@ TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY = (
 )
 TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = 0.70
 
+TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY = (
+    "toileting_temporal_lateral_dark_band_and_symbol_gate_v1"
+)
+TOILETING_SCAIL_MAX_ATTEMPTS = 3
+TOILETING_SCAIL_RETRY_SEED_STEP = 1
+TOILETING_SCAIL_MAX_FLAGGED_FRAME_FRACTION = 0.05
+TOILETING_SCAIL_MAX_FLAGGED_FRAMES_MINIMUM = 4
+
 
 def select_transparent_guidance_policy(
     action: str,
@@ -127,6 +135,275 @@ def select_transparent_guidance_policy(
         "static_reference_mask": True,
         "reference_aligned_uniform_background": True,
     }
+
+
+def _toileting_lateral_dark_band_frame_quality(
+    rgb: np.ndarray,
+    *,
+    frame_index: int,
+) -> dict[str, Any]:
+    """Find an invented high-contrast band inside the moving tail corridor.
+
+    The small-dog toilet driver swings the tail along the subject's right side.
+    SCAIL can occasionally paint a black/white arrow-like symbol across that tail
+    even though the uploaded identity and the white-maquette driver are clean.
+    A global palette histogram misses the narrow symbol, while a generic contour
+    detector can confuse it with eyes, nose, tray grid, or an exterior key edge.
+    This gate therefore examines only a deeply internal, lateral body corridor
+    and requires a sizeable elongated locally-dark component.
+    """
+
+    frame = np.asarray(rgb, dtype=np.uint8)
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        return {
+            "frame_index": int(frame_index),
+            "available": False,
+            "flagged": True,
+            "reason": "invalid_rgb_frame",
+            "components": [],
+        }
+    height, width = frame.shape[:2]
+    if min(height, width) < 64:
+        return {
+            "frame_index": int(frame_index),
+            "available": False,
+            "flagged": True,
+            "reason": "frame_too_small",
+            "components": [],
+        }
+
+    border_width = max(4, min(8, min(height, width) // 32))
+    border_pixels = np.concatenate(
+        (
+            frame[:border_width, :, :].reshape(-1, 3),
+            frame[-border_width:, :, :].reshape(-1, 3),
+            frame[:, :border_width, :].reshape(-1, 3),
+            frame[:, -border_width:, :].reshape(-1, 3),
+        ),
+        axis=0,
+    )
+    background_rgb = np.median(border_pixels, axis=0)
+    canvas_distance = np.sqrt(
+        np.sum(
+            (frame.astype(np.float32) - background_rgb.astype(np.float32)) ** 2,
+            axis=2,
+        )
+    )
+    foreground = (canvas_distance > 12.0).astype(np.uint8)
+    foreground = cv2.morphologyEx(
+        foreground,
+        cv2.MORPH_CLOSE,
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=2,
+    )
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        foreground,
+        connectivity=8,
+    )
+    if component_count <= 1:
+        return {
+            "frame_index": int(frame_index),
+            "available": False,
+            "flagged": True,
+            "reason": "foreground_unavailable",
+            "components": [],
+        }
+    largest_label = max(
+        range(1, component_count),
+        key=lambda label: int(stats[label, cv2.CC_STAT_AREA]),
+    )
+    subject = labels == largest_label
+    rows, columns = np.where(subject)
+    if rows.size < 256:
+        return {
+            "frame_index": int(frame_index),
+            "available": False,
+            "flagged": True,
+            "reason": "foreground_too_small",
+            "components": [],
+        }
+    left, right = int(columns.min()), int(columns.max()) + 1
+    top, bottom = int(rows.min()), int(rows.max()) + 1
+    subject_width = right - left
+    subject_height = bottom - top
+
+    luma = cv2.cvtColor(frame, cv2.COLOR_RGB2LAB)[:, :, 0]
+    local_luma = cv2.GaussianBlur(luma, (31, 31), sigmaX=7.0)
+    local_contrast = local_luma.astype(np.int16) - luma.astype(np.int16)
+    interior_distance = cv2.distanceTransform(
+        subject.astype(np.uint8),
+        cv2.DIST_L2,
+        5,
+    )
+    row_grid, column_grid = np.indices(subject.shape)
+    lateral_corridor = (
+        subject
+        & (column_grid >= left + int(round(subject_width * 0.68)))
+        & (column_grid < left + int(round(subject_width * 0.96)))
+        & (row_grid >= top + int(round(subject_height * 0.25)))
+        & (row_grid < top + int(round(subject_height * 0.78)))
+        & (interior_distance >= 3.0)
+    )
+    dark = (
+        lateral_corridor
+        & (luma < 70)
+        & (local_contrast >= 25)
+    )
+    dark = cv2.morphologyEx(
+        dark.astype(np.uint8),
+        cv2.MORPH_OPEN,
+        np.ones((2, 2), dtype=np.uint8),
+    )
+    dark_count, dark_labels, dark_stats, _ = cv2.connectedComponentsWithStats(
+        dark,
+        connectivity=8,
+    )
+    selected_components: list[dict[str, int | float]] = []
+    for label in range(1, dark_count):
+        x, y, component_width, component_height, area = (
+            int(value) for value in dark_stats[label]
+        )
+        long_side = max(component_width, component_height)
+        short_side = max(1, min(component_width, component_height))
+        elongation = float(long_side) / float(short_side)
+        if area < 32 or long_side < 18 or elongation < 2.2:
+            continue
+        selected_components.append(
+            {
+                "x": x,
+                "y": y,
+                "width": component_width,
+                "height": component_height,
+                "pixels": area,
+                "elongation": round(elongation, 6),
+            }
+        )
+    return {
+        "frame_index": int(frame_index),
+        "available": True,
+        "flagged": bool(selected_components),
+        "subject_bbox": [left, top, right, bottom],
+        "background_rgb": [round(float(value), 3) for value in background_rgb],
+        "components": selected_components,
+    }
+
+
+def toileting_temporal_identity_artifact_quality(
+    frames: list[np.ndarray],
+) -> dict[str, Any]:
+    """Require invented tail bands/symbols to be absent across the video."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"toileting_temporal_identity_artifact_quality"},
+    )
+    frame_metrics = [
+        _toileting_lateral_dark_band_frame_quality(
+            frame,
+            frame_index=index,
+        )
+        for index, frame in enumerate(frames)
+    ]
+    frame_count = len(frame_metrics)
+    unavailable = [
+        metric for metric in frame_metrics if metric.get("available") is not True
+    ]
+    flagged = [metric for metric in frame_metrics if metric.get("flagged") is True]
+    permitted_flagged_frames = max(
+        TOILETING_SCAIL_MAX_FLAGGED_FRAMES_MINIMUM,
+        int(round(frame_count * TOILETING_SCAIL_MAX_FLAGGED_FRAME_FRACTION)),
+    )
+    acceptable = bool(
+        frame_count >= 9
+        and not unavailable
+        and len(flagged) <= permitted_flagged_frames
+    )
+    issues: list[str] = []
+    if frame_count < 9:
+        issues.append("toileting_video_too_short_for_temporal_artifact_gate")
+    if unavailable:
+        issues.append("toileting_video_artifact_frame_analysis_unavailable")
+    if len(flagged) > permitted_flagged_frames:
+        issues.append("toileting_temporal_lateral_dark_band_or_symbol")
+    peak_component_pixels = max(
+        (
+            int(component.get("pixels", 0))
+            for metric in flagged
+            for component in metric.get("components", [])
+            if isinstance(component, dict)
+        ),
+        default=0,
+    )
+    return {
+        "policy": TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY,
+        "available": bool(frame_count >= 9 and not unavailable),
+        "acceptable": acceptable,
+        "issues": issues,
+        "frame_count": frame_count,
+        "flagged_frame_count": len(flagged),
+        "flagged_frame_indices": [
+            int(metric["frame_index"]) for metric in flagged
+        ],
+        "permitted_flagged_frames": permitted_flagged_frames,
+        "maximum_flagged_frame_fraction": (
+            TOILETING_SCAIL_MAX_FLAGGED_FRAME_FRACTION
+        ),
+        "peak_component_pixels": peak_component_pixels,
+        "frames": flagged,
+        "penalty": round(
+            float(len(unavailable) * 1000 + len(flagged) * 100)
+            + float(peak_component_pixels),
+            6,
+        ),
+    }
+
+
+def evaluate_toileting_scail_video_identity_artifacts(
+    video_path: Path,
+) -> dict[str, Any]:
+    """Decode and enforce the small-dog toileting temporal marking contract."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"evaluate_toileting_scail_video_identity_artifacts"},
+    )
+    capture = cv2.VideoCapture(str(video_path))
+    frames: list[np.ndarray] = []
+    try:
+        while True:
+            ok, bgr = capture.read()
+            if not ok:
+                break
+            frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    finally:
+        capture.release()
+    quality = toileting_temporal_identity_artifact_quality(frames)
+    return {
+        **quality,
+        "video_path": str(video_path),
+        "video_sha256": file_sha256(video_path) if video_path.is_file() else None,
+    }
+
+
+def scail_workflow_with_retry_seed(
+    workflow: dict[str, Any],
+    *,
+    seed: int,
+) -> tuple[dict[str, Any], list[str]]:
+    """Copy a prepared SCAIL workflow and replace every sampler noise seed."""
+
+    _sync_local_video_runtime(globals(), {"scail_workflow_with_retry_seed"})
+    candidate = json.loads(json.dumps(workflow))
+    updated_nodes: list[str] = []
+    for node_id, node in candidate.items():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict) or "noise_seed" not in inputs:
+            continue
+        inputs["noise_seed"] = int(seed)
+        updated_nodes.append(str(node_id))
+    if not updated_nodes:
+        raise RuntimeError("Prepared SCAIL workflow contains no noise_seed input.")
+    return candidate, updated_nodes
 
 
 def _recoverable_candidate_path(job_dir: Path, value: Any) -> Path | None:
@@ -1678,6 +1955,8 @@ def run_subject_replacement_job(job_id: str) -> None:
         if isinstance(stored_transparent_guidance_policies, dict)
         else {}
     )
+    scail_video_attempts_by_action: dict[str, list[dict[str, Any]]] = {}
+    selected_scail_seeds: dict[str, int] = {}
     reference_generation_chain = bool(job.get("reference_generation_completed"))
     progress_base = 38.0 if reference_generation_chain else 3.0
     progress_total = 59.0 if reference_generation_chain else 94.0
@@ -1968,19 +2247,154 @@ def run_subject_replacement_job(job_id: str) -> None:
             stage="generating_subject_replacement",
             progress=action_start + action_span * 0.18,
         )
-        entry = queue_and_wait(
-            workflow,
-            f"SCAIL subject replacement {action} for {job_id}",
-            timeout=7200,
-            job_id=job_id,
-        )
-        generated_video = first_output(
-            entry,
-            {".mp4"},
-            f"SCAIL {action} subject replacement",
-        )
         video_target = job_dir / f"{action}_subject_replacement.mp4"
-        shutil.copy2(generated_video, video_target)
+        dog_toileting_temporal_gate = bool(
+            action == "toileting"
+            and str(job.get("species") or "").strip().lower() == "dog"
+        )
+        maximum_scail_attempts = (
+            TOILETING_SCAIL_MAX_ATTEMPTS
+            if dog_toileting_temporal_gate
+            else 1
+        )
+        base_scail_seed = int(action_config["effective_seed"])
+        scail_attempt_records: list[dict[str, Any]] = []
+        selected_scail_candidate: Path | None = None
+        selected_scail_seed: int | None = None
+        for scail_attempt in range(1, maximum_scail_attempts + 1):
+            attempt_seed = base_scail_seed + (
+                (scail_attempt - 1) * TOILETING_SCAIL_RETRY_SEED_STEP
+            )
+            candidate_workflow, updated_seed_nodes = (
+                scail_workflow_with_retry_seed(
+                    workflow,
+                    seed=attempt_seed,
+                )
+            )
+            if scail_attempt > 1:
+                update_job(
+                    job_id,
+                    stage="retrying_subject_replacement",
+                    progress=action_start + action_span * 0.18,
+                    current_action=action,
+                    current_action_label=action_label,
+                    scail_retry_action=action,
+                    scail_retry_attempt=scail_attempt,
+                    scail_retry_max_attempts=maximum_scail_attempts,
+                    scail_retry_seed=attempt_seed,
+                    scail_retry_reason=(
+                        "toileting_temporal_lateral_dark_band_or_symbol"
+                    ),
+                )
+            write_workflow(
+                job_dir,
+                f"scail_{action}_attempt_{scail_attempt:02d}.json",
+                candidate_workflow,
+            )
+            entry = queue_and_wait(
+                candidate_workflow,
+                (
+                    f"SCAIL subject replacement {action} for {job_id} "
+                    f"attempt {scail_attempt}/{maximum_scail_attempts}"
+                ),
+                timeout=7200,
+                job_id=job_id,
+            )
+            generated_candidate = first_output(
+                entry,
+                {".mp4"},
+                f"SCAIL {action} subject replacement attempt {scail_attempt}",
+            )
+            attempt_target = (
+                job_dir
+                / f"{action}_subject_replacement_attempt_{scail_attempt:02d}.mp4"
+                if maximum_scail_attempts > 1
+                else video_target
+            )
+            shutil.copy2(generated_candidate, attempt_target)
+            if dog_toileting_temporal_gate:
+                temporal_identity_quality = (
+                    evaluate_toileting_scail_video_identity_artifacts(
+                        attempt_target,
+                    )
+                )
+            else:
+                temporal_identity_quality = {
+                    "policy": "not_applicable",
+                    "available": True,
+                    "acceptable": True,
+                    "issues": [],
+                }
+            attempt_record = {
+                "attempt": scail_attempt,
+                "seed": attempt_seed,
+                "seed_step": TOILETING_SCAIL_RETRY_SEED_STEP,
+                "workflow_seed_nodes": updated_seed_nodes,
+                "video": attempt_target.name,
+                "video_sha256": file_sha256(attempt_target),
+                "temporal_identity_quality": temporal_identity_quality,
+                "selected": False,
+            }
+            scail_attempt_records.append(attempt_record)
+            if temporal_identity_quality.get("acceptable") is True:
+                selected_scail_candidate = attempt_target
+                selected_scail_seed = attempt_seed
+                attempt_record["selected"] = True
+                break
+            LOGGER.warning(
+                "%s SCAIL %s attempt %d/%d rejected: %s",
+                job_id,
+                action,
+                scail_attempt,
+                maximum_scail_attempts,
+                temporal_identity_quality.get("issues"),
+            )
+
+        scail_video_attempts_by_action[action] = scail_attempt_records
+        if selected_scail_candidate is None or selected_scail_seed is None:
+            update_job(
+                job_id,
+                scail_video_attempts=dict(scail_video_attempts_by_action),
+                scail_video_temporal_identity_status={
+                    selected_action: (
+                        "passed"
+                        if any(
+                            record.get("selected") is True
+                            for record in records
+                        )
+                        else "failed"
+                    )
+                    for selected_action, records in (
+                        scail_video_attempts_by_action.items()
+                    )
+                },
+            )
+            raise RuntimeError(
+                f"{action}_scail_temporal_identity_gate_failed_after_"
+                f"{maximum_scail_attempts}_attempts"
+            )
+        selected_scail_seeds[action] = selected_scail_seed
+        if selected_scail_candidate != video_target:
+            shutil.copy2(selected_scail_candidate, video_target)
+        generated_video = video_target
+        update_job(
+            job_id,
+            scail_video_attempts=dict(scail_video_attempts_by_action),
+            scail_video_temporal_identity_status={
+                selected_action: (
+                    "passed"
+                    if any(
+                        record.get("selected") is True
+                        for record in records
+                    )
+                    else "failed"
+                )
+                for selected_action, records in (
+                    scail_video_attempts_by_action.items()
+                )
+            },
+            effective_action_selected_seeds=dict(selected_scail_seeds),
+        )
         final_video_fur_surface: dict[str, Any] | None = None
         fur_surface_config = action_config.get("fur_surface_gate")
         if (
@@ -2195,6 +2609,17 @@ def run_subject_replacement_job(job_id: str) -> None:
             "output_playback": action_timing,
             "playback_contract": video_playback_contract,
             "video_engine": "scail2-14b-fp8",
+            "requested_effective_seed": base_scail_seed,
+            "selected_effective_seed": selected_scail_seed,
+            "scail_attempt_count": len(scail_attempt_records),
+            "temporal_identity_quality": next(
+                (
+                    record.get("temporal_identity_quality")
+                    for record in scail_attempt_records
+                    if record.get("selected") is True
+                ),
+                None,
+            ),
             "driving_template": Path(action_config["driving_animation"]).name,
             "final_video_fur_surface_audit": (
                 f"{action}_final_video_fur_surface.json"
@@ -2570,7 +2995,18 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "reference": str(reference_path),
                 "reference_sha256": file_sha256(reference_path),
                 "driving_template": str(action_config["driving_animation"]),
-                "effective_seed": int(action_config["effective_seed"]),
+                "requested_effective_seed": base_scail_seed,
+                "effective_seed": int(selected_scail_seed),
+                "scail_attempt_count": len(scail_attempt_records),
+                "scail_video_attempts": scail_attempt_records,
+                "temporal_identity_quality": next(
+                    (
+                        record.get("temporal_identity_quality")
+                        for record in scail_attempt_records
+                        if record.get("selected") is True
+                    ),
+                    None,
+                ),
                 "effective_pose_strength": float(action_config["pose_strength"]),
                 "video": video_target.name,
                 "transparent_gif": (
