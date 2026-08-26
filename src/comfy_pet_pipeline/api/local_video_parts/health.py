@@ -645,6 +645,17 @@ def health() -> dict[str, Any]:
                 "secondary_reference_loaded_by_qwen": False,
                 "negative_prompt_conditioning": False,
             },
+            "dog_drinking_first_frame": {
+                "policy": DOG_DRINKING_PROMPT_ONLY_FIRST_FRAME_POLICY,
+                "steps": DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS,
+                "denoise": DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
+                "image1": "approved_upload_anchored_canonical_identity_sampler",
+                "prompt_only_action_geometry": True,
+                "white_model_loaded_by_qwen": False,
+                "secondary_reference_loaded_by_qwen": False,
+                "negative_prompt_conditioning": False,
+                "action_geometry_deferred_to_scail": True,
+            },
             "dog_eating_scail_pose": {
                 "policy": DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,
                 "driver_role": "head_lift_timing_signal_only",

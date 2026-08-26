@@ -127,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.10"
+API_VERSION = "2.26.11"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -288,7 +288,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.20"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.21"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -444,6 +444,12 @@ DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
 )
 DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
 DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
+DOG_DRINKING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
+    "canonical_image1_only_four_step_direct_drinking_action_"
+    "no_white_model_or_secondary_qwen_reference_v1"
+)
+DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
+DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
 GROOMING_ADVISORY_IDENTITY_REFINE_POLICY = (
     "pose_locked_draft_image1_canonical_image2_face_image3_conditional_masked_v7"
 )
@@ -4703,6 +4709,11 @@ build_advisory_grooming_action_transfer_prompt = (
 
 build_dog_eating_prompt_only_action_transfer_prompt = (
     _local_video_prompting_workflows.build_dog_eating_prompt_only_action_transfer_prompt
+)
+
+
+build_dog_drinking_prompt_only_action_transfer_prompt = (
+    _local_video_prompting_workflows.build_dog_drinking_prompt_only_action_transfer_prompt
 )
 
 

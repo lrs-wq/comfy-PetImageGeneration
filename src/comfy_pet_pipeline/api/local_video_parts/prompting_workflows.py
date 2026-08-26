@@ -543,6 +543,45 @@ def build_dog_eating_prompt_only_action_transfer_prompt(
     )
 
 
+def build_dog_drinking_prompt_only_action_transfer_prompt(
+    pose: str,
+    *,
+    profile_fur_lock: str = "",
+) -> str:
+    """Create drinking geometry without exposing white-model morphology."""
+    _sync_local_video_runtime(
+        globals(), {"build_dog_drinking_prompt_only_action_transfer_prompt"}
+    )
+
+    if action_key(pose) != "drinking":
+        raise ValueError("Prompt-only dog drinking transfer supports only drinking.")
+    del profile_fur_lock
+    return (
+        "Edit Image 1. Keep this exact dog and its restrained stylized 3D "
+        "identity unchanged. Preserve its exact apparent age and breed geometry: "
+        "skull and cheek width, muzzle length/width/taper, ear topology/size/"
+        "carriage, eyes, nose, coat colors and markings, natural coat length/"
+        "volume, torso and leg proportions, paws, and the tail's exact thickness, "
+        "shape and carriage. Change only the pose to active drinking. Put exactly "
+        "one small shallow water bowl ON THE GROUND immediately in front of the "
+        "two planted front paws. Lower and bend the dog's head and neck until the "
+        "lower muzzle physically reaches and slightly overlaps the bowl's near rim "
+        "and one tiny anatomically attached pink tongue tip touches the water "
+        "surface. Keep the water low and fully inside the bowl with only subtle "
+        "ripples; no food, splash, spill, stream, drool, long tongue or panting "
+        "smile. The bowl stays separate from the body and must not hide, replace, "
+        "lift or fuse with a paw. Repose the torso and legs naturally as needed, "
+        "keeping all four complete attached legs and paws and the complete tail "
+        "visible. Do not change folded ears to upright ears or upright ears to "
+        "folded ears, do not shorten or widen the muzzle, and do not change a "
+        "straight tail to a curled tail or a curled tail to a straight tail. Keep "
+        "one complete natural unclothed dog with no collar, accessory, extra "
+        "subject or extra prop. Every background pixel stays flat pure #00FF00 "
+        "green, with generous clearance and no floor, shadow, reflection, gradient, "
+        "text or watermark."
+    )
+
+
 def build_advisory_grooming_action_transfer_prompt(
     pose: str,
     *,
