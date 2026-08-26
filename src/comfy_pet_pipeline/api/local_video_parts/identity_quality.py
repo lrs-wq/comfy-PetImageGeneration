@@ -826,80 +826,83 @@ def neutralize_uploaded_identity_chroma_spill(
     )
     minimum_enclosed_component = max(
         32,
-        int(round(foreground_count * 0.0005)),
+        int(round(foreground_count * 0.0002)),
     )
-    maximum_enclosed_fill = max(
+    maximum_enclosed_hole = max(
         256,
-        int(round(foreground_count * 0.06)),
+        int(round(foreground_count * 0.04)),
     )
+    repair_radius = max(
+        2,
+        min(
+            8,
+            int(round(min(subject_width, subject_height) * 0.008)),
+        ),
+    )
+    frame_height, frame_width = foreground.shape
     for label in range(1, component_count):
         component = (component_labels == label).astype(np.uint8)
         component_area = int(np.count_nonzero(component))
         if component_area < minimum_enclosed_component:
             continue
-        component_x = int(component_stats[label, cv2.CC_STAT_LEFT])
-        component_y = int(component_stats[label, cv2.CC_STAT_TOP])
-        component_width = int(component_stats[label, cv2.CC_STAT_WIDTH])
-        component_height = int(component_stats[label, cv2.CC_STAT_HEIGHT])
-        if (
-            component_y < y0 + int(round(subject_height * 0.32))
-            or component_width > int(round(subject_width * 0.45))
-            or component_height > int(round(subject_height * 0.35))
-        ):
-            continue
-        contours, _ = cv2.findContours(
-            component,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE,
+        inverse = (component == 0).astype(np.uint8)
+        hole_count, hole_labels, hole_stats, _ = (
+            cv2.connectedComponentsWithStats(
+                inverse,
+                connectivity=8,
+            )
         )
-        filled = np.zeros(foreground.shape, dtype=np.uint8)
-        cv2.drawContours(filled, contours, -1, 1, cv2.FILLED)
-        filled = (filled > 0) & foreground & ~paired_eye_mask
-        filled_area = int(np.count_nonzero(filled))
-        added_pixels = filled_area - component_area
-        if (
-            filled_area > maximum_enclosed_fill
-            or filled_area < int(round(component_area * 1.20))
-            or added_pixels < max(24, int(round(component_area * 0.20)))
-        ):
-            continue
-        repair_radius = max(
-            2,
-            min(
-                8,
-                int(round(min(subject_width, subject_height) * 0.008)),
-            ),
-        )
-        repair_region = cv2.dilate(
-            filled.astype(np.uint8),
-            cv2.getStructuringElement(
-                cv2.MORPH_ELLIPSE,
-                (repair_radius * 2 + 1, repair_radius * 2 + 1),
-            ),
-            iterations=1,
-        ).astype(bool)
-        repair_region &= foreground & ~paired_eye_mask
-        enclosed_spill_repair |= repair_region
-        enclosed_spill_components.append(
-            {
-                "label": label,
-                "bbox": [
-                    component_x,
-                    component_y,
-                    component_x + component_width,
-                    component_y + component_height,
-                ],
-                "detected_pixels": component_area,
-                "filled_pixels": filled_area,
-                "added_pixels": added_pixels,
-                "repair_radius": repair_radius,
-                "repair_pixels": int(np.count_nonzero(repair_region)),
-                "fill_to_detected_ratio": round(
-                    filled_area / float(component_area),
-                    6,
+        for hole_label in range(1, hole_count):
+            hole_x = int(hole_stats[hole_label, cv2.CC_STAT_LEFT])
+            hole_y = int(hole_stats[hole_label, cv2.CC_STAT_TOP])
+            hole_width = int(hole_stats[hole_label, cv2.CC_STAT_WIDTH])
+            hole_height = int(hole_stats[hole_label, cv2.CC_STAT_HEIGHT])
+            if (
+                hole_x == 0
+                or hole_y == 0
+                or hole_x + hole_width == frame_width
+                or hole_y + hole_height == frame_height
+            ):
+                continue
+            raw_hole = hole_labels == hole_label
+            raw_hole_area = int(np.count_nonzero(raw_hole))
+            hole = raw_hole & foreground & ~paired_eye_mask
+            hole_area = int(np.count_nonzero(hole))
+            if (
+                hole_area < minimum_enclosed_component
+                or hole_area > maximum_enclosed_hole
+                or hole_area < int(round(raw_hole_area * 0.90))
+                or hole_y < y0 + int(round(subject_height * 0.32))
+                or hole_width > int(round(subject_width * 0.45))
+                or hole_height > int(round(subject_height * 0.35))
+            ):
+                continue
+            repair_region = cv2.dilate(
+                hole.astype(np.uint8),
+                cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE,
+                    (repair_radius * 2 + 1, repair_radius * 2 + 1),
                 ),
-            }
-        )
+                iterations=1,
+            ).astype(bool)
+            repair_region &= foreground & ~paired_eye_mask
+            enclosed_spill_repair |= repair_region
+            enclosed_spill_components.append(
+                {
+                    "label": label,
+                    "hole_label": hole_label,
+                    "bbox": [
+                        hole_x,
+                        hole_y,
+                        hole_x + hole_width,
+                        hole_y + hole_height,
+                    ],
+                    "detected_component_pixels": component_area,
+                    "hole_pixels": hole_area,
+                    "repair_radius": repair_radius,
+                    "repair_pixels": int(np.count_nonzero(repair_region)),
+                }
+            )
 
     correction = detected_correction | enclosed_spill_repair
     corrected_count = int(np.count_nonzero(correction))
@@ -953,7 +956,24 @@ def neutralize_uploaded_identity_chroma_spill(
                 float(inpaint_radius),
                 cv2.INPAINT_TELEA,
             )
-            reconstructed_lab[:, :, 0][enclosed_spill_repair] = repaired_luma[
+            repair_distance = cv2.distanceTransform(
+                texture_mask_u8,
+                cv2.DIST_L2,
+                5,
+            )
+            luma_feather_width = float(max(2, repair_radius + 1))
+            luma_weight = np.clip(
+                repair_distance / luma_feather_width,
+                0.0,
+                1.0,
+            )
+            blended_luma = np.clip(
+                lab[:, :, 0].astype(np.float32) * (1.0 - luma_weight)
+                + repaired_luma.astype(np.float32) * luma_weight,
+                0,
+                255,
+            ).astype(np.uint8)
+            reconstructed_lab[:, :, 0][enclosed_spill_repair] = blended_luma[
                 enclosed_spill_repair
             ]
         reconstructed_rgb = cv2.cvtColor(reconstructed_lab, cv2.COLOR_LAB2RGB)
@@ -989,6 +1009,11 @@ def neutralize_uploaded_identity_chroma_spill(
             "enclosed_spill_pixels": enclosed_spill_pixels,
             "enclosed_spill_added_pixels": enclosed_spill_added_pixels,
             "luminance_reconstruction_pixels": enclosed_spill_pixels,
+            "luminance_reconstruction_feather_width": (
+                float(max(2, repair_radius + 1))
+                if enclosed_spill_pixels
+                else 0.0
+            ),
             "chroma_donor_pixels": donor_count,
             "fallback_lab_ab": [fallback_a, fallback_b],
             "corrected_lab_a_floor": 128,
