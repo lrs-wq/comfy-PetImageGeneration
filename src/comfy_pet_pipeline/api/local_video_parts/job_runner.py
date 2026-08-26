@@ -1265,6 +1265,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     attempt_cutout,
                     validate_canonical_interior=(
                         GENERATION_VISUAL_AUDITS_BLOCKING
+                        or canonical_identity_palette_gate_required
                     ),
                 )
             except Exception as exc:  # noqa: BLE001 - image requests may return the saved raw image
@@ -2023,6 +2024,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     cartoon_transparent,
                     validate_canonical_interior=(
                         GENERATION_VISUAL_AUDITS_BLOCKING
+                        or canonical_identity_palette_gate_required
                     ),
                 )
                 if not normalized_chroma["acceptable"]:
