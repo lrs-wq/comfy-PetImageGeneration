@@ -127,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.11"
+API_VERSION = "2.26.12"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -288,7 +288,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.21"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.22"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -669,6 +669,12 @@ DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY = (
 )
 DOG_EATING_STATIC_POSE_FALLBACK_POLICY = (
     "static_reference_eating_pose_identity_fallback_v1"
+)
+DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY = (
+    "reference_space_identity_locked_head_lapping_v1"
+)
+DOG_DRINKING_STATIC_POSE_FALLBACK_POLICY = (
+    "static_reference_drinking_pose_identity_fallback_v1"
 )
 UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY = (
     "uploaded_subject_absolute_animation_roughness_v1"

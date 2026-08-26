@@ -74,6 +74,11 @@ EATING_FULL_POSE_LOWER_HALF_CHANGE_RATIO_MIN = 0.01
 # down-up-down eating cycle. Its audited lower-quarter XOR is 0.011581, so a
 # 1.1% floor preserves the anti-static gate without rejecting that motion.
 EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN = 0.011
+DRINKING_REFERENCE_ALIGNED_POSE_POLICY = (
+    "reference_space_identity_locked_head_lapping_v1"
+)
+DRINKING_REFERENCE_HEAD_LIFT_PX = 6.0
+DRINKING_REFERENCE_LAP_CYCLES = 3
 GROOMING_TEMPORAL_LOOP_POLICY = (
     "grooming_second_half_ping_pong_closed_loop_v1"
 )
@@ -236,10 +241,12 @@ DOG_DRINKING_PROMPT = (
     "reference as the only identity and appearance authority. Preserve the exact "
     "breed traits, apparent age, face and muzzle geometry, eyes, ears, nose, coat "
     "colors and localized markings, natural coat length and volume, body "
-    "proportions, paws, and complete tail. Use the neutral-white dog anatomy driver "
-    "only for the low-head drinking motion, joint trajectories, one fixed shallow "
-    "water bowl, camera, scale and framing. Never copy the driver's white coat, face, "
-    "eyes, proportions, material, or lighting. Keep the bowl and still water fixed. "
+    "proportions, paws, and complete tail. The prepared pose video is synthesized "
+    "from this same approved reference and controls only a small head-lapping motion; "
+    "its body, ears, paws and tail stay locked to the reference geometry. Never "
+    "invent a curled tail when the reference tail is straight, change folded ears to "
+    "upright ears, shorten the muzzle, or import any neutral-white driver morphology. "
+    "Keep the bowl and still water fixed. "
     "Animate one restrained natural lapping cycle with only a tiny anatomically "
     "attached pink tongue tip touching the water, subtle muzzle and neck movement, "
     "and no splash, drool or long tongue. Keep all four legs attached and stable. "
@@ -326,7 +333,9 @@ DOG_DRINKING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT.replace(
     "panting smile, ",
 ) + (
     ", long tongue, detached tongue, transparent tongue, splash, drool, water "
-    "strand, moving bowl, changing bowl, duplicate bowl, food in water bowl"
+    "strand, moving bowl, changing bowl, duplicate bowl, food in water bowl, "
+    "curled tail when reference tail is straight, upright ears when reference ears "
+    "are folded, copied white-model silhouette"
 )
 DOG_RUNNING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT + (
     ", two-legged run, bipedal pose, fused legs, hidden far-side leg, missing paw, "
@@ -3338,6 +3347,331 @@ def make_static_reference_eating_pose_frames(
                 "policy": "reference_mask_static_bowl_fallback_v1",
                 "fallback_reason": fallback_reason[:1000],
             },
+        },
+    )
+
+
+def make_drinking_reference_aligned_pose_frames(
+    reference: Image.Image,
+    reference_mask: Image.Image,
+    canvas_size: tuple[int, int],
+    *,
+    frame_count: int,
+    maximum_head_lift_px: float = DRINKING_REFERENCE_HEAD_LIFT_PX,
+    lap_cycles: int = DRINKING_REFERENCE_LAP_CYCLES,
+) -> tuple[list[Image.Image], list[Image.Image], dict[str, Any]]:
+    """Animate only the accepted reference head and keep body identity geometry fixed.
+
+    The small-dog drinking driver has identity-bearing upright ears and a tightly
+    curled tail. Feeding that silhouette to SCAIL can overwrite a floppy-eared,
+    straight-tailed upload even when Qwen produced a correct action keyframe. This
+    path derives every pose pixel from the accepted keyframe and adds only a bounded
+    closed-loop head lap around its real tongue anchor.
+    """
+    if reference.size != canvas_size or reference_mask.size != canvas_size:
+        raise ValueError(
+            "drinking_reference_motion_unreliable: reference_size_mismatch"
+        )
+    if frame_count < 9:
+        raise ValueError(
+            "drinking_reference_motion_unreliable: fewer_than_9_frames"
+        )
+    if maximum_head_lift_px <= 0 or maximum_head_lift_px > 12:
+        raise ValueError(
+            "drinking_reference_motion_unreliable: invalid_head_lift_limit"
+        )
+    if lap_cycles < 1 or lap_cycles > 6:
+        raise ValueError(
+            "drinking_reference_motion_unreliable: invalid_lap_cycle_count"
+        )
+
+    reference_rgba = np.asarray(reference.convert("RGBA"), dtype=np.uint8).copy()
+    reference_mask_rgb = np.asarray(
+        reference_mask.convert("RGB"),
+        dtype=np.uint8,
+    )
+    reference_identity = np.all(
+        reference_mask_rgb == (0, 0, 255),
+        axis=2,
+    )
+    identity_pixels = int(np.count_nonzero(reference_identity))
+    if identity_pixels < 500:
+        raise ValueError(
+            "drinking_reference_motion_unreliable: reference_subject_too_small"
+        )
+
+    subject_left, subject_top, subject_right, subject_bottom = binary_bbox(
+        reference_identity
+    )
+    subject_width = subject_right - subject_left
+    subject_height = subject_bottom - subject_top
+    row_indices, column_indices = np.indices(reference_identity.shape)
+    reference_rgb = reference_rgba[..., :3]
+    red = reference_rgb[..., 0].astype(np.int16)
+    green = reference_rgb[..., 1].astype(np.int16)
+    blue = reference_rgb[..., 2].astype(np.int16)
+
+    # The direct drinking edit is required to contain one tiny pink tongue tip.
+    # Blue-over-green chroma separates that tongue from cream/golden fur, while
+    # the lower-body restriction excludes pink ear interiors.
+    tongue_candidates = (
+        reference_identity
+        & (row_indices >= subject_top + int(round(subject_height * 0.35)))
+        & (red >= 110)
+        & (red - green >= 25)
+        & (blue - green >= 5)
+    )
+    tongue_count, tongue_labels, tongue_stats, tongue_centroids = (
+        cv2.connectedComponentsWithStats(
+            tongue_candidates.astype(np.uint8),
+            connectivity=8,
+        )
+    )
+    minimum_tongue_pixels = max(6, int(round(identity_pixels * 0.00005)))
+    maximum_tongue_pixels = max(120, int(round(identity_pixels * 0.04)))
+    tongue_components: list[tuple[int, int, float, int]] = []
+    for label in range(1, tongue_count):
+        area = int(tongue_stats[label, cv2.CC_STAT_AREA])
+        component_top = int(tongue_stats[label, cv2.CC_STAT_TOP])
+        component_height = int(tongue_stats[label, cv2.CC_STAT_HEIGHT])
+        component_bottom = component_top + component_height
+        center_x = float(tongue_centroids[label][0])
+        if (
+            minimum_tongue_pixels <= area <= maximum_tongue_pixels
+            and subject_left <= center_x < subject_right
+        ):
+            tongue_components.append(
+                (component_bottom, area, -abs(center_x - (subject_left + subject_right) / 2.0), label)
+            )
+    if not tongue_components:
+        raise ValueError(
+            "drinking_reference_motion_unreliable: no_pink_tongue_anchor"
+        )
+    _bottom_rank, _area_rank, _center_rank, tongue_label = max(
+        tongue_components
+    )
+    reference_tongue = tongue_labels == tongue_label
+    tongue_left, tongue_top, tongue_right, tongue_bottom = binary_bbox(
+        reference_tongue
+    )
+    tongue_center_x = float(tongue_centroids[tongue_label][0])
+    tongue_center_y = float(tongue_centroids[tongue_label][1])
+
+    head_center_x = tongue_center_x
+    head_center_y = max(
+        float(subject_top),
+        float(tongue_top) - subject_height * 0.16,
+    )
+    head_radius_x = max(28.0, subject_width * 0.22)
+    head_radius_y = max(34.0, subject_height * 0.25)
+    head_weight = np.exp(
+        -0.5
+        * (
+            ((column_indices - head_center_x) / head_radius_x) ** 2
+            + ((row_indices - head_center_y) / head_radius_y) ** 2
+        )
+    ).astype(np.float32)
+    corridor_half_width = max(34.0, subject_width * 0.28)
+    head_weight[
+        (column_indices < head_center_x - corridor_half_width)
+        | (column_indices > head_center_x + corridor_half_width)
+    ] = 0.0
+    lower_static_y = min(canvas_size[1], tongue_bottom + 2)
+    head_weight[row_indices >= lower_static_y] = 0.0
+    head_weight[head_weight < 0.08] = 0.0
+    motion_region = head_weight > 0.0
+    if int(np.count_nonzero(reference_identity & motion_region)) < 200:
+        raise ValueError(
+            "drinking_reference_motion_unreliable: head_motion_region_too_small"
+        )
+
+    identity_layer = reference_rgba.copy()
+    identity_layer[~reference_identity] = 0
+    identity_mask_u8 = reference_identity.astype(np.uint8) * 255
+    tongue_mask_u8 = reference_tongue.astype(np.uint8) * 255
+    map_x = column_indices.astype(np.float32)
+    pose_frames: list[Image.Image] = []
+    mask_frames: list[Image.Image] = []
+    head_lifts: list[float] = []
+    tongue_center_y_by_frame: list[float] = []
+
+    for index in range(frame_count):
+        if index in {0, frame_count - 1}:
+            lift_px = 0.0
+        else:
+            phase = (2.0 * np.pi * lap_cycles * index) / float(frame_count - 1)
+            lift_px = float(maximum_head_lift_px * (0.5 - 0.5 * np.cos(phase)))
+        head_lifts.append(lift_px)
+        map_y = (row_indices + lift_px * head_weight).astype(np.float32)
+        warped_identity_layer = cv2.remap(
+            identity_layer,
+            map_x,
+            map_y,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0, 0),
+        )
+        warped_identity = cv2.remap(
+            identity_mask_u8,
+            map_x,
+            map_y,
+            interpolation=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        ) >= 128
+        warped_tongue = cv2.remap(
+            tongue_mask_u8,
+            map_x,
+            map_y,
+            interpolation=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        ) >= 128
+        tongue_rows, _tongue_columns = np.where(warped_tongue)
+        if not tongue_rows.size:
+            raise ValueError(
+                "drinking_reference_motion_unreliable: warped_tongue_empty"
+            )
+        tongue_center_y_by_frame.append(float(np.mean(tongue_rows)))
+
+        pose_rgb = np.full((*reference_identity.shape, 3), 255, dtype=np.uint8)
+        warped_alpha = (
+            warped_identity_layer[..., 3:4].astype(np.float32) / 255.0
+        )
+        pose_rgb = np.clip(
+            warped_identity_layer[..., :3] * warped_alpha
+            + pose_rgb * (1.0 - warped_alpha),
+            0,
+            255,
+        ).astype(np.uint8)
+        pose_frames.append(Image.fromarray(pose_rgb, mode="RGB"))
+
+        colored_mask = np.full((*reference_identity.shape, 3), 255, dtype=np.uint8)
+        colored_mask[warped_identity] = (0, 0, 255)
+        mask_frames.append(Image.fromarray(colored_mask, mode="RGB"))
+
+    tongue_motion_span = max(tongue_center_y_by_frame) - min(
+        tongue_center_y_by_frame
+    )
+    if tongue_motion_span < 2.0:
+        raise ValueError(
+            "drinking_reference_motion_unreliable: tongue_motion_too_small"
+        )
+    if not (
+        np.array_equal(np.asarray(pose_frames[0]), np.asarray(pose_frames[-1]))
+        and np.array_equal(np.asarray(mask_frames[0]), np.asarray(mask_frames[-1]))
+    ):
+        raise ValueError(
+            "drinking_reference_motion_unreliable: loop_endpoints_not_closed"
+        )
+
+    return (
+        pose_frames,
+        mask_frames,
+        {
+            "policy": DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
+            "fallback_used": False,
+            "driver_input_used": False,
+            "driver_signal_only": False,
+            "driver_rgb_preserved": False,
+            "driver_silhouette_preserved": False,
+            "reference_identity_preserved": True,
+            "pose_geometry_scope": (
+                "reference_locked_body_ears_paws_tail_plus_bounded_head_lapping"
+            ),
+            "reference_subject_bbox": [
+                subject_left,
+                subject_top,
+                subject_right,
+                subject_bottom,
+            ],
+            "reference_tongue_bbox": [
+                tongue_left,
+                tongue_top,
+                tongue_right,
+                tongue_bottom,
+            ],
+            "reference_tongue_pixels": int(np.count_nonzero(reference_tongue)),
+            "reference_tongue_center": [
+                round(tongue_center_x, 4),
+                round(tongue_center_y, 4),
+            ],
+            "head_deformation_center": [
+                round(head_center_x, 4),
+                round(head_center_y, 4),
+            ],
+            "head_deformation_radius": [
+                round(head_radius_x, 4),
+                round(head_radius_y, 4),
+            ],
+            "head_motion_region_bbox": list(binary_bbox(motion_region)),
+            "head_lift_px_by_frame": [round(value, 4) for value in head_lifts],
+            "head_lift_px_max": round(max(head_lifts), 4),
+            "lap_cycles": lap_cycles,
+            "tongue_center_y_by_frame": [
+                round(value, 4) for value in tongue_center_y_by_frame
+            ],
+            "tongue_motion_span_px": round(tongue_motion_span, 4),
+            "lower_foreground_static_y_start": lower_static_y,
+            "body_ears_paws_tail_outside_head_motion_locked": True,
+            "closed_loop_endpoints": True,
+            "scene_prop_separated": False,
+        },
+    )
+
+
+def make_static_reference_drinking_pose_frames(
+    reference: Image.Image,
+    reference_mask: Image.Image,
+    canvas_size: tuple[int, int],
+    *,
+    frame_count: int,
+    fallback_reason: str,
+) -> tuple[list[Image.Image], list[Image.Image], dict[str, Any]]:
+    """Keep the approved drinking identity when a bounded head lap is unavailable."""
+    if reference.size != canvas_size or reference_mask.size != canvas_size:
+        raise ValueError(
+            "drinking_static_reference_fallback_unreliable: reference_size_mismatch"
+        )
+    if frame_count < 1:
+        raise ValueError(
+            "drinking_static_reference_fallback_unreliable: invalid_frame_count"
+        )
+    rgba = np.asarray(reference.convert("RGBA"), dtype=np.uint8).copy()
+    mask_rgb = np.asarray(reference_mask.convert("RGB"), dtype=np.uint8)
+    identity = np.all(mask_rgb == (0, 0, 255), axis=2)
+    if int(np.count_nonzero(identity)) < 500:
+        raise ValueError(
+            "drinking_static_reference_fallback_unreliable: reference_subject_too_small"
+        )
+    rgba[~identity] = 0
+    alpha = rgba[..., 3:4].astype(np.float32) / 255.0
+    pose_rgb = np.full((*identity.shape, 3), 255, dtype=np.uint8)
+    pose_rgb = np.clip(
+        rgba[..., :3] * alpha + pose_rgb * (1.0 - alpha),
+        0,
+        255,
+    ).astype(np.uint8)
+    colored_mask = np.full((*identity.shape, 3), 255, dtype=np.uint8)
+    colored_mask[identity] = (0, 0, 255)
+    pose = Image.fromarray(pose_rgb, mode="RGB")
+    mask = Image.fromarray(colored_mask, mode="RGB")
+    return (
+        [pose.copy() for _ in range(frame_count)],
+        [mask.copy() for _ in range(frame_count)],
+        {
+            "policy": "static_reference_drinking_pose_identity_fallback_v1",
+            "fallback_used": True,
+            "fallback_reason": fallback_reason[:1000],
+            "driver_input_used": False,
+            "driver_signal_only": False,
+            "driver_rgb_preserved": False,
+            "driver_silhouette_preserved": False,
+            "reference_identity_preserved": True,
+            "pose_geometry_scope": "static_approved_drinking_reference",
+            "reference_subject_bbox": list(binary_bbox(identity)),
+            "body_ears_paws_tail_outside_head_motion_locked": True,
+            "scene_prop_separated": False,
         },
     )
 
@@ -6460,6 +6794,30 @@ def main() -> int:
                 make_full_eating_pose_and_mask_frames(
                     sampled,
                     (args.width, args.height),
+                )
+            )
+    elif args.action == "drinking" and args.species == "dog":
+        try:
+            pose_frames, pose_masks, pose_metadata = (
+                make_drinking_reference_aligned_pose_frames(
+                    reference,
+                    reference_mask,
+                    (args.width, args.height),
+                    frame_count=args.frames,
+                )
+            )
+        except ValueError as exc:
+            if not str(exc).startswith(
+                "drinking_reference_motion_unreliable:"
+            ):
+                raise
+            pose_frames, pose_masks, pose_metadata = (
+                make_static_reference_drinking_pose_frames(
+                    reference,
+                    reference_mask,
+                    (args.width, args.height),
+                    frame_count=args.frames,
+                    fallback_reason=str(exc),
                 )
             )
     else:

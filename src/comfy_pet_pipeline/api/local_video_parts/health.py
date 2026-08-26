@@ -656,6 +656,18 @@ def health() -> dict[str, Any]:
                 "negative_prompt_conditioning": False,
                 "action_geometry_deferred_to_scail": True,
             },
+            "dog_drinking_scail_pose": {
+                "policy": DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
+                "pose_source": "approved_upload_anchored_drinking_reference",
+                "motion_scope": "bounded_closed_loop_head_lapping_only",
+                "driver_input_used": False,
+                "driver_rgb_preserved": False,
+                "driver_silhouette_preserved": False,
+                "body_ears_paws_tail_locked_to_reference": True,
+                "static_identity_safe_fallback_policy": (
+                    DOG_DRINKING_STATIC_POSE_FALLBACK_POLICY
+                ),
+            },
             "dog_eating_scail_pose": {
                 "policy": DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,
                 "driver_role": "head_lift_timing_signal_only",

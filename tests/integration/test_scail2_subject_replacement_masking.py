@@ -255,6 +255,62 @@ class EatingScenePropMaskTests(unittest.TestCase):
         )
         return reference, colored
 
+    @staticmethod
+    def _drinking_reference() -> tuple[Image.Image, Image.Image]:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(reference)
+        coat = (232, 202, 148, 255)
+        ear = (205, 158, 104, 255)
+        draw.ellipse((165, 145, 405, 345), fill=coat)
+        draw.ellipse((70, 225, 235, 385), fill=coat)
+        draw.ellipse((55, 300, 175, 402), fill=(238, 210, 165, 255))
+        draw.ellipse((70, 240, 115, 345), fill=ear)
+        draw.ellipse((188, 238, 232, 350), fill=ear)
+        draw.rounded_rectangle((180, 290, 230, 410), radius=18, fill=coat)
+        draw.rounded_rectangle((300, 285, 350, 410), radius=18, fill=coat)
+        # A straight, low tail is deliberately far outside the head edit region.
+        draw.polygon(
+            ((380, 225), (472, 245), (472, 270), (380, 265)),
+            fill=coat,
+        )
+        draw.rounded_rectangle(
+            (55, 382, 185, 442),
+            radius=20,
+            fill=(170, 175, 180, 255),
+        )
+        draw.ellipse((66, 375, 174, 408), fill=(105, 155, 190, 255))
+        draw.rounded_rectangle(
+            (112, 350, 132, 401),
+            radius=8,
+            fill=(228, 92, 145, 255),
+        )
+
+        colored = Image.new("RGB", (512, 512), (0, 0, 0))
+        mask_draw = ImageDraw.Draw(colored)
+        mask_draw.ellipse((165, 145, 405, 345), fill=(0, 0, 255))
+        mask_draw.ellipse((70, 225, 235, 385), fill=(0, 0, 255))
+        mask_draw.ellipse((55, 300, 175, 402), fill=(0, 0, 255))
+        mask_draw.ellipse((70, 240, 115, 345), fill=(0, 0, 255))
+        mask_draw.ellipse((188, 238, 232, 350), fill=(0, 0, 255))
+        mask_draw.rounded_rectangle(
+            (180, 290, 230, 410), radius=18, fill=(0, 0, 255)
+        )
+        mask_draw.rounded_rectangle(
+            (300, 285, 350, 410), radius=18, fill=(0, 0, 255)
+        )
+        mask_draw.polygon(
+            ((380, 225), (472, 245), (472, 270), (380, 265)),
+            fill=(0, 0, 255),
+        )
+        mask_draw.rounded_rectangle(
+            (55, 382, 185, 442), radius=20, fill=(0, 0, 255)
+        )
+        mask_draw.ellipse((66, 375, 174, 408), fill=(0, 0, 255))
+        mask_draw.rounded_rectangle(
+            (112, 350, 132, 401), radius=8, fill=(0, 0, 255)
+        )
+        return reference, colored
+
     def test_temporal_prop_mask_keeps_cat_occlusion_out_of_bowl_layer(self) -> None:
         frames = self._normalized_frames()
         exclusions, metadata = scail.make_eating_prop_exclusion_masks(frames)
@@ -740,6 +796,92 @@ class EatingScenePropMaskTests(unittest.TestCase):
         self.assertTrue(np.all(allowed))
         high_pose = np.asarray(poses[high_index].convert("RGB"), dtype=np.uint8)
         self.assertFalse(np.any(np.all(high_pose == (225, 25, 25), axis=2)))
+
+    def test_reference_aligned_drinking_locks_tail_and_body_geometry(self) -> None:
+        reference, reference_mask = self._drinking_reference()
+        poses, masks, metadata = scail.make_drinking_reference_aligned_pose_frames(
+            reference,
+            reference_mask,
+            (512, 512),
+            frame_count=81,
+        )
+
+        self.assertEqual(
+            metadata["policy"],
+            "reference_space_identity_locked_head_lapping_v1",
+        )
+        self.assertFalse(metadata["driver_input_used"])
+        self.assertFalse(metadata["driver_rgb_preserved"])
+        self.assertFalse(metadata["driver_silhouette_preserved"])
+        self.assertTrue(metadata["reference_identity_preserved"])
+        self.assertTrue(
+            metadata["body_ears_paws_tail_outside_head_motion_locked"]
+        )
+        self.assertTrue(metadata["closed_loop_endpoints"])
+        self.assertEqual(metadata["lap_cycles"], 3)
+        self.assertEqual(metadata["head_lift_px_max"], 6.0)
+        self.assertGreaterEqual(metadata["tongue_motion_span_px"], 2.0)
+        self.assertEqual(len(poses), 81)
+        self.assertEqual(len(masks), 81)
+
+        first_pose = np.asarray(poses[0].convert("RGB"), dtype=np.uint8)
+        first_mask = np.asarray(masks[0].convert("RGB"), dtype=np.uint8)
+        self.assertTrue(
+            np.array_equal(first_pose, np.asarray(poses[-1].convert("RGB")))
+        )
+        self.assertTrue(
+            np.array_equal(first_mask, np.asarray(masks[-1].convert("RGB")))
+        )
+        # Straight tail and lower bowl/body regions remain byte-identical while
+        # only the tongue/head corridor moves.
+        for pose, mask in zip(poses[1:], masks[1:], strict=True):
+            pose_pixels = np.asarray(pose.convert("RGB"), dtype=np.uint8)
+            mask_pixels = np.asarray(mask.convert("RGB"), dtype=np.uint8)
+            self.assertTrue(
+                np.array_equal(
+                    pose_pixels[215:285, 370:480],
+                    first_pose[215:285, 370:480],
+                )
+            )
+            self.assertTrue(
+                np.array_equal(
+                    mask_pixels[215:285, 370:480],
+                    first_mask[215:285, 370:480],
+                )
+            )
+            self.assertTrue(
+                np.array_equal(
+                    pose_pixels[410:450, 45:195],
+                    first_pose[410:450, 45:195],
+                )
+            )
+            blue = np.all(mask_pixels == (0, 0, 255), axis=2)
+            white = np.all(mask_pixels == (255, 255, 255), axis=2)
+            self.assertTrue(np.all(blue | white))
+
+        tongue_values = metadata["tongue_center_y_by_frame"]
+        self.assertLess(min(tongue_values), max(tongue_values))
+
+    def test_static_drinking_fallback_keeps_reference_identity(self) -> None:
+        reference, reference_mask = self._drinking_reference()
+        poses, masks, metadata = scail.make_static_reference_drinking_pose_frames(
+            reference,
+            reference_mask,
+            (512, 512),
+            frame_count=13,
+            fallback_reason=(
+                "drinking_reference_motion_unreliable: no_pink_tongue_anchor"
+            ),
+        )
+
+        self.assertTrue(metadata["fallback_used"])
+        self.assertFalse(metadata["driver_input_used"])
+        self.assertFalse(metadata["driver_silhouette_preserved"])
+        self.assertEqual(len(poses), 13)
+        self.assertEqual(len(masks), 13)
+        for pose, mask in zip(poses[1:], masks[1:], strict=True):
+            self.assertTrue(np.array_equal(np.asarray(pose), np.asarray(poses[0])))
+            self.assertTrue(np.array_equal(np.asarray(mask), np.asarray(masks[0])))
 
     def test_reference_aligned_eating_motion_pushes_touching_muzzle_into_food(
         self,
