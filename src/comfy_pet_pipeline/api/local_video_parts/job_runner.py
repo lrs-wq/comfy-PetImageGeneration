@@ -145,6 +145,186 @@ def exhausted_action_candidate_recovery_policy(
     return "reject"
 
 
+def make_toileting_canonical_tray_fallback(
+    source: Path,
+    target: Path,
+) -> dict[str, Any]:
+    """Place an identity-preserving canonical dog on a deterministic clean tray.
+
+    This path is used only after every generated toileting candidate has failed
+    identity checks.  The approved canonical remains the complete dog-identity
+    authority; the generated geometry image and white model are deliberately not
+    loaded.  A neutral tray is drawn behind the unchanged dog so SCAIL receives a
+    reference whose wide prop footprint is already beneath, rather than behind,
+    the subject.
+    """
+    _sync_local_video_runtime(
+        globals(), {"make_toileting_canonical_tray_fallback"}
+    )
+
+    with Image.open(source) as loaded:
+        canonical = loaded.convert("RGBA")
+    width, height = canonical.size
+    rgba = np.asarray(canonical, dtype=np.uint8)
+    subject = rgba[..., 3] >= 16
+    rows, columns = np.where(subject)
+    if columns.size < 500:
+        raise RuntimeError(
+            "Toileting canonical tray fallback requires a visible canonical dog."
+        )
+    subject_left = int(columns.min())
+    subject_top = int(rows.min())
+    subject_right = int(columns.max()) + 1
+    subject_bottom = int(rows.max()) + 1
+    subject_width = subject_right - subject_left
+    subject_height = subject_bottom - subject_top
+    if subject_width < width * 0.16 or subject_height < height * 0.28:
+        raise RuntimeError(
+            "Toileting canonical tray fallback rejected a tiny canonical dog."
+        )
+
+    side_extension = max(int(round(width * 0.05)), int(round(subject_width * 0.40)))
+    tray_left = max(int(round(width * 0.03)), subject_left - side_extension)
+    tray_right = min(int(round(width * 0.97)), subject_right + side_extension)
+    tray_top = max(
+        subject_top + int(round(subject_height * 0.60)),
+        subject_bottom - int(round(subject_height * 0.27)),
+    )
+    tray_bottom = min(
+        height - max(8, int(round(height * 0.025))),
+        subject_bottom + max(18, int(round(subject_height * 0.07))),
+    )
+    tray_width = tray_right - tray_left
+    tray_height = tray_bottom - tray_top
+    if (
+        tray_width < subject_width * 1.35
+        or tray_height < max(36, int(round(height * 0.08)))
+        or tray_top >= subject_bottom
+    ):
+        raise RuntimeError(
+            "Toileting canonical tray fallback could not form a broad underbody tray."
+        )
+
+    scale = 4
+    tray = np.zeros((height * scale, width * scale, 4), dtype=np.uint8)
+
+    def points(values: list[tuple[int, int]]) -> np.ndarray:
+        return np.asarray(
+            [[int(x * scale), int(y * scale)] for x, y in values],
+            dtype=np.int32,
+        )
+
+    shoulder = max(10, int(round(tray_width * 0.035)))
+    inset = max(20, int(round(tray_width * 0.075)))
+    front_top = tray_top + int(round(tray_height * 0.62))
+    outer = points(
+        [
+            (tray_left + shoulder, tray_top),
+            (tray_right - shoulder, tray_top),
+            (tray_right, tray_bottom),
+            (tray_left, tray_bottom),
+        ]
+    )
+    cv2.fillPoly(tray, [outer], (174, 179, 176, 255))
+
+    grid = points(
+        [
+            (tray_left + inset, tray_top + 9),
+            (tray_right - inset, tray_top + 9),
+            (tray_right - inset - shoulder, front_top),
+            (tray_left + inset + shoulder, front_top),
+        ]
+    )
+    grid_mask = np.zeros(tray.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(grid_mask, [grid], 255)
+    grid_layer = np.zeros_like(tray)
+    grid_layer[grid_mask > 0] = (113, 121, 117, 255)
+    grid_x0 = tray_left + inset
+    grid_x1 = tray_right - inset
+    grid_y0 = tray_top + 9
+    grid_y1 = front_top
+    for fraction in np.linspace(0.08, 0.92, 9):
+        x = int(round(grid_x0 + (grid_x1 - grid_x0) * float(fraction)))
+        cv2.line(
+            grid_layer,
+            (x * scale, grid_y0 * scale),
+            (x * scale, grid_y1 * scale),
+            (66, 73, 70, 255),
+            max(2, scale),
+            lineType=cv2.LINE_AA,
+        )
+    for fraction in np.linspace(0.10, 0.90, 6):
+        y = int(round(grid_y0 + (grid_y1 - grid_y0) * float(fraction)))
+        cv2.line(
+            grid_layer,
+            (grid_x0 * scale, y * scale),
+            (grid_x1 * scale, y * scale),
+            (66, 73, 70, 255),
+            max(2, scale),
+            lineType=cv2.LINE_AA,
+        )
+    tray[grid_mask > 0] = grid_layer[grid_mask > 0]
+
+    front = points(
+        [
+            (tray_left, front_top - 2),
+            (tray_right, front_top - 2),
+            (tray_right, tray_bottom),
+            (tray_left, tray_bottom),
+        ]
+    )
+    cv2.fillPoly(tray, [front], (201, 204, 199, 255))
+    cv2.polylines(
+        tray,
+        [outer],
+        True,
+        (145, 150, 147, 255),
+        max(3, scale * 2),
+        lineType=cv2.LINE_AA,
+    )
+    tray_image = Image.fromarray(tray, mode="RGBA").resize(
+        (width, height),
+        Image.Resampling.LANCZOS,
+    )
+    composite = Image.alpha_composite(tray_image, canonical)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    composite.save(target, format="PNG", optimize=True)
+
+    composite_alpha = np.asarray(composite.getchannel("A"), dtype=np.uint8) >= 16
+    composite_rows, composite_columns = np.where(composite_alpha)
+    composite_bbox = [
+        int(composite_columns.min()),
+        int(composite_rows.min()),
+        int(composite_columns.max()) + 1,
+        int(composite_rows.max()) + 1,
+    ]
+    composite_aspect = (composite_bbox[2] - composite_bbox[0]) / float(
+        max(1, composite_bbox[3] - composite_bbox[1])
+    )
+    if composite_aspect < TOILETING_TRAY_MIN_REFERENCE_ASPECT_RATIO:
+        raise RuntimeError(
+            "Toileting canonical tray fallback remained too narrow after compositing."
+        )
+    return {
+        "policy": TOILETING_CANONICAL_TRAY_FALLBACK_POLICY,
+        "source": str(source),
+        "target": str(target),
+        "subject_bbox": [
+            subject_left,
+            subject_top,
+            subject_right,
+            subject_bottom,
+        ],
+        "tray_bbox": [tray_left, tray_top, tray_right, tray_bottom],
+        "composite_bbox": composite_bbox,
+        "composite_aspect_ratio": round(composite_aspect, 6),
+        "tray_width_to_subject_width": round(tray_width / subject_width, 6),
+        "subject_tray_vertical_overlap_px": subject_bottom - tray_top,
+        "tray_drawn_behind_identity": True,
+        "white_model_or_generated_identity_used": False,
+    }
+
+
 POSE_ATTEMPT_PROVENANCE_FIELDS = (
     "identity_input_policy",
     "image1_input_name",
@@ -2308,9 +2488,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             and species == "dog"
             and action_key(pose) == "drinking"
         )
+        dog_toileting_prompt_only_action_transfer_active = bool(
+            canonical_action_reference
+            and species == "dog"
+            and action_key(pose) == "toileting"
+        )
         dog_prompt_only_action_transfer_active = bool(
             dog_eating_prompt_only_action_transfer_active
             or dog_drinking_prompt_only_action_transfer_active
+            or dog_toileting_prompt_only_action_transfer_active
         )
         if dog_eating_prompt_only_action_transfer_active:
             update_job(
@@ -2350,6 +2536,26 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 ),
                 dog_drinking_first_frame_denoise=(
                     DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
+                ),
+            )
+        if dog_toileting_prompt_only_action_transfer_active:
+            update_job(
+                job_id,
+                dog_toileting_first_frame_policy=(
+                    DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY
+                ),
+                dog_toileting_first_frame_prompt_only_action_geometry=True,
+                dog_toileting_first_frame_image1_role=(
+                    "approved_upload_anchored_canonical_identity_sampler"
+                ),
+                dog_toileting_first_frame_white_model_loaded_by_qwen=False,
+                dog_toileting_first_frame_secondary_reference_loaded_by_qwen=False,
+                dog_toileting_first_frame_action_geometry_deferred_to_scail=True,
+                dog_toileting_first_frame_steps=(
+                    DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
+                ),
+                dog_toileting_first_frame_denoise=(
+                    DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
                 ),
             )
         advisory_action_candidate_gate_required = bool(
@@ -2846,6 +3052,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 dog_drinking_prompt_only_action_transfer_attempt: (
                     dict[str, Any] | None
                 ) = None
+                dog_toileting_prompt_only_action_transfer_attempt: (
+                    dict[str, Any] | None
+                ) = None
                 if dog_prompt_only_action_transfer_active:
                     attempt_primary_input_name = qwen_input_name
                     attempt_secondary_input_name = None
@@ -2863,7 +3072,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         dog_prompt_only_policy = (
                             DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY
                         )
-                    else:
+                    elif dog_drinking_prompt_only_action_transfer_active:
                         attempt_prompt = (
                             build_dog_drinking_prompt_only_action_transfer_prompt(
                                 pose,
@@ -2872,6 +3081,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         )
                         dog_prompt_only_policy = (
                             DOG_DRINKING_PROMPT_ONLY_FIRST_FRAME_POLICY
+                        )
+                    else:
+                        attempt_prompt = (
+                            build_dog_toileting_prompt_only_action_transfer_prompt(
+                                pose,
+                                profile_fur_lock=profile_fur_lock,
+                            )
+                        )
+                        dog_prompt_only_policy = (
+                            DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY
                         )
                     dog_prompt_only_action_transfer_attempt = {
                         "policy": dog_prompt_only_policy,
@@ -2894,8 +3113,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         dog_eating_prompt_only_action_transfer_attempt = (
                             dog_prompt_only_action_transfer_attempt
                         )
-                    else:
+                    elif dog_drinking_prompt_only_action_transfer_active:
                         dog_drinking_prompt_only_action_transfer_attempt = (
+                            dog_prompt_only_action_transfer_attempt
+                        )
+                    else:
+                        dog_toileting_prompt_only_action_transfer_attempt = (
                             dog_prompt_only_action_transfer_attempt
                         )
                 if advisory_grooming_action_transfer_active:
@@ -3889,7 +4112,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     effective_pose_denoise = (
                         DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
                         if dog_eating_prompt_only_action_transfer_active
-                        else DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
+                        else (
+                            DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
+                            if dog_drinking_prompt_only_action_transfer_active
+                            else DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
+                        )
                     )
                 if advisory_grooming_identity_refine_active:
                     effective_pose_denoise = (
@@ -3949,7 +4176,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     effective_pose_steps = (
                         DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
                         if dog_eating_prompt_only_action_transfer_active
-                        else DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
+                        else (
+                            DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
+                            if dog_drinking_prompt_only_action_transfer_active
+                            else DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
+                        )
                     )
                 if advisory_grooming_identity_refine_active:
                     effective_pose_steps = max(
@@ -5122,6 +5353,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                     "dog_drinking_prompt_only_action_transfer": (
                         dog_drinking_prompt_only_action_transfer_attempt
+                    ),
+                    "dog_toileting_prompt_only_action_transfer": (
+                        dog_toileting_prompt_only_action_transfer_attempt
                     ),
                     "grooming_advisory_identity_refine": (
                         grooming_advisory_identity_refine_audit
@@ -6451,19 +6685,50 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     canonical_fallback_policy = (
                         "upload_anchored_canonical_standing_reference_v1"
                         if standing_fallback
-                        else "upload_anchored_canonical_dog_action_reference_v1"
+                        else (
+                            TOILETING_CANONICAL_TRAY_FALLBACK_POLICY
+                            if fallback_action == "toileting"
+                            else "upload_anchored_canonical_dog_action_reference_v1"
+                        )
                     )
                     canonical_fallback = (
                         job_dir
                         / f"pose_{index:02d}_upload_anchored_canonical_fallback.png"
                     )
-                    canonical_normalization = (
+                    canonical_identity_fallback = (
+                        canonical_fallback
+                        if fallback_action != "toileting"
+                        else job_dir
+                        / f"pose_{index:02d}_upload_anchored_canonical_identity.png"
+                    )
+                    canonical_identity_normalization = (
                         normalize_qwen_action_reference_rgba(
                             cartoon_output,
-                            canonical_fallback,
+                            canonical_identity_fallback,
                             action=action_key(pose),
                         )
                     )
+                    toileting_tray_fallback: dict[str, Any] | None = None
+                    if fallback_action == "toileting":
+                        tray_staging = (
+                            job_dir
+                            / f"pose_{index:02d}_canonical_toileting_tray_staging.png"
+                        )
+                        toileting_tray_fallback = (
+                            make_toileting_canonical_tray_fallback(
+                                canonical_identity_fallback,
+                                tray_staging,
+                            )
+                        )
+                        canonical_normalization = (
+                            normalize_qwen_action_reference_rgba(
+                                tray_staging,
+                                canonical_fallback,
+                                action=action_key(pose),
+                            )
+                        )
+                    else:
+                        canonical_normalization = canonical_identity_normalization
                     canonical_edge_quality = canonical_normalization[
                         "transparent_edge_quality"
                     ]
@@ -6471,10 +6736,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         canonical_fallback,
                         pose,
                         require_eating_mouth_contact=False,
-                        validate_action_geometry=False,
+                        validate_action_geometry=fallback_action == "toileting",
                     )
                     canonical_palette = evaluate_pose_identity_palette(
-                        canonical_fallback,
+                        canonical_identity_fallback,
                         primary_reference=pose_reference_identity_palette,
                         upper_body_reference=(
                             pose_reference_upper_body_identity_palette
@@ -6513,7 +6778,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         ),
                         returns_original_upload=False,
                         returns_approved_canonical=True,
-                        action_geometry_deferred_to_scail=True,
+                        action_geometry_deferred_to_scail=(
+                            fallback_action != "toileting"
+                        ),
+                        toileting_tray_geometry_prebound=(
+                            fallback_action == "toileting"
+                        ),
                         blocks_job=False,
                     )
                     canonical_chroma = {
@@ -6566,7 +6836,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "identity_recovery_v1"
                         ),
                         "canonical_self_reference_reuse": True,
-                        "action_geometry_deferred_to_scail": True,
+                        "action_geometry_deferred_to_scail": (
+                            fallback_action != "toileting"
+                        ),
+                        "toileting_tray_geometry_prebound": (
+                            fallback_action == "toileting"
+                        ),
                     }
                     best_attempt = {
                         **rejected_attempt,
@@ -6616,7 +6891,21 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "rejected_identity_palette": rejected_attempt.get(
                                 "identity_palette"
                             ),
-                            "action_geometry_deferred_to_scail": True,
+                            "identity_only_path": str(
+                                canonical_identity_fallback
+                            ),
+                            "identity_only_sha256": file_sha256(
+                                canonical_identity_fallback
+                            ),
+                            "action_geometry_deferred_to_scail": (
+                                fallback_action != "toileting"
+                            ),
+                            "toileting_tray_geometry_prebound": (
+                                fallback_action == "toileting"
+                            ),
+                            "toileting_tray_fallback": (
+                                toileting_tray_fallback
+                            ),
                         },
                     }
                     append_recovery_event(
@@ -6632,8 +6921,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 "reuse_upload_anchored_canonical_and_defer_"
                                 "standing_geometry_to_scail"
                                 if standing_fallback
-                                else "reuse_upload_anchored_canonical_and_defer_"
-                                f"{fallback_action}_geometry_to_scail"
+                                else (
+                                    "reuse_upload_anchored_canonical_with_"
+                                    "deterministic_underbody_tray"
+                                    if fallback_action == "toileting"
+                                    else "reuse_upload_anchored_canonical_and_defer_"
+                                    f"{fallback_action}_geometry_to_scail"
+                                )
                             ),
                             "profile": best_attempt["profile"],
                             "result": "accepted_identity_safe_canonical",

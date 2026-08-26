@@ -298,6 +298,40 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
                 )
             )
 
+    def test_prompt_only_dog_toileting_transfer_locks_breed_and_tray_position(
+        self,
+    ) -> None:
+        pose = pipeline.subject_replacement_pose_prompt("toileting", species="dog")
+        prompt = pipeline.build_dog_toileting_prompt_only_action_transfer_prompt(
+            pose,
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+        )
+
+        self.assertTrue(prompt.startswith("Edit Image 1."))
+        self.assertIn("exact apparent age and breed geometry", prompt)
+        self.assertIn("Place the tray UNDER the dog, never behind it", prompt)
+        self.assertIn("front paws and the seated hindquarters", prompt)
+        self.assertIn("wider than the seated dog", prompt)
+        self.assertIn("folded ears to upright ears", prompt)
+        self.assertIn("straight tail to a curled tail", prompt)
+        self.assertIn("flat pure #00FF00 green", prompt)
+        for forbidden_token in (
+            "Image 2",
+            "white model",
+            "white maquette",
+            "action guide",
+            "video frame",
+        ):
+            self.assertNotIn(forbidden_token.lower(), prompt.lower())
+
+        with self.assertRaisesRegex(ValueError, "supports only toileting"):
+            pipeline.build_dog_toileting_prompt_only_action_transfer_prompt(
+                pipeline.subject_replacement_pose_prompt(
+                    "standing",
+                    species="dog",
+                )
+            )
+
     def test_dog_prompts_lock_age_muzzle_chroma_and_driver_defined_idle_pose(
         self,
     ) -> None:
@@ -1822,6 +1856,45 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertEqual(
             workflow["14"]["inputs"]["denoise"],
             pipeline.DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
+        )
+
+    def test_dog_toileting_workflow_never_loads_white_model_into_qwen(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, _uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="toileting",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=1,
+                identity_palette_guard=True,
+                visual_audits_blocking=False,
+                species="dog",
+            )
+
+        load_images = {
+            node_id: node["inputs"]["image"]
+            for node_id, node in workflow.items()
+            if node.get("class_type") == "LoadImage"
+        }
+        expected_canonical = "local_video_api/capture-toileting/cartoon_reference.png"
+        self.assertEqual(load_images, {"1": expected_canonical})
+        self.assertNotIn(pose_input, load_images.values())
+        self.assertNotIn("image2", workflow["6"]["inputs"])
+        self.assertNotIn("image3", workflow["6"]["inputs"])
+        self.assertTrue(
+            workflow["6"]["inputs"]["prompt"].startswith("Edit Image 1.")
+        )
+        self.assertIn(
+            "Place the tray UNDER the dog, never behind it",
+            workflow["6"]["inputs"]["prompt"],
+        )
+        self.assertEqual(workflow["7"]["inputs"]["prompt"], "")
+        self.assertEqual(
+            workflow["14"]["inputs"]["steps"],
+            pipeline.DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS,
+        )
+        self.assertEqual(
+            workflow["14"]["inputs"]["denoise"],
+            pipeline.DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
         )
 
     def test_production_eating_attempt4_refines_pose_safe_palette_drift(

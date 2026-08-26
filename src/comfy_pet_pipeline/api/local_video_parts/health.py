@@ -656,6 +656,23 @@ def health() -> dict[str, Any]:
                 "negative_prompt_conditioning": False,
                 "action_geometry_deferred_to_scail": True,
             },
+            "dog_toileting_first_frame": {
+                "policy": DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY,
+                "steps": DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS,
+                "denoise": DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
+                "image1": "approved_upload_anchored_canonical_identity_sampler",
+                "prompt_only_action_geometry": True,
+                "white_model_loaded_by_qwen": False,
+                "secondary_reference_loaded_by_qwen": False,
+                "negative_prompt_conditioning": False,
+                "required_spatial_gate": TOILETING_TRAY_SPATIAL_POLICY,
+                "tray_min_reference_aspect_ratio": (
+                    TOILETING_TRAY_MIN_REFERENCE_ASPECT_RATIO
+                ),
+                "identity_safe_terminal_fallback": (
+                    TOILETING_CANONICAL_TRAY_FALLBACK_POLICY
+                ),
+            },
             "dog_drinking_scail_pose": {
                 "policy": DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
                 "pose_source": "approved_upload_anchored_drinking_reference",

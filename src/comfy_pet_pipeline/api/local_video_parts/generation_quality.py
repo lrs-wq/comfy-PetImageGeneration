@@ -2838,6 +2838,7 @@ def pose_cutout_quality(
         issues.append("pose_not_low_or_wide_enough_for_bowl_action")
     bowl_components: list[dict[str, Any]] = []
     drinking_contact: dict[str, Any] | None = None
+    toileting_tray_spatial: dict[str, Any] | None = None
     eating_horizontal_shelf = None
     if action in {"eating", "drinking"}:
         for label in meaningful_labels[1:]:
@@ -2923,6 +2924,30 @@ def pose_cutout_quality(
                 "connected_contact_assumed": True,
                 "maximum_gap_px": DRINKING_MOUTH_BOWL_GAP_MAX_PX,
             }
+    if action == "toileting":
+        tray_acceptable = (
+            bbox_aspect_ratio >= TOILETING_TRAY_MIN_REFERENCE_ASPECT_RATIO
+        )
+        toileting_tray_spatial = {
+            "acceptable": tray_acceptable,
+            "issues": (
+                []
+                if tray_acceptable
+                else ["toileting_tray_not_wide_beneath_subject"]
+            ),
+            "penalty": 0.0 if tray_acceptable else 125.0,
+            "policy": TOILETING_TRAY_SPATIAL_POLICY,
+            "bbox_aspect_ratio": round(bbox_aspect_ratio, 6),
+            "minimum_bbox_aspect_ratio": (
+                TOILETING_TRAY_MIN_REFERENCE_ASPECT_RATIO
+            ),
+            "interpretation": (
+                "the_complete_dog_plus_tray_footprint_must_be_wider_than_"
+                "an_identity_only_seated_dog"
+            ),
+        }
+        if not tray_acceptable:
+            issues.extend(toileting_tray_spatial["issues"])
     if action in {"lying", "lying down"} and bbox_aspect_ratio < 0.90:
         issues.append("pose_not_low_or_wide_enough_for_lying")
     eating_contact = None
@@ -2972,6 +2997,7 @@ def pose_cutout_quality(
         "eating_horizontal_shelf": eating_horizontal_shelf,
         "eating_mouth_bowl_contact": eating_contact,
         "drinking_mouth_bowl_contact": drinking_contact,
+        "toileting_tray_spatial": toileting_tray_spatial,
     }
 
 

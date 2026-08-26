@@ -582,6 +582,45 @@ def build_dog_drinking_prompt_only_action_transfer_prompt(
     )
 
 
+def build_dog_toileting_prompt_only_action_transfer_prompt(
+    pose: str,
+    *,
+    profile_fur_lock: str = "",
+) -> str:
+    """Create the seated tray action without exposing white-model morphology."""
+    _sync_local_video_runtime(
+        globals(), {"build_dog_toileting_prompt_only_action_transfer_prompt"}
+    )
+
+    if action_key(pose) != "toileting":
+        raise ValueError("Prompt-only dog toileting transfer supports only toileting.")
+    del profile_fur_lock
+    return (
+        "Edit Image 1. Keep this exact dog and its restrained stylized 3D "
+        "identity unchanged. Preserve its exact apparent age and breed geometry: "
+        "skull and cheek width, muzzle length/width/taper, ear topology/size/"
+        "carriage, eyes, nose, coat colors and markings, natural coat length/"
+        "volume, torso and leg proportions, paws, and the tail's exact thickness, "
+        "shape and carriage. Change only the pose to a stable natural seated "
+        "toileting pose on exactly one clean low rectangular pet toilet tray. "
+        "Place the tray UNDER the dog, never behind it: both front paws and the "
+        "seated hindquarters physically rest on the tray's visible grid insert. "
+        "The continuous outer rim must remain visible beyond the dog's silhouette "
+        "on the left, right, front and rear, and the broad tray footprint must be "
+        "wider than the seated dog. Keep the tray centered, complete, horizontal, "
+        "fixed and fully inside the canvas. Repose the torso and legs naturally as "
+        "needed while keeping all four complete attached legs and paws, both ears "
+        "and the complete tail visible. Do not change folded ears to upright ears "
+        "or upright ears to folded ears, do not shorten or widen the muzzle, and "
+        "do not change a straight tail to a curled tail or a curled tail to a "
+        "straight tail. Keep one complete natural unclothed dog with no collar, "
+        "accessory, extra subject or extra prop. Show no urine, feces, litter, "
+        "mess, duplicate tray or litter box. Every background pixel stays flat "
+        "pure #00FF00 green, with generous clearance and no floor continuation, "
+        "shadow, reflection, gradient, text or watermark."
+    )
+
+
 def build_advisory_grooming_action_transfer_prompt(
     pose: str,
     *,

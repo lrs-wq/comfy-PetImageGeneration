@@ -1049,6 +1049,66 @@ class BowlActionSilhouetteTests(unittest.TestCase):
                     )
 
 
+class ToiletingTrayFallbackTests(unittest.TestCase):
+    def test_identity_only_toileting_reference_is_rejected_then_tray_is_added(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "canonical.png"
+            target = root / "toileting_fallback.png"
+            image = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            fur = (225, 199, 153, 255)
+            draw.ellipse((174, 48, 338, 200), fill=fur)
+            draw.rounded_rectangle((154, 166, 358, 416), radius=82, fill=fur)
+            draw.rectangle((178, 350, 222, 456), fill=fur)
+            draw.rectangle((284, 350, 328, 456), fill=fur)
+            draw.polygon(((346, 314), (430, 388), (350, 406)), fill=fur)
+            image.save(source, format="PNG")
+
+            pose = pipeline.subject_replacement_pose_prompt(
+                "toileting",
+                species="dog",
+            )
+            identity_only = pipeline.pose_cutout_quality(source, pose)
+            self.assertFalse(identity_only["acceptable"], identity_only)
+            self.assertIn(
+                "toileting_tray_not_wide_beneath_subject",
+                identity_only["issues"],
+            )
+
+            metadata = pipeline.make_toileting_canonical_tray_fallback(
+                source,
+                target,
+            )
+            with_tray = pipeline.pose_cutout_quality(target, pose)
+
+            self.assertTrue(with_tray["acceptable"], with_tray)
+            self.assertEqual(
+                metadata["policy"],
+                pipeline.TOILETING_CANONICAL_TRAY_FALLBACK_POLICY,
+            )
+            self.assertGreaterEqual(
+                metadata["composite_aspect_ratio"],
+                pipeline.TOILETING_TRAY_MIN_REFERENCE_ASPECT_RATIO,
+            )
+            self.assertGreater(metadata["subject_tray_vertical_overlap_px"], 0)
+            self.assertTrue(metadata["tray_drawn_behind_identity"])
+            self.assertFalse(metadata["white_model_or_generated_identity_used"])
+
+            with Image.open(source) as source_loaded, Image.open(target) as target_loaded:
+                source_rgba = source_loaded.convert("RGBA")
+                target_rgba = target_loaded.convert("RGBA")
+                source_pixels = source_rgba.load()
+                target_pixels = target_rgba.load()
+                for y in range(source_rgba.height):
+                    for x in range(source_rgba.width):
+                        source_pixel = source_pixels[x, y]
+                        if source_pixel[3] == 255:
+                            self.assertEqual(target_pixels[x, y], source_pixel)
+
+
 class PoseSimilarityTests(unittest.TestCase):
     def test_unsegmentable_candidate_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -127,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.12"
+API_VERSION = "2.26.13"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -288,7 +288,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.22"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.23"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -450,6 +450,12 @@ DOG_DRINKING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
 )
 DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
 DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
+DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
+    "canonical_image1_only_four_step_direct_toileting_action_"
+    "no_white_model_or_secondary_qwen_reference_v1"
+)
+DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
+DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
 GROOMING_ADVISORY_IDENTITY_REFINE_POLICY = (
     "pose_locked_draft_image1_canonical_image2_face_image3_conditional_masked_v7"
 )
@@ -653,6 +659,11 @@ FINAL_VIDEO_VALIDATED_ACTION_REFERENCE_POLICIES = {
 EATING_MOUTH_BOWL_CONTACT_POLICY = "warm_face_component_above_detected_bowl_v4"
 DRINKING_MOUTH_BOWL_CONTACT_POLICY = "detached_bowl_subject_proximity_v1"
 DRINKING_MOUTH_BOWL_GAP_MAX_PX = 12
+TOILETING_TRAY_SPATIAL_POLICY = "wide_tray_beneath_subject_silhouette_v1"
+TOILETING_TRAY_MIN_REFERENCE_ASPECT_RATIO = 0.72
+TOILETING_CANONICAL_TRAY_FALLBACK_POLICY = (
+    "upload_anchored_canonical_with_deterministic_underbody_tray_v1"
+)
 EATING_BOWL_SPLIT_FALLBACK_POLICY = (
     "food_anchored_beige_bowl_after_eroded_warm_core_miss_v2"
 )
@@ -4723,6 +4734,11 @@ build_dog_drinking_prompt_only_action_transfer_prompt = (
 )
 
 
+build_dog_toileting_prompt_only_action_transfer_prompt = (
+    _local_video_prompting_workflows.build_dog_toileting_prompt_only_action_transfer_prompt
+)
+
+
 build_advisory_grooming_identity_refine_prompt = (
     _local_video_prompting_workflows.build_advisory_grooming_identity_refine_prompt
 )
@@ -6741,6 +6757,9 @@ action_candidate_degraded_selection_key = (
 )
 exhausted_action_candidate_recovery_policy = (
     _local_video_job_runner.exhausted_action_candidate_recovery_policy
+)
+make_toileting_canonical_tray_fallback = (
+    _local_video_job_runner.make_toileting_canonical_tray_fallback
 )
 run_job = _local_video_job_runner.run_job
 
