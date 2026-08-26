@@ -8,6 +8,40 @@ from __future__ import annotations
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
+def merge_identity_chroma_spill_cleanup(
+    chroma: dict[str, Any],
+    cleanup: dict[str, Any],
+    *,
+    blocking: bool,
+) -> dict[str, Any]:
+    """Attach despill evidence and reject candidates beyond safe reconstruction."""
+
+    merged = {**chroma, "identity_chroma_spill_cleanup": cleanup}
+    cleanup_issues = [str(issue) for issue in cleanup.get("issues", [])]
+    if cleanup.get("acceptable", True) is not False:
+        return merged
+    if blocking:
+        merged["acceptable"] = False
+        merged["issues"] = list(
+            dict.fromkeys(
+                [
+                    *[str(issue) for issue in merged.get("issues", [])],
+                    *cleanup_issues,
+                ]
+            )
+        )
+    else:
+        merged["warnings"] = list(
+            dict.fromkeys(
+                [
+                    *[str(issue) for issue in merged.get("warnings", [])],
+                    *cleanup_issues,
+                ]
+            )
+        )
+    return merged
+
+
 def action_candidate_degraded_selection_key(
     record: dict[str, Any],
     *,
@@ -1243,11 +1277,17 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 }
             if chroma_metrics.get("acceptable") and attempt_cutout.is_file():
                 try:
-                    chroma_metrics["identity_chroma_spill_cleanup"] = (
-                        neutralize_uploaded_identity_chroma_spill(
-                            attempt_cutout,
-                            source_identity_palette,
-                        )
+                    cleanup = neutralize_uploaded_identity_chroma_spill(
+                        attempt_cutout,
+                        source_identity_palette,
+                    )
+                    chroma_metrics = merge_identity_chroma_spill_cleanup(
+                        chroma_metrics,
+                        cleanup,
+                        blocking=bool(
+                            GENERATION_VISUAL_AUDITS_BLOCKING
+                            or canonical_identity_palette_gate_required
+                        ),
                     )
                 except Exception as exc:  # noqa: BLE001 - retry candidate fail closed
                     chroma_metrics = {
@@ -1518,6 +1558,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 for record in cartoon_attempts
                 if isinstance(record.get("identity_palette"), dict)
                 and record["identity_palette"].get("acceptable") is True
+                and not bool(
+                    (
+                        record.get("chroma", {}).get(
+                            "identity_chroma_spill_cleanup",
+                            {},
+                        )
+                        if isinstance(record.get("chroma"), dict)
+                        else {}
+                    ).get("regeneration_required")
+                )
             ]
             fallback_uses_uploaded_identity = bool(
                 canonical_identity_palette_gate_required
@@ -1586,7 +1636,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     job_id,
                 )
             else:
-                chroma_metrics["identity_chroma_spill_cleanup"] = (
+                fallback_cleanup = (
                     neutralize_uploaded_identity_chroma_spill(
                         fallback_cutout,
                         source_identity_palette,
@@ -1600,6 +1650,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "applied": False,
                         "status": "skipped_advisory",
                     }
+                )
+                chroma_metrics = merge_identity_chroma_spill_cleanup(
+                    chroma_metrics,
+                    fallback_cleanup,
+                    blocking=bool(
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                        or canonical_identity_palette_gate_required
+                    ),
                 )
                 fallback_candidate_palette = (
                     identity_palette_signature(fallback_cutout)
@@ -1729,12 +1787,24 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 uploaded_fallback_cutout,
                                 uploaded_fallback_semantic,
                             )
-                            uploaded_chroma_metrics[
-                                "identity_chroma_spill_cleanup"
-                            ] = neutralize_uploaded_identity_chroma_spill(
-                                uploaded_fallback_cutout,
-                                source_identity_palette,
+                            uploaded_cleanup = (
+                                neutralize_uploaded_identity_chroma_spill(
+                                    uploaded_fallback_cutout,
+                                    source_identity_palette,
+                                )
                             )
+                            uploaded_chroma_metrics = (
+                                merge_identity_chroma_spill_cleanup(
+                                    uploaded_chroma_metrics,
+                                    uploaded_cleanup,
+                                    blocking=True,
+                                )
+                            )
+                            if uploaded_chroma_metrics.get("acceptable") is not True:
+                                raise RuntimeError(
+                                    "Uploaded identity fallback exceeded the safe "
+                                    "chroma reconstruction scope."
+                                )
                             uploaded_candidate_palette = identity_palette_signature(
                                 uploaded_fallback_cutout
                             )
@@ -4690,11 +4760,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     and attempt_cutout.is_file()
                 ):
                     try:
-                        chroma_metrics["identity_chroma_spill_cleanup"] = (
-                            neutralize_uploaded_identity_chroma_spill(
-                                attempt_cutout,
-                                source_identity_palette,
-                            )
+                        cleanup = neutralize_uploaded_identity_chroma_spill(
+                            attempt_cutout,
+                            source_identity_palette,
+                        )
+                        chroma_metrics = merge_identity_chroma_spill_cleanup(
+                            chroma_metrics,
+                            cleanup,
+                            blocking=bool(action_candidate_audits_required),
                         )
                     except Exception as exc:  # noqa: BLE001 - retry fail closed
                         chroma_metrics = {
@@ -7394,7 +7467,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             )
                         )
                     )
-                chroma_metrics["identity_chroma_spill_cleanup"] = (
+                fallback_cleanup = (
                     neutralize_uploaded_identity_chroma_spill(
                         fallback_cutout,
                         source_identity_palette,
@@ -7405,6 +7478,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "applied": False,
                         "status": "skipped_advisory",
                     }
+                )
+                chroma_metrics = merge_identity_chroma_spill_cleanup(
+                    chroma_metrics,
+                    fallback_cleanup,
+                    blocking=bool(GENERATION_VISUAL_AUDITS_BLOCKING),
                 )
                 quality = (
                     pose_cutout_quality(

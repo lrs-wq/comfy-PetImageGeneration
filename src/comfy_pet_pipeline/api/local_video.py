@@ -127,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.19"
+API_VERSION = "2.26.20"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -288,7 +288,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.29"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.30"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -694,8 +694,11 @@ UPLOADED_IDENTITY_SURFACE_COMPARISON_MODE = (
     "uploaded_identity_absolute_surface_contract_v1"
 )
 UPLOADED_IDENTITY_CHROMA_SPILL_POLICY = (
-    "source_palette_guarded_enclosed_spill_hole_texture_reconstruction_v5"
+    "source_palette_guarded_bounded_reconstruction_or_regeneration_v6"
 )
+UPLOADED_IDENTITY_CHROMA_SPILL_BODY_REGENERATION_FRACTION_MIN = 0.08
+UPLOADED_IDENTITY_CHROMA_SPILL_COMPONENT_REGENERATION_FRACTION_MIN = 0.04
+UPLOADED_IDENTITY_CHROMA_SPILL_HOLE_REGENERATION_FRACTION_MIN = 0.008
 BOWL_IDENTITY_PALETTE_BOTTOM_EXCLUSION = max(
     0.0,
     min(
@@ -1389,7 +1392,8 @@ CHROMA_BACKGROUND_PROMPT = """The entire background must be a perfectly flat, un
 CHROMA_NEGATIVE = (
     "white background, gray background, black background, dark background, non-green background, scenery, floor, floor line, cast shadow, "
     "contact shadow, reflection, background gradient, background texture, green subject, green fur, green clothing, "
-    "green bounce light, green color spill, green rim light, cyan rim light, chroma reflection on fur"
+    "background poster, decorative background graphic, icon, symbol, letter, number, outline, pattern, logo, watermark, "
+    "green marking on animal, green outline inside animal, green bounce light, green color spill, green rim light, cyan rim light, chroma reflection on fur"
 )
 
 SLEEK_GROOMING_PROMPT = (
@@ -6761,6 +6765,9 @@ TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = (
     _local_video_subject_replacement.TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO
 )
 pose_attempt_provenance = _local_video_job_runner.pose_attempt_provenance
+merge_identity_chroma_spill_cleanup = (
+    _local_video_job_runner.merge_identity_chroma_spill_cleanup
+)
 
 
 resolve_action_identity_palette_reference = (

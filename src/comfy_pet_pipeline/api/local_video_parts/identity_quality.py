@@ -658,6 +658,9 @@ def neutralize_uploaded_identity_chroma_spill(
         "policy": UPLOADED_IDENTITY_CHROMA_SPILL_POLICY,
         "path": str(path),
         "applied": False,
+        "acceptable": True,
+        "issues": [],
+        "regeneration_required": False,
     }
     if not isinstance(source_identity_palette, dict) or not source_identity_palette.get(
         "available"
@@ -910,6 +913,42 @@ def neutralize_uploaded_identity_chroma_spill(
     enclosed_spill_added_pixels = int(
         np.count_nonzero(enclosed_spill_repair & ~detected_correction)
     )
+    broad_body_spill = bool(
+        detected_body_count / float(max(1, foreground_count))
+        >= UPLOADED_IDENTITY_CHROMA_SPILL_BODY_REGENERATION_FRACTION_MIN
+    )
+    unsafe_enclosed_components: list[dict[str, Any]] = []
+    for component in enclosed_spill_components:
+        component_fraction = int(component["detected_component_pixels"]) / float(
+            max(1, foreground_count)
+        )
+        hole_fraction = int(component["hole_pixels"]) / float(
+            max(1, foreground_count)
+        )
+        if (
+            component_fraction
+            >= UPLOADED_IDENTITY_CHROMA_SPILL_COMPONENT_REGENERATION_FRACTION_MIN
+            and hole_fraction
+            >= UPLOADED_IDENTITY_CHROMA_SPILL_HOLE_REGENERATION_FRACTION_MIN
+        ):
+            unsafe_enclosed_components.append(
+                {
+                    **component,
+                    "detected_component_fraction": round(component_fraction, 6),
+                    "hole_fraction": round(hole_fraction, 6),
+                }
+            )
+    regeneration_reasons = []
+    if broad_body_spill:
+        regeneration_reasons.append("broad_body_green_screen_spill")
+    if unsafe_enclosed_components:
+        regeneration_reasons.append("large_enclosed_green_screen_marking")
+    regeneration_required = bool(regeneration_reasons)
+    regeneration_issues = (
+        ["identity_chroma_spill_exceeds_safe_reconstruction_scope"]
+        if regeneration_required
+        else []
+    )
     alpha_hash_before = hashlib.sha256(alpha.tobytes()).hexdigest()
     if corrected_count:
         rgb = rgba[:, :, :3]
@@ -991,6 +1030,22 @@ def neutralize_uploaded_identity_chroma_spill(
     result.update(
         {
             "applied": bool(corrected_count),
+            "acceptable": not regeneration_required,
+            "issues": regeneration_issues,
+            "regeneration_required": regeneration_required,
+            "regeneration_reasons": regeneration_reasons,
+            "regeneration_thresholds": {
+                "body_fraction_min": (
+                    UPLOADED_IDENTITY_CHROMA_SPILL_BODY_REGENERATION_FRACTION_MIN
+                ),
+                "enclosing_component_fraction_min": (
+                    UPLOADED_IDENTITY_CHROMA_SPILL_COMPONENT_REGENERATION_FRACTION_MIN
+                ),
+                "enclosed_hole_fraction_min": (
+                    UPLOADED_IDENTITY_CHROMA_SPILL_HOLE_REGENERATION_FRACTION_MIN
+                ),
+            },
+            "unsafe_enclosed_components": unsafe_enclosed_components,
             "reason": "corrected" if corrected_count else "only_paired_eye_accents",
             "corrected_pixels": corrected_count,
             "detected_correction_pixels": int(

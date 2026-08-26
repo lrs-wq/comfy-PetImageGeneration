@@ -1013,6 +1013,8 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         center = corrected.getpixel((128, 178))
         ring = corrected.getpixel((128, 158))
         self.assertTrue(result["applied"], result)
+        self.assertTrue(result["acceptable"], result)
+        self.assertFalse(result["regeneration_required"], result)
         self.assertEqual(result["enclosed_spill_component_count"], 1)
         self.assertGreater(result["enclosed_spill_added_pixels"], 250)
         self.assertEqual(
@@ -1024,6 +1026,66 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         self.assertGreater(max(center[:3]) - min(center[:3]), 20)
         self.assertLess(ring[1] - max(ring[0], ring[2]), 5)
         self.assertEqual(corrected.getchannel("A").tobytes(), alpha_before)
+
+    def test_identity_aware_despill_rejects_broad_body_spill_for_retry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "broad-spill-dog.png"
+            image = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((48, 32, 463, 479), fill=(194, 158, 96, 255))
+            draw.rectangle((96, 232, 415, 447), fill=(72, 168, 82, 255))
+            image.save(path)
+            source_palette = {
+                "available": True,
+                "fractions": {"green": 0.0, "blue_or_cyan": 0.0},
+                "green_or_cyan_body_fraction": 0.0,
+            }
+
+            result = pipeline.neutralize_uploaded_identity_chroma_spill(
+                path,
+                source_palette,
+            )
+
+        self.assertTrue(result["applied"], result)
+        self.assertFalse(result["acceptable"], result)
+        self.assertTrue(result["regeneration_required"], result)
+        self.assertIn("broad_body_green_screen_spill", result["regeneration_reasons"])
+        self.assertEqual(
+            result["issues"],
+            ["identity_chroma_spill_exceeds_safe_reconstruction_scope"],
+        )
+
+    def test_chroma_cleanup_contract_blocks_only_unsafe_reconstruction(self) -> None:
+        chroma = {"acceptable": True, "issues": []}
+        cleanup = {
+            "acceptable": False,
+            "issues": ["identity_chroma_spill_exceeds_safe_reconstruction_scope"],
+            "regeneration_required": True,
+        }
+
+        blocked = pipeline.merge_identity_chroma_spill_cleanup(
+            chroma,
+            cleanup,
+            blocking=True,
+        )
+        advisory = pipeline.merge_identity_chroma_spill_cleanup(
+            chroma,
+            cleanup,
+            blocking=False,
+        )
+
+        self.assertFalse(blocked["acceptable"])
+        self.assertEqual(
+            blocked["issues"],
+            ["identity_chroma_spill_exceeds_safe_reconstruction_scope"],
+        )
+        self.assertTrue(advisory["acceptable"])
+        self.assertEqual(
+            advisory["warnings"],
+            ["identity_chroma_spill_exceeds_safe_reconstruction_scope"],
+        )
 
     def test_unavailable_identity_palette_signature_fails_closed(self) -> None:
         source = {"available": True, "fractions": {}}

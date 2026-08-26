@@ -325,7 +325,7 @@ def build_cartoon_reference_prompt(
     if species == "dog":
         fur_section = f"\n\n{fur_lock.strip()}" if fur_lock.strip() else ""
         return f"""Use case: identity-preserving stylized 3D dog character design.
-BACKGROUND RULE — non-negotiable: every pixel outside the dog must be one perfectly flat uniform pure #00FF00 green. No floor, shadow, gradient, scenery, text, logo, watermark, border, or halo.
+BACKGROUND RULE — non-negotiable: every pixel outside the dog must be one perfectly flat uniform pure #00FF00 green. It is a blank solid-color field, never a poster or graphic: no decorative shape, icon, symbol, letter, number, outline, pattern, floor, shadow, gradient, scenery, text, logo, watermark, border, or halo. No green shape, reflection, marking, or outline may cross onto or appear inside the dog's silhouette.
 
 The uploaded identity image, or the role-labeled uploaded identity image set when multiple views are supplied, is the only identity and appearance authority. Create a canonical identity-faithful restrained semi-realistic stylized 3D digital double of this exact same dog. Never copy identity, breed, proportions, face, coat, color, markings, ears, eyes, muzzle, tail, material, or lighting from an action profile or white model.
 
