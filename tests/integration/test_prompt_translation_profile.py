@@ -980,6 +980,51 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         self.assertGreater(max(chest[:3]) - min(chest[:3]), 20)
         self.assertEqual(corrected.getchannel("A").tobytes(), alpha_before)
 
+    def test_identity_aware_despill_repairs_enclosed_green_screen_marking(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "enclosed-spill-dog.png"
+            image = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            warm_coat = (194, 158, 96, 255)
+            draw.rectangle((32, 24, 223, 231), fill=warm_coat)
+            draw.ellipse((112, 162, 144, 192), fill=(118, 118, 108, 255))
+            draw.ellipse(
+                (106, 156, 150, 198),
+                outline=(42, 170, 70, 255),
+                width=6,
+            )
+            image.save(path)
+            alpha_before = image.getchannel("A").tobytes()
+            source_palette = {
+                "available": True,
+                "fractions": {"green": 0.0, "blue_or_cyan": 0.0},
+                "green_or_cyan_body_fraction": 0.0,
+            }
+
+            result = pipeline.neutralize_uploaded_identity_chroma_spill(
+                path,
+                source_palette,
+            )
+            with Image.open(path) as corrected_image:
+                corrected = corrected_image.convert("RGBA")
+
+        center = corrected.getpixel((128, 178))
+        ring = corrected.getpixel((128, 158))
+        self.assertTrue(result["applied"], result)
+        self.assertEqual(result["enclosed_spill_component_count"], 1)
+        self.assertGreater(result["enclosed_spill_added_pixels"], 250)
+        self.assertEqual(
+            result["enclosed_spill_reconstruction"],
+            "full_lab_telea_inpaint",
+        )
+        self.assertGreater(center[0], center[1])
+        self.assertGreater(center[1], center[2])
+        self.assertGreater(max(center[:3]) - min(center[:3]), 20)
+        self.assertLess(ring[1] - max(ring[0], ring[2]), 5)
+        self.assertEqual(corrected.getchannel("A").tobytes(), alpha_before)
+
     def test_unavailable_identity_palette_signature_fails_closed(self) -> None:
         source = {"available": True, "fractions": {}}
         candidate = {"available": False, "reason": "empty_subject_mask"}
