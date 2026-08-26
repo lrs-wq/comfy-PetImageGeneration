@@ -54,7 +54,7 @@ RECOVERABLE_OUTPUT_FALLBACK_POLICY = "identity_anchored_breathing_gif_v2"
 
 TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY = (
     "reference_aligned_static_subject_and_tray_mask_with_"
-    "adaptive_semantic_or_canvas_extraction_v3"
+    "adaptive_semantic_canvas_hybrid_extraction_v4"
 )
 TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY = (
     "driver_pose_mask_for_narrow_toileting_reference_v1"

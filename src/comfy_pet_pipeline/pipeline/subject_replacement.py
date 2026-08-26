@@ -5274,7 +5274,7 @@ REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY = (
     "reference_guided_bounded_canvas_subject_and_prop_matte_v2"
 )
 REFERENCE_ALIGNED_ADAPTIVE_EXTRACTION_POLICY = (
-    "reference_guided_adaptive_semantic_or_bounded_canvas_matte_v3"
+    "reference_guided_adaptive_semantic_bounded_hybrid_matte_v4"
 )
 REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY = (
     "semantic_u2net_static_reference_subject_and_tray_gate"
@@ -5282,7 +5282,14 @@ REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY = (
 REFERENCE_ALIGNED_BOUNDED_CANVAS_EXTRACTION_STRATEGY = (
     "bounded_canvas_color_distance"
 )
+REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY = (
+    "hybrid_semantic_u2net_plus_bounded_canvas_static_reference_gate"
+)
+REFERENCE_ALIGNED_HYBRID_EXTRACTION_POLICY = (
+    "reference_guided_hybrid_semantic_plus_bounded_canvas_matte_v1"
+)
 REFERENCE_ALIGNED_BOUNDED_CANVAS_BORDER_DISTANCE_P999_MAX = 8.0
+REFERENCE_ALIGNED_HYBRID_CANVAS_BORDER_DISTANCE_P999_MAX = 32.0
 
 
 def _canvas_border_color_distance_p999(rgb: np.ndarray) -> float:
@@ -5317,6 +5324,11 @@ def reference_aligned_transparent_extraction_strategy(
         <= REFERENCE_ALIGNED_BOUNDED_CANVAS_BORDER_DISTANCE_P999_MAX
     ):
         return REFERENCE_ALIGNED_BOUNDED_CANVAS_EXTRACTION_STRATEGY
+    if (
+        float(canvas_border_distance_p999_max)
+        <= REFERENCE_ALIGNED_HYBRID_CANVAS_BORDER_DISTANCE_P999_MAX
+    ):
+        return REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY
     return REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY
 
 
@@ -5734,6 +5746,17 @@ def build_unstabilized_transparent_gif(
                     max(reference_aligned_border_distance_p999_values)
                 )
             )
+
+        def normalized_guidance_mask(index: int) -> np.ndarray | None:
+            if guidance_frames is None:
+                return None
+            guidance_rgb = normalized_rgb(guidance_frames[index])
+            return (
+                (guidance_rgb[:, :, 2] >= 225)
+                & (guidance_rgb[:, :, 0] <= 30)
+                & (guidance_rgb[:, :, 1] <= 30)
+            )
+
         chroma_masks: list[tuple[np.ndarray, np.ndarray]] = []
         chroma_usable = True
         for frame in normalized_source:
@@ -5749,6 +5772,44 @@ def build_unstabilized_transparent_gif(
                 break
             chroma_masks.append((extracted_rgb, extracted_alpha))
 
+        reference_aligned_bounded_frames: (
+            list[tuple[np.ndarray, np.ndarray]] | None
+        ) = None
+        reference_aligned_bounded_metrics: list[dict[str, float]] = []
+        if (
+            not chroma_usable
+            and reference_aligned_extraction_strategy
+            == REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY
+        ):
+            reference_aligned_bounded_frames = []
+            for index, frame in enumerate(normalized_source):
+                guidance = normalized_guidance_mask(index)
+                if guidance is None:
+                    raise RuntimeError(
+                        "Reference-aligned hybrid extraction requires a "
+                        "guidance mask video"
+                    )
+                bounded_rgb, bounded_alpha, bounded_metrics = (
+                    _reference_guided_uniform_background_mask(
+                        frame.copy(),
+                        guidance,
+                        frame_index=index,
+                        guidance_component_coverage_required_min=(
+                            guidance_component_coverage_required_min
+                        ),
+                        guidance_area_ratio_required_min=(
+                            guidance_area_ratio_required_min
+                        ),
+                        guidance_component_area_fraction_required_min=(
+                            guidance_component_area_fraction_required_min
+                        ),
+                    )
+                )
+                reference_aligned_bounded_frames.append(
+                    (bounded_rgb, bounded_alpha)
+                )
+                reference_aligned_bounded_metrics.append(bounded_metrics)
+
         extraction_method = "chroma_key"
         extracted_frames: list[tuple[np.ndarray, np.ndarray]]
         semantic_metrics: list[dict[str, float]] = []
@@ -5762,12 +5823,12 @@ def build_unstabilized_transparent_gif(
             extraction_method = REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY
             extracted_frames = []
             for index, frame in enumerate(normalized_source):
-                guidance_rgb = normalized_rgb(guidance_frames[index])
-                guidance = (
-                    (guidance_rgb[:, :, 2] >= 225)
-                    & (guidance_rgb[:, :, 0] <= 30)
-                    & (guidance_rgb[:, :, 1] <= 30)
-                )
+                guidance = normalized_guidance_mask(index)
+                if guidance is None:
+                    raise RuntimeError(
+                        "Reference-aligned bounded-canvas extraction requires "
+                        "a guidance mask video"
+                    )
                 extracted_rgb, extracted_alpha, frame_metrics = (
                     _reference_guided_uniform_background_mask(
                         frame.copy(),
@@ -5787,7 +5848,12 @@ def build_unstabilized_transparent_gif(
                 extracted_frames.append((extracted_rgb, extracted_alpha))
                 semantic_metrics.append(frame_metrics)
         else:
-            extraction_method = "rembg_u2net_guided_by_pose_mask"
+            extraction_method = (
+                REFERENCE_ALIGNED_HYBRID_EXTRACTION_POLICY
+                if reference_aligned_extraction_strategy
+                == REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY
+                else "rembg_u2net_guided_by_pose_mask"
+            )
             from rembg import new_session, remove
 
             session = new_session(
@@ -5811,12 +5877,7 @@ def build_unstabilized_transparent_gif(
 
                 guidance: np.ndarray | None = None
                 if guidance_frames is not None:
-                    guidance_rgb = normalized_rgb(guidance_frames[index])
-                    guidance = (
-                        (guidance_rgb[:, :, 2] >= 225)
-                        & (guidance_rgb[:, :, 0] <= 30)
-                        & (guidance_rgb[:, :, 1] <= 30)
-                    )
+                    guidance = normalized_guidance_mask(index)
 
                 hard = (alpha >= 16).astype(np.uint8)
                 component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -6032,6 +6093,13 @@ def build_unstabilized_transparent_gif(
                     semantic_core_retention = 1.0
                     semantic_upper_core_retention = 1.0
                     semantic_grid_core_retention_min = 1.0
+                if reference_aligned_bounded_frames is not None:
+                    bounded_rgb, bounded_alpha = (
+                        reference_aligned_bounded_frames[index]
+                    )
+                    bounded_additions = bounded_alpha > alpha
+                    rgb[bounded_additions] = bounded_rgb[bounded_additions]
+                    alpha = np.maximum(alpha, bounded_alpha).astype(np.uint8)
                 alpha[:2, :] = 0
                 alpha[-2:, :] = 0
                 alpha[:, :2] = 0
@@ -6263,7 +6331,11 @@ def build_unstabilized_transparent_gif(
             cleanup_metrics["second_pass_selected"] = False
             if (
                 reference_aligned_uniform_background
-                and extraction_method == "rembg_u2net_guided_by_pose_mask"
+                and extraction_method
+                in {
+                    "rembg_u2net_guided_by_pose_mask",
+                    REFERENCE_ALIGNED_HYBRID_EXTRACTION_POLICY,
+                }
                 and (
                     not bool(cleanup_metrics.get("acceptable"))
                     or float(cleanup_metrics.get("penalty", 0.0)) > 50.0
@@ -6539,6 +6611,23 @@ def build_unstabilized_transparent_gif(
                 ),
                 "bounded_canvas_selection_max": (
                     REFERENCE_ALIGNED_BOUNDED_CANVAS_BORDER_DISTANCE_P999_MAX
+                ),
+                "hybrid_canvas_selection_max": (
+                    REFERENCE_ALIGNED_HYBRID_CANVAS_BORDER_DISTANCE_P999_MAX
+                ),
+                "bounded_guidance_coverage_min": min(
+                    (
+                        item.get("guidance_coverage", 1.0)
+                        for item in reference_aligned_bounded_metrics
+                    ),
+                    default=None,
+                ),
+                "bounded_area_ratio_min": min(
+                    (
+                        item.get("area_ratio", 1.0)
+                        for item in reference_aligned_bounded_metrics
+                    ),
+                    default=None,
                 ),
             },
             "silhouette_edge_cleanup": {

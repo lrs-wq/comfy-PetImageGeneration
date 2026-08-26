@@ -19,6 +19,7 @@ from src.comfy_pet_pipeline.media.transparent_animation import (
 from src.comfy_pet_pipeline.pipeline.subject_replacement import (
     REFERENCE_ALIGNED_ADAPTIVE_EXTRACTION_POLICY,
     REFERENCE_ALIGNED_BOUNDED_CANVAS_EXTRACTION_STRATEGY,
+    REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY,
     REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY,
     REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY,
     _reference_guided_uniform_background_mask,
@@ -105,7 +106,7 @@ class TransparentVideoCliTests(unittest.TestCase):
     def test_reference_aligned_extraction_is_adaptive(self):
         self.assertEqual(
             REFERENCE_ALIGNED_ADAPTIVE_EXTRACTION_POLICY,
-            "reference_guided_adaptive_semantic_or_bounded_canvas_matte_v3",
+            "reference_guided_adaptive_semantic_bounded_hybrid_matte_v4",
         )
         self.assertEqual(
             reference_aligned_transparent_extraction_strategy(7.99),
@@ -113,6 +114,10 @@ class TransparentVideoCliTests(unittest.TestCase):
         )
         self.assertEqual(
             reference_aligned_transparent_extraction_strategy(20.70),
+            REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY,
+        )
+        self.assertEqual(
+            reference_aligned_transparent_extraction_strategy(40.0),
             REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY,
         )
 
