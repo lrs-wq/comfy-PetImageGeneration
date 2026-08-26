@@ -5271,8 +5271,53 @@ def transparent_guidance_dynamic_component_radius(action: str | None) -> int:
 
 
 REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY = (
-    "reference_guided_uniform_background_subject_and_prop_matte_v1"
+    "reference_guided_bounded_canvas_subject_and_prop_matte_v2"
 )
+REFERENCE_ALIGNED_ADAPTIVE_EXTRACTION_POLICY = (
+    "reference_guided_adaptive_semantic_or_bounded_canvas_matte_v3"
+)
+REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY = (
+    "semantic_u2net_static_reference_subject_and_tray_gate"
+)
+REFERENCE_ALIGNED_BOUNDED_CANVAS_EXTRACTION_STRATEGY = (
+    "bounded_canvas_color_distance"
+)
+REFERENCE_ALIGNED_BOUNDED_CANVAS_BORDER_DISTANCE_P999_MAX = 8.0
+
+
+def _canvas_border_color_distance_p999(rgb: np.ndarray) -> float:
+    """Measure how far a generated canvas border varies from its median RGB."""
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError("Canvas border measurement requires an RGB frame")
+    height, width = rgb.shape[:2]
+    border_width = max(4, min(8, min(height, width) // 32))
+    pixels = rgb.astype(np.float32)
+    border_pixels = np.concatenate(
+        (
+            pixels[:border_width, :, :].reshape(-1, 3),
+            pixels[-border_width:, :, :].reshape(-1, 3),
+            pixels[:, :border_width, :].reshape(-1, 3),
+            pixels[:, -border_width:, :].reshape(-1, 3),
+        ),
+        axis=0,
+    )
+    background_rgb = np.median(border_pixels, axis=0)
+    border_distance = np.sqrt(
+        np.sum((border_pixels - background_rgb) ** 2, axis=1)
+    )
+    return float(np.percentile(border_distance, 99.9))
+
+
+def reference_aligned_transparent_extraction_strategy(
+    canvas_border_distance_p999_max: float,
+) -> str:
+    """Choose canvas extraction only when every frame is genuinely flat."""
+    if (
+        float(canvas_border_distance_p999_max)
+        <= REFERENCE_ALIGNED_BOUNDED_CANVAS_BORDER_DISTANCE_P999_MAX
+    ):
+        return REFERENCE_ALIGNED_BOUNDED_CANVAS_EXTRACTION_STRATEGY
+    return REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY
 
 
 def _reference_guided_uniform_background_mask(
@@ -5284,14 +5329,16 @@ def _reference_guided_uniform_background_mask(
     guidance_area_ratio_required_min: float,
     guidance_component_area_fraction_required_min: float,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
-    """Extract a complete subject+prop matte from a uniform generated canvas.
+    """Extract a complete subject+prop matte from a low-variation canvas.
 
     U2Net reliably isolates an animal, but it can omit a broad rectangular pet
-    toilet tray. SCAIL canvases are generated on a uniform background, so for a
-    reference-aligned toileting guide we estimate that background from a clean
-    border and retain every connected foreground component that overlaps the
-    immutable dog+tray reference mask. This is intentionally opt-in; callers
-    must first prove that the reference already contains the complete tray.
+    toilet tray. SCAIL canvases are generated on a nearly uniform background,
+    sometimes with a bounded cyan/gray gradient. For a reference-aligned
+    toileting guide we estimate the canvas from its clean border, adapt the
+    alpha threshold to that measured variation, and retain every connected
+    foreground component overlapping the immutable dog+tray reference mask.
+    This is intentionally opt-in; callers must first prove that the reference
+    already contains the complete tray.
     """
 
     if rgb.ndim != 3 or rgb.shape[2] != 3:
@@ -5320,20 +5367,21 @@ def _reference_guided_uniform_background_mask(
         axis=0,
     )
     background_rgb = np.median(border_pixels, axis=0)
-    border_distance = np.sqrt(
-        np.sum((border_pixels - background_rgb) ** 2, axis=1)
-    )
-    border_distance_p999 = float(np.percentile(border_distance, 99.9))
-    if border_distance_p999 > 8.0:
+    border_distance_p999 = _canvas_border_color_distance_p999(rgb)
+    if border_distance_p999 > 32.0:
         raise RuntimeError(
-            "Reference-aligned toileting background is not uniform at frame "
+            "Reference-aligned toileting canvas varies too much at frame "
             f"{frame_index}: border_distance_p999={border_distance_p999:.4f}"
         )
 
     distance = np.sqrt(
         np.sum((pixels - background_rgb.reshape(1, 1, 3)) ** 2, axis=2)
     )
-    alpha_low = max(6.0, border_distance_p999 + 2.0)
+    # A truly flat canvas keeps the original 6..20 soft transition. Generated
+    # cyan/gray canvases can have a smooth border drift near 21 RGB-distance
+    # units; placing the zero-alpha boundary three units above the measured
+    # p99.9 removes that canvas without weakening dog+tray coverage.
+    alpha_low = max(6.0, border_distance_p999 + 3.0)
     alpha_high = max(20.0, alpha_low + 12.0)
     alpha = np.clip(
         (distance - alpha_low) * (255.0 / (alpha_high - alpha_low)),
@@ -5669,6 +5717,23 @@ def build_unstabilized_transparent_gif(
             )
 
         normalized_source = [normalized_rgb(frame) for frame in source_frames]
+        reference_aligned_border_distance_p999_values: list[float] = []
+        reference_aligned_extraction_strategy: str | None = None
+        if reference_aligned_uniform_background:
+            if guidance_frames is None:
+                raise RuntimeError(
+                    "Reference-aligned adaptive extraction requires a "
+                    "guidance mask video"
+                )
+            reference_aligned_border_distance_p999_values = [
+                _canvas_border_color_distance_p999(frame)
+                for frame in normalized_source
+            ]
+            reference_aligned_extraction_strategy = (
+                reference_aligned_transparent_extraction_strategy(
+                    max(reference_aligned_border_distance_p999_values)
+                )
+            )
         chroma_masks: list[tuple[np.ndarray, np.ndarray]] = []
         chroma_usable = True
         for frame in normalized_source:
@@ -5689,12 +5754,11 @@ def build_unstabilized_transparent_gif(
         semantic_metrics: list[dict[str, float]] = []
         if chroma_usable and len(chroma_masks) == len(normalized_source):
             extracted_frames = chroma_masks
-        elif reference_aligned_uniform_background:
-            if guidance_frames is None:
-                raise RuntimeError(
-                    "Reference-aligned uniform-background extraction requires "
-                    "a guidance mask video"
-                )
+        elif (
+            reference_aligned_uniform_background
+            and reference_aligned_extraction_strategy
+            == REFERENCE_ALIGNED_BOUNDED_CANVAS_EXTRACTION_STRATEGY
+        ):
             extraction_method = REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY
             extracted_frames = []
             for index, frame in enumerate(normalized_source):
@@ -6195,6 +6259,62 @@ def build_unstabilized_transparent_gif(
                     action=action,
                 )
             )
+            cleanup_metrics["cleanup_pass_count"] = 1
+            cleanup_metrics["second_pass_selected"] = False
+            if (
+                reference_aligned_uniform_background
+                and extraction_method == "rembg_u2net_guided_by_pose_mask"
+                and (
+                    not bool(cleanup_metrics.get("acceptable"))
+                    or float(cleanup_metrics.get("penalty", 0.0)) > 50.0
+                )
+            ):
+                second_rgb, second_alpha, second_metrics = (
+                    clean_transparent_edge_halo(
+                        cleaned_rgb,
+                        cleaned_alpha,
+                        action=action,
+                    )
+                )
+                if float(second_metrics.get("penalty", 500.0)) < float(
+                    cleanup_metrics.get("penalty", 500.0)
+                ):
+                    first_metrics = cleanup_metrics
+                    cleaned_rgb = second_rgb
+                    cleaned_alpha = second_alpha
+                    cleanup_metrics = {
+                        **second_metrics,
+                        "applied": bool(first_metrics.get("applied"))
+                        or bool(second_metrics.get("applied")),
+                        "rgb_applied": bool(first_metrics.get("rgb_applied"))
+                        or bool(second_metrics.get("rgb_applied")),
+                        "alpha_applied": bool(
+                            first_metrics.get("alpha_applied")
+                        )
+                        or bool(second_metrics.get("alpha_applied")),
+                        "replaced_pixels": int(
+                            first_metrics.get("replaced_pixels", 0)
+                        )
+                        + int(second_metrics.get("replaced_pixels", 0)),
+                        "alpha_adjusted_pixels": int(
+                            np.count_nonzero(cleaned_alpha != alpha)
+                        ),
+                        "candidate_pixels": int(
+                            first_metrics.get("candidate_pixels", 0)
+                        ),
+                        "candidate_fraction": float(
+                            first_metrics.get("candidate_fraction", 0.0)
+                        ),
+                        "contact_shadow": first_metrics.get(
+                            "contact_shadow",
+                            second_metrics.get("contact_shadow"),
+                        ),
+                        "cleanup_pass_count": 2,
+                        "second_pass_selected": True,
+                        "first_pass_penalty": float(
+                            first_metrics.get("penalty", 0.0)
+                        ),
+                    }
             cleaned_extracted_frames.append((cleaned_rgb, cleaned_alpha))
             edge_cleanup_metrics.append(cleanup_metrics)
         extracted_frames = cleaned_extracted_frames
@@ -6400,11 +6520,25 @@ def build_unstabilized_transparent_gif(
                 ),
                 "policy": REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY,
                 "border_distance_p999_max": max(
-                    (
-                        item.get("background_border_distance_p999", 0.0)
-                        for item in semantic_metrics
-                    ),
+                    reference_aligned_border_distance_p999_values,
                     default=None,
+                ),
+            },
+            "reference_aligned_extraction": {
+                "requested": bool(reference_aligned_uniform_background),
+                "policy": REFERENCE_ALIGNED_ADAPTIVE_EXTRACTION_POLICY,
+                "strategy": reference_aligned_extraction_strategy,
+                "extraction_method": extraction_method,
+                "canvas_border_distance_p999_min": min(
+                    reference_aligned_border_distance_p999_values,
+                    default=None,
+                ),
+                "canvas_border_distance_p999_max": max(
+                    reference_aligned_border_distance_p999_values,
+                    default=None,
+                ),
+                "bounded_canvas_selection_max": (
+                    REFERENCE_ALIGNED_BOUNDED_CANVAS_BORDER_DISTANCE_P999_MAX
                 ),
             },
             "silhouette_edge_cleanup": {
@@ -6469,6 +6603,11 @@ def build_unstabilized_transparent_gif(
                     for item in edge_cleanup_metrics
                     if bool(item.get("acceptable"))
                 ),
+                "second_pass_frames": sum(
+                    1
+                    for item in edge_cleanup_metrics
+                    if bool(item.get("second_pass_selected"))
+                ),
                 "residual_candidate_fraction_max": max(
                     (
                         float(
@@ -6507,7 +6646,7 @@ def build_unstabilized_transparent_gif(
                     "dynamic_drinking_running_limb_proximity_v1"
                     if normalized_action in {"drinking", "running"}
                     else (
-                        "reference_aligned_subject_and_tray_component_v1"
+                        "reference_aligned_subject_and_tray_component_v2"
                         if reference_aligned_uniform_background
                         else "static_action_component_v1"
                     )

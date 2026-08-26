@@ -54,7 +54,7 @@ RECOVERABLE_OUTPUT_FALLBACK_POLICY = "identity_anchored_breathing_gif_v2"
 
 TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY = (
     "reference_aligned_static_subject_and_tray_mask_with_"
-    "uniform_background_extraction_v1"
+    "adaptive_semantic_or_canvas_extraction_v3"
 )
 TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY = (
     "driver_pose_mask_for_narrow_toileting_reference_v1"
@@ -2330,7 +2330,7 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "reference_aligned_uniform_background"
             ]:
                 transparent_command.append(
-                    "--reference-aligned-uniform-background"
+                    "--reference-aligned-adaptive-extraction"
                 )
             update_job(
                 job_id,

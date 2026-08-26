@@ -17,9 +17,13 @@ from src.comfy_pet_pipeline.media.transparent_animation import (
     validate_animation,
 )
 from src.comfy_pet_pipeline.pipeline.subject_replacement import (
+    REFERENCE_ALIGNED_ADAPTIVE_EXTRACTION_POLICY,
+    REFERENCE_ALIGNED_BOUNDED_CANVAS_EXTRACTION_STRATEGY,
+    REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY,
     REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY,
     _reference_guided_uniform_background_mask,
     encode_static_mask_video,
+    reference_aligned_transparent_extraction_strategy,
     transparent_guidance_area_ratio_minimum,
     transparent_guidance_component_area_fraction_minimum,
     transparent_guidance_component_coverage_minimum,
@@ -83,9 +87,34 @@ class TransparentVideoCliTests(unittest.TestCase):
                 "--reference-aligned-uniform-background",
             ]
         )
+        adaptive = cli.build_parser().parse_args(
+            [
+                "video.mp4",
+                "mask.mp4",
+                "output.gif",
+                "--action",
+                "toileting",
+                "--reference-aligned-adaptive-extraction",
+            ]
+        )
 
         self.assertFalse(default.reference_aligned_uniform_background)
         self.assertTrue(enabled.reference_aligned_uniform_background)
+        self.assertTrue(adaptive.reference_aligned_uniform_background)
+
+    def test_reference_aligned_extraction_is_adaptive(self):
+        self.assertEqual(
+            REFERENCE_ALIGNED_ADAPTIVE_EXTRACTION_POLICY,
+            "reference_guided_adaptive_semantic_or_bounded_canvas_matte_v3",
+        )
+        self.assertEqual(
+            reference_aligned_transparent_extraction_strategy(7.99),
+            REFERENCE_ALIGNED_BOUNDED_CANVAS_EXTRACTION_STRATEGY,
+        )
+        self.assertEqual(
+            reference_aligned_transparent_extraction_strategy(20.70),
+            REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY,
+        )
 
     def test_drinking_and_running_use_bounded_limb_proximity(self):
         for action in ("drinking", "running"):
@@ -186,7 +215,7 @@ class TransparentVideoCliTests(unittest.TestCase):
 
         self.assertEqual(
             REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY,
-            "reference_guided_uniform_background_subject_and_prop_matte_v1",
+            "reference_guided_bounded_canvas_subject_and_prop_matte_v2",
         )
         self.assertEqual(int(alpha[0, 0]), 0)
         self.assertGreaterEqual(int(alpha[96, 24]), 128)
@@ -195,6 +224,36 @@ class TransparentVideoCliTests(unittest.TestCase):
         self.assertGreater(metrics["area_ratio"], 0.95)
         self.assertLess(metrics["background_border_distance_p999"], 1.0)
         self.assertTrue(np.all(output_rgb[alpha == 0] == 0))
+
+    def test_bounded_canvas_gradient_retains_reference_aligned_tray(self):
+        x_gradient = np.linspace(-10.0, 10.0, 128, dtype=np.float32)[None, :]
+        y_gradient = np.linspace(-5.0, 5.0, 128, dtype=np.float32)[:, None]
+        rgb = np.empty((128, 128, 3), dtype=np.float32)
+        rgb[:, :, 0] = 230.0 + x_gradient + y_gradient
+        rgb[:, :, 1] = 241.0 + x_gradient * 0.7 - y_gradient
+        rgb[:, :, 2] = 240.0 - x_gradient * 0.5 + y_gradient * 0.8
+        rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+        guidance_u8 = np.zeros((128, 128), dtype=np.uint8)
+        cv2.rectangle(rgb, (16, 82), (112, 112), (170, 180, 176), -1)
+        cv2.rectangle(guidance_u8, (16, 82), (112, 112), 1, -1)
+        cv2.ellipse(rgb, (64, 58), (27, 43), 0, 0, 360, (222, 184, 126), -1)
+        cv2.ellipse(guidance_u8, (64, 58), (27, 43), 0, 0, 360, 1, -1)
+
+        _output_rgb, alpha, metrics = _reference_guided_uniform_background_mask(
+            rgb,
+            guidance_u8.astype(bool),
+            frame_index=0,
+            guidance_component_coverage_required_min=0.70,
+            guidance_area_ratio_required_min=0.78,
+            guidance_component_area_fraction_required_min=0.005,
+        )
+
+        self.assertGreater(metrics["background_border_distance_p999"], 8.0)
+        self.assertLess(metrics["background_border_distance_p999"], 32.0)
+        self.assertGreater(metrics["guidance_coverage"], 0.80)
+        self.assertGreater(metrics["area_ratio"], 0.80)
+        self.assertEqual(int(alpha[0, 0]), 0)
+        self.assertGreaterEqual(int(alpha[96, 24]), 128)
 
     @unittest.skipUnless(importlib.util.find_spec("av"), "PyAV is not installed")
     def test_static_reference_mask_normalizes_black_background_losslessly(self):

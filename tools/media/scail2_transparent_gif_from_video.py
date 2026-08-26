@@ -41,11 +41,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gif-fps", type=int, default=20)
     parser.add_argument("--gif-frames", type=int, default=100)
     parser.add_argument(
+        "--reference-aligned-adaptive-extraction",
         "--reference-aligned-uniform-background",
+        dest="reference_aligned_uniform_background",
         action="store_true",
         help=(
-            "Extract a complete subject+prop matte from a uniform canvas using "
-            "the supplied immutable reference mask."
+            "Adaptively extract a complete subject+prop matte using either a "
+            "flat-canvas mask or semantic segmentation, gated by the supplied "
+            "immutable reference mask."
         ),
     )
     return parser
