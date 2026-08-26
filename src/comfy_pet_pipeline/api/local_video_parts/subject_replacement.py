@@ -54,12 +54,12 @@ RECOVERABLE_OUTPUT_FALLBACK_POLICY = "identity_anchored_breathing_gif_v2"
 
 TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY = (
     "reference_aligned_static_subject_and_tray_mask_with_"
-    "adaptive_semantic_canvas_hybrid_extraction_v4"
+    "adaptive_semantic_canvas_hybrid_extraction_v5"
 )
 TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY = (
     "driver_pose_mask_for_narrow_toileting_reference_v1"
 )
-TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = 0.72
+TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = 0.70
 
 
 def select_transparent_guidance_policy(

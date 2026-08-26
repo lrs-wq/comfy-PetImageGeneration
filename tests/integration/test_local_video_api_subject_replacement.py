@@ -1367,6 +1367,28 @@ class TransparentGuidanceSelectionTests(unittest.TestCase):
         self.assertEqual(drinking["policy"], "driver_pose_mask_v1")
         self.assertEqual(drinking["source_key"], "pose_mask_video")
 
+    def test_borderline_real_tray_reference_uses_static_reference_mask(self) -> None:
+        plan = pipeline.select_transparent_guidance_policy(
+            "toileting",
+            {
+                "reference_metadata": {
+                    "reference_alpha_bbox": [108, 50, 404, 462],
+                }
+            },
+        )
+
+        self.assertAlmostEqual(
+            plan["reference_alpha_bbox_aspect_ratio"],
+            296 / 412,
+        )
+        self.assertEqual(
+            plan["policy"],
+            pipeline.TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY,
+        )
+        self.assertEqual(plan["source_key"], "reference_mask")
+        self.assertTrue(plan["static_reference_mask"])
+        self.assertTrue(plan["reference_aligned_uniform_background"])
+
 
 class CanonicalChromaIntegrityTests(unittest.TestCase):
     def test_canonical_cutout_rejects_large_central_neck_hole(self) -> None:
