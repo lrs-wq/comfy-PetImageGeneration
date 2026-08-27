@@ -127,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.26"
+API_VERSION = "2.26.27"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -288,7 +288,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.36"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.37"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -692,6 +692,9 @@ DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY = (
 )
 DOG_DRINKING_STATIC_POSE_FALLBACK_POLICY = (
     "static_reference_drinking_pose_identity_fallback_v1"
+)
+DOG_DRINKING_FULL_DRIVER_FALLBACK_POLICY = (
+    "full_white_driver_drinking_pose_static_bowl_v1"
 )
 UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY = (
     "uploaded_subject_absolute_animation_roughness_v1"
@@ -2135,6 +2138,7 @@ def require_expected_scail_pose_policy(
         and expected_policy == DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY
     ):
         accepted_policies.add(DOG_DRINKING_STATIC_POSE_FALLBACK_POLICY)
+        accepted_policies.add(DOG_DRINKING_FULL_DRIVER_FALLBACK_POLICY)
     if actual_policy not in accepted_policies:
         raise RuntimeError(
             f"SCAIL {action} pose policy changed before GPU submission: "

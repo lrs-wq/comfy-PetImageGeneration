@@ -103,6 +103,32 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             pipeline.DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
         )
         self.assertTrue(dog_drinking_pose["driver_input_used"])
+        self.assertEqual(
+            dog_drinking_pose["dynamic_full_white_driver_fallback_policy"],
+            pipeline.DOG_DRINKING_FULL_DRIVER_FALLBACK_POLICY,
+        )
+        self.assertTrue(
+            dog_drinking_pose["dynamic_fallback_full_white_driver_geometry"]
+        )
+        self.assertTrue(
+            dog_drinking_pose["dynamic_fallback_static_bowl_mask_and_rgb"]
+        )
+        toileting_guidance = payload["subject_replacement"][
+            "dog_toileting_first_frame"
+        ]["transparent_guidance"]
+        self.assertTrue(
+            toileting_guidance[
+                "blue_identity_and_red_static_tray_roles_preserved"
+            ]
+        )
+        self.assertTrue(
+            toileting_guidance["low_contrast_static_tray_neutral_despill"]
+        )
+        self.assertTrue(
+            toileting_guidance[
+                "transparent_failure_isolated_to_current_action"
+            ]
+        )
         self.assertFalse(payload["subject_replacement"]["ok"])
         self.assertEqual(
             payload["subject_replacement"]["upload_validation"]["status"],

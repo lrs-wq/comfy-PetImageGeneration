@@ -229,6 +229,73 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         # tight v3 fingerprint instead of treating that expected mask delta as speed.
         self.assertLess(audit["lower_quarter_change_ratio_max"], 0.015)
 
+    def test_digest_bound_dog_drinking_loop_passes_dynamic_full_driver_fallback(
+        self,
+    ) -> None:
+        profile = pipeline.load_subject_profile(
+            "dog_small_white_model_test_v1"
+        )
+        driver_path = Path(
+            profile["runtime"]["actions"]["drinking"]["driving_animation"]
+        )
+        frames, durations = scail_pipeline.read_animation_frames(driver_path)
+        sampled = scail_pipeline.sample_timed_frames(frames, durations, 81, 16.0)
+
+        pose_frames, mask_frames, metadata = (
+            scail_pipeline.make_full_drinking_pose_and_mask_frames(
+                sampled,
+                (512, 512),
+                reference_retarget_failure=(
+                    "drinking_reference_motion_unreliable: test_retarget"
+                ),
+            )
+        )
+
+        self.assertEqual(len(pose_frames), 81)
+        self.assertEqual(len(mask_frames), 81)
+        self.assertEqual(
+            metadata["policy"],
+            scail_pipeline.DRINKING_FULL_WHITE_DRIVER_FALLBACK_POLICY,
+        )
+        self.assertFalse(metadata["fallback_used"])
+        self.assertTrue(metadata["driver_input_used"])
+        self.assertFalse(metadata["driver_signal_only"])
+        self.assertTrue(metadata["full_white_driver_geometry"])
+        self.assertTrue(metadata["scene_prop_separated"])
+        self.assertTrue(metadata["static_bowl_mask"])
+        self.assertTrue(metadata["static_bowl_rgb"])
+        self.assertTrue(metadata["identity_motion_audit"]["passed"])
+        self.assertGreaterEqual(
+            metadata["identity_motion_audit"]["change_ratio_max"],
+            scail_pipeline.DRINKING_FULL_DRIVER_CHANGE_RATIO_MIN,
+        )
+
+        first_mask = np.asarray(mask_frames[0], dtype=np.uint8)
+        static_bowl = np.all(first_mask == (255, 0, 0), axis=2)
+        self.assertGreater(int(np.count_nonzero(static_bowl)), 1000)
+        first_bowl_rgb = np.asarray(pose_frames[0], dtype=np.uint8)[static_bowl]
+        for pose_frame, mask_frame in zip(
+            pose_frames[1:],
+            mask_frames[1:],
+            strict=True,
+        ):
+            self.assertTrue(
+                np.array_equal(
+                    static_bowl,
+                    np.all(
+                        np.asarray(mask_frame, dtype=np.uint8)
+                        == (255, 0, 0),
+                        axis=2,
+                    ),
+                )
+            )
+            self.assertTrue(
+                np.array_equal(
+                    first_bowl_rgb,
+                    np.asarray(pose_frame, dtype=np.uint8)[static_bowl],
+                )
+            )
+
     def test_dog_eating_prompts_require_low_fixed_kibble_below_rim(self) -> None:
         pose = pipeline.subject_replacement_pose_prompt("eating", species="dog")
         rules = pipeline.action_first_frame_rules(pose, species="dog")

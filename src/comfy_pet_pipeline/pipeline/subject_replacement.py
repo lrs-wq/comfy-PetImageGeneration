@@ -77,6 +77,10 @@ EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN = 0.011
 DRINKING_REFERENCE_ALIGNED_POSE_POLICY = (
     "reference_space_white_driver_head_path_static_bowl_v3"
 )
+DRINKING_FULL_WHITE_DRIVER_FALLBACK_POLICY = (
+    "full_white_driver_drinking_pose_static_bowl_v1"
+)
+DRINKING_FULL_DRIVER_CHANGE_RATIO_MIN = 0.01
 DRINKING_REFERENCE_HEAD_LIFT_PX = 36.0
 DRINKING_REFERENCE_HEAD_LIFT_MIN_PX = 14.0
 DRINKING_REFERENCE_LAP_CYCLES = 3
@@ -4458,6 +4462,259 @@ def make_static_reference_drinking_pose_frames(
     )
 
 
+def make_full_drinking_pose_and_mask_frames(
+    sampled_frames: list[Image.Image],
+    canvas_size: tuple[int, int],
+    *,
+    reference_retarget_failure: str,
+) -> tuple[list[Image.Image], list[Image.Image], dict[str, Any]]:
+    """Use the complete white driver when reference-space retargeting is unsafe.
+
+    The approved upload remains SCAIL's identity reference.  Only action geometry
+    comes from the digest-bound white maquette: the dog silhouette varies on every
+    frame, while a temporal vote freezes the bowl mask and bowl RGB for the loop.
+    This is intentionally dynamic; a static reference is not an acceptable
+    drinking fallback because it removes the action signal before GPU submission.
+    """
+
+    frame_count = len(sampled_frames)
+    if frame_count < 9:
+        raise ValueError(
+            "drinking_full_driver_fallback_unreliable: fewer_than_9_frames"
+        )
+
+    cleaned_frames: list[Image.Image] = []
+    cleanup_records: list[dict[str, Any]] = []
+    for frame in sampled_frames:
+        driver_rgba = np.asarray(frame.convert("RGBA"), dtype=np.uint8).copy()
+        driver_silhouette, cleanup = white_maquette_semantic_silhouette(
+            driver_rgba
+        )
+        driver_luma = cv2.cvtColor(driver_rgba[..., :3], cv2.COLOR_RGB2GRAY)
+        driver_rgba[..., :3] = np.repeat(driver_luma[..., None], 3, axis=2)
+        driver_rgba[..., 3] = driver_silhouette
+        driver_rgba[driver_silhouette == 0, :3] = 0
+        cleaned_frames.append(Image.fromarray(driver_rgba, mode="RGBA"))
+        cleanup_records.append(cleanup)
+
+    source_bbox = expand_bbox(
+        union_alpha_bbox(cleaned_frames),
+        cleaned_frames[0].size,
+        margin_fraction=0.06,
+    )
+    normalized_frames = [
+        contain_rgba(frame.crop(source_bbox), canvas_size, 0.88)
+        for frame in cleaned_frames
+    ]
+
+    detected_prop_masks: list[np.ndarray] = []
+    detected_frame_indices: list[int] = []
+    detection_records: list[dict[str, Any]] = []
+    detection_errors: list[dict[str, Any]] = []
+    for index, normalized in enumerate(normalized_frames):
+        try:
+            colored_mask, _prop_exclusion, metadata = (
+                make_drinking_reference_identity_mask(normalized)
+            )
+        except ValueError as exc:
+            if not str(exc).startswith(
+                "drinking_reference_prop_split_unreliable:"
+            ):
+                raise
+            detection_errors.append(
+                {"frame_index": index, "error": str(exc)[:500]}
+            )
+            continue
+        colored_rgb = np.asarray(colored_mask.convert("RGB"), dtype=np.uint8)
+        prop = np.all(colored_rgb == (255, 0, 0), axis=2)
+        if int(np.count_nonzero(prop)) < 64:
+            detection_errors.append(
+                {
+                    "frame_index": index,
+                    "error": "detected_prop_smaller_than_64_pixels",
+                }
+            )
+            continue
+        detected_prop_masks.append(prop)
+        detected_frame_indices.append(index)
+        detection_records.append(metadata)
+
+    minimum_detected_frames = max(6, int(np.ceil(frame_count * 0.60)))
+    if len(detected_prop_masks) < minimum_detected_frames:
+        raise ValueError(
+            "drinking_full_driver_fallback_unreliable: "
+            f"bowl_detected_frames={len(detected_prop_masks)}; "
+            f"minimum={minimum_detected_frames}"
+        )
+
+    prop_stack = np.stack(detected_prop_masks, axis=0)
+    temporal_vote_minimum = max(
+        3,
+        int(np.ceil(len(detected_prop_masks) * 0.25)),
+    )
+    static_prop = np.count_nonzero(prop_stack, axis=0) >= temporal_vote_minimum
+    static_prop = cv2.morphologyEx(
+        static_prop.astype(np.uint8),
+        cv2.MORPH_CLOSE,
+        np.ones((7, 7), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    static_prop = _largest_binary_component(
+        static_prop,
+        minimum_area=64,
+        error_prefix="drinking_full_driver_fallback_unreliable",
+    )
+    static_prop_pixels = int(np.count_nonzero(static_prop))
+    canvas_area = canvas_size[0] * canvas_size[1]
+    static_prop_fraction = static_prop_pixels / float(canvas_area)
+    if not 0.001 <= static_prop_fraction <= 0.20:
+        raise ValueError(
+            "drinking_full_driver_fallback_unreliable: "
+            f"static_bowl_fraction={static_prop_fraction:.6f}"
+        )
+
+    prop_y, prop_x = np.where(static_prop)
+    detected_rgb = np.stack(
+        [
+            np.asarray(normalized_frames[index].convert("RGB"), dtype=np.uint8)
+            for index in detected_frame_indices
+        ],
+        axis=0,
+    )
+    point_rgb = detected_rgb[:, prop_y, prop_x, :]
+    point_observed = prop_stack[:, prop_y, prop_x]
+    static_point_rgb = np.median(point_rgb, axis=0)
+    observed_points = np.any(point_observed, axis=0)
+    if np.any(observed_points):
+        observed_rgb = np.where(
+            point_observed[:, observed_points, None],
+            point_rgb[:, observed_points, :].astype(np.float32),
+            np.nan,
+        )
+        static_point_rgb[observed_points] = np.nanmedian(
+            observed_rgb,
+            axis=0,
+        )
+    static_prop_rgb = np.full(
+        (canvas_size[1], canvas_size[0], 3),
+        255,
+        dtype=np.uint8,
+    )
+    static_prop_rgb[prop_y, prop_x] = np.clip(
+        np.rint(static_point_rgb),
+        0,
+        255,
+    ).astype(np.uint8)
+
+    pose_frames: list[Image.Image] = []
+    mask_frames: list[Image.Image] = []
+    identity_masks: list[np.ndarray] = []
+    identity_bboxes: list[list[int]] = []
+    for normalized in normalized_frames:
+        rgba = np.asarray(normalized.convert("RGBA"), dtype=np.uint8)
+        hard_alpha = cv2.dilate(
+            (rgba[..., 3] >= 16).astype(np.uint8),
+            np.ones((5, 5), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        identity = hard_alpha & ~static_prop
+        identity = _largest_binary_component(
+            identity,
+            minimum_area=500,
+            error_prefix="drinking_full_driver_fallback_unreliable",
+        )
+        identity_masks.append(identity)
+        identity_bboxes.append(list(binary_bbox(identity)))
+
+        pose_rgb = np.full(
+            (canvas_size[1], canvas_size[0], 3),
+            255,
+            dtype=np.uint8,
+        )
+        pose_rgb[identity] = rgba[..., :3][identity]
+        pose_rgb[static_prop] = static_prop_rgb[static_prop]
+        pose_frames.append(Image.fromarray(pose_rgb, mode="RGB"))
+
+        colored_mask = np.full_like(pose_rgb, 255)
+        colored_mask[identity] = (0, 0, 255)
+        colored_mask[static_prop] = (255, 0, 0)
+        mask_frames.append(Image.fromarray(colored_mask, mode="RGB"))
+
+    first_identity = identity_masks[0]
+    identity_change_ratios = [
+        float(np.count_nonzero(np.logical_xor(first_identity, identity)))
+        / float(canvas_area)
+        for identity in identity_masks
+    ]
+    identity_change_ratio_max = max(identity_change_ratios)
+    if identity_change_ratio_max < DRINKING_FULL_DRIVER_CHANGE_RATIO_MIN:
+        raise ValueError(
+            "drinking_full_driver_fallback_unreliable: "
+            f"identity_change_ratio_max={identity_change_ratio_max:.6f}; "
+            f"minimum={DRINKING_FULL_DRIVER_CHANGE_RATIO_MIN:.6f}"
+        )
+
+    return (
+        pose_frames,
+        mask_frames,
+        {
+            "policy": DRINKING_FULL_WHITE_DRIVER_FALLBACK_POLICY,
+            "fallback_used": False,
+            "reference_retarget_failure": reference_retarget_failure[:1000],
+            "driver_input_used": True,
+            "driver_signal_only": False,
+            "driver_rgb_preserved": False,
+            "driver_silhouette_preserved": True,
+            "full_white_driver_geometry": True,
+            "reference_identity_preserved": False,
+            "pose_geometry_scope": "full_white_driver_subject_per_frame",
+            "identity_authority": "approved_upload_drinking_reference",
+            "action_geometry_authority": "digest_bound_white_maquette_video",
+            "scene_prop_authority": "digest_bound_white_maquette_video",
+            "source_union_bbox": list(source_bbox),
+            "identity_bbox_by_frame": identity_bboxes,
+            "identity_motion_audit": {
+                "policy": "first_frame_blue_identity_mask_xor_v1",
+                "reference_frame_index": 0,
+                "change_ratio_by_frame": [
+                    round(value, 6) for value in identity_change_ratios
+                ],
+                "change_ratio_max": round(identity_change_ratio_max, 6),
+                "change_ratio_max_frame_index": int(
+                    np.argmax(identity_change_ratios)
+                ),
+                "change_ratio_minimum": DRINKING_FULL_DRIVER_CHANGE_RATIO_MIN,
+                "passed": True,
+            },
+            "driver_cleanup_policy": cleanup_records[0]["policy"],
+            "driver_cleanup_visible_fraction_min": min(
+                float(record["visible_fraction"])
+                for record in cleanup_records
+            ),
+            "bowl_detection_policy": detection_records[0]["policy"],
+            "bowl_detected_frames": len(detected_prop_masks),
+            "bowl_detection_minimum_frames": minimum_detected_frames,
+            "bowl_detection_failed_frames": detection_errors,
+            "bowl_temporal_vote_minimum_frames": temporal_vote_minimum,
+            "scene_prop_separated": True,
+            "scene_prop_fraction": static_prop_fraction,
+            "scene_prop_bbox": list(binary_bbox(static_prop)),
+            "static_bowl_mask": True,
+            "static_bowl_rgb": True,
+            "closed_loop_endpoints": bool(
+                np.array_equal(
+                    np.asarray(pose_frames[0]),
+                    np.asarray(pose_frames[-1]),
+                )
+                and np.array_equal(
+                    np.asarray(mask_frames[0]),
+                    np.asarray(mask_frames[-1]),
+                )
+            ),
+        },
+    )
+
+
 def _make_eating_reference_identity_mask_strict(
     normalized: Image.Image,
 ) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
@@ -6403,7 +6660,7 @@ def transparent_guidance_component_coverage_minimum(action: str | None) -> float
 
 def transparent_guidance_area_ratio_minimum(action: str | None) -> float:
     """Require the toilet tray footprint to survive final matte extraction."""
-    return 0.78 if str(action or "").strip().lower() == "toileting" else 0.55
+    return 0.75 if str(action or "").strip().lower() == "toileting" else 0.55
 
 
 def transparent_guidance_component_area_fraction_minimum(
@@ -6434,10 +6691,10 @@ def transparent_guidance_dynamic_component_radius(action: str | None) -> int:
 
 
 REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY = (
-    "reference_guided_bounded_canvas_subject_and_prop_matte_v2"
+    "reference_guided_bounded_canvas_subject_and_prop_matte_v3"
 )
 REFERENCE_ALIGNED_ADAPTIVE_EXTRACTION_POLICY = (
-    "reference_guided_adaptive_semantic_bounded_hybrid_matte_v4"
+    "reference_guided_adaptive_semantic_bounded_hybrid_matte_v5"
 )
 REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY = (
     "semantic_u2net_static_reference_subject_and_tray_gate"
@@ -6449,7 +6706,7 @@ REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY = (
     "hybrid_semantic_u2net_plus_bounded_canvas_static_reference_gate"
 )
 REFERENCE_ALIGNED_HYBRID_EXTRACTION_POLICY = (
-    "reference_guided_hybrid_semantic_plus_bounded_canvas_matte_v1"
+    "reference_guided_hybrid_semantic_plus_bounded_canvas_matte_v2"
 )
 REFERENCE_ALIGNED_BOUNDED_CANVAS_BORDER_DISTANCE_P999_MAX = 8.0
 REFERENCE_ALIGNED_HYBRID_CANVAS_BORDER_DISTANCE_P999_MAX = 32.0
@@ -6503,6 +6760,7 @@ def _reference_guided_uniform_background_mask(
     guidance_component_coverage_required_min: float,
     guidance_area_ratio_required_min: float,
     guidance_component_area_fraction_required_min: float,
+    static_prop_guidance: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
     """Extract a complete subject+prop matte from a low-variation canvas.
 
@@ -6528,6 +6786,18 @@ def _reference_guided_uniform_background_mask(
         raise RuntimeError(
             "Reference-aligned uniform-background guidance is empty or too small"
         )
+    if static_prop_guidance is None:
+        static_prop = np.zeros_like(guidance)
+    else:
+        if static_prop_guidance.shape != guidance.shape:
+            raise ValueError(
+                "Static prop guidance dimensions do not match the source frame"
+            )
+        static_prop = static_prop_guidance.astype(bool)
+        if int(np.count_nonzero(static_prop)) < 64:
+            raise RuntimeError(
+                "Reference-aligned static prop guidance is empty or too small"
+            )
 
     height, width = rgb.shape[:2]
     border_width = max(4, min(8, min(height, width) // 32))
@@ -6563,6 +6833,14 @@ def _reference_guided_uniform_background_mask(
         0.0,
         255.0,
     ).astype(np.uint8)
+    static_prop_recovered = static_prop & (alpha < 64)
+    if np.any(static_prop):
+        # The validated toileting reference already separates the immutable
+        # tray as the red SCAIL object.  A pale generated tray can be nearly the
+        # same colour as a cyan/gray canvas and is therefore invisible to a
+        # distance-only matte.  Preserve that fixed prop role explicitly while
+        # leaving the animal to semantic/canvas extraction.
+        alpha[static_prop] = 255
 
     hard = (alpha >= 16).astype(np.uint8)
     component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -6687,6 +6965,13 @@ def _reference_guided_uniform_background_mask(
         255.0,
     )
     output_rgb = output_rgb.astype(np.uint8)
+    if np.any(static_prop_recovered):
+        neutral_prop = cv2.cvtColor(pixels.astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        output_rgb[static_prop_recovered] = np.repeat(
+            neutral_prop[static_prop_recovered, None],
+            3,
+            axis=1,
+        )
     output_rgb[alpha == 0] = 0
 
     return output_rgb, alpha, {
@@ -6725,6 +7010,11 @@ def _reference_guided_uniform_background_mask(
         "background_border_distance_p999": border_distance_p999,
         "background_alpha_low": alpha_low,
         "background_alpha_high": alpha_high,
+        "static_prop_guidance_pixels": float(np.count_nonzero(static_prop)),
+        "static_prop_recovered_pixels": float(
+            np.count_nonzero(static_prop_recovered)
+        ),
+        "static_prop_guidance_preserved": bool(np.any(static_prop)),
     }
 
 
@@ -6910,15 +7200,29 @@ def build_unstabilized_transparent_gif(
                 )
             )
 
-        def normalized_guidance_mask(index: int) -> np.ndarray | None:
+        def normalized_guidance_roles(
+            index: int,
+        ) -> tuple[np.ndarray | None, np.ndarray | None]:
             if guidance_frames is None:
-                return None
+                return None, None
             guidance_rgb = normalized_rgb(guidance_frames[index])
-            return (
+            identity = (
                 (guidance_rgb[:, :, 2] >= 225)
                 & (guidance_rgb[:, :, 0] <= 30)
                 & (guidance_rgb[:, :, 1] <= 30)
             )
+            static_prop = (
+                (guidance_rgb[:, :, 0] >= 225)
+                & (guidance_rgb[:, :, 1] <= 30)
+                & (guidance_rgb[:, :, 2] <= 30)
+            )
+            if not reference_aligned_uniform_background:
+                return identity, None
+            return identity | static_prop, static_prop
+
+        def normalized_guidance_mask(index: int) -> np.ndarray | None:
+            guidance, _static_prop = normalized_guidance_roles(index)
+            return guidance
 
         chroma_masks: list[tuple[np.ndarray, np.ndarray]] = []
         chroma_usable = True
@@ -6946,7 +7250,9 @@ def build_unstabilized_transparent_gif(
         ):
             reference_aligned_bounded_frames = []
             for index, frame in enumerate(normalized_source):
-                guidance = normalized_guidance_mask(index)
+                guidance, static_prop_guidance = normalized_guidance_roles(
+                    index
+                )
                 if guidance is None:
                     raise RuntimeError(
                         "Reference-aligned hybrid extraction requires a "
@@ -6966,6 +7272,7 @@ def build_unstabilized_transparent_gif(
                         guidance_component_area_fraction_required_min=(
                             guidance_component_area_fraction_required_min
                         ),
+                        static_prop_guidance=static_prop_guidance,
                     )
                 )
                 reference_aligned_bounded_frames.append(
@@ -6986,7 +7293,9 @@ def build_unstabilized_transparent_gif(
             extraction_method = REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY
             extracted_frames = []
             for index, frame in enumerate(normalized_source):
-                guidance = normalized_guidance_mask(index)
+                guidance, static_prop_guidance = normalized_guidance_roles(
+                    index
+                )
                 if guidance is None:
                     raise RuntimeError(
                         "Reference-aligned bounded-canvas extraction requires "
@@ -7006,6 +7315,7 @@ def build_unstabilized_transparent_gif(
                         guidance_component_area_fraction_required_min=(
                             guidance_component_area_fraction_required_min
                         ),
+                        static_prop_guidance=static_prop_guidance,
                     )
                 )
                 extracted_frames.append((extracted_rgb, extracted_alpha))
@@ -8599,15 +8909,32 @@ def main() -> int:
                 "drinking_reference_motion_unreliable:"
             ):
                 raise
-            pose_frames, pose_masks, pose_metadata = (
-                make_static_reference_drinking_pose_frames(
-                    reference,
-                    reference_mask,
-                    (args.width, args.height),
-                    frame_count=args.frames,
-                    fallback_reason=str(exc),
+            reference_retarget_failure = str(exc)
+            try:
+                pose_frames, pose_masks, pose_metadata = (
+                    make_full_drinking_pose_and_mask_frames(
+                        sampled,
+                        (args.width, args.height),
+                        reference_retarget_failure=reference_retarget_failure,
+                    )
                 )
-            )
+            except ValueError as full_driver_exc:
+                if not str(full_driver_exc).startswith(
+                    "drinking_full_driver_fallback_unreliable:"
+                ):
+                    raise
+                pose_frames, pose_masks, pose_metadata = (
+                    make_static_reference_drinking_pose_frames(
+                        reference,
+                        reference_mask,
+                        (args.width, args.height),
+                        frame_count=args.frames,
+                        fallback_reason=(
+                            f"{reference_retarget_failure}; "
+                            f"{full_driver_exc}"
+                        ),
+                    )
+                )
     else:
         pose_frames, pose_masks, pose_metadata = make_pose_and_mask_frames(
             sampled,

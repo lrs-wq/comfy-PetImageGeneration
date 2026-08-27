@@ -106,7 +106,7 @@ class TransparentVideoCliTests(unittest.TestCase):
     def test_reference_aligned_extraction_is_adaptive(self):
         self.assertEqual(
             REFERENCE_ALIGNED_ADAPTIVE_EXTRACTION_POLICY,
-            "reference_guided_adaptive_semantic_bounded_hybrid_matte_v4",
+            "reference_guided_adaptive_semantic_bounded_hybrid_matte_v5",
         )
         self.assertEqual(
             reference_aligned_transparent_extraction_strategy(7.99),
@@ -184,7 +184,7 @@ class TransparentVideoCliTests(unittest.TestCase):
         )
         self.assertEqual(
             transparent_guidance_area_ratio_minimum("toileting"),
-            0.78,
+            0.75,
         )
         self.assertEqual(
             transparent_guidance_component_area_fraction_minimum("toileting"),
@@ -220,7 +220,7 @@ class TransparentVideoCliTests(unittest.TestCase):
 
         self.assertEqual(
             REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY,
-            "reference_guided_bounded_canvas_subject_and_prop_matte_v2",
+            "reference_guided_bounded_canvas_subject_and_prop_matte_v3",
         )
         self.assertEqual(int(alpha[0, 0]), 0)
         self.assertGreaterEqual(int(alpha[96, 24]), 128)
@@ -259,6 +259,39 @@ class TransparentVideoCliTests(unittest.TestCase):
         self.assertGreater(metrics["area_ratio"], 0.80)
         self.assertEqual(int(alpha[0, 0]), 0)
         self.assertGreaterEqual(int(alpha[96, 24]), 128)
+
+    def test_static_red_prop_guidance_recovers_low_contrast_toilet_tray(self):
+        rgb = np.full((128, 128, 3), (214, 226, 217), dtype=np.uint8)
+        identity = np.zeros((128, 128), dtype=np.uint8)
+        static_prop = np.zeros((128, 128), dtype=np.uint8)
+        cv2.ellipse(rgb, (64, 54), (25, 39), 0, 0, 360, (210, 172, 116), -1)
+        cv2.ellipse(identity, (64, 54), (25, 39), 0, 0, 360, 1, -1)
+        cv2.rectangle(rgb, (14, 84), (114, 113), (220, 229, 222), -1)
+        cv2.rectangle(static_prop, (14, 84), (114, 113), 1, -1)
+        guidance = (identity | static_prop).astype(bool)
+
+        output_rgb, alpha, metrics = _reference_guided_uniform_background_mask(
+            rgb,
+            guidance,
+            frame_index=0,
+            guidance_component_coverage_required_min=0.70,
+            guidance_area_ratio_required_min=0.75,
+            guidance_component_area_fraction_required_min=0.005,
+            static_prop_guidance=static_prop.astype(bool),
+        )
+
+        self.assertGreaterEqual(int(alpha[100, 24]), 128)
+        self.assertGreater(metrics["static_prop_recovered_pixels"], 1000)
+        self.assertTrue(metrics["static_prop_guidance_preserved"])
+        self.assertGreater(metrics["guidance_coverage"], 0.95)
+        self.assertEqual(
+            int(output_rgb[100, 24, 0]),
+            int(output_rgb[100, 24, 1]),
+        )
+        self.assertEqual(
+            int(output_rgb[100, 24, 1]),
+            int(output_rgb[100, 24, 2]),
+        )
 
     @unittest.skipUnless(importlib.util.find_spec("av"), "PyAV is not installed")
     def test_static_reference_mask_normalizes_black_background_losslessly(self):

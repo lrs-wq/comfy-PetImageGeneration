@@ -2611,6 +2611,11 @@ def run_subject_replacement_job(job_id: str) -> None:
             if not isinstance(pose_metadata, dict):
                 bowl_motion_contract_issues.append("pose_metadata_missing")
             else:
+                full_driver_drinking_fallback = bool(
+                    action == "drinking"
+                    and pose_metadata.get("policy")
+                    == DOG_DRINKING_FULL_DRIVER_FALLBACK_POLICY
+                )
                 if pose_metadata.get("fallback_used") is True:
                     bowl_motion_contract_issues.append(
                         "static_pose_fallback_forbidden"
@@ -2641,6 +2646,30 @@ def run_subject_replacement_job(job_id: str) -> None:
                     if pose_metadata.get("driver_signal_only") is not False:
                         bowl_motion_contract_issues.append(
                             "full_white_driver_silhouette_not_preserved"
+                        )
+                elif full_driver_drinking_fallback:
+                    if pose_metadata.get("driver_input_used") is not True:
+                        bowl_motion_contract_issues.append(
+                            "drinking_white_driver_not_used"
+                        )
+                    if (
+                        pose_metadata.get("full_white_driver_geometry")
+                        is not True
+                    ):
+                        bowl_motion_contract_issues.append(
+                            "full_white_driver_geometry_missing"
+                        )
+                    if pose_metadata.get("driver_signal_only") is not False:
+                        bowl_motion_contract_issues.append(
+                            "full_white_driver_silhouette_not_preserved"
+                        )
+                    if pose_metadata.get("static_bowl_mask") is not True:
+                        bowl_motion_contract_issues.append(
+                            "drinking_static_bowl_mask_missing"
+                        )
+                    if pose_metadata.get("static_bowl_rgb") is not True:
+                        bowl_motion_contract_issues.append(
+                            "drinking_static_bowl_rgb_missing"
                         )
                 elif pose_metadata.get("driver_signal_only") is not True:
                     bowl_motion_contract_issues.append(
@@ -3378,19 +3407,53 @@ def run_subject_replacement_job(job_id: str) -> None:
                     transparent_guidance_policies
                 ),
             )
-            run_cancelable_process(
-                job_id,
-                transparent_command,
-                log_path=transparent_log,
-                stage_name=f"{action} transparent GIF extraction",
-                timeout=1800,
-            )
-            if not gif_target.is_file():
-                raise RuntimeError(
-                    f"{action} transparent GIF extraction produced no file."
+            gif_target.unlink(missing_ok=True)
+            apng_target.unlink(missing_ok=True)
+            try:
+                run_cancelable_process(
+                    job_id,
+                    transparent_command,
+                    log_path=transparent_log,
+                    stage_name=f"{action} transparent GIF extraction",
+                    timeout=1800,
                 )
+                if not gif_target.is_file():
+                    raise RuntimeError(
+                        f"{action} transparent GIF extraction produced no file."
+                    )
+                transparent_metrics = logged_json(transparent_log)
+            except JobCancelled:
+                raise
+            except Exception as exc:
+                degraded_result, _fallback_source = (
+                    recover_subject_replacement_action_with_fallback(
+                        job_id,
+                        get_job(job_id),
+                        action=action,
+                        pose_index=actions.index(action) + 1,
+                        error=exc,
+                    )
+                )
+                degraded_result.update(
+                    {
+                        "scail_attempt_count": len(scail_attempt_records),
+                        "scail_video_attempts": scail_attempt_records,
+                        "scail_generation_succeeded": True,
+                        "scail_video_filename": generated_video.name,
+                        "transparent_extraction_failed": True,
+                        "transparent_guidance_policy": (
+                            transparent_guidance_plan
+                        ),
+                    }
+                )
+                results.append(degraded_result)
+                update_job(
+                    job_id,
+                    progress=action_start + action_span,
+                    subject_replacement_results=results,
+                )
+                continue
             apng_available = apng_target.is_file()
-            transparent_metrics = logged_json(transparent_log)
             transparent_metrics["guidance_policy"] = (
                 transparent_guidance_plan
             )

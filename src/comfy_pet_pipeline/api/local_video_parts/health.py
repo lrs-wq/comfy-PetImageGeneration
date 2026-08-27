@@ -705,7 +705,10 @@ def health() -> dict[str, Any]:
                     "hybrid_canvas_selection_border_distance_p999_max": 32.0,
                     "semantic_static_reference_subject_and_tray_gate": True,
                     "hybrid_alpha_union_preserves_semantic_dog_and_canvas_tray": True,
+                    "blue_identity_and_red_static_tray_roles_preserved": True,
+                    "low_contrast_static_tray_neutral_despill": True,
                     "conditional_second_edge_cleanup_pass": True,
+                    "transparent_failure_isolated_to_current_action": True,
                     "fail_closed": True,
                 },
             },
@@ -720,6 +723,11 @@ def health() -> dict[str, Any]:
                 "static_identity_safe_fallback_policy": (
                     DOG_DRINKING_STATIC_POSE_FALLBACK_POLICY
                 ),
+                "dynamic_full_white_driver_fallback_policy": (
+                    DOG_DRINKING_FULL_DRIVER_FALLBACK_POLICY
+                ),
+                "dynamic_fallback_full_white_driver_geometry": True,
+                "dynamic_fallback_static_bowl_mask_and_rgb": True,
             },
             "dog_eating_scail_pose": {
                 "policy": DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,
