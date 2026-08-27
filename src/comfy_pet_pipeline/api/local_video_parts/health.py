@@ -640,9 +640,11 @@ def health() -> dict[str, Any]:
                 "steps": DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS,
                 "denoise": DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
                 "image1": "approved_upload_anchored_canonical_identity_sampler",
-                "prompt_only_action_geometry": True,
-                "white_model_loaded_by_qwen": False,
-                "secondary_reference_loaded_by_qwen": False,
+                "image2": "digest_bound_white_model_action_geometry_guide",
+                "prompt_only_action_geometry": False,
+                "white_model_loaded_by_qwen": True,
+                "white_model_rgb_loaded_by_qwen": False,
+                "secondary_reference_loaded_by_qwen": True,
                 "negative_prompt_conditioning": False,
             },
             "dog_drinking_first_frame": {
@@ -650,20 +652,24 @@ def health() -> dict[str, Any]:
                 "steps": DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS,
                 "denoise": DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
                 "image1": "approved_upload_anchored_canonical_identity_sampler",
-                "prompt_only_action_geometry": True,
-                "white_model_loaded_by_qwen": False,
-                "secondary_reference_loaded_by_qwen": False,
+                "image2": "digest_bound_white_model_action_geometry_guide",
+                "prompt_only_action_geometry": False,
+                "white_model_loaded_by_qwen": True,
+                "white_model_rgb_loaded_by_qwen": False,
+                "secondary_reference_loaded_by_qwen": True,
                 "negative_prompt_conditioning": False,
-                "action_geometry_deferred_to_scail": True,
+                "action_geometry_deferred_to_scail": False,
             },
             "dog_toileting_first_frame": {
                 "policy": DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY,
                 "steps": DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS,
                 "denoise": DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
                 "image1": "approved_upload_anchored_canonical_identity_sampler",
-                "prompt_only_action_geometry": True,
-                "white_model_loaded_by_qwen": False,
-                "secondary_reference_loaded_by_qwen": False,
+                "image2": "digest_bound_white_model_action_geometry_guide",
+                "prompt_only_action_geometry": False,
+                "white_model_loaded_by_qwen": True,
+                "white_model_rgb_loaded_by_qwen": False,
+                "secondary_reference_loaded_by_qwen": True,
                 "negative_prompt_conditioning": False,
                 "required_spatial_gate": TOILETING_TRAY_SPATIAL_POLICY,
                 "tray_min_reference_aspect_ratio": (
@@ -707,7 +713,7 @@ def health() -> dict[str, Any]:
                 "policy": DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
                 "pose_source": "approved_upload_anchored_drinking_reference",
                 "motion_scope": "bounded_closed_loop_head_lapping_only",
-                "driver_input_used": False,
+                "driver_input_used": True,
                 "driver_rgb_preserved": False,
                 "driver_silhouette_preserved": False,
                 "body_ears_paws_tail_locked_to_reference": True,
@@ -724,6 +730,11 @@ def health() -> dict[str, Any]:
                 "static_identity_safe_fallback_policy": (
                     DOG_EATING_STATIC_POSE_FALLBACK_POLICY
                 ),
+                "canonical_identity_full_driver_fallback_policy": (
+                    DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY
+                ),
+                "canonical_identity_reference_prop_inference": False,
+                "canonical_fallback_full_white_driver_body_and_bowl": True,
             },
             "species_routes": {
                 "cat": {

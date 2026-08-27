@@ -127,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.25"
+API_VERSION = "2.26.26"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -288,7 +288,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.35"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.36"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -688,7 +688,7 @@ DOG_EATING_CANONICAL_IDENTITY_FALLBACK_POLICY = (
     "upload_anchored_canonical_eating_identity_full_white_driver_v1"
 )
 DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY = (
-    "reference_space_identity_locked_head_lapping_v1"
+    "reference_space_white_driver_head_path_static_bowl_v3"
 )
 DOG_DRINKING_STATIC_POSE_FALLBACK_POLICY = (
     "static_reference_drinking_pose_identity_fallback_v1"
@@ -2130,6 +2130,11 @@ def require_expected_scail_pose_policy(
     ):
         accepted_policies.add(DOG_EATING_STATIC_POSE_FALLBACK_POLICY)
         accepted_policies.add(DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY)
+    if (
+        action == "drinking"
+        and expected_policy == DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY
+    ):
+        accepted_policies.add(DOG_DRINKING_STATIC_POSE_FALLBACK_POLICY)
     if actual_policy not in accepted_policies:
         raise RuntimeError(
             f"SCAIL {action} pose policy changed before GPU submission: "
@@ -2337,6 +2342,10 @@ def configure_uploaded_subject_validation(
                 fur_silhouette_gate["required_pose_policy"] = (
                     expected_eating_pose_policy
                 )
+        elif action == "drinking" and dog_profile:
+            expected_pose_policies[action] = (
+                DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY
+            )
 
     frozen["prompt_profile"] = (
         "uploaded-dog-white-model-v1"

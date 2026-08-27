@@ -86,6 +86,23 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             payload = pipeline.health()
 
         self.assertEqual(payload["version"], "2.21.4")
+        dog_eating = payload["subject_replacement"]["dog_eating_first_frame"]
+        self.assertEqual(
+            dog_eating["image2"],
+            "digest_bound_white_model_action_geometry_guide",
+        )
+        self.assertFalse(dog_eating["prompt_only_action_geometry"])
+        self.assertTrue(dog_eating["white_model_loaded_by_qwen"])
+        self.assertFalse(dog_eating["white_model_rgb_loaded_by_qwen"])
+        self.assertTrue(dog_eating["secondary_reference_loaded_by_qwen"])
+        dog_drinking_pose = payload["subject_replacement"][
+            "dog_drinking_scail_pose"
+        ]
+        self.assertEqual(
+            dog_drinking_pose["policy"],
+            pipeline.DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
+        )
+        self.assertTrue(dog_drinking_pose["driver_input_used"])
         self.assertFalse(payload["subject_replacement"]["ok"])
         self.assertEqual(
             payload["subject_replacement"]["upload_validation"]["status"],

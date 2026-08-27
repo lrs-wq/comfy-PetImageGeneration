@@ -623,6 +623,33 @@ class SubjectReplacementEffectiveConfigTests(unittest.TestCase):
                 pipeline.DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,
             )
 
+    def test_dog_drinking_pose_policy_accepts_only_current_motion_paths(
+        self,
+    ) -> None:
+        for actual_policy in (
+            pipeline.DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
+            pipeline.DOG_DRINKING_STATIC_POSE_FALLBACK_POLICY,
+        ):
+            pipeline.require_expected_scail_pose_policy(
+                {"pose_metadata": {"policy": actual_policy}},
+                "drinking",
+                pipeline.DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
+            )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "SCAIL drinking pose policy changed before GPU submission",
+        ):
+            pipeline.require_expected_scail_pose_policy(
+                {
+                    "pose_metadata": {
+                        "policy": "reference_space_identity_locked_head_lapping_v1",
+                    }
+                },
+                "drinking",
+                pipeline.DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
+            )
+
     def test_cat_full_driver_policy_still_rejects_dog_static_fallback(
         self,
     ) -> None:
