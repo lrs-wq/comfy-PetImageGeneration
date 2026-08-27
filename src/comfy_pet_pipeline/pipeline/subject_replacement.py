@@ -87,8 +87,8 @@ DRINKING_REFERENCE_LAP_CYCLES = 3
 GROOMING_TEMPORAL_LOOP_POLICY = (
     "grooming_second_half_ping_pong_closed_loop_v1"
 )
-ACTION_TAIL_COSINE_LOOP_POLICY = (
-    "drinking_eating_tail_cosine_blend_to_first_v1"
+ACTION_TAIL_GEOMETRY_SAFE_LOOP_POLICY = (
+    "drinking_eating_terminal_phase_snap_to_first_v2"
 )
 DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY = (
     "canonical_identity_full_white_driver_eating_fallback_v1"
@@ -6602,9 +6602,9 @@ def close_transparent_action_tail_loop(
     frames: list[tuple[np.ndarray, np.ndarray]],
     *,
     target_frame_index: int,
-    maximum_blend_frames: int = 9,
+    maximum_tail_window_frames: int = 9,
 ) -> tuple[list[tuple[np.ndarray, np.ndarray]], dict[str, Any]]:
-    """Blend the published tail back to frame zero without changing duration."""
+    """Close the loop without cross-dissolving two displaced silhouettes."""
 
     if len(frames) < 3:
         raise ValueError("Action tail closure requires at least three frames.")
@@ -6612,41 +6612,47 @@ def close_transparent_action_tail_loop(
         raise ValueError(
             "Action tail closure target must be inside the source frame range."
         )
-    if maximum_blend_frames < 3:
-        raise ValueError("Action tail closure requires at least three blend frames.")
-    blend_count = min(maximum_blend_frames, target_frame_index + 1)
-    blend_start = target_frame_index - blend_count + 1
+    if maximum_tail_window_frames < 1:
+        raise ValueError("Action tail closure requires a non-empty tail window.")
+    tail_window_count = min(maximum_tail_window_frames, target_frame_index + 1)
+    tail_window_start = target_frame_index - tail_window_count + 1
     first_rgb, first_alpha = frames[0]
     closed = [(rgb.copy(), alpha.copy()) for rgb, alpha in frames]
-    for frame_index in range(blend_start, target_frame_index + 1):
-        phase = (frame_index - blend_start + 1) / float(blend_count)
-        weight = 0.5 - 0.5 * np.cos(np.pi * phase)
-        source_rgb, source_alpha = closed[frame_index]
-        blended_rgb = np.clip(
-            np.rint(
-                source_rgb.astype(np.float32) * (1.0 - weight)
-                + first_rgb.astype(np.float32) * weight
-            ),
-            0,
-            255,
-        ).astype(np.uint8)
-        blended_alpha = np.clip(
-            np.rint(
-                source_alpha.astype(np.float32) * (1.0 - weight)
-                + first_alpha.astype(np.float32) * weight
-            ),
-            0,
-            255,
-        ).astype(np.uint8)
-        closed[frame_index] = (blended_rgb, blended_alpha)
+    tail_to_first_transition_scores = [
+        _transparent_frame_transition_score(frames[index], frames[0])
+        for index in range(tail_window_start, target_frame_index + 1)
+    ]
+    pre_terminal_transition_score = _transparent_frame_transition_score(
+        frames[target_frame_index - 1],
+        frames[0],
+    )
+    # The source drivers already return toward their opening phase.  Only snap
+    # the terminal publication frame to frame zero.  A cosine RGB/alpha blend
+    # between spatially separated animals creates a visible double silhouette,
+    # which is worse than the small residual terminal phase correction.
     closed[target_frame_index] = (first_rgb.copy(), first_alpha.copy())
     for frame_index in range(target_frame_index + 1, len(closed)):
         closed[frame_index] = (first_rgb.copy(), first_alpha.copy())
     return closed, {
-        "policy": ACTION_TAIL_COSINE_LOOP_POLICY,
-        "blend_start_frame_index": blend_start,
+        "policy": ACTION_TAIL_GEOMETRY_SAFE_LOOP_POLICY,
+        "tail_window_start_frame_index": tail_window_start,
+        "tail_window_frame_count": tail_window_count,
         "target_frame_index": target_frame_index,
-        "blend_frame_count": blend_count,
+        "blend_frame_count": 0,
+        "cross_dissolve_applied": False,
+        "single_subject_silhouette_preserved": True,
+        "tail_to_first_transition_score_min": round(
+            min(tail_to_first_transition_scores),
+            6,
+        ),
+        "tail_to_first_transition_score_at_target": round(
+            tail_to_first_transition_scores[-1],
+            6,
+        ),
+        "pre_terminal_transition_score": round(
+            pre_terminal_transition_score,
+            6,
+        ),
         "terminal_frame_matches_first": True,
         "preserves_source_frame_count": len(closed) == len(frames),
         "preserves_duration": True,
@@ -7883,7 +7889,7 @@ def build_unstabilized_transparent_gif(
                 **action_loop_metadata,
                 "action": action,
                 "applied": True,
-                "playback": "original_motion_with_short_cosine_tail_closure",
+                "playback": "original_motion_with_geometry_safe_terminal_snap",
                 "closed_loop": True,
             }
         sampled_original_source_indices = [

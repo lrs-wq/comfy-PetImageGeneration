@@ -1746,7 +1746,7 @@ class DrivingAnimationDecodeTests(unittest.TestCase):
         self.assertTrue(closed_quality["acceptable"])
         self.assertEqual(closed_quality["loop_transition_score"], 0.0)
 
-    def test_action_tail_cosine_closure_preserves_length_and_closes(self) -> None:
+    def test_action_tail_terminal_snap_preserves_length_and_geometry(self) -> None:
         alpha = np.full((4, 4), 255, dtype=np.uint8)
         frames = [
             (np.full((4, 4, 3), value, dtype=np.uint8), alpha)
@@ -1756,23 +1756,46 @@ class DrivingAnimationDecodeTests(unittest.TestCase):
         closed, metadata = scail.close_transparent_action_tail_loop(
             frames,
             target_frame_index=4,
-            maximum_blend_frames=3,
+            maximum_tail_window_frames=3,
         )
 
         self.assertEqual(len(closed), len(frames))
         self.assertTrue(np.array_equal(closed[4][0], closed[0][0]))
         self.assertTrue(np.array_equal(closed[5][0], closed[0][0]))
-        self.assertGreater(int(closed[2][0][0, 0, 0]), 0)
-        self.assertLess(int(closed[3][0][0, 0, 0]), 60)
+        self.assertTrue(np.array_equal(closed[2][0], frames[2][0]))
+        self.assertTrue(np.array_equal(closed[3][0], frames[3][0]))
+        self.assertFalse(metadata["cross_dissolve_applied"])
+        self.assertTrue(metadata["single_subject_silhouette_preserved"])
+        self.assertEqual(metadata["blend_frame_count"], 0)
         self.assertEqual(
             metadata["policy"],
-            "drinking_eating_tail_cosine_blend_to_first_v1",
+            "drinking_eating_terminal_phase_snap_to_first_v2",
         )
         quality = scail.transparent_animation_loop_quality(
             closed,
             [0, 1, 2, 3, 4],
         )
         self.assertTrue(quality["acceptable"])
+
+    def test_action_tail_terminal_snap_never_creates_double_alpha(self) -> None:
+        frames: list[tuple[np.ndarray, np.ndarray]] = []
+        for offset in (0, 2, 4, 6, 8):
+            rgb = np.zeros((24, 24, 3), dtype=np.uint8)
+            alpha = np.zeros((24, 24), dtype=np.uint8)
+            rgb[7:17, 3 + offset : 11 + offset] = (180, 140, 100)
+            alpha[7:17, 3 + offset : 11 + offset] = 255
+            frames.append((rgb, alpha))
+
+        closed, metadata = scail.close_transparent_action_tail_loop(
+            frames,
+            target_frame_index=4,
+        )
+
+        self.assertTrue(np.array_equal(closed[3][1], frames[3][1]))
+        self.assertTrue(np.array_equal(closed[4][1], frames[0][1]))
+        self.assertEqual(set(np.unique(closed[3][1])), {0, 255})
+        self.assertEqual(set(np.unique(closed[4][1])), {0, 255})
+        self.assertFalse(metadata["cross_dissolve_applied"])
 
     def test_video_driver_decodes_all_frames_with_constant_timing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
