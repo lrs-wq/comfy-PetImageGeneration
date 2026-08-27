@@ -72,12 +72,15 @@ TOILETING_SCAIL_MAX_FLAGGED_FRAMES_MINIMUM = 4
 TOILETING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (1.0, 0.92, 0.84)
 
 DRINKING_SCAIL_TEMPORAL_ACTION_POLICY = (
-    "drinking_visible_motion_energy_gate_v1"
+    "drinking_visible_motion_and_driver_silhouette_retention_gate_v2"
 )
 DRINKING_SCAIL_MAX_ATTEMPTS = 3
-DRINKING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (1.0, 1.06, 0.94)
+DRINKING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (1.0, 1.18, 1.32)
 DRINKING_SCAIL_ADJACENT_MAE_MIN = 0.60
 DRINKING_SCAIL_FIRST_FRAME_MAE_MAX_MIN = 3.0
+DRINKING_SCAIL_EXPECTED_SILHOUETTE_EXCURSION_MIN = 0.02
+DRINKING_SCAIL_SILHOUETTE_RETENTION_RATIO_MIN = 0.35
+DRINKING_SCAIL_BACKGROUND_DISTANCE_MIN = 24.0
 
 EATING_SCAIL_TEMPORAL_ACTION_POLICY = "eating_visible_motion_energy_gate_v1"
 EATING_SCAIL_MAX_ATTEMPTS = 2
@@ -408,10 +411,95 @@ def evaluate_toileting_scail_video_identity_artifacts(
     }
 
 
-def drinking_scail_video_motion_quality(
+def _drinking_subject_silhouette(frame: np.ndarray) -> np.ndarray | None:
+    """Extract the largest subject component from a uniform-background frame."""
+
+    rgb = np.asarray(frame, dtype=np.uint8)
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        return None
+    height, width = rgb.shape[:2]
+    border_width = max(4, min(height, width) // 64)
+    border = np.concatenate(
+        (
+            rgb[:border_width].reshape(-1, 3),
+            rgb[-border_width:].reshape(-1, 3),
+            rgb[:, :border_width].reshape(-1, 3),
+            rgb[:, -border_width:].reshape(-1, 3),
+        ),
+        axis=0,
+    )
+    background = np.median(border.astype(np.float32), axis=0)
+    distance = np.linalg.norm(
+        rgb.astype(np.float32) - background[None, None, :],
+        axis=2,
+    )
+    foreground = (distance >= DRINKING_SCAIL_BACKGROUND_DISTANCE_MIN).astype(
+        np.uint8
+    )
+    foreground = cv2.morphologyEx(
+        foreground,
+        cv2.MORPH_CLOSE,
+        np.ones((3, 3), dtype=np.uint8),
+        iterations=1,
+    )
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        foreground,
+        connectivity=8,
+    )
+    if component_count < 2:
+        return None
+    largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    largest_area = int(stats[largest_label, cv2.CC_STAT_AREA])
+    if largest_area < max(256, int(round(height * width * 0.005))):
+        return None
+    return labels == largest_label
+
+
+def _drinking_silhouette_excursion(
     frames: list[np.ndarray],
 ) -> dict[str, Any]:
-    """Reject a drinking result that remains effectively a static keyframe."""
+    """Measure subject-outline change relative to the first animation frame."""
+
+    silhouettes = [_drinking_subject_silhouette(frame) for frame in frames]
+    available = [mask for mask in silhouettes if isinstance(mask, np.ndarray)]
+    if len(available) != len(frames) or not available:
+        return {
+            "available": False,
+            "frame_count": len(frames),
+            "decoded_silhouette_count": len(available),
+            "first_frame_normalized_xor_max": 0.0,
+            "first_frame_normalized_xor_max_frame_index": None,
+        }
+    first = available[0]
+    excursion_by_frame: list[float] = []
+    for silhouette in available:
+        normalization_area = max(
+            1,
+            int(np.count_nonzero(first)),
+            int(np.count_nonzero(silhouette)),
+        )
+        excursion_by_frame.append(
+            float(np.count_nonzero(np.logical_xor(first, silhouette)))
+            / float(normalization_area)
+        )
+    maximum = max(excursion_by_frame, default=0.0)
+    return {
+        "available": True,
+        "frame_count": len(frames),
+        "decoded_silhouette_count": len(available),
+        "first_frame_normalized_xor_max": round(maximum, 6),
+        "first_frame_normalized_xor_max_frame_index": (
+            int(np.argmax(excursion_by_frame)) if excursion_by_frame else None
+        ),
+    }
+
+
+def drinking_scail_video_motion_quality(
+    frames: list[np.ndarray],
+    *,
+    expected_pose_frames: list[np.ndarray] | None = None,
+) -> dict[str, Any]:
+    """Reject static drinking or output that collapses the white-model path."""
 
     _sync_local_video_runtime(
         globals(),
@@ -448,6 +536,38 @@ def drinking_scail_video_motion_quality(
         issues.append("drinking_motion_energy_too_low")
     if first_frame_mae_max < DRINKING_SCAIL_FIRST_FRAME_MAE_MAX_MIN:
         issues.append("drinking_action_excursion_too_low")
+    output_silhouette = _drinking_silhouette_excursion(frames)
+    expected_silhouette = (
+        _drinking_silhouette_excursion(expected_pose_frames)
+        if expected_pose_frames is not None
+        else None
+    )
+    silhouette_retention_ratio: float | None = None
+    if expected_silhouette is not None:
+        expected_excursion = float(
+            expected_silhouette["first_frame_normalized_xor_max"]
+        )
+        output_excursion = float(
+            output_silhouette["first_frame_normalized_xor_max"]
+        )
+        if expected_silhouette.get("available") is not True:
+            issues.append("drinking_expected_pose_silhouette_unavailable")
+        elif (
+            expected_excursion
+            < DRINKING_SCAIL_EXPECTED_SILHOUETTE_EXCURSION_MIN
+        ):
+            issues.append("drinking_expected_pose_silhouette_excursion_too_low")
+        elif output_silhouette.get("available") is not True:
+            issues.append("drinking_output_silhouette_unavailable")
+        else:
+            silhouette_retention_ratio = output_excursion / expected_excursion
+            if (
+                silhouette_retention_ratio
+                < DRINKING_SCAIL_SILHOUETTE_RETENTION_RATIO_MIN
+            ):
+                issues.append(
+                    "drinking_driver_silhouette_excursion_retention_too_low"
+                )
     return {
         "policy": DRINKING_SCAIL_TEMPORAL_ACTION_POLICY,
         "available": len(normalized_frames) >= 9,
@@ -459,6 +579,16 @@ def drinking_scail_video_motion_quality(
         "first_frame_grayscale_mae_max": round(first_frame_mae_max, 6),
         "first_frame_grayscale_mae_max_minimum": (
             DRINKING_SCAIL_FIRST_FRAME_MAE_MAX_MIN
+        ),
+        "output_silhouette_excursion": output_silhouette,
+        "expected_pose_silhouette_excursion": expected_silhouette,
+        "silhouette_excursion_retention_ratio": (
+            round(silhouette_retention_ratio, 6)
+            if silhouette_retention_ratio is not None
+            else None
+        ),
+        "silhouette_excursion_retention_ratio_minimum": (
+            DRINKING_SCAIL_SILHOUETTE_RETENTION_RATIO_MIN
         ),
     }
 
@@ -495,7 +625,11 @@ def eating_scail_video_motion_quality(
     }
 
 
-def evaluate_drinking_scail_video_motion(video_path: Path) -> dict[str, Any]:
+def evaluate_drinking_scail_video_motion(
+    video_path: Path,
+    *,
+    expected_pose_video_path: Path | None = None,
+) -> dict[str, Any]:
     """Decode and enforce the dog drinking motion contract."""
 
     _sync_local_video_runtime(
@@ -512,11 +646,39 @@ def evaluate_drinking_scail_video_motion(video_path: Path) -> dict[str, Any]:
             frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
     finally:
         capture.release()
-    quality = drinking_scail_video_motion_quality(frames)
+    expected_pose_frames: list[np.ndarray] | None = None
+    if expected_pose_video_path is not None:
+        expected_capture = cv2.VideoCapture(str(expected_pose_video_path))
+        expected_pose_frames = []
+        try:
+            while True:
+                ok, bgr = expected_capture.read()
+                if not ok:
+                    break
+                expected_pose_frames.append(
+                    cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                )
+        finally:
+            expected_capture.release()
+    quality = drinking_scail_video_motion_quality(
+        frames,
+        expected_pose_frames=expected_pose_frames,
+    )
     return {
         **quality,
         "video_path": str(video_path),
         "video_sha256": file_sha256(video_path) if video_path.is_file() else None,
+        "expected_pose_video_path": (
+            str(expected_pose_video_path)
+            if expected_pose_video_path is not None
+            else None
+        ),
+        "expected_pose_video_sha256": (
+            file_sha256(expected_pose_video_path)
+            if expected_pose_video_path is not None
+            and expected_pose_video_path.is_file()
+            else None
+        ),
     }
 
 
@@ -2880,7 +3042,10 @@ def run_subject_replacement_job(job_id: str) -> None:
                     scail_retry_reason=(
                         "toileting_temporal_lateral_dark_band_or_symbol"
                         if dog_toileting_temporal_gate
-                        else "drinking_visible_motion_energy_too_low"
+                        else (
+                            "drinking_motion_or_driver_silhouette_"
+                            "retention_too_low"
+                        )
                         if dog_drinking_motion_gate
                         else "eating_visible_motion_energy_too_low"
                     ),
@@ -2919,7 +3084,12 @@ def run_subject_replacement_job(job_id: str) -> None:
                 )
             elif dog_drinking_motion_gate:
                 temporal_identity_quality = (
-                    evaluate_drinking_scail_video_motion(attempt_target)
+                    evaluate_drinking_scail_video_motion(
+                        attempt_target,
+                        expected_pose_video_path=Path(
+                            manifest["input_files"]["pose_video"]
+                        ),
+                    )
                 )
             elif dog_eating_motion_gate:
                 temporal_identity_quality = (

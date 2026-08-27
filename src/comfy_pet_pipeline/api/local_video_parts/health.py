@@ -728,6 +728,23 @@ def health() -> dict[str, Any]:
                 ),
                 "dynamic_fallback_full_white_driver_geometry": True,
                 "dynamic_fallback_static_bowl_mask_and_rgb": True,
+                "output_temporal_action_gate": {
+                    "policy": DRINKING_SCAIL_TEMPORAL_ACTION_POLICY,
+                    "compares_output_to_prepared_white_model_pose": True,
+                    "expected_silhouette_excursion_min": (
+                        DRINKING_SCAIL_EXPECTED_SILHOUETTE_EXCURSION_MIN
+                    ),
+                    "silhouette_excursion_retention_ratio_min": (
+                        DRINKING_SCAIL_SILHOUETTE_RETENTION_RATIO_MIN
+                    ),
+                    "max_attempts": DRINKING_SCAIL_MAX_ATTEMPTS,
+                    "pose_strength_multipliers": list(
+                        DRINKING_SCAIL_POSE_STRENGTH_MULTIPLIERS
+                    ),
+                    "rejects_texture_only_motion": True,
+                    "required_before_transparent_extraction": True,
+                    "fail_closed": True,
+                },
             },
             "dog_eating_scail_pose": {
                 "policy": DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,

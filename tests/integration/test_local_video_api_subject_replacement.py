@@ -1556,6 +1556,107 @@ class ToiletingScailTemporalIdentityArtifactTests(unittest.TestCase):
         self.assertIn("drinking_motion_energy_too_low", static_quality["issues"])
         self.assertTrue(moving_quality["acceptable"], moving_quality)
 
+    def test_drinking_motion_gate_requires_driver_silhouette_retention(
+        self,
+    ) -> None:
+        background = np.zeros((256, 256, 3), dtype=np.uint8)
+        background[:, :] = (0, 255, 0)
+        expected: list[np.ndarray] = []
+        texture_only: list[np.ndarray] = []
+        for index in range(13):
+            expected_frame = background.copy()
+            cv2.rectangle(
+                expected_frame,
+                (72, 90),
+                (178, 230),
+                (190, 155, 110),
+                -1,
+            )
+            cv2.circle(
+                expected_frame,
+                (170, 74 + index * 8),
+                48,
+                (155, 120, 90),
+                -1,
+            )
+            expected.append(expected_frame)
+
+            texture_frame = background.copy()
+            cv2.rectangle(
+                texture_frame,
+                (72, 90),
+                (178, 230),
+                (190, 155, 110),
+                -1,
+            )
+            cv2.circle(
+                texture_frame,
+                (170, 74),
+                48,
+                (155, 120, 90),
+                -1,
+            )
+            cv2.rectangle(
+                texture_frame,
+                (90, 112),
+                (164, 206),
+                (70, 50, 35) if index % 2 else (220, 190, 150),
+                -1,
+            )
+            texture_only.append(texture_frame)
+
+        collapsed = pipeline.drinking_scail_video_motion_quality(
+            texture_only,
+            expected_pose_frames=expected,
+        )
+        faithful = pipeline.drinking_scail_video_motion_quality(
+            expected,
+            expected_pose_frames=expected,
+        )
+
+        self.assertFalse(collapsed["acceptable"], collapsed)
+        self.assertIn(
+            "drinking_driver_silhouette_excursion_retention_too_low",
+            collapsed["issues"],
+        )
+        self.assertLess(
+            collapsed["silhouette_excursion_retention_ratio"],
+            collapsed["silhouette_excursion_retention_ratio_minimum"],
+        )
+        self.assertTrue(faithful["acceptable"], faithful)
+
+    def test_drinking_retry_controls_increase_pose_strength(self) -> None:
+        workflow = {
+            "17": {
+                "class_type": "WanSCAILToVideo",
+                "inputs": {"pose_strength": 1.05},
+            },
+            "20": {
+                "class_type": "SamplerCustom",
+                "inputs": {"noise_seed": 20260829},
+            },
+        }
+
+        second, _, second_controls = (
+            pipeline.scail_workflow_with_retry_controls(
+                workflow,
+                seed=20260830,
+                action="drinking",
+                attempt=2,
+            )
+        )
+        third, _, third_controls = pipeline.scail_workflow_with_retry_controls(
+            workflow,
+            seed=20260831,
+            action="drinking",
+            attempt=3,
+        )
+
+        self.assertAlmostEqual(second["17"]["inputs"]["pose_strength"], 1.239)
+        self.assertAlmostEqual(third["17"]["inputs"]["pose_strength"], 1.386)
+        self.assertEqual(second_controls["pose_strength_multiplier"], 1.18)
+        self.assertEqual(third_controls["pose_strength_multiplier"], 1.32)
+
 
 class CanonicalChromaIntegrityTests(unittest.TestCase):
     def test_canonical_cutout_rejects_large_central_neck_hole(self) -> None:
