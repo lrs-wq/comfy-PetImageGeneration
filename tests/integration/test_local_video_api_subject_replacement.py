@@ -1432,6 +1432,25 @@ class ToiletingScailTemporalIdentityArtifactTests(unittest.TestCase):
         self.assertEqual(quality["flagged_frame_count"], 3)
         self.assertEqual(quality["permitted_flagged_frames"], 4)
 
+    def test_temporal_gate_ignores_repeated_thin_natural_edge_detail(self) -> None:
+        natural_edge = self._frame(invented_tail_band=False)
+        # Real accepted toileting output contains short anti-aliased coat creases
+        # in this lateral corridor.  They may be elongated, but their connected
+        # area stays below the empirically separated bad-band floor (bad symbols
+        # in rejected videos occupy hundreds to thousands of pixels).
+        cv2.rectangle(natural_edge, (350, 252), (353, 275), (8, 8, 8), -1)
+
+        quality = pipeline.toileting_temporal_identity_artifact_quality(
+            [natural_edge.copy() for _ in range(12)]
+        )
+
+        self.assertTrue(quality["acceptable"], quality)
+        self.assertEqual(quality["flagged_frame_count"], 0)
+        self.assertEqual(
+            quality["dark_component_area_minimum"],
+            pipeline.TOILETING_SCAIL_DARK_COMPONENT_AREA_MIN,
+        )
+
     def test_retry_seed_copy_does_not_mutate_prepared_workflow(self) -> None:
         workflow = {
             "20": {
@@ -1452,6 +1471,61 @@ class ToiletingScailTemporalIdentityArtifactTests(unittest.TestCase):
         self.assertEqual(updated, ["20"])
         self.assertEqual(candidate["20"]["inputs"]["noise_seed"], 20260836)
         self.assertEqual(workflow["20"]["inputs"]["noise_seed"], 20260835)
+
+    def test_retry_controls_vary_toileting_pose_strength_without_mutation(
+        self,
+    ) -> None:
+        workflow = {
+            "17": {
+                "class_type": "WanSCAILToVideo",
+                "inputs": {"pose_strength": 1.05},
+            },
+            "20": {
+                "class_type": "SamplerCustom",
+                "inputs": {"noise_seed": 20260835},
+            },
+        }
+
+        candidate, seed_nodes, controls = (
+            pipeline.scail_workflow_with_retry_controls(
+                workflow,
+                seed=20260837,
+                action="toileting",
+                attempt=3,
+            )
+        )
+
+        self.assertEqual(seed_nodes, ["20"])
+        self.assertEqual(candidate["20"]["inputs"]["noise_seed"], 20260837)
+        self.assertAlmostEqual(candidate["17"]["inputs"]["pose_strength"], 0.882)
+        self.assertEqual(controls["pose_strength_multiplier"], 0.84)
+        self.assertEqual(workflow["17"]["inputs"]["pose_strength"], 1.05)
+
+    def test_drinking_motion_gate_rejects_static_and_accepts_visible_path(
+        self,
+    ) -> None:
+        static = np.full((512, 512, 3), 255, dtype=np.uint8)
+        cv2.rectangle(static, (160, 100), (350, 450), (190, 155, 110), -1)
+        moving: list[np.ndarray] = []
+        for index in range(13):
+            frame = static.copy()
+            cv2.circle(
+                frame,
+                (210, 165 + index * 20),
+                52,
+                (140, 105, 75),
+                -1,
+            )
+            moving.append(frame)
+
+        static_quality = pipeline.drinking_scail_video_motion_quality(
+            [static.copy() for _ in range(13)]
+        )
+        moving_quality = pipeline.drinking_scail_video_motion_quality(moving)
+
+        self.assertFalse(static_quality["acceptable"], static_quality)
+        self.assertIn("drinking_motion_energy_too_low", static_quality["issues"])
+        self.assertTrue(moving_quality["acceptable"], moving_quality)
 
 
 class CanonicalChromaIntegrityTests(unittest.TestCase):

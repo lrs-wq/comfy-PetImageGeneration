@@ -127,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.23"
+API_VERSION = "2.26.24"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -288,7 +288,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.33"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.34"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -439,20 +439,20 @@ GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = len(
     GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT
 )
 DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
-    "canonical_image1_only_four_step_direct_eating_action_"
-    "no_white_model_or_secondary_qwen_reference_v1"
+    "canonical_identity_image1_plus_white_model_geometry_image2_"
+    "four_step_direct_eating_action_v2"
 )
 DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
 DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
 DOG_DRINKING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
-    "canonical_image1_only_four_step_direct_drinking_action_"
-    "no_white_model_or_secondary_qwen_reference_v1"
+    "canonical_identity_image1_plus_white_model_geometry_image2_"
+    "four_step_direct_drinking_action_v2"
 )
 DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
 DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
 DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
-    "canonical_image1_only_four_step_direct_toileting_action_"
-    "no_white_model_or_secondary_qwen_reference_v1"
+    "canonical_identity_image1_plus_white_model_geometry_image2_"
+    "four_step_direct_toileting_action_v2"
 )
 DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
 DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
@@ -6739,6 +6739,9 @@ revalidate_uploaded_qwen_references_before_scail = (
 recover_subject_replacement_job_with_fallback = (
     _local_video_subject_replacement.recover_subject_replacement_job_with_fallback
 )
+recover_subject_replacement_action_with_fallback = (
+    _local_video_subject_replacement.recover_subject_replacement_action_with_fallback
+)
 RECOVERABLE_OUTPUT_FALLBACK_POLICY = (
     _local_video_subject_replacement.RECOVERABLE_OUTPUT_FALLBACK_POLICY
 )
@@ -6761,8 +6764,23 @@ toileting_temporal_identity_artifact_quality = (
 evaluate_toileting_scail_video_identity_artifacts = (
     _local_video_subject_replacement.evaluate_toileting_scail_video_identity_artifacts
 )
+drinking_scail_video_motion_quality = (
+    _local_video_subject_replacement.drinking_scail_video_motion_quality
+)
+evaluate_drinking_scail_video_motion = (
+    _local_video_subject_replacement.evaluate_drinking_scail_video_motion
+)
+eating_scail_video_motion_quality = (
+    _local_video_subject_replacement.eating_scail_video_motion_quality
+)
+evaluate_eating_scail_video_motion = (
+    _local_video_subject_replacement.evaluate_eating_scail_video_motion
+)
 scail_workflow_with_retry_seed = (
     _local_video_subject_replacement.scail_workflow_with_retry_seed
+)
+scail_workflow_with_retry_controls = (
+    _local_video_subject_replacement.scail_workflow_with_retry_controls
 )
 TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY = (
     _local_video_subject_replacement.TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY
@@ -6776,11 +6794,26 @@ TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = (
 TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY = (
     _local_video_subject_replacement.TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY
 )
+TOILETING_SCAIL_DARK_COMPONENT_AREA_MIN = (
+    _local_video_subject_replacement.TOILETING_SCAIL_DARK_COMPONENT_AREA_MIN
+)
 TOILETING_SCAIL_MAX_ATTEMPTS = (
     _local_video_subject_replacement.TOILETING_SCAIL_MAX_ATTEMPTS
 )
 TOILETING_SCAIL_RETRY_SEED_STEP = (
     _local_video_subject_replacement.TOILETING_SCAIL_RETRY_SEED_STEP
+)
+DRINKING_SCAIL_TEMPORAL_ACTION_POLICY = (
+    _local_video_subject_replacement.DRINKING_SCAIL_TEMPORAL_ACTION_POLICY
+)
+DRINKING_SCAIL_MAX_ATTEMPTS = (
+    _local_video_subject_replacement.DRINKING_SCAIL_MAX_ATTEMPTS
+)
+EATING_SCAIL_TEMPORAL_ACTION_POLICY = (
+    _local_video_subject_replacement.EATING_SCAIL_TEMPORAL_ACTION_POLICY
+)
+EATING_SCAIL_MAX_ATTEMPTS = (
+    _local_video_subject_replacement.EATING_SCAIL_MAX_ATTEMPTS
 )
 pose_attempt_provenance = _local_video_job_runner.pose_attempt_provenance
 merge_identity_chroma_spill_cleanup = (
@@ -8043,7 +8076,9 @@ async def create_job(
             "recovery_history": [],
             "background_removal_failed": False,
             "background_removal_failures": [],
-            "transparent_outputs_complete": True,
+            "transparent_outputs_complete": False,
+            "transparent_outputs_quality_passed": False,
+            "action_quality_summary": {},
             "error": None,
             "cancel_requested": False,
             "active_prompt_id": None,

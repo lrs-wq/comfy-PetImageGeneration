@@ -167,6 +167,26 @@ def exhausted_action_candidate_recovery_policy(
     """Choose a successful retry recovery without re-admitting identity drift."""
     palette = record.get("identity_palette")
     if isinstance(palette, dict) and palette.get("acceptable") is True:
+        quality = record.get("quality")
+        quality_issues = {
+            str(issue)
+            for issue in (
+                quality.get("issues", [])
+                if isinstance(quality, dict)
+                else []
+            )
+        }
+        hard_action_issues = {
+            "pose_not_low_or_wide_enough_for_bowl_action",
+            "eating_bowl_or_food_not_detected",
+            "eating_bowl_paw_layout_invalid",
+            "eating_bowl_contact_unreliable",
+            "eating_muzzle_not_at_bowl",
+            "drinking_muzzle_not_at_bowl",
+            "toileting_tray_not_wide_beneath_subject",
+        }
+        if quality_issues & hard_action_issues:
+            return "identity_safe_generated_candidate_requires_final_action_gate"
         return "identity_safe_generated_candidate"
     if action in {
         "standing",
@@ -259,7 +279,7 @@ def make_toileting_canonical_tray_fallback(
             (tray_left, tray_bottom),
         ]
     )
-    cv2.fillPoly(tray, [outer], (174, 179, 176, 255))
+    cv2.fillPoly(tray, [outer], (226, 229, 227, 255))
 
     grid = points(
         [
@@ -272,7 +292,7 @@ def make_toileting_canonical_tray_fallback(
     grid_mask = np.zeros(tray.shape[:2], dtype=np.uint8)
     cv2.fillPoly(grid_mask, [grid], 255)
     grid_layer = np.zeros_like(tray)
-    grid_layer[grid_mask > 0] = (113, 121, 117, 255)
+    grid_layer[grid_mask > 0] = (211, 216, 213, 255)
     grid_x0 = tray_left + inset
     grid_x1 = tray_right - inset
     grid_y0 = tray_top + 9
@@ -283,7 +303,7 @@ def make_toileting_canonical_tray_fallback(
             grid_layer,
             (x * scale, grid_y0 * scale),
             (x * scale, grid_y1 * scale),
-            (66, 73, 70, 255),
+            (184, 190, 187, 255),
             max(2, scale),
             lineType=cv2.LINE_AA,
         )
@@ -293,7 +313,7 @@ def make_toileting_canonical_tray_fallback(
             grid_layer,
             (grid_x0 * scale, y * scale),
             (grid_x1 * scale, y * scale),
-            (66, 73, 70, 255),
+            (184, 190, 187, 255),
             max(2, scale),
             lineType=cv2.LINE_AA,
         )
@@ -307,12 +327,12 @@ def make_toileting_canonical_tray_fallback(
             (tray_left, tray_bottom),
         ]
     )
-    cv2.fillPoly(tray, [front], (201, 204, 199, 255))
+    cv2.fillPoly(tray, [front], (235, 237, 234, 255))
     cv2.polylines(
         tray,
         [outer],
         True,
-        (145, 150, 147, 255),
+        (207, 212, 209, 255),
         max(3, scale * 2),
         lineType=cv2.LINE_AA,
     )
@@ -2576,13 +2596,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 dog_eating_first_frame_policy=(
                     DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY
                 ),
-                dog_eating_first_frame_prompt_only_action_geometry=True,
+                dog_eating_first_frame_prompt_only_action_geometry=False,
                 dog_eating_first_frame_image1_role=(
                     "approved_upload_anchored_canonical_identity_sampler"
                 ),
-                dog_eating_first_frame_white_model_loaded_by_qwen=False,
-                dog_eating_first_frame_secondary_reference_loaded_by_qwen=False,
-                dog_eating_first_frame_action_geometry_deferred_to_scail=True,
+                dog_eating_first_frame_image2_role=(
+                    "white_model_action_geometry_only"
+                ),
+                dog_eating_first_frame_white_model_loaded_by_qwen=True,
+                dog_eating_first_frame_secondary_reference_loaded_by_qwen=True,
+                dog_eating_first_frame_action_geometry_deferred_to_scail=False,
                 dog_eating_first_frame_steps=(
                     DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
                 ),
@@ -2596,13 +2619,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 dog_drinking_first_frame_policy=(
                     DOG_DRINKING_PROMPT_ONLY_FIRST_FRAME_POLICY
                 ),
-                dog_drinking_first_frame_prompt_only_action_geometry=True,
+                dog_drinking_first_frame_prompt_only_action_geometry=False,
                 dog_drinking_first_frame_image1_role=(
                     "approved_upload_anchored_canonical_identity_sampler"
                 ),
-                dog_drinking_first_frame_white_model_loaded_by_qwen=False,
-                dog_drinking_first_frame_secondary_reference_loaded_by_qwen=False,
-                dog_drinking_first_frame_action_geometry_deferred_to_scail=True,
+                dog_drinking_first_frame_image2_role=(
+                    "white_model_action_geometry_only"
+                ),
+                dog_drinking_first_frame_white_model_loaded_by_qwen=True,
+                dog_drinking_first_frame_secondary_reference_loaded_by_qwen=True,
+                dog_drinking_first_frame_action_geometry_deferred_to_scail=False,
                 dog_drinking_first_frame_steps=(
                     DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
                 ),
@@ -2616,13 +2642,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 dog_toileting_first_frame_policy=(
                     DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY
                 ),
-                dog_toileting_first_frame_prompt_only_action_geometry=True,
+                dog_toileting_first_frame_prompt_only_action_geometry=False,
                 dog_toileting_first_frame_image1_role=(
                     "approved_upload_anchored_canonical_identity_sampler"
                 ),
-                dog_toileting_first_frame_white_model_loaded_by_qwen=False,
-                dog_toileting_first_frame_secondary_reference_loaded_by_qwen=False,
-                dog_toileting_first_frame_action_geometry_deferred_to_scail=True,
+                dog_toileting_first_frame_image2_role=(
+                    "white_model_action_geometry_only"
+                ),
+                dog_toileting_first_frame_white_model_loaded_by_qwen=True,
+                dog_toileting_first_frame_secondary_reference_loaded_by_qwen=True,
+                dog_toileting_first_frame_action_geometry_deferred_to_scail=False,
                 dog_toileting_first_frame_steps=(
                     DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
                 ),
@@ -3129,11 +3158,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 ) = None
                 if dog_prompt_only_action_transfer_active:
                     attempt_primary_input_name = qwen_input_name
-                    attempt_secondary_input_name = None
+                    attempt_secondary_input_name = pose_reference_input_name
                     attempt_tertiary_input_name = None
                     attempt_additional_reference_input_names = None
                     attempt_noise_mask_input_name = None
-                    attempt_geometry_input_name = None
+                    attempt_geometry_input_name = pose_reference_input_name
                     if dog_eating_prompt_only_action_transfer_active:
                         attempt_prompt = (
                             build_dog_eating_prompt_only_action_transfer_prompt(
@@ -3169,15 +3198,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "image1_role": (
                             "approved_upload_anchored_canonical_identity_sampler"
                         ),
-                        "image2_role": None,
+                        "image2_role": "white_model_action_geometry_only",
                         "image3_role": None,
-                        "prompt_only_action_geometry": True,
-                        "white_model_loaded_by_qwen": False,
-                        "secondary_reference_loaded_by_qwen": False,
+                        "prompt_only_action_geometry": False,
+                        "white_model_loaded_by_qwen": True,
+                        "secondary_reference_loaded_by_qwen": True,
                         "foreign_pose_image_loaded_by_qwen": False,
                         "uploaded_identity_views_consumed_via_canonical_only": True,
                         "full_canvas_action_redraw": True,
-                        "action_geometry_deferred_to_scail": True,
+                        "action_geometry_deferred_to_scail": False,
                         "sampler_noise_mask_input_name": None,
                         "post_qwen_pixel_composite_enabled": False,
                     }
@@ -6688,8 +6717,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     action=action_key(pose),
                     approved_canonical_available=approved_canonical_available,
                 )
-                if exhausted_recovery == "identity_safe_generated_candidate":
+                if exhausted_recovery in {
+                    "identity_safe_generated_candidate",
+                    "identity_safe_generated_candidate_requires_final_action_gate",
+                }:
                     best_attempt = best_action_candidate_degraded_attempt
+                    requires_final_action_gate = bool(
+                        exhausted_recovery
+                        == "identity_safe_generated_candidate_requires_final_action_gate"
+                    )
                     selected_candidate_gate = dict(
                         best_attempt.get("action_candidate_gate") or {}
                     )
@@ -6710,6 +6746,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         returns_original_upload=False,
                         returns_approved_canonical=False,
                         blocks_job=False,
+                        requires_final_action_gate=requires_final_action_gate,
                     )
                     best_attempt["action_candidate_gate"] = (
                         selected_candidate_gate
@@ -6724,6 +6761,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "reason": "action_candidate_gate_attempts_exhausted",
                             "strategy": (
                                 "select_identity_safe_structural_action_generated_"
+                                "candidate_with_required_final_action_gate"
+                                if requires_final_action_gate
+                                else "select_identity_safe_structural_action_generated_"
                                 "candidate"
                             ),
                             "profile": best_attempt["profile"],
@@ -6742,7 +6782,25 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             GENERATION_ACTION_CANDIDATE_GATE_POLICY
                         ),
                         action_candidate_gate_status=(
-                            "identity_safe_degraded_candidate_selected"
+                            "identity_safe_candidate_pending_final_action_gate"
+                            if requires_final_action_gate
+                            else "identity_safe_degraded_candidate_selected"
+                        ),
+                        action_candidate_final_gate_required_actions=sorted(
+                            {
+                                *(
+                                    get_job(job_id).get(
+                                        "action_candidate_final_gate_required_actions",
+                                        [],
+                                    )
+                                    or []
+                                ),
+                                *(
+                                    [action_key(pose)]
+                                    if requires_final_action_gate
+                                    else []
+                                ),
+                            }
                         ),
                         action_candidate_gate_action=action_key(pose),
                         action_candidate_gate_attempt_budget=len(

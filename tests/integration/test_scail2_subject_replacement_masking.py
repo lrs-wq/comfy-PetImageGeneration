@@ -303,13 +303,40 @@ class EatingScenePropMaskTests(unittest.TestCase):
             fill=(0, 0, 255),
         )
         mask_draw.rounded_rectangle(
-            (55, 382, 185, 442), radius=20, fill=(0, 0, 255)
+            (55, 382, 185, 442), radius=20, fill=(255, 0, 0)
         )
-        mask_draw.ellipse((66, 375, 174, 408), fill=(0, 0, 255))
+        mask_draw.ellipse((66, 375, 174, 408), fill=(255, 0, 0))
         mask_draw.rounded_rectangle(
             (112, 350, 132, 401), radius=8, fill=(0, 0, 255)
         )
         return reference, colored
+
+    @staticmethod
+    def _drinking_driver_frames() -> list[Image.Image]:
+        frames: list[Image.Image] = []
+        for index in range(81):
+            phase = 2.0 * np.pi * index / 80.0
+            lift = int(round(52.0 * (0.5 - 0.5 * np.cos(phase))))
+            frame = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(frame)
+            neutral = (220, 222, 219, 255)
+            draw.ellipse((165, 145, 405, 345), fill=neutral)
+            draw.rounded_rectangle(
+                (180, 290, 230, 410), radius=18, fill=neutral
+            )
+            draw.rounded_rectangle(
+                (300, 285, 350, 410), radius=18, fill=neutral
+            )
+            draw.ellipse(
+                (70, 225 - lift, 235, 385 - lift),
+                fill=neutral,
+            )
+            draw.polygon(
+                ((380, 225), (472, 245), (472, 270), (380, 265)),
+                fill=neutral,
+            )
+            frames.append(frame)
+        return frames
 
     def test_temporal_prop_mask_keeps_cat_occlusion_out_of_bowl_layer(self) -> None:
         frames = self._normalized_frames()
@@ -481,6 +508,99 @@ class EatingScenePropMaskTests(unittest.TestCase):
 
         self.assertFalse(metadata["scene_prop_separated"])
         self.assertFalse(np.any(unknown))
+
+    def test_toileting_pose_separates_and_lightens_lateral_tray(self) -> None:
+        frames: list[Image.Image] = []
+        for _index in range(13):
+            frame = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(frame)
+            draw.rounded_rectangle(
+                (62, 365, 450, 466),
+                radius=18,
+                fill=(62, 68, 65, 255),
+            )
+            draw.ellipse((150, 72, 365, 420), fill=(225, 205, 170, 255))
+            draw.rounded_rectangle(
+                (185, 300, 240, 445),
+                radius=20,
+                fill=(225, 205, 170, 255),
+            )
+            draw.rounded_rectangle(
+                (275, 300, 330, 445),
+                radius=20,
+                fill=(225, 205, 170, 255),
+            )
+            frames.append(frame)
+
+        poses, masks, metadata = scail.make_pose_and_mask_frames(
+            frames,
+            (512, 512),
+            separate_toileting_prop=True,
+        )
+
+        self.assertTrue(metadata["scene_prop_separated"])
+        self.assertEqual(
+            metadata["scene_prop_metadata"]["policy"],
+            "toileting_complete_tray_red_scail_prop_v3",
+        )
+        mask = np.asarray(masks[0].convert("RGB"), dtype=np.uint8)
+        pose = np.asarray(poses[0].convert("RGB"), dtype=np.uint8)
+        blue = np.all(mask == (0, 0, 255), axis=2)
+        red = np.all(mask == (255, 0, 0), axis=2)
+        white = np.all(mask == (255, 255, 255), axis=2)
+        self.assertTrue(np.any(blue))
+        self.assertTrue(np.any(red))
+        self.assertTrue(np.all(blue | red | white))
+        self.assertTrue(red[430, 256])
+        self.assertTrue(blue[400, 210])
+        self.assertTrue(
+            np.array_equal(pose[400, 210], np.asarray((225, 205, 170)))
+        )
+        self.assertGreater(
+            metadata["scene_prop_metadata"]["grid_prop_area_min"],
+            0,
+        )
+        self.assertGreaterEqual(int(pose[red].min()), 188)
+
+    def test_toileting_white_paws_remain_identity_over_dark_grid(self) -> None:
+        frames: list[Image.Image] = []
+        for _index in range(9):
+            frame = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(frame)
+            draw.rounded_rectangle(
+                (62, 365, 450, 466),
+                radius=18,
+                fill=(72, 72, 72, 255),
+            )
+            draw.ellipse((150, 72, 365, 420), fill=(225, 225, 225, 255))
+            draw.rounded_rectangle(
+                (185, 300, 240, 445),
+                radius=20,
+                fill=(225, 225, 225, 255),
+            )
+            draw.rounded_rectangle(
+                (275, 300, 330, 445),
+                radius=20,
+                fill=(225, 225, 225, 255),
+            )
+            frames.append(frame)
+
+        _poses, masks, metadata = scail.make_pose_and_mask_frames(
+            frames,
+            (512, 512),
+            separate_toileting_prop=True,
+        )
+        mask = np.asarray(masks[0].convert("RGB"), dtype=np.uint8)
+        blue = np.all(mask == (0, 0, 255), axis=2)
+        red = np.all(mask == (255, 0, 0), axis=2)
+
+        self.assertTrue(metadata["scene_prop_metadata"]["white_maquette_material"])
+        self.assertEqual(
+            metadata["scene_prop_metadata"]["grid_material_policy"],
+            "white_maquette_deep_grid_slots_v1",
+        )
+        self.assertTrue(blue[400, 210])
+        self.assertTrue(red[430, 256])
 
     def test_eating_geometry_guide_selects_low_muzzle_and_removes_identity(self) -> None:
         guide, metadata = scail.make_eating_geometry_guide(
@@ -800,6 +920,7 @@ class EatingScenePropMaskTests(unittest.TestCase):
     def test_reference_aligned_drinking_locks_tail_and_body_geometry(self) -> None:
         reference, reference_mask = self._drinking_reference()
         poses, masks, metadata = scail.make_drinking_reference_aligned_pose_frames(
+            self._drinking_driver_frames(),
             reference,
             reference_mask,
             (512, 512),
@@ -808,9 +929,10 @@ class EatingScenePropMaskTests(unittest.TestCase):
 
         self.assertEqual(
             metadata["policy"],
-            "reference_space_identity_locked_head_lapping_v1",
+            "reference_space_white_driver_head_path_static_bowl_v3",
         )
-        self.assertFalse(metadata["driver_input_used"])
+        self.assertTrue(metadata["driver_input_used"])
+        self.assertTrue(metadata["driver_signal_only"])
         self.assertFalse(metadata["driver_rgb_preserved"])
         self.assertFalse(metadata["driver_silhouette_preserved"])
         self.assertTrue(metadata["reference_identity_preserved"])
@@ -819,7 +941,8 @@ class EatingScenePropMaskTests(unittest.TestCase):
         )
         self.assertTrue(metadata["closed_loop_endpoints"])
         self.assertEqual(metadata["lap_cycles"], 3)
-        self.assertEqual(metadata["head_lift_px_max"], 6.0)
+        self.assertGreaterEqual(metadata["head_lift_px_max"], 14.0)
+        self.assertGreater(metadata["driver_head_y_span"], 4.0)
         self.assertGreaterEqual(metadata["tongue_motion_span_px"], 2.0)
         self.assertEqual(len(poses), 81)
         self.assertEqual(len(masks), 81)
@@ -856,11 +979,61 @@ class EatingScenePropMaskTests(unittest.TestCase):
                 )
             )
             blue = np.all(mask_pixels == (0, 0, 255), axis=2)
+            red = np.all(mask_pixels == (255, 0, 0), axis=2)
             white = np.all(mask_pixels == (255, 255, 255), axis=2)
-            self.assertTrue(np.all(blue | white))
+            self.assertTrue(np.all(blue | red | white))
 
         tongue_values = metadata["tongue_center_y_by_frame"]
         self.assertLess(min(tongue_values), max(tongue_values))
+
+    def test_drinking_reference_split_keeps_contact_tongue_out_of_bowl(
+        self,
+    ) -> None:
+        reference, _reference_mask = self._drinking_reference()
+
+        colored, exclusion, metadata = (
+            scail.make_drinking_reference_identity_mask(reference)
+        )
+        mask = np.asarray(colored.convert("RGB"), dtype=np.uint8)
+        excluded = np.asarray(exclusion.convert("L"), dtype=np.uint8)
+
+        self.assertEqual(
+            metadata["policy"],
+            "drinking_reference_dog_blue_bowl_red_v2",
+        )
+        self.assertTrue(metadata["tongue_reclassified_as_identity"])
+        self.assertEqual(tuple(mask[370, 122]), (0, 0, 255))
+        self.assertEqual(int(excluded[370, 122]), 0)
+        self.assertEqual(tuple(mask[430, 100]), (255, 0, 0))
+        self.assertEqual(int(excluded[430, 100]), 255)
+        self.assertEqual(tuple(mask[250, 300]), (0, 0, 255))
+
+    def test_drinking_motion_uses_contact_anchor_without_visible_tongue(
+        self,
+    ) -> None:
+        reference, reference_mask = self._drinking_reference()
+        reference_pixels = np.asarray(reference.convert("RGBA"), dtype=np.uint8).copy()
+        reference_pixels[350:402, 112:133, :3] = (232, 202, 148)
+        reference_without_pink = Image.fromarray(reference_pixels, mode="RGBA")
+
+        poses, masks, metadata = scail.make_drinking_reference_aligned_pose_frames(
+            self._drinking_driver_frames(),
+            reference_without_pink,
+            reference_mask,
+            (512, 512),
+            frame_count=81,
+        )
+
+        self.assertFalse(metadata["tongue_anchor_detected"])
+        self.assertEqual(
+            metadata["motion_anchor_policy"],
+            "nearest_identity_to_static_bowl_contact_v1",
+        )
+        self.assertTrue(metadata["driver_input_used"])
+        self.assertGreaterEqual(metadata["head_lift_px_max"], 14.0)
+        self.assertGreaterEqual(metadata["tongue_motion_span_px"], 2.0)
+        self.assertEqual(len(poses), 81)
+        self.assertEqual(len(masks), 81)
 
     def test_static_drinking_fallback_keeps_reference_identity(self) -> None:
         reference, reference_mask = self._drinking_reference()
@@ -1282,6 +1455,11 @@ class EatingScenePropMaskTests(unittest.TestCase):
             scail.DEFAULT_PROMPT,
         )
 
+    def test_toileting_prompt_blocks_dark_contour_outlines(self) -> None:
+        self.assertIn("without any black", scail.DOG_TOILETING_PROMPT)
+        self.assertIn("black outline", scail.DOG_TOILETING_NEGATIVE_PROMPT)
+        self.assertIn("dark tray rim", scail.DOG_TOILETING_NEGATIVE_PROMPT)
+
     def test_grooming_reference_can_match_driver_contain_fraction(self) -> None:
         reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
         ImageDraw.Draw(reference).ellipse(
@@ -1520,6 +1698,34 @@ class DrivingAnimationDecodeTests(unittest.TestCase):
         self.assertFalse(open_quality["acceptable"])
         self.assertTrue(closed_quality["acceptable"])
         self.assertEqual(closed_quality["loop_transition_score"], 0.0)
+
+    def test_action_tail_cosine_closure_preserves_length_and_closes(self) -> None:
+        alpha = np.full((4, 4), 255, dtype=np.uint8)
+        frames = [
+            (np.full((4, 4, 3), value, dtype=np.uint8), alpha)
+            for value in (0, 15, 30, 60, 120, 220)
+        ]
+
+        closed, metadata = scail.close_transparent_action_tail_loop(
+            frames,
+            target_frame_index=4,
+            maximum_blend_frames=3,
+        )
+
+        self.assertEqual(len(closed), len(frames))
+        self.assertTrue(np.array_equal(closed[4][0], closed[0][0]))
+        self.assertTrue(np.array_equal(closed[5][0], closed[0][0]))
+        self.assertGreater(int(closed[2][0][0, 0, 0]), 0)
+        self.assertLess(int(closed[3][0][0, 0, 0]), 60)
+        self.assertEqual(
+            metadata["policy"],
+            "drinking_eating_tail_cosine_blend_to_first_v1",
+        )
+        quality = scail.transparent_animation_loop_quality(
+            closed,
+            [0, 1, 2, 3, 4],
+        )
+        self.assertTrue(quality["acceptable"])
 
     def test_video_driver_decodes_all_frames_with_constant_timing(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

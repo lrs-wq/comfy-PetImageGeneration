@@ -509,7 +509,7 @@ def build_dog_eating_prompt_only_action_transfer_prompt(
     *,
     profile_fur_lock: str = "",
 ) -> str:
-    """Repose the approved dog canonical without exposing white-model morphology."""
+    """Transfer white-model eating geometry onto the approved dog identity."""
     _sync_local_video_runtime(
         globals(), {"build_dog_eating_prompt_only_action_transfer_prompt"}
     )
@@ -518,7 +518,11 @@ def build_dog_eating_prompt_only_action_transfer_prompt(
         raise ValueError("Prompt-only dog eating transfer supports only eating.")
     del profile_fur_lock
     return (
-        "Edit Image 1. Keep this exact dog and its restrained stylized 3D "
+        "Image 1 is the only identity and appearance authority. Image 2 is a "
+        "neutral white action-geometry guide: copy only its eating pose, camera, "
+        "ground contact, and bowl placement. Never copy Image 2's breed, skull, "
+        "ears, muzzle, body proportions, tail, color, material, lighting, or "
+        "surface. Edit Image 1. Keep this exact dog and its restrained stylized 3D "
         "identity unchanged. Preserve its exact apparent age and breed geometry: "
         "skull and cheek width, muzzle length/width/taper, ear topology/size/"
         "carriage, eyes, nose, coat colors and markings, natural coat length/"
@@ -548,7 +552,7 @@ def build_dog_drinking_prompt_only_action_transfer_prompt(
     *,
     profile_fur_lock: str = "",
 ) -> str:
-    """Create drinking geometry without exposing white-model morphology."""
+    """Transfer white-model drinking geometry onto the approved dog identity."""
     _sync_local_video_runtime(
         globals(), {"build_dog_drinking_prompt_only_action_transfer_prompt"}
     )
@@ -557,7 +561,12 @@ def build_dog_drinking_prompt_only_action_transfer_prompt(
         raise ValueError("Prompt-only dog drinking transfer supports only drinking.")
     del profile_fur_lock
     return (
-        "Edit Image 1. Keep this exact dog and its restrained stylized 3D "
+        "Image 1 is the only identity and appearance authority. Image 2 is a "
+        "neutral white action-geometry guide: copy only its drinking pose, camera, "
+        "ground contact, head-to-water contact, and bowl placement. Never copy "
+        "Image 2's breed, skull, ears, muzzle, body proportions, tail, color, "
+        "material, lighting, or surface. Edit Image 1. Keep this exact dog and its "
+        "restrained stylized 3D "
         "identity unchanged. Preserve its exact apparent age and breed geometry: "
         "skull and cheek width, muzzle length/width/taper, ear topology/size/"
         "carriage, eyes, nose, coat colors and markings, natural coat length/"
@@ -587,7 +596,7 @@ def build_dog_toileting_prompt_only_action_transfer_prompt(
     *,
     profile_fur_lock: str = "",
 ) -> str:
-    """Create the seated tray action without exposing white-model morphology."""
+    """Transfer white-model toileting geometry onto the approved dog identity."""
     _sync_local_video_runtime(
         globals(), {"build_dog_toileting_prompt_only_action_transfer_prompt"}
     )
@@ -596,7 +605,12 @@ def build_dog_toileting_prompt_only_action_transfer_prompt(
         raise ValueError("Prompt-only dog toileting transfer supports only toileting.")
     del profile_fur_lock
     return (
-        "Edit Image 1. Keep this exact dog and its restrained stylized 3D "
+        "Image 1 is the only identity and appearance authority. Image 2 is a "
+        "neutral white action-geometry guide: copy only its seated toileting pose, "
+        "camera, paw contact, and complete tray footprint. Never copy Image 2's "
+        "breed, skull, ears, muzzle, body proportions, tail, color, material, "
+        "lighting, or surface. Edit Image 1. Keep this exact dog and its restrained "
+        "stylized 3D "
         "identity unchanged. Preserve its exact apparent age and breed geometry: "
         "skull and cheek width, muzzle length/width/taper, ear topology/size/"
         "carriage, eyes, nose, coat colors and markings, natural coat length/"

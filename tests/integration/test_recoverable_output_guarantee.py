@@ -236,6 +236,68 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
                 {"ffmpeg_palette", "pillow_multiframe"},
             )
 
+    def test_action_fallback_does_not_complete_or_replace_sibling_actions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary)
+            job_id = "single-action-isolation"
+            job_dir = output_root / job_id
+            job_dir.mkdir()
+            _write_transparent_identity(job_dir / "input_identity_source.png")
+            job = _accepted_job(
+                job_id,
+                ["toileting", "standing", "eating"],
+                status="running",
+            )
+            job["effective_subject_config"] = {
+                "frames": 81,
+                "fps": 16,
+                "actions": {
+                    action: {}
+                    for action in ("toileting", "standing", "eating")
+                },
+            }
+            jobs = {job_id: job}
+
+            with patch.multiple(
+                pipeline,
+                OUTPUT_ROOT=output_root,
+                JOBS=jobs,
+                TRANSPARENT_GIF_SIZE=TEST_GIF_SIZE,
+                TRANSPARENT_GIF_FRAMES=TEST_GIF_FRAMES,
+                TRANSPARENT_GIF_FPS=TEST_GIF_FPS,
+                TRANSPARENT_GIF_DURATION_SECONDS=(
+                    TEST_GIF_DURATION_SECONDS
+                ),
+                FFMPEG_BIN=(
+                    output_root / "missing-ffmpeg-for-pillow-fallback"
+                ),
+            ):
+                result, _source = (
+                    pipeline.recover_subject_replacement_action_with_fallback(
+                        job_id,
+                        job,
+                        action="toileting",
+                        pose_index=1,
+                        error=RuntimeError("forced toileting gate failure"),
+                    )
+                )
+
+            self.assertEqual(jobs[job_id]["status"], "running")
+            self.assertEqual(result["action"], "toileting")
+            self.assertTrue(result["degraded"])
+            self.assertFalse(result["generation_succeeded"])
+            self.assertFalse(result["quality_passed"])
+            gif_actions = {
+                output["action"]
+                for output in jobs[job_id]["outputs"]
+                if output["type"] == "transparent_gif"
+            }
+            self.assertEqual(gif_actions, {"toileting"})
+            self.assertNotIn("standing", gif_actions)
+            self.assertNotIn("eating", gif_actions)
+
     def test_worker_exception_returns_every_dog_action_gif(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output_root = Path(temporary)

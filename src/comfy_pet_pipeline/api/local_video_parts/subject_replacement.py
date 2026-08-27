@@ -62,12 +62,28 @@ TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY = (
 TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = 0.70
 
 TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY = (
-    "toileting_temporal_lateral_dark_band_and_symbol_gate_v1"
+    "toileting_temporal_lateral_dark_band_and_symbol_gate_v2"
 )
+TOILETING_SCAIL_DARK_COMPONENT_AREA_MIN = 120
 TOILETING_SCAIL_MAX_ATTEMPTS = 3
 TOILETING_SCAIL_RETRY_SEED_STEP = 1
 TOILETING_SCAIL_MAX_FLAGGED_FRAME_FRACTION = 0.05
 TOILETING_SCAIL_MAX_FLAGGED_FRAMES_MINIMUM = 4
+TOILETING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (1.0, 0.92, 0.84)
+
+DRINKING_SCAIL_TEMPORAL_ACTION_POLICY = (
+    "drinking_visible_motion_energy_gate_v1"
+)
+DRINKING_SCAIL_MAX_ATTEMPTS = 3
+DRINKING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (1.0, 1.06, 0.94)
+DRINKING_SCAIL_ADJACENT_MAE_MIN = 0.60
+DRINKING_SCAIL_FIRST_FRAME_MAE_MAX_MIN = 3.0
+
+EATING_SCAIL_TEMPORAL_ACTION_POLICY = "eating_visible_motion_energy_gate_v1"
+EATING_SCAIL_MAX_ATTEMPTS = 2
+EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (1.0, 0.94)
+EATING_SCAIL_ADJACENT_MAE_MIN = 0.55
+EATING_SCAIL_FIRST_FRAME_MAE_MAX_MIN = 3.0
 
 
 def select_transparent_guidance_policy(
@@ -266,7 +282,11 @@ def _toileting_lateral_dark_band_frame_quality(
         long_side = max(component_width, component_height)
         short_side = max(1, min(component_width, component_height))
         elongation = float(long_side) / float(short_side)
-        if area < 32 or long_side < 18 or elongation < 2.2:
+        if (
+            area < TOILETING_SCAIL_DARK_COMPONENT_AREA_MIN
+            or long_side < 18
+            or elongation < 2.2
+        ):
             continue
         selected_components.append(
             {
@@ -345,6 +365,9 @@ def toileting_temporal_identity_artifact_quality(
             int(metric["frame_index"]) for metric in flagged
         ],
         "permitted_flagged_frames": permitted_flagged_frames,
+        "dark_component_area_minimum": (
+            TOILETING_SCAIL_DARK_COMPONENT_AREA_MIN
+        ),
         "maximum_flagged_frame_fraction": (
             TOILETING_SCAIL_MAX_FLAGGED_FRAME_FRACTION
         ),
@@ -385,6 +408,143 @@ def evaluate_toileting_scail_video_identity_artifacts(
     }
 
 
+def drinking_scail_video_motion_quality(
+    frames: list[np.ndarray],
+) -> dict[str, Any]:
+    """Reject a drinking result that remains effectively a static keyframe."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"drinking_scail_video_motion_quality"},
+    )
+
+    normalized_frames = [
+        cv2.cvtColor(np.asarray(frame, dtype=np.uint8), cv2.COLOR_RGB2GRAY).astype(
+            np.float32
+        )
+        for frame in frames
+        if isinstance(frame, np.ndarray)
+        and frame.ndim == 3
+        and frame.shape[2] == 3
+    ]
+    adjacent_mae = [
+        float(np.mean(np.abs(current - previous)))
+        for previous, current in zip(
+            normalized_frames,
+            normalized_frames[1:],
+            strict=False,
+        )
+    ]
+    first_frame_mae = [
+        float(np.mean(np.abs(frame - normalized_frames[0])))
+        for frame in normalized_frames
+    ] if normalized_frames else []
+    adjacent_mae_mean = float(np.mean(adjacent_mae)) if adjacent_mae else 0.0
+    first_frame_mae_max = max(first_frame_mae, default=0.0)
+    issues: list[str] = []
+    if len(normalized_frames) < 9:
+        issues.append("drinking_video_too_short_for_motion_gate")
+    if adjacent_mae_mean < DRINKING_SCAIL_ADJACENT_MAE_MIN:
+        issues.append("drinking_motion_energy_too_low")
+    if first_frame_mae_max < DRINKING_SCAIL_FIRST_FRAME_MAE_MAX_MIN:
+        issues.append("drinking_action_excursion_too_low")
+    return {
+        "policy": DRINKING_SCAIL_TEMPORAL_ACTION_POLICY,
+        "available": len(normalized_frames) >= 9,
+        "acceptable": not issues,
+        "issues": issues,
+        "frame_count": len(normalized_frames),
+        "adjacent_grayscale_mae_mean": round(adjacent_mae_mean, 6),
+        "adjacent_grayscale_mae_minimum": DRINKING_SCAIL_ADJACENT_MAE_MIN,
+        "first_frame_grayscale_mae_max": round(first_frame_mae_max, 6),
+        "first_frame_grayscale_mae_max_minimum": (
+            DRINKING_SCAIL_FIRST_FRAME_MAE_MAX_MIN
+        ),
+    }
+
+
+def eating_scail_video_motion_quality(
+    frames: list[np.ndarray],
+) -> dict[str, Any]:
+    """Reject an eating result whose prepared head-nod did not survive SCAIL."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"eating_scail_video_motion_quality"},
+    )
+
+    quality = drinking_scail_video_motion_quality(frames)
+    adjacent = float(quality["adjacent_grayscale_mae_mean"])
+    excursion = float(quality["first_frame_grayscale_mae_max"])
+    issues: list[str] = []
+    if int(quality["frame_count"]) < 9:
+        issues.append("eating_video_too_short_for_motion_gate")
+    if adjacent < EATING_SCAIL_ADJACENT_MAE_MIN:
+        issues.append("eating_motion_energy_too_low")
+    if excursion < EATING_SCAIL_FIRST_FRAME_MAE_MAX_MIN:
+        issues.append("eating_action_excursion_too_low")
+    return {
+        **quality,
+        "policy": EATING_SCAIL_TEMPORAL_ACTION_POLICY,
+        "acceptable": not issues,
+        "issues": issues,
+        "adjacent_grayscale_mae_minimum": EATING_SCAIL_ADJACENT_MAE_MIN,
+        "first_frame_grayscale_mae_max_minimum": (
+            EATING_SCAIL_FIRST_FRAME_MAE_MAX_MIN
+        ),
+    }
+
+
+def evaluate_drinking_scail_video_motion(video_path: Path) -> dict[str, Any]:
+    """Decode and enforce the dog drinking motion contract."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"evaluate_drinking_scail_video_motion"},
+    )
+    capture = cv2.VideoCapture(str(video_path))
+    frames: list[np.ndarray] = []
+    try:
+        while True:
+            ok, bgr = capture.read()
+            if not ok:
+                break
+            frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    finally:
+        capture.release()
+    quality = drinking_scail_video_motion_quality(frames)
+    return {
+        **quality,
+        "video_path": str(video_path),
+        "video_sha256": file_sha256(video_path) if video_path.is_file() else None,
+    }
+
+
+def evaluate_eating_scail_video_motion(video_path: Path) -> dict[str, Any]:
+    """Decode and enforce the dog eating motion contract."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"evaluate_eating_scail_video_motion"},
+    )
+    capture = cv2.VideoCapture(str(video_path))
+    frames: list[np.ndarray] = []
+    try:
+        while True:
+            ok, bgr = capture.read()
+            if not ok:
+                break
+            frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    finally:
+        capture.release()
+    quality = eating_scail_video_motion_quality(frames)
+    return {
+        **quality,
+        "video_path": str(video_path),
+        "video_sha256": file_sha256(video_path) if video_path.is_file() else None,
+    }
+
+
 def scail_workflow_with_retry_seed(
     workflow: dict[str, Any],
     *,
@@ -404,6 +564,64 @@ def scail_workflow_with_retry_seed(
     if not updated_nodes:
         raise RuntimeError("Prepared SCAIL workflow contains no noise_seed input.")
     return candidate, updated_nodes
+
+
+def scail_workflow_with_retry_controls(
+    workflow: dict[str, Any],
+    *,
+    seed: int,
+    action: str,
+    attempt: int,
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    """Vary both seed and action pose strength across quality retries."""
+
+    candidate, updated_seed_nodes = scail_workflow_with_retry_seed(
+        workflow,
+        seed=seed,
+    )
+    normalized_action = str(action or "").strip().lower()
+    multipliers = (
+        TOILETING_SCAIL_POSE_STRENGTH_MULTIPLIERS
+        if normalized_action == "toileting"
+        else DRINKING_SCAIL_POSE_STRENGTH_MULTIPLIERS
+        if normalized_action == "drinking"
+        else EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS
+        if normalized_action == "eating"
+        else (1.0,)
+    )
+    multiplier = float(multipliers[min(max(1, attempt), len(multipliers)) - 1])
+    updated_pose_nodes: list[str] = []
+    original_strengths: dict[str, float] = {}
+    effective_strengths: dict[str, float] = {}
+    for node_id, node in candidate.items():
+        if not isinstance(node, dict) or node.get("class_type") != "WanSCAILToVideo":
+            continue
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict) or "pose_strength" not in inputs:
+            continue
+        original = float(inputs["pose_strength"])
+        effective = round(original * multiplier, 6)
+        inputs["pose_strength"] = effective
+        updated_pose_nodes.append(str(node_id))
+        original_strengths[str(node_id)] = original
+        effective_strengths[str(node_id)] = effective
+    if not updated_pose_nodes:
+        raise RuntimeError(
+            "Prepared SCAIL workflow contains no WanSCAIL pose_strength input."
+        )
+    return (
+        candidate,
+        updated_seed_nodes,
+        {
+            "policy": "seed_plus_action_pose_strength_retry_v1",
+            "action": normalized_action,
+            "attempt": int(attempt),
+            "pose_strength_multiplier": multiplier,
+            "updated_pose_nodes": updated_pose_nodes,
+            "original_pose_strengths": original_strengths,
+            "effective_pose_strengths": effective_strengths,
+        },
+    )
 
 
 def _recoverable_candidate_path(job_dir: Path, value: Any) -> Path | None:
@@ -733,6 +951,147 @@ def _write_recoverable_breathing_gif(
         shutil.rmtree(frame_dir, ignore_errors=True)
 
 
+def recover_subject_replacement_action_with_fallback(
+    job_id: str,
+    job: dict[str, Any],
+    *,
+    action: str,
+    pose_index: int,
+    error: BaseException,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Create one explicit degraded action result and keep sibling actions running."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"recover_subject_replacement_action_with_fallback"},
+    )
+    job_dir = OUTPUT_ROOT / job_id
+    source_path, source_role, source_image = _load_recoverable_reference(
+        _recoverable_reference_candidates(job_dir, job, action, pose_index)
+    )
+    try:
+        fallback_reference = (
+            job_dir / f"{action}_degraded_fallback_reference.png"
+        )
+        normalization = _normalize_recoverable_reference(
+            source_image,
+            fallback_reference,
+            size=TRANSPARENT_GIF_SIZE,
+        )
+    finally:
+        source_image.close()
+    effective = job.get("effective_subject_config")
+    action_timing = subject_replacement_action_output_timing(
+        effective,
+        action,
+    )
+    gif_timing = action_timing["transparent_gif"]
+    gif_target = job_dir / f"{action}_subject_replacement_transparent_512.gif"
+    animation = _write_recoverable_breathing_gif(
+        fallback_reference,
+        gif_target,
+        size=TRANSPARENT_GIF_SIZE,
+        frame_count=int(gif_timing["frames"]),
+        fps=int(gif_timing["fps"]),
+    )
+    action_label = SUBJECT_REPLACEMENT_ACTION_LABELS.get(action, action)
+    original_error = f"{type(error).__name__}: {str(error)[:1000]}"
+    append_output(
+        job_id,
+        {
+            "type": "degraded_fallback_reference",
+            "action": action,
+            "action_label": action_label,
+            "filename": fallback_reference.name,
+            "width": TRANSPARENT_GIF_SIZE,
+            "height": TRANSPARENT_GIF_SIZE,
+            "transparent": True,
+            "sha256": normalization["sha256"],
+            "fallback_source": str(source_path),
+            "fallback_source_role": source_role,
+            "primary": False,
+        },
+    )
+    append_output(
+        job_id,
+        {
+            "type": "transparent_gif",
+            "action": action,
+            "action_label": action_label,
+            "filename": gif_target.name,
+            "width": TRANSPARENT_GIF_SIZE,
+            "height": TRANSPARENT_GIF_SIZE,
+            "frames": int(gif_timing["frames"]),
+            "fps": int(gif_timing["fps"]),
+            "duration_seconds": float(gif_timing["duration_seconds"]),
+            "output_playback": action_timing,
+            "transparent": True,
+            "video_engine": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+            "degraded": True,
+            "quality_passed": False,
+            "generation_succeeded": False,
+            "output_exists": True,
+            "sha256": animation["sha256"],
+            "fallback_source": str(source_path),
+            "fallback_source_role": source_role,
+            "primary": True,
+        },
+    )
+    result = {
+        "action": action,
+        "action_label": action_label,
+        "reference": str(fallback_reference),
+        "reference_sha256": normalization["sha256"],
+        "video": None,
+        "transparent_gif": gif_target.name,
+        "transparent_metrics": animation,
+        "output_playback": action_timing,
+        "output_exists": True,
+        "generation_succeeded": False,
+        "quality_passed": False,
+        "degraded": True,
+        "degraded_policy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+        "fallback_source": str(source_path),
+        "fallback_source_role": source_role,
+        "original_error": original_error,
+    }
+    source = {
+        "path": str(source_path),
+        "role": source_role,
+        "normalization": normalization,
+        "animation": animation,
+    }
+    append_recovery_event(
+        job_id,
+        {
+            "stage": "action_output_recovery",
+            "action": action,
+            "reason": original_error,
+            "strategy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+            "result": "accepted_degraded_action_only",
+            "source": source,
+        },
+    )
+    record_nonblocking_job_anomaly(
+        job_id,
+        code=f"degraded_output_fallback_{action}",
+        message=(
+            f"{action_label}动作生成未通过质量门禁，已仅对该动作生成身份锚定的"
+            "降级循环；其他动作继续独立生成。"
+        ),
+        stage="completed_with_degraded_output",
+        details={
+            "action": action,
+            "policy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+            "exception_type": type(error).__name__,
+            "error": str(error)[:1000],
+            "fallback_source_role": source_role,
+        },
+        expose_as_public_stage=True,
+    )
+    return result, source
+
+
 def recover_subject_replacement_job_with_fallback(
     job_id: str,
     error: BaseException,
@@ -880,6 +1239,9 @@ def recover_subject_replacement_job_with_fallback(
                 "transparent": True,
                 "video_engine": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
                 "degraded": True,
+                "output_exists": True,
+                "generation_succeeded": False,
+                "quality_passed": False,
                 "sha256": animation["sha256"],
                 "fallback_source": str(source_path),
                 "fallback_source_role": source_role,
@@ -896,6 +1258,9 @@ def recover_subject_replacement_job_with_fallback(
             "transparent_metrics": animation,
             "output_playback": action_timing,
             "degraded": True,
+            "output_exists": True,
+            "generation_succeeded": False,
+            "quality_passed": False,
             "degraded_policy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
             "fallback_source": str(source_path),
             "fallback_source_role": source_role,
@@ -1010,12 +1375,36 @@ def recover_subject_replacement_job_with_fallback(
         degraded_output_fallback_source_roles=fallback_source_roles,
         degraded_output_upload_identity_anchored=upload_identity_fallback,
         transparent_outputs_complete=True,
+        transparent_outputs_quality_passed=False,
+        degraded_output_actions=actions,
         original_generation_error=f"{type(error).__name__}: {str(error)[:4000]}",
         subject_replacement_results=[
             results_by_action[action]
             for action in actions
             if action in results_by_action
         ],
+        action_quality_summary={
+            action: {
+                "output_exists": True,
+                "generation_succeeded": bool(
+                    results_by_action.get(action, {}).get(
+                        "generation_succeeded",
+                        not results_by_action.get(action, {}).get("degraded", False),
+                    )
+                ),
+                "quality_passed": bool(
+                    results_by_action.get(action, {}).get(
+                        "quality_passed",
+                        not results_by_action.get(action, {}).get("degraded", False),
+                    )
+                ),
+                "degraded": bool(
+                    results_by_action.get(action, {}).get("degraded", False)
+                ),
+            }
+            for action in actions
+            if action in results_by_action
+        },
         reference_generation_status=(
             "completed"
             if job.get("reference_generation_completed")
@@ -2140,6 +2529,50 @@ def run_subject_replacement_job(job_id: str) -> None:
             expected_pose_policy,
         )
         pose_metadata = manifest.get("pose_metadata")
+        final_gate_required_actions = {
+            str(value)
+            for value in (
+                get_job(job_id).get(
+                    "action_candidate_final_gate_required_actions",
+                    [],
+                )
+                or []
+            )
+        }
+        dog_bowl_motion_contract = bool(
+            action in {"eating", "drinking"}
+            and str(job.get("species") or "").strip().lower() == "dog"
+        )
+        bowl_motion_contract_issues: list[str] = []
+        if dog_bowl_motion_contract:
+            if not isinstance(pose_metadata, dict):
+                bowl_motion_contract_issues.append("pose_metadata_missing")
+            else:
+                if pose_metadata.get("fallback_used") is True:
+                    bowl_motion_contract_issues.append(
+                        "static_pose_fallback_forbidden"
+                    )
+                if pose_metadata.get("driver_signal_only") is not True:
+                    bowl_motion_contract_issues.append(
+                        "white_driver_motion_signal_missing"
+                    )
+                if pose_metadata.get("scene_prop_separated") is not True:
+                    bowl_motion_contract_issues.append(
+                        "bowl_prop_not_separated"
+                    )
+                if (
+                    action == "drinking"
+                    and pose_metadata.get("driver_input_used") is not True
+                ):
+                    bowl_motion_contract_issues.append(
+                        "drinking_white_driver_not_used"
+                    )
+        manifest["final_action_gate"] = {
+            "required_by_candidate_gate": action in final_gate_required_actions,
+            "pre_scail_motion_contract_required": dog_bowl_motion_contract,
+            "pre_scail_motion_contract_passed": not bowl_motion_contract_issues,
+            "issues": bowl_motion_contract_issues,
+        }
         final_video_comparison_scope = (
             select_final_video_fur_surface_comparison_scope(
                 action=action,
@@ -2155,6 +2588,34 @@ def run_subject_replacement_job(job_id: str) -> None:
         )
         write_workflow(job_dir, f"scail_{action}.json", workflow)
         write_json_atomic(job_dir / f"{action}_prepare_manifest.json", manifest)
+
+        if bowl_motion_contract_issues:
+            action_error = RuntimeError(
+                f"{action}_pre_scail_action_motion_contract_failed: "
+                + ", ".join(bowl_motion_contract_issues)
+            )
+            degraded_result, _fallback_source = (
+                recover_subject_replacement_action_with_fallback(
+                    job_id,
+                    get_job(job_id),
+                    action=action,
+                    pose_index=actions.index(action) + 1,
+                    error=action_error,
+                )
+            )
+            degraded_result["final_action_gate_required"] = bool(
+                action in final_gate_required_actions
+            )
+            degraded_result["pre_scail_action_motion_contract"] = (
+                manifest["final_action_gate"]
+            )
+            results.append(degraded_result)
+            update_job(
+                job_id,
+                progress=action_start + action_span,
+                subject_replacement_results=results,
+            )
+            continue
 
         normalized_reference = experiment_dir / "reference_normalized.png"
         reference_target = job_dir / f"{action}_subject_reference.png"
@@ -2225,17 +2686,18 @@ def run_subject_replacement_job(job_id: str) -> None:
                 },
             )
         scail_reference_policies[action] = reference_policy
-        scail_scene_prop_policies[action] = (
-            "dog_toileting_tray_terminal_geometry_contract_v1"
-            if action == "toileting"
-            else (
-                "dog_white_model_bowl_scail_object_mapping"
+        if action == "toileting":
+            scail_scene_prop_policies[action] = (
+                "dog_toileting_lateral_tray_red_object_mapping_v2"
+            )
+        elif action in {"eating", "drinking"}:
+            scail_scene_prop_policies[action] = (
+                "dog_white_model_bowl_scail_object_mapping_v2"
                 if job.get("species") == "dog"
                 else "cat_blue_bowl_red_scail_object_mapping"
             )
-            if action == "eating"
-            else "no_scene_prop"
-        )
+        else:
+            scail_scene_prop_policies[action] = "no_scene_prop"
         update_job(
             job_id,
             scail_reference_policy=dict(scail_reference_policies),
@@ -2252,9 +2714,21 @@ def run_subject_replacement_job(job_id: str) -> None:
             action == "toileting"
             and str(job.get("species") or "").strip().lower() == "dog"
         )
+        dog_drinking_motion_gate = bool(
+            action == "drinking"
+            and str(job.get("species") or "").strip().lower() == "dog"
+        )
+        dog_eating_motion_gate = bool(
+            action == "eating"
+            and str(job.get("species") or "").strip().lower() == "dog"
+        )
         maximum_scail_attempts = (
             TOILETING_SCAIL_MAX_ATTEMPTS
             if dog_toileting_temporal_gate
+            else DRINKING_SCAIL_MAX_ATTEMPTS
+            if dog_drinking_motion_gate
+            else EATING_SCAIL_MAX_ATTEMPTS
+            if dog_eating_motion_gate
             else 1
         )
         base_scail_seed = int(action_config["effective_seed"])
@@ -2265,10 +2739,12 @@ def run_subject_replacement_job(job_id: str) -> None:
             attempt_seed = base_scail_seed + (
                 (scail_attempt - 1) * TOILETING_SCAIL_RETRY_SEED_STEP
             )
-            candidate_workflow, updated_seed_nodes = (
-                scail_workflow_with_retry_seed(
+            candidate_workflow, updated_seed_nodes, retry_controls = (
+                scail_workflow_with_retry_controls(
                     workflow,
                     seed=attempt_seed,
+                    action=action,
+                    attempt=scail_attempt,
                 )
             )
             if scail_attempt > 1:
@@ -2284,6 +2760,10 @@ def run_subject_replacement_job(job_id: str) -> None:
                     scail_retry_seed=attempt_seed,
                     scail_retry_reason=(
                         "toileting_temporal_lateral_dark_band_or_symbol"
+                        if dog_toileting_temporal_gate
+                        else "drinking_visible_motion_energy_too_low"
+                        if dog_drinking_motion_gate
+                        else "eating_visible_motion_energy_too_low"
                     ),
                 )
             write_workflow(
@@ -2318,6 +2798,14 @@ def run_subject_replacement_job(job_id: str) -> None:
                         attempt_target,
                     )
                 )
+            elif dog_drinking_motion_gate:
+                temporal_identity_quality = (
+                    evaluate_drinking_scail_video_motion(attempt_target)
+                )
+            elif dog_eating_motion_gate:
+                temporal_identity_quality = (
+                    evaluate_eating_scail_video_motion(attempt_target)
+                )
             else:
                 temporal_identity_quality = {
                     "policy": "not_applicable",
@@ -2330,6 +2818,7 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "seed": attempt_seed,
                 "seed_step": TOILETING_SCAIL_RETRY_SEED_STEP,
                 "workflow_seed_nodes": updated_seed_nodes,
+                "retry_controls": retry_controls,
                 "video": attempt_target.name,
                 "video_sha256": file_sha256(attempt_target),
                 "temporal_identity_quality": temporal_identity_quality,
@@ -2369,10 +2858,35 @@ def run_subject_replacement_job(job_id: str) -> None:
                     )
                 },
             )
-            raise RuntimeError(
+            action_error = RuntimeError(
                 f"{action}_scail_temporal_identity_gate_failed_after_"
                 f"{maximum_scail_attempts}_attempts"
             )
+            degraded_result, _fallback_source = (
+                recover_subject_replacement_action_with_fallback(
+                    job_id,
+                    get_job(job_id),
+                    action=action,
+                    pose_index=actions.index(action) + 1,
+                    error=action_error,
+                )
+            )
+            degraded_result["scail_attempt_count"] = len(
+                scail_attempt_records
+            )
+            degraded_result["scail_video_attempts"] = scail_attempt_records
+            degraded_result["temporal_identity_quality"] = (
+                scail_attempt_records[-1].get("temporal_identity_quality")
+                if scail_attempt_records
+                else None
+            )
+            results.append(degraded_result)
+            update_job(
+                job_id,
+                progress=action_start + action_span,
+                subject_replacement_results=results,
+            )
+            continue
         selected_scail_seeds[action] = selected_scail_seed
         if selected_scail_candidate != video_target:
             shutil.copy2(selected_scail_candidate, video_target)
@@ -2609,6 +3123,10 @@ def run_subject_replacement_job(job_id: str) -> None:
             "output_playback": action_timing,
             "playback_contract": video_playback_contract,
             "video_engine": "scail2-14b-fp8",
+            "output_exists": True,
+            "generation_succeeded": True,
+            "quality_passed": True,
+            "degraded": False,
             "requested_effective_seed": base_scail_seed,
             "selected_effective_seed": selected_scail_seed,
             "scail_attempt_count": len(scail_attempt_records),
@@ -2786,6 +3304,47 @@ def run_subject_replacement_job(job_id: str) -> None:
             transparent_metrics["guidance_policy"] = (
                 transparent_guidance_plan
             )
+            if action in {"eating", "drinking"}:
+                bowl_temporal_cycle = transparent_metrics.get(
+                    "temporal_cycle"
+                )
+                bowl_published_loop = (
+                    bowl_temporal_cycle.get("published_loop_quality")
+                    if isinstance(bowl_temporal_cycle, dict)
+                    else None
+                )
+                if not (
+                    isinstance(bowl_published_loop, dict)
+                    and bowl_published_loop.get("acceptable") is True
+                ):
+                    action_error = RuntimeError(
+                        f"{action}_transparent_loop_quality_failed"
+                    )
+                    degraded_result, _fallback_source = (
+                        recover_subject_replacement_action_with_fallback(
+                            job_id,
+                            get_job(job_id),
+                            action=action,
+                            pose_index=actions.index(action) + 1,
+                            error=action_error,
+                        )
+                    )
+                    degraded_result["scail_attempt_count"] = len(
+                        scail_attempt_records
+                    )
+                    degraded_result["scail_video_attempts"] = (
+                        scail_attempt_records
+                    )
+                    degraded_result["transparent_loop_quality"] = (
+                        bowl_temporal_cycle
+                    )
+                    results.append(degraded_result)
+                    update_job(
+                        job_id,
+                        progress=action_start + action_span,
+                        subject_replacement_results=results,
+                    )
+                    continue
             if action == "grooming":
                 temporal_cycle = transparent_metrics.get("temporal_cycle")
                 published_loop_quality = (
@@ -2958,6 +3517,10 @@ def run_subject_replacement_job(job_id: str) -> None:
                     "output_playback": action_timing,
                     "transparent": True,
                     "video_engine": "scail2-14b-fp8",
+                    "output_exists": True,
+                    "generation_succeeded": True,
+                    "quality_passed": True,
+                    "degraded": False,
                     "driving_template": Path(action_config["driving_animation"]).name,
                     "edge_mode": "clean_hard_alpha_no_dither",
                     "temporal_cycle": temporal_cycle_output,
@@ -2980,6 +3543,10 @@ def run_subject_replacement_job(job_id: str) -> None:
                         "transparent": True,
                         "soft_alpha": True,
                         "video_engine": "scail2-14b-fp8",
+                        "output_exists": True,
+                        "generation_succeeded": True,
+                        "quality_passed": True,
+                        "degraded": False,
                         "driving_template": Path(
                             action_config["driving_animation"]
                         ).name,
@@ -3024,6 +3591,10 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "temporal_cycle": temporal_cycle_output,
                 "final_video_fur_surface": final_video_fur_surface,
                 "output_playback": action_timing,
+                "output_exists": True,
+                "generation_succeeded": True,
+                "quality_passed": True,
+                "degraded": False,
             }
         )
         update_job(
@@ -3036,15 +3607,49 @@ def run_subject_replacement_job(job_id: str) -> None:
     free_comfy_models()
     result_order = {action: index for index, action in enumerate(actions)}
     results.sort(key=lambda result: result_order.get(str(result.get("action")), 999))
+    degraded_actions = [
+        str(result.get("action"))
+        for result in results
+        if result.get("degraded") is True
+        or result.get("quality_passed") is False
+    ]
+    transparent_outputs_complete = bool(
+        len(results) == len(actions)
+        and all(str(result.get("transparent_gif") or "") for result in results)
+    )
+    transparent_outputs_quality_passed = bool(
+        transparent_outputs_complete and not degraded_actions
+    )
     update_job(
         job_id,
         status="completed",
-        stage="completed",
+        stage=(
+            "completed_with_degraded_output"
+            if degraded_actions
+            else "completed"
+        ),
         progress=100,
         current_action=None,
         current_action_label=None,
         current_action_index=None,
         subject_replacement_results=results,
+        degraded_output_fallback=bool(degraded_actions),
+        degraded_output_actions=degraded_actions,
+        transparent_outputs_complete=transparent_outputs_complete,
+        transparent_outputs_quality_passed=(
+            transparent_outputs_quality_passed
+        ),
+        action_quality_summary={
+            str(result.get("action")): {
+                "output_exists": bool(result.get("output_exists")),
+                "generation_succeeded": bool(
+                    result.get("generation_succeeded")
+                ),
+                "quality_passed": bool(result.get("quality_passed")),
+                "degraded": bool(result.get("degraded")),
+            }
+            for result in results
+        },
         error=nonblocking_result_error(job_id),
         finished_at=utc_now(),
     )

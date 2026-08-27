@@ -75,12 +75,16 @@ EATING_FULL_POSE_LOWER_HALF_CHANGE_RATIO_MIN = 0.01
 # 1.1% floor preserves the anti-static gate without rejecting that motion.
 EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN = 0.011
 DRINKING_REFERENCE_ALIGNED_POSE_POLICY = (
-    "reference_space_identity_locked_head_lapping_v1"
+    "reference_space_white_driver_head_path_static_bowl_v3"
 )
-DRINKING_REFERENCE_HEAD_LIFT_PX = 6.0
+DRINKING_REFERENCE_HEAD_LIFT_PX = 36.0
+DRINKING_REFERENCE_HEAD_LIFT_MIN_PX = 14.0
 DRINKING_REFERENCE_LAP_CYCLES = 3
 GROOMING_TEMPORAL_LOOP_POLICY = (
     "grooming_second_half_ping_pong_closed_loop_v1"
+)
+ACTION_TAIL_COSINE_LOOP_POLICY = (
+    "drinking_eating_tail_cosine_blend_to_first_v1"
 )
 
 DEFAULT_PROMPT = (
@@ -298,7 +302,10 @@ DOG_TOILETING_PROMPT = (
     "coat, face, proportions, material, or lighting. Keep the tray fixed, complete "
     "and unchanged beneath the dog; show no urine, feces, mess, litter or extra prop. "
     "Keep all four legs anatomically attached, identity stable and the complete tail "
-    "visible. The entire background outside the dog and tray remains perfectly "
+    "visible. Render natural softly shaded fur and tray edges without any black, "
+    "inked, comic, cel-shaded, or contour-stroke outline. Keep the tray rim pale "
+    "neutral gray with no dark border. The entire background outside the dog and "
+    "tray remains perfectly "
     "uniform pure #00FF00 green with no floor continuation, shadow, reflection, "
     "gradient, texture or flicker."
 )
@@ -347,7 +354,9 @@ DOG_SLEEPING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT + (
 )
 DOG_TOILETING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT + (
     ", urine, feces, excrement, mess, litter, dirty tray, duplicate tray, litter box, "
-    "moving tray, changing tray, tray fused into body"
+    "moving tray, changing tray, tray fused into body, black outline, dark outline, "
+    "ink outline, comic outline, contour stroke, cel-shaded border, thick border, "
+    "dark tray rim"
 )
 
 DOG_ACTION_PROMPTS = {
@@ -1161,13 +1170,368 @@ def make_eating_prop_exclusion_masks(
     )
 
 
+def make_toileting_prop_exclusion_masks(
+    normalized_frames: list[Image.Image],
+) -> tuple[list[Image.Image], dict[str, Any]]:
+    """Split the wide lower toilet tray from the animal identity.
+
+    Lateral tray geometry, the static dark grid, and the lower tray base are
+    marked as the red SCAIL prop.  Light animal paws remain blue, while detached
+    lower floor/shadow fragments outside the stable tray bounds are discarded.
+    """
+
+    if not normalized_frames:
+        raise ValueError("toileting_prop_split_unreliable: no_frames")
+    size = normalized_frames[0].size
+    if any(frame.size != size for frame in normalized_frames):
+        raise ValueError(
+            "toileting_prop_split_unreliable: inconsistent_frame_size"
+        )
+    alpha_masks = [
+        np.asarray(frame.getchannel("A"), dtype=np.uint8) >= 16
+        for frame in normalized_frames
+    ]
+    union = np.logical_or.reduce(alpha_masks)
+    left, top, right, bottom = binary_bbox(union)
+    subject_width = right - left
+    subject_height = bottom - top
+    if subject_width < 32 or subject_height < 48:
+        raise ValueError("toileting_prop_split_unreliable: tiny_subject")
+
+    row_widths = np.asarray(
+        [
+            int(columns.max() - columns.min() + 1)
+            if (columns := np.where(union[row])[0]).size
+            else 0
+            for row in range(union.shape[0])
+        ],
+        dtype=np.int32,
+    )
+    body_y0 = top + int(round(subject_height * 0.16))
+    body_y1 = top + int(round(subject_height * 0.58))
+    body_width_samples = row_widths[body_y0:body_y1]
+    body_width_samples = body_width_samples[body_width_samples > 0]
+    if body_width_samples.size < 8:
+        raise ValueError(
+            "toileting_prop_split_unreliable: insufficient_body_rows"
+        )
+    body_width_p80 = float(np.percentile(body_width_samples, 80))
+    tray_width_threshold = max(
+        int(round(body_width_p80 * 1.16)),
+        int(round(size[0] * 0.26)),
+    )
+    search_y0 = top + int(round(subject_height * 0.54))
+    wide_rows = row_widths >= tray_width_threshold
+    tray_top: int | None = None
+    for row in range(search_y0, bottom):
+        stop = min(bottom, row + 7)
+        if int(np.count_nonzero(wide_rows[row:stop])) >= min(4, stop - row):
+            tray_top = row
+            break
+    if tray_top is None:
+        widest_row = int(search_y0 + np.argmax(row_widths[search_y0:bottom]))
+        if row_widths[widest_row] < max(48, int(round(body_width_p80 * 1.08))):
+            raise ValueError(
+                "toileting_prop_split_unreliable: no_wide_lower_tray"
+            )
+        tray_top = widest_row
+
+    lower_wide_rows = np.flatnonzero(
+        wide_rows & (np.arange(union.shape[0]) >= tray_top)
+    )
+    if not lower_wide_rows.size:
+        raise ValueError(
+            "toileting_prop_split_unreliable: no_stable_tray_bottom"
+        )
+    tray_main_bottom = min(bottom, int(lower_wide_rows[-1]) + 3)
+    tray_band_height = max(1, tray_main_bottom - tray_top)
+    column_support = np.count_nonzero(
+        union[tray_top:tray_main_bottom],
+        axis=0,
+    )
+    supported_columns = column_support >= max(
+        4,
+        int(round(tray_band_height * 0.18)),
+    )
+    column_transitions = np.diff(
+        np.pad(supported_columns.astype(np.int8), (1, 1))
+    )
+    column_starts = np.flatnonzero(column_transitions == 1)
+    column_ends = np.flatnonzero(column_transitions == -1)
+    column_runs = [
+        (int(end - start), int(start), int(end))
+        for start, end in zip(column_starts, column_ends, strict=True)
+    ]
+    if not column_runs:
+        raise ValueError(
+            "toileting_prop_split_unreliable: no_stable_tray_columns"
+        )
+    _tray_run_width, tray_main_left, tray_main_right = max(column_runs)
+    tray_horizontal_margin = max(3, int(round(subject_width * 0.015)))
+    tray_main_left = max(left, tray_main_left - tray_horizontal_margin)
+    tray_main_right = min(right, tray_main_right + tray_horizontal_margin)
+
+    row_indices, column_indices = np.indices(union.shape)
+    valid_lower_geometry = (
+        (row_indices < tray_top)
+        | (
+            (column_indices >= tray_main_left)
+            & (column_indices < tray_main_right)
+            & (row_indices < tray_main_bottom)
+        )
+    )
+    rgb_frames = np.stack(
+        [
+            np.asarray(frame.convert("RGBA"), dtype=np.uint8)[..., :3]
+            for frame in normalized_frames
+        ],
+        axis=0,
+    )
+    median_rgb = np.median(rgb_frames, axis=0).astype(np.uint8)
+    median_luma = cv2.cvtColor(median_rgb, cv2.COLOR_RGB2GRAY)
+    median_red = median_rgb[..., 0].astype(np.int16)
+    median_green = median_rgb[..., 1].astype(np.int16)
+    median_blue = median_rgb[..., 2].astype(np.int16)
+    median_span = (
+        median_rgb.max(axis=2).astype(np.int16)
+        - median_rgb.min(axis=2).astype(np.int16)
+    )
+    foreground_span_p90 = float(np.percentile(median_span[union], 90))
+    white_maquette_material = foreground_span_p90 <= 4.0
+    grid_dark_luma_max = 112
+    if white_maquette_material:
+        grid_material_candidate = union & (
+            median_luma <= grid_dark_luma_max
+        )
+        identity_colour_support = np.zeros_like(union)
+        grid_material_policy = "white_maquette_deep_grid_slots_v1"
+    else:
+        # Generated identity references preserve warm coat chroma while their
+        # toilet trays are neutral gray/white.  Keep the full warm dog, including
+        # paws and tail, out of the prop mask even where it overlaps the grid.
+        identity_colour_support = (
+            union
+            & (median_red - median_blue >= 15)
+            & (median_red - median_green >= 6)
+        )
+        grid_material_candidate = (
+            union
+            & (median_span <= 12)
+            & ~identity_colour_support
+        )
+        grid_material_policy = "neutral_tray_minus_warm_identity_v1"
+    grid_dark_row_counts = np.asarray(
+        [
+            int(
+                np.count_nonzero(
+                    grid_material_candidate[
+                        row,
+                        tray_main_left:tray_main_right,
+                    ]
+                )
+            )
+            for row in range(union.shape[0])
+        ],
+        dtype=np.int32,
+    )
+    grid_dark_row_required = max(12, int(round(body_width_p80 * 0.08)))
+    grid_rows = grid_dark_row_counts >= grid_dark_row_required
+    tray_surface_top = tray_top
+    tray_base_top = tray_main_bottom
+    grid_seen = False
+    for row in range(tray_top, tray_main_bottom):
+        if int(np.count_nonzero(grid_rows[row : min(row + 5, tray_main_bottom)])) >= 3:
+            if not grid_seen:
+                tray_surface_top = row
+            grid_seen = True
+        if not grid_seen:
+            continue
+        stop = min(tray_main_bottom, row + 7)
+        if stop - row >= 4 and int(np.count_nonzero(grid_rows[row:stop])) <= 1:
+            tray_base_top = row
+            break
+    if tray_base_top <= tray_top:
+        tray_base_top = tray_main_bottom
+
+    core_y0 = top + int(round(subject_height * 0.30))
+    exclusions: list[np.ndarray] = []
+    prop_areas: list[int] = []
+    prop_fractions: list[float] = []
+    core_widths: list[int] = []
+    grid_prop_areas: list[int] = []
+    base_prop_areas: list[int] = []
+    artifact_pixels_removed: list[int] = []
+    for alpha, rgb in zip(alpha_masks, rgb_frames, strict=True):
+        cleaned_alpha = alpha & valid_lower_geometry
+        artifact_pixels_removed.append(
+            int(np.count_nonzero(alpha & ~cleaned_alpha))
+        )
+        core_columns = np.any(
+            cleaned_alpha[core_y0:tray_top, :],
+            axis=0,
+        ).astype(
+            np.uint8
+        )
+        core_columns = cv2.dilate(
+            core_columns.reshape(1, -1),
+            np.ones((1, 9), dtype=np.uint8),
+            iterations=1,
+        ).reshape(-1).astype(bool)
+        core_widths.append(int(np.count_nonzero(core_columns)))
+        projected_identity = np.broadcast_to(core_columns, cleaned_alpha.shape)
+        lateral_prop = (
+            cleaned_alpha
+            & (row_indices >= tray_top)
+            & ~projected_identity
+            & ~identity_colour_support
+        )
+        lateral_prop = cv2.morphologyEx(
+            lateral_prop.astype(np.uint8),
+            cv2.MORPH_CLOSE,
+            np.ones((5, 9), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        frame_luma = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        grid_prop = (
+            cleaned_alpha
+            & (row_indices >= tray_surface_top)
+            & (row_indices < tray_base_top)
+            & grid_material_candidate
+            & (
+                (frame_luma <= grid_dark_luma_max + 18)
+                if white_maquette_material
+                else True
+            )
+        )
+        grid_prop = cv2.dilate(
+            grid_prop.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        grid_prop &= cleaned_alpha & (row_indices < tray_base_top)
+        base_prop = (
+            cleaned_alpha
+            & (row_indices >= tray_base_top)
+            & ~identity_colour_support
+        )
+        prop = lateral_prop | grid_prop | base_prop
+        prop &= cleaned_alpha
+        prop_area = int(np.count_nonzero(prop))
+        foreground_area = int(np.count_nonzero(cleaned_alpha))
+        if prop_area < 64:
+            raise ValueError(
+                "toileting_prop_split_unreliable: tray_prop_too_small"
+            )
+        prop_fraction = prop_area / float(max(1, foreground_area))
+        if not 0.005 <= prop_fraction <= 0.50:
+            raise ValueError(
+                "toileting_prop_split_unreliable: invalid_prop_fraction="
+                f"{prop_fraction:.6f}"
+            )
+        exclusions.append(prop)
+        prop_areas.append(prop_area)
+        prop_fractions.append(prop_fraction)
+        grid_prop_areas.append(int(np.count_nonzero(grid_prop)))
+        base_prop_areas.append(int(np.count_nonzero(base_prop)))
+
+    return (
+        [
+            Image.fromarray(mask.astype(np.uint8) * 255, mode="L")
+            for mask in exclusions
+        ],
+        {
+            "policy": "toileting_complete_tray_red_scail_prop_v3",
+            "method": (
+                "lateral_geometry_plus_material_grid_plus_lower_base_v3"
+            ),
+            "subject_bbox": [left, top, right, bottom],
+            "body_width_p80": round(body_width_p80, 4),
+            "tray_width_threshold": tray_width_threshold,
+            "tray_top_y": tray_top,
+            "tray_main_bbox": [
+                tray_main_left,
+                tray_top,
+                tray_main_right,
+                tray_main_bottom,
+            ],
+            "tray_base_top_y": tray_base_top,
+            "tray_surface_top_y": tray_surface_top,
+            "grid_dark_luma_max": grid_dark_luma_max,
+            "grid_dark_row_required": grid_dark_row_required,
+            "grid_material_policy": grid_material_policy,
+            "foreground_material_span_p90": round(
+                foreground_span_p90,
+                4,
+            ),
+            "white_maquette_material": white_maquette_material,
+            "identity_core_y0": core_y0,
+            "identity_core_width_min": min(core_widths),
+            "prop_area_min": min(prop_areas),
+            "prop_area_max": max(prop_areas),
+            "grid_prop_area_min": min(grid_prop_areas),
+            "grid_prop_area_max": max(grid_prop_areas),
+            "base_prop_area_min": min(base_prop_areas),
+            "base_prop_area_max": max(base_prop_areas),
+            "prop_fraction_min": min(prop_fractions),
+            "prop_fraction_max": max(prop_fractions),
+            "artifact_pixels_removed_min": min(artifact_pixels_removed),
+            "artifact_pixels_removed_max": max(artifact_pixels_removed),
+            "detached_floor_artifact_cleanup": True,
+            "dark_tray_edge_normalization": True,
+        },
+    )
+
+
+def normalize_toileting_prop_rgb(
+    frame: Image.Image,
+    prop_mask: Image.Image,
+    prop_metadata: dict[str, Any] | None = None,
+) -> Image.Image:
+    """Remove floor artifacts and neutralize the complete tray prop."""
+
+    rgba = np.asarray(frame.convert("RGBA"), dtype=np.uint8).copy()
+    prop = np.asarray(prop_mask.convert("L"), dtype=np.uint8) >= 128
+    if prop_metadata is not None:
+        tray_main_bbox = prop_metadata.get("tray_main_bbox")
+        if (
+            isinstance(tray_main_bbox, list)
+            and len(tray_main_bbox) == 4
+        ):
+            tray_left, tray_top, tray_right, tray_bottom = (
+                int(value) for value in tray_main_bbox
+            )
+            rows, columns = np.indices(prop.shape)
+            allowed = (
+                (rows < tray_top)
+                | (
+                    (columns >= tray_left)
+                    & (columns < tray_right)
+                    & (rows < tray_bottom)
+                )
+            )
+            artifact = (rgba[..., 3] >= 16) & ~allowed
+            rgba[artifact] = 0
+            prop &= allowed
+    if not np.any(prop):
+        return Image.fromarray(rgba, mode="RGBA")
+    luma = cv2.cvtColor(rgba[..., :3], cv2.COLOR_RGB2GRAY).astype(np.float32)
+    neutral = np.clip(175.0 + luma * 0.25, 188.0, 236.0).astype(np.uint8)
+    rgba[prop, 0] = neutral[prop]
+    rgba[prop, 1] = neutral[prop]
+    rgba[prop, 2] = neutral[prop]
+    return Image.fromarray(rgba, mode="RGBA")
+
+
 def make_pose_and_mask_frames(
     sampled_frames: list[Image.Image],
     canvas_size: tuple[int, int],
     pose_background: tuple[int, int, int] = (255, 255, 255),
     separate_eating_prop: bool = False,
+    separate_toileting_prop: bool = False,
     white_maquette_cleanup: bool = False,
 ) -> tuple[list[Image.Image], list[Image.Image], dict[str, Any]]:
+    if separate_eating_prop and separate_toileting_prop:
+        raise ValueError("Only one action prop split may be requested")
     cleanup_records: list[dict[str, Any]] = []
     if white_maquette_cleanup:
         cleaned_frames: list[Image.Image] = []
@@ -1197,6 +1561,23 @@ def make_pose_and_mask_frames(
             normalized_frames
         )
         prop_exclusions = list(eating_exclusions)
+    elif separate_toileting_prop:
+        toileting_exclusions, prop_metadata = (
+            make_toileting_prop_exclusion_masks(normalized_frames)
+        )
+        prop_exclusions = list(toileting_exclusions)
+        normalized_frames = [
+            normalize_toileting_prop_rgb(
+                frame,
+                exclusion,
+                prop_metadata,
+            )
+            for frame, exclusion in zip(
+                normalized_frames,
+                toileting_exclusions,
+                strict=True,
+            )
+        ]
 
     pose_frames: list[Image.Image] = []
     mask_frames: list[Image.Image] = []
@@ -1259,7 +1640,9 @@ def make_pose_and_mask_frames(
         "identity_fraction_min": min(identity_fractions),
         "identity_fraction_max": max(identity_fractions),
         "identity_fraction_mean": sum(identity_fractions) / len(identity_fractions),
-        "scene_prop_separated": separate_eating_prop,
+        "scene_prop_separated": (
+            separate_eating_prop or separate_toileting_prop
+        ),
         "white_maquette_cleanup": white_maquette_cleanup,
     }
     if cleanup_records:
@@ -1271,7 +1654,7 @@ def make_pose_and_mask_frames(
             float(record["visible_fraction"]) for record in cleanup_records
         )
         metadata["white_maquette_source_chroma_preserved"] = False
-    if separate_eating_prop:
+    if separate_eating_prop or separate_toileting_prop:
         metadata.update(
             {
                 "scene_prop_fraction_min": min(prop_fractions),
@@ -3393,6 +3776,7 @@ def make_static_reference_eating_pose_frames(
 
 
 def make_drinking_reference_aligned_pose_frames(
+    sampled_frames: list[Image.Image],
     reference: Image.Image,
     reference_mask: Image.Image,
     canvas_size: tuple[int, int],
@@ -3401,13 +3785,12 @@ def make_drinking_reference_aligned_pose_frames(
     maximum_head_lift_px: float = DRINKING_REFERENCE_HEAD_LIFT_PX,
     lap_cycles: int = DRINKING_REFERENCE_LAP_CYCLES,
 ) -> tuple[list[Image.Image], list[Image.Image], dict[str, Any]]:
-    """Animate only the accepted reference head and keep body identity geometry fixed.
+    """Retarget the white driver's head path onto the accepted dog reference.
 
     The small-dog drinking driver has identity-bearing upright ears and a tightly
-    curled tail. Feeding that silhouette to SCAIL can overwrite a floppy-eared,
-    straight-tailed upload even when Qwen produced a correct action keyframe. This
-    path derives every pose pixel from the accepted keyframe and adds only a bounded
-    closed-loop head lap around its real tongue anchor.
+    curled tail. Its RGB and silhouette must therefore never enter SCAIL as identity.
+    This path extracts only the upper-body motion curve, retargets that curve inside
+    the accepted reference's head/neck region, and keeps the reference bowl static.
     """
     if reference.size != canvas_size or reference_mask.size != canvas_size:
         raise ValueError(
@@ -3417,7 +3800,7 @@ def make_drinking_reference_aligned_pose_frames(
         raise ValueError(
             "drinking_reference_motion_unreliable: fewer_than_9_frames"
         )
-    if maximum_head_lift_px <= 0 or maximum_head_lift_px > 12:
+    if maximum_head_lift_px < DRINKING_REFERENCE_HEAD_LIFT_MIN_PX or maximum_head_lift_px > 48:
         raise ValueError(
             "drinking_reference_motion_unreliable: invalid_head_lift_limit"
         )
@@ -3425,6 +3808,87 @@ def make_drinking_reference_aligned_pose_frames(
         raise ValueError(
             "drinking_reference_motion_unreliable: invalid_lap_cycle_count"
         )
+    if len(sampled_frames) != frame_count:
+        raise ValueError(
+            "drinking_reference_motion_unreliable: driver_frame_count_mismatch"
+        )
+
+    cleaned_driver_frames: list[Image.Image] = []
+    driver_cleanup_records: list[dict[str, Any]] = []
+    for frame in sampled_frames:
+        driver_rgba = np.asarray(frame.convert("RGBA"), dtype=np.uint8).copy()
+        driver_silhouette, cleanup = white_maquette_semantic_silhouette(
+            driver_rgba
+        )
+        driver_luma = cv2.cvtColor(driver_rgba[..., :3], cv2.COLOR_RGB2GRAY)
+        driver_rgba[..., :3] = np.repeat(driver_luma[..., None], 3, axis=2)
+        driver_rgba[..., 3] = driver_silhouette
+        driver_rgba[driver_silhouette == 0, :3] = 0
+        cleaned_driver_frames.append(Image.fromarray(driver_rgba, mode="RGBA"))
+        driver_cleanup_records.append(cleanup)
+    driver_source_bbox = expand_bbox(
+        union_alpha_bbox(cleaned_driver_frames),
+        cleaned_driver_frames[0].size,
+        margin_fraction=0.06,
+    )
+    normalized_driver = [
+        contain_rgba(frame.crop(driver_source_bbox), canvas_size, 0.88)
+        for frame in cleaned_driver_frames
+    ]
+    driver_masks = [
+        np.asarray(frame.getchannel("A"), dtype=np.uint8) >= 16
+        for frame in normalized_driver
+    ]
+    driver_union = np.logical_or.reduce(driver_masks)
+    driver_left, driver_top, driver_right, driver_bottom = binary_bbox(
+        driver_union
+    )
+    driver_width = driver_right - driver_left
+    driver_height = driver_bottom - driver_top
+    driver_rows, driver_columns = np.indices(driver_union.shape)
+    driver_upper_limit = driver_top + int(round(driver_height * 0.70))
+    driver_upper_center_x: list[float] = []
+    driver_upper_center_y: list[float] = []
+    driver_upper_pixels: list[int] = []
+    for driver_mask in driver_masks:
+        driver_upper = driver_mask & (driver_rows < driver_upper_limit)
+        upper_y, upper_x = np.where(driver_upper)
+        driver_upper_pixels.append(int(upper_y.size))
+        if upper_y.size < 256:
+            raise ValueError(
+                "drinking_reference_motion_unreliable: insufficient_driver_head_signal"
+            )
+        driver_upper_center_x.append(float(np.mean(upper_x)))
+        driver_upper_center_y.append(float(np.mean(upper_y)))
+    driver_high_y = float(np.percentile(driver_upper_center_y, 10))
+    driver_low_y = float(np.percentile(driver_upper_center_y, 90))
+    driver_head_y_span = driver_low_y - driver_high_y
+    if driver_head_y_span < 4.0:
+        raise ValueError(
+            "drinking_reference_motion_unreliable: driver_head_motion_range_too_small"
+        )
+    driver_lift_fractions = [
+        float(
+            np.clip(
+                (driver_low_y - center_y) / driver_head_y_span,
+                0.0,
+                1.0,
+            )
+        )
+        for center_y in driver_upper_center_y
+    ]
+    low_phase_x_values = [
+        center_x
+        for center_x, lift_fraction in zip(
+            driver_upper_center_x,
+            driver_lift_fractions,
+            strict=True,
+        )
+        if lift_fraction <= 0.20
+    ]
+    driver_low_phase_x = float(
+        np.median(low_phase_x_values or driver_upper_center_x)
+    )
 
     reference_rgba = np.asarray(reference.convert("RGBA"), dtype=np.uint8).copy()
     reference_mask_rgb = np.asarray(
@@ -3435,10 +3899,19 @@ def make_drinking_reference_aligned_pose_frames(
         reference_mask_rgb == (0, 0, 255),
         axis=2,
     )
+    reference_prop = np.all(
+        reference_mask_rgb == (255, 0, 0),
+        axis=2,
+    )
     identity_pixels = int(np.count_nonzero(reference_identity))
     if identity_pixels < 500:
         raise ValueError(
             "drinking_reference_motion_unreliable: reference_subject_too_small"
+        )
+    prop_pixels = int(np.count_nonzero(reference_prop))
+    if prop_pixels < 64:
+        raise ValueError(
+            "drinking_reference_motion_unreliable: reference_bowl_not_separated"
         )
 
     subject_left, subject_top, subject_right, subject_bottom = binary_bbox(
@@ -3446,17 +3919,33 @@ def make_drinking_reference_aligned_pose_frames(
     )
     subject_width = subject_right - subject_left
     subject_height = subject_bottom - subject_top
+    scaled_driver_head_lift_px = (
+        driver_head_y_span
+        * subject_height
+        / float(max(1, driver_height))
+        * 2.35
+    )
+    effective_head_lift_px = float(
+        np.clip(
+            scaled_driver_head_lift_px,
+            DRINKING_REFERENCE_HEAD_LIFT_MIN_PX,
+            maximum_head_lift_px,
+        )
+    )
+    driver_horizontal_scale = subject_width / float(max(1, driver_width))
     row_indices, column_indices = np.indices(reference_identity.shape)
     reference_rgb = reference_rgba[..., :3]
     red = reference_rgb[..., 0].astype(np.int16)
     green = reference_rgb[..., 1].astype(np.int16)
     blue = reference_rgb[..., 2].astype(np.int16)
 
-    # The direct drinking edit is required to contain one tiny pink tongue tip.
-    # Blue-over-green chroma separates that tongue from cream/golden fur, while
-    # the lower-body restriction excludes pink ear interiors.
+    # Prefer a visible tongue as the mouth anchor, but inspect the original
+    # alpha subject rather than the already split blue identity.  A tongue that
+    # physically touches the water can otherwise be absorbed into the red bowl
+    # component by a generic prop splitter.
+    reference_alpha = reference_rgba[..., 3] >= 16
     tongue_candidates = (
-        reference_identity
+        reference_alpha
         & (row_indices >= subject_top + int(round(subject_height * 0.35)))
         & (red >= 110)
         & (red - green >= 25)
@@ -3482,26 +3971,81 @@ def make_drinking_reference_aligned_pose_frames(
             and subject_left <= center_x < subject_right
         ):
             tongue_components.append(
-                (component_bottom, area, -abs(center_x - (subject_left + subject_right) / 2.0), label)
+                (
+                    area,
+                    component_bottom,
+                    -abs(center_x - (subject_left + subject_right) / 2.0),
+                    label,
+                )
             )
-    if not tongue_components:
-        raise ValueError(
-            "drinking_reference_motion_unreliable: no_pink_tongue_anchor"
+    tongue_anchor_detected = bool(tongue_components)
+    if tongue_anchor_detected:
+        _area_rank, _bottom_rank, _center_rank, tongue_label = max(
+            tongue_components
         )
-    _bottom_rank, _area_rank, _center_rank, tongue_label = max(
-        tongue_components
+        reference_motion_anchor = tongue_labels == tongue_label
+        # The tongue belongs to the dog even when the prop splitter connected
+        # it to the water surface.  Reclassify only the colour-qualified tongue
+        # component; the surrounding bowl remains immutable red geometry.
+        reference_identity = reference_identity | reference_motion_anchor
+        reference_prop = reference_prop & ~reference_motion_anchor
+        motion_anchor_policy = "pink_tongue_component_from_reference_alpha_v2"
+    else:
+        # Some valid drinking keyframes hide the tongue or render it in a coat-
+        # coloured material.  Find the nearest lower identity pixels to the
+        # separated bowl and use that compact mouth/contact patch as the motion
+        # anchor.  This keeps action generation available without inventing a
+        # driver silhouette or moving the bowl.
+        prop_left, prop_top, prop_right, _prop_bottom = binary_bbox(
+            reference_prop
+        )
+        distance_to_prop = cv2.distanceTransform(
+            (~reference_prop).astype(np.uint8),
+            cv2.DIST_L2,
+            3,
+        )
+        contact_distance_max = max(12.0, subject_height * 0.08)
+        contact_corridor = (
+            reference_identity
+            & (column_indices >= prop_left - int(round(subject_width * 0.12)))
+            & (column_indices < prop_right + int(round(subject_width * 0.12)))
+            & (row_indices >= subject_top + int(round(subject_height * 0.30)))
+            & (row_indices < prop_top + int(round(subject_height * 0.12)))
+            & (distance_to_prop <= contact_distance_max)
+        )
+        if not np.any(contact_corridor):
+            raise ValueError(
+                "drinking_reference_motion_unreliable: "
+                "no_mouth_to_bowl_contact_anchor"
+            )
+        nearest_distance = float(np.min(distance_to_prop[contact_corridor]))
+        reference_motion_anchor = contact_corridor & (
+            distance_to_prop <= nearest_distance + 3.0
+        )
+        if int(np.count_nonzero(reference_motion_anchor)) < 3:
+            contact_y, contact_x = np.where(contact_corridor)
+            lowest_index = int(np.argmax(contact_y))
+            anchor_x = int(contact_x[lowest_index])
+            anchor_y = int(contact_y[lowest_index])
+            anchor_disk = (
+                (column_indices - anchor_x) ** 2
+                + (row_indices - anchor_y) ** 2
+                <= 8**2
+            )
+            reference_motion_anchor = anchor_disk & reference_identity
+        motion_anchor_policy = "nearest_identity_to_static_bowl_contact_v1"
+
+    anchor_left, anchor_top, anchor_right, anchor_bottom = binary_bbox(
+        reference_motion_anchor
     )
-    reference_tongue = tongue_labels == tongue_label
-    tongue_left, tongue_top, tongue_right, tongue_bottom = binary_bbox(
-        reference_tongue
-    )
-    tongue_center_x = float(tongue_centroids[tongue_label][0])
-    tongue_center_y = float(tongue_centroids[tongue_label][1])
+    anchor_y, anchor_x = np.where(reference_motion_anchor)
+    tongue_center_x = float(np.mean(anchor_x))
+    tongue_center_y = float(np.mean(anchor_y))
 
     head_center_x = tongue_center_x
     head_center_y = max(
         float(subject_top),
-        float(tongue_top) - subject_height * 0.16,
+        float(anchor_top) - subject_height * 0.16,
     )
     head_radius_x = max(28.0, subject_width * 0.22)
     head_radius_y = max(34.0, subject_height * 0.25)
@@ -3517,7 +4061,21 @@ def make_drinking_reference_aligned_pose_frames(
         (column_indices < head_center_x - corridor_half_width)
         | (column_indices > head_center_x + corridor_half_width)
     ] = 0.0
-    lower_static_y = min(canvas_size[1], tongue_bottom + 2)
+    lower_static_y = min(canvas_size[1], anchor_bottom + 2)
+    attachment_half_width = max(18.0, head_radius_x * 0.70)
+    attachment_corridor = (
+        (column_indices >= head_center_x - attachment_half_width)
+        & (column_indices <= head_center_x + attachment_half_width)
+        & (row_indices >= head_center_y - head_radius_y * 0.15)
+        & (row_indices < lower_static_y)
+    )
+    attachment_weight = np.exp(
+        -0.5 * ((column_indices - head_center_x) / head_radius_x) ** 2
+    ).astype(np.float32)
+    head_weight[attachment_corridor] = np.maximum(
+        head_weight[attachment_corridor],
+        attachment_weight[attachment_corridor],
+    )
     head_weight[row_indices >= lower_static_y] = 0.0
     head_weight[head_weight < 0.08] = 0.0
     motion_region = head_weight > 0.0
@@ -3528,25 +4086,47 @@ def make_drinking_reference_aligned_pose_frames(
 
     identity_layer = reference_rgba.copy()
     identity_layer[~reference_identity] = 0
+    prop_layer = reference_rgba.copy()
+    prop_layer[~reference_prop] = 0
     identity_mask_u8 = reference_identity.astype(np.uint8) * 255
-    tongue_mask_u8 = reference_tongue.astype(np.uint8) * 255
-    map_x = column_indices.astype(np.float32)
+    motion_anchor_mask_u8 = reference_motion_anchor.astype(np.uint8) * 255
     pose_frames: list[Image.Image] = []
     mask_frames: list[Image.Image] = []
     head_lifts: list[float] = []
+    head_horizontal_shifts: list[float] = []
     tongue_center_y_by_frame: list[float] = []
+    motion_anchor_main_component_coverages: list[float] = []
 
-    for index in range(frame_count):
-        if index in {0, frame_count - 1}:
-            lift_px = 0.0
-        else:
-            phase = (2.0 * np.pi * lap_cycles * index) / float(frame_count - 1)
-            lift_px = float(maximum_head_lift_px * (0.5 - 0.5 * np.cos(phase)))
+    for index, driver_lift_fraction in enumerate(driver_lift_fractions):
+        phase = (2.0 * np.pi * lap_cycles * index) / float(frame_count - 1)
+        lap_px = float(
+            2.0
+            * (1.0 - driver_lift_fraction)
+            * (0.5 - 0.5 * np.cos(phase))
+        )
+        lift_px = float(
+            effective_head_lift_px * driver_lift_fraction + lap_px
+        )
+        horizontal_shift_px = float(
+            np.clip(
+                (driver_upper_center_x[index] - driver_low_phase_x)
+                * driver_horizontal_scale,
+                -10.0,
+                10.0,
+            )
+        )
+        if index == frame_count - 1:
+            lift_px = head_lifts[0]
+            horizontal_shift_px = head_horizontal_shifts[0]
         head_lifts.append(lift_px)
+        head_horizontal_shifts.append(horizontal_shift_px)
+        map_x_frame = (
+            column_indices - horizontal_shift_px * head_weight
+        ).astype(np.float32)
         map_y = (row_indices + lift_px * head_weight).astype(np.float32)
         warped_identity_layer = cv2.remap(
             identity_layer,
-            map_x,
+            map_x_frame,
             map_y,
             interpolation=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_CONSTANT,
@@ -3554,28 +4134,62 @@ def make_drinking_reference_aligned_pose_frames(
         )
         warped_identity = cv2.remap(
             identity_mask_u8,
-            map_x,
+            map_x_frame,
             map_y,
             interpolation=cv2.INTER_NEAREST,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         ) >= 128
-        warped_tongue = cv2.remap(
-            tongue_mask_u8,
-            map_x,
+        warped_motion_anchor = cv2.remap(
+            motion_anchor_mask_u8,
+            map_x_frame,
             map_y,
             interpolation=cv2.INTER_NEAREST,
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=0,
         ) >= 128
-        tongue_rows, _tongue_columns = np.where(warped_tongue)
-        if not tongue_rows.size:
+        anchor_rows, _anchor_columns = np.where(warped_motion_anchor)
+        if not anchor_rows.size:
             raise ValueError(
-                "drinking_reference_motion_unreliable: warped_tongue_empty"
+                "drinking_reference_motion_unreliable: "
+                "warped_mouth_anchor_empty"
             )
-        tongue_center_y_by_frame.append(float(np.mean(tongue_rows)))
+        component_count, component_labels, component_stats, _ = (
+            cv2.connectedComponentsWithStats(
+                warped_identity.astype(np.uint8),
+                connectivity=8,
+            )
+        )
+        if component_count < 2:
+            raise ValueError(
+                "drinking_reference_motion_unreliable: "
+                "warped_identity_empty"
+            )
+        main_component_label = 1 + int(
+            np.argmax(component_stats[1:, cv2.CC_STAT_AREA])
+        )
+        anchor_main_coverage = float(
+            np.count_nonzero(
+                warped_motion_anchor
+                & (component_labels == main_component_label)
+            )
+        ) / float(max(1, np.count_nonzero(warped_motion_anchor)))
+        motion_anchor_main_component_coverages.append(anchor_main_coverage)
+        if anchor_main_coverage < 0.80:
+            raise ValueError(
+                "drinking_reference_motion_unreliable: "
+                "mouth_anchor_detached_from_subject"
+            )
+        tongue_center_y_by_frame.append(float(np.mean(anchor_rows)))
 
         pose_rgb = np.full((*reference_identity.shape, 3), 255, dtype=np.uint8)
+        prop_alpha = prop_layer[..., 3:4].astype(np.float32) / 255.0
+        pose_rgb = np.clip(
+            prop_layer[..., :3] * prop_alpha
+            + pose_rgb * (1.0 - prop_alpha),
+            0,
+            255,
+        ).astype(np.uint8)
         warped_alpha = (
             warped_identity_layer[..., 3:4].astype(np.float32) / 255.0
         )
@@ -3588,6 +4202,7 @@ def make_drinking_reference_aligned_pose_frames(
         pose_frames.append(Image.fromarray(pose_rgb, mode="RGB"))
 
         colored_mask = np.full((*reference_identity.shape, 3), 255, dtype=np.uint8)
+        colored_mask[reference_prop] = (255, 0, 0)
         colored_mask[warped_identity] = (0, 0, 255)
         mask_frames.append(Image.fromarray(colored_mask, mode="RGB"))
 
@@ -3612,14 +4227,42 @@ def make_drinking_reference_aligned_pose_frames(
         {
             "policy": DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
             "fallback_used": False,
-            "driver_input_used": False,
-            "driver_signal_only": False,
+            "driver_input_used": True,
+            "driver_signal_only": True,
             "driver_rgb_preserved": False,
             "driver_silhouette_preserved": False,
             "reference_identity_preserved": True,
             "pose_geometry_scope": (
-                "reference_locked_body_ears_paws_tail_plus_bounded_head_lapping"
+                "reference_locked_identity_plus_white_driver_head_path"
             ),
+            "driver_source_bbox": list(driver_source_bbox),
+            "driver_subject_bbox": [
+                driver_left,
+                driver_top,
+                driver_right,
+                driver_bottom,
+            ],
+            "driver_signal_method": "upper_subject_centroid_xy_p10_p90_v1",
+            "driver_upper_limit_y": driver_upper_limit,
+            "driver_upper_pixels_min": min(driver_upper_pixels),
+            "driver_upper_center_x_by_frame": [
+                round(value, 4) for value in driver_upper_center_x
+            ],
+            "driver_upper_center_y_by_frame": [
+                round(value, 4) for value in driver_upper_center_y
+            ],
+            "driver_head_y_p10": round(driver_high_y, 4),
+            "driver_head_y_p90": round(driver_low_y, 4),
+            "driver_head_y_span": round(driver_head_y_span, 4),
+            "driver_lift_fraction_by_frame": [
+                round(value, 4) for value in driver_lift_fractions
+            ],
+            "driver_cleanup_policy": driver_cleanup_records[0]["policy"],
+            "scaled_driver_head_lift_px": round(
+                scaled_driver_head_lift_px,
+                4,
+            ),
+            "effective_head_lift_px": round(effective_head_lift_px, 4),
             "reference_subject_bbox": [
                 subject_left,
                 subject_top,
@@ -3627,12 +4270,27 @@ def make_drinking_reference_aligned_pose_frames(
                 subject_bottom,
             ],
             "reference_tongue_bbox": [
-                tongue_left,
-                tongue_top,
-                tongue_right,
-                tongue_bottom,
+                anchor_left,
+                anchor_top,
+                anchor_right,
+                anchor_bottom,
+            ] if tongue_anchor_detected else None,
+            "reference_motion_anchor_bbox": [
+                anchor_left,
+                anchor_top,
+                anchor_right,
+                anchor_bottom,
             ],
-            "reference_tongue_pixels": int(np.count_nonzero(reference_tongue)),
+            "reference_tongue_pixels": (
+                int(np.count_nonzero(reference_motion_anchor))
+                if tongue_anchor_detected
+                else 0
+            ),
+            "reference_motion_anchor_pixels": int(
+                np.count_nonzero(reference_motion_anchor)
+            ),
+            "tongue_anchor_detected": tongue_anchor_detected,
+            "motion_anchor_policy": motion_anchor_policy,
             "reference_tongue_center": [
                 round(tongue_center_x, 4),
                 round(tongue_center_y, 4),
@@ -3645,18 +4303,37 @@ def make_drinking_reference_aligned_pose_frames(
                 round(head_radius_x, 4),
                 round(head_radius_y, 4),
             ],
+            "attachment_corridor_half_width": round(
+                attachment_half_width,
+                4,
+            ),
             "head_motion_region_bbox": list(binary_bbox(motion_region)),
             "head_lift_px_by_frame": [round(value, 4) for value in head_lifts],
             "head_lift_px_max": round(max(head_lifts), 4),
+            "head_horizontal_shift_px_by_frame": [
+                round(value, 4) for value in head_horizontal_shifts
+            ],
+            "head_horizontal_shift_span_px": round(
+                max(head_horizontal_shifts) - min(head_horizontal_shifts),
+                4,
+            ),
             "lap_cycles": lap_cycles,
             "tongue_center_y_by_frame": [
                 round(value, 4) for value in tongue_center_y_by_frame
             ],
             "tongue_motion_span_px": round(tongue_motion_span, 4),
+            "motion_anchor_main_component_coverage_min": round(
+                min(motion_anchor_main_component_coverages),
+                6,
+            ),
+            "motion_anchor_connected_all_frames": True,
             "lower_foreground_static_y_start": lower_static_y,
             "body_ears_paws_tail_outside_head_motion_locked": True,
             "closed_loop_endpoints": True,
-            "scene_prop_separated": False,
+            "scene_prop_separated": True,
+            "scene_prop_fraction": prop_pixels / float(reference_prop.size),
+            "static_bowl_mask": True,
+            "static_bowl_rgb": True,
         },
     )
 
@@ -3681,11 +4358,16 @@ def make_static_reference_drinking_pose_frames(
     rgba = np.asarray(reference.convert("RGBA"), dtype=np.uint8).copy()
     mask_rgb = np.asarray(reference_mask.convert("RGB"), dtype=np.uint8)
     identity = np.all(mask_rgb == (0, 0, 255), axis=2)
+    prop = np.all(mask_rgb == (255, 0, 0), axis=2)
     if int(np.count_nonzero(identity)) < 500:
         raise ValueError(
             "drinking_static_reference_fallback_unreliable: reference_subject_too_small"
         )
-    rgba[~identity] = 0
+    if int(np.count_nonzero(prop)) < 64:
+        raise ValueError(
+            "drinking_static_reference_fallback_unreliable: reference_bowl_too_small"
+        )
+    rgba[~(identity | prop)] = 0
     alpha = rgba[..., 3:4].astype(np.float32) / 255.0
     pose_rgb = np.full((*identity.shape, 3), 255, dtype=np.uint8)
     pose_rgb = np.clip(
@@ -3695,6 +4377,7 @@ def make_static_reference_drinking_pose_frames(
     ).astype(np.uint8)
     colored_mask = np.full((*identity.shape, 3), 255, dtype=np.uint8)
     colored_mask[identity] = (0, 0, 255)
+    colored_mask[prop] = (255, 0, 0)
     pose = Image.fromarray(pose_rgb, mode="RGB")
     mask = Image.fromarray(colored_mask, mode="RGB")
     return (
@@ -3712,7 +4395,9 @@ def make_static_reference_drinking_pose_frames(
             "pose_geometry_scope": "static_approved_drinking_reference",
             "reference_subject_bbox": list(binary_bbox(identity)),
             "body_ears_paws_tail_outside_head_motion_locked": True,
-            "scene_prop_separated": False,
+            "scene_prop_separated": True,
+            "static_bowl_mask": True,
+            "static_bowl_rgb": True,
         },
     )
 
@@ -4411,12 +5096,309 @@ def make_eating_reference_identity_mask(
         )
 
 
+def make_drinking_reference_identity_mask(
+    normalized: Image.Image,
+) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
+    """Keep the complete dog blue while reserving only its bowl as red.
+
+    Drinking references often connect a pink tongue and a warm muzzle directly
+    to the water surface.  The eating splitter intentionally follows connected
+    food geometry and can therefore classify that contact corridor as a prop.
+    This refinement tracks sustained lower-body alpha runs and selects the
+    widest track close to the subject baseline as the bowl body.
+    """
+
+    rgba = np.asarray(normalized.convert("RGBA"), dtype=np.uint8)
+    rgb = rgba[..., :3]
+    alpha = rgba[..., 3] >= 16
+    if not np.any(alpha):
+        raise ValueError("drinking_reference_prop_split_unreliable: empty_alpha")
+
+    left, top, right, bottom = binary_bbox(alpha)
+    subject_width = right - left
+    subject_height = bottom - top
+    if subject_width < 64 or subject_height < 64:
+        raise ValueError("drinking_reference_prop_split_unreliable: tiny_subject")
+
+    search_x0 = left
+    search_x1 = right
+    search_y0 = top + int(round(subject_height * 0.60))
+
+    row_runs: list[tuple[int, int, int, int]] = []
+    for row in range(search_y0, bottom):
+        row_alpha = alpha[row, search_x0:search_x1].astype(np.int8)
+        transitions = np.diff(np.pad(row_alpha, (1, 1)))
+        starts = np.flatnonzero(transitions == 1) + search_x0
+        ends = np.flatnonzero(transitions == -1) + search_x0
+        for run_start, run_end in zip(starts, ends, strict=True):
+            row_runs.append(
+                (
+                    int(run_end - run_start),
+                    row,
+                    int(run_start),
+                    int(run_end),
+                )
+            )
+    if not row_runs:
+        raise ValueError(
+            "drinking_reference_prop_split_unreliable: no_bowl_row_runs"
+        )
+
+    wide_threshold = max(
+        24,
+        int(round(subject_width * 0.18)),
+    )
+    wide_runs = sorted(
+        (run for run in row_runs if run[0] >= wide_threshold),
+        key=lambda run: run[1],
+    )
+    if not wide_runs:
+        raise ValueError(
+            "drinking_reference_prop_split_unreliable: no_wide_bowl_rows"
+        )
+
+    groups: list[list[tuple[int, int, int, int]]] = []
+    for run in wide_runs:
+        best_group: list[tuple[int, int, int, int]] | None = None
+        best_overlap = -1
+        for group in groups:
+            previous = group[-1]
+            row_gap = run[1] - previous[1]
+            if not 0 <= row_gap <= 2:
+                continue
+            overlap = max(
+                0,
+                min(run[3], previous[3]) - max(run[2], previous[2]),
+            )
+            minimum_overlap = int(round(min(run[0], previous[0]) * 0.25))
+            if overlap >= minimum_overlap and overlap > best_overlap:
+                best_group = group
+                best_overlap = overlap
+        if best_group is None:
+            groups.append([run])
+        else:
+            best_group.append(run)
+    minimum_group_rows = max(4, int(round(subject_height * 0.015)))
+    sustained_groups = [
+        group for group in groups if len(group) >= minimum_group_rows
+    ]
+    if not sustained_groups:
+        raise ValueError(
+            "drinking_reference_prop_split_unreliable: "
+            "no_sustained_bowl_rows"
+        )
+    lowest_group_bottom = max(group[-1][1] for group in sustained_groups)
+    bottom_tolerance = max(4, int(round(subject_height * 0.06)))
+    baseline_groups = [
+        group
+        for group in sustained_groups
+        if group[-1][1] >= lowest_group_bottom - bottom_tolerance
+    ]
+    bowl_group = max(
+        baseline_groups,
+        key=lambda group: (
+            max(run[0] for run in group),
+            group[-1][1],
+            len(group),
+        ),
+    )
+    baseline_span = max(12, int(round(subject_height * 0.12)))
+    baseline_runs = [
+        run
+        for run in bowl_group
+        if run[1] >= bowl_group[-1][1] - baseline_span
+    ]
+    widest_run = max(run[0] for run in baseline_runs)
+    bowl_left = max(left, min(run[2] for run in baseline_runs) - 3)
+    bowl_right = min(right, max(run[3] for run in baseline_runs) + 3)
+    bowl_bottom = min(bottom, bowl_group[-1][1] + 3)
+    bowl_width_fraction = (bowl_right - bowl_left) / float(subject_width)
+    if not 0.18 <= bowl_width_fraction <= 0.60:
+        raise ValueError(
+            "drinking_reference_prop_split_unreliable: "
+            f"bowl_width_fraction={bowl_width_fraction:.4f}"
+        )
+
+    red = rgb[..., 0].astype(np.int16)
+    green = rgb[..., 1].astype(np.int16)
+    blue = rgb[..., 2].astype(np.int16)
+    channel_max = np.maximum(np.maximum(red, green), blue)
+    channel_min = np.minimum(np.minimum(red, green), blue)
+    luma = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    row_indices, column_indices = np.indices(alpha.shape)
+    bowl_material = (
+        alpha
+        & (column_indices >= bowl_left)
+        & (column_indices < bowl_right)
+        & (row_indices >= search_y0)
+        & (
+            (((channel_max - channel_min) <= 48) & (luma <= 225))
+            | (blue >= red + 5)
+        )
+    )
+    material_row_threshold = max(
+        6,
+        int(round((bowl_right - bowl_left) * 0.60)),
+    )
+    material_rows = [
+        row
+        for row in range(search_y0, bottom)
+        if int(np.count_nonzero(bowl_material[row])) >= material_row_threshold
+    ]
+    material_groups: list[list[int]] = []
+    for row in material_rows:
+        if not material_groups or row - material_groups[-1][-1] > 2:
+            material_groups.append([row])
+        else:
+            material_groups[-1].append(row)
+    sustained_material_groups = [
+        group for group in material_groups if len(group) >= 3
+    ]
+    if sustained_material_groups:
+        bowl_material_group = max(
+            sustained_material_groups,
+            key=lambda group: (group[-1], len(group)),
+        )
+        bowl_top = max(top, bowl_material_group[0] - 4)
+        bowl_top_policy = "lower_neutral_or_cool_material_rows_v1"
+    else:
+        bowl_top = max(
+            search_y0,
+            bowl_group[-1][1] - max(20, int(round(subject_height * 0.20))),
+        )
+        bowl_top_policy = "baseline_geometry_height_fallback_v1"
+
+    hard_alpha = cv2.dilate(
+        alpha.astype(np.uint8),
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    bowl_zone = (
+        (column_indices >= bowl_left)
+        & (column_indices < bowl_right)
+        & (row_indices >= bowl_top)
+        & (row_indices < bottom + 2)
+    )
+    prop_exclusion = hard_alpha & bowl_zone
+
+    tongue_seed = (
+        alpha
+        & (column_indices >= bowl_left)
+        & (column_indices < bowl_right)
+        & (row_indices >= top + int(round(subject_height * 0.35)))
+        & (red >= 110)
+        & (red - green >= 25)
+        & (blue - green >= 5)
+    )
+    tongue_count, tongue_labels, tongue_stats, tongue_centroids = (
+        cv2.connectedComponentsWithStats(
+            tongue_seed.astype(np.uint8),
+            connectivity=8,
+        )
+    )
+    tongue_candidates: list[tuple[int, int, float, int]] = []
+    hard_pixels = int(np.count_nonzero(hard_alpha))
+    for label in range(1, tongue_count):
+        area = int(tongue_stats[label, cv2.CC_STAT_AREA])
+        component_top = int(tongue_stats[label, cv2.CC_STAT_TOP])
+        component_height = int(tongue_stats[label, cv2.CC_STAT_HEIGHT])
+        component_bottom = component_top + component_height
+        center_x = float(tongue_centroids[label][0])
+        if (
+            6 <= area <= max(120, int(round(hard_pixels * 0.04)))
+            and bowl_left <= center_x < bowl_right
+        ):
+            tongue_candidates.append(
+                (
+                    area,
+                    component_bottom,
+                    -abs(center_x - (bowl_left + bowl_right - 1) / 2.0),
+                    label,
+                )
+            )
+    tongue_support = np.zeros_like(alpha)
+    tongue_bbox: list[int] | None = None
+    if tongue_candidates:
+        _area_rank, _bottom_rank, _center_rank, tongue_label = max(
+            tongue_candidates
+        )
+        tongue_core = tongue_labels == tongue_label
+        tongue_neighbourhood = cv2.dilate(
+            tongue_core.astype(np.uint8),
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        tongue_colour_support = (
+            alpha
+            & (red >= 90)
+            & (red - green >= 15)
+            & (blue - green >= -5)
+        )
+        tongue_support = tongue_neighbourhood & tongue_colour_support
+        tongue_bbox = list(binary_bbox(tongue_support))
+        prop_exclusion &= ~tongue_support
+
+    identity = hard_alpha & ~prop_exclusion
+    prop_pixels = int(np.count_nonzero(prop_exclusion))
+    identity_pixels = int(np.count_nonzero(identity))
+    if prop_pixels < 64 or identity_pixels < 500:
+        raise ValueError(
+            "drinking_reference_prop_split_unreliable: "
+            f"invalid_pixel_counts=({identity_pixels},{prop_pixels})"
+        )
+    prop_fraction = prop_pixels / float(max(1, hard_pixels))
+    if not 0.015 <= prop_fraction <= 0.24:
+        raise ValueError(
+            "drinking_reference_prop_split_unreliable: "
+            f"prop_fraction={prop_fraction:.4f}"
+        )
+
+    colored = np.zeros((*alpha.shape, 3), dtype=np.uint8)
+    colored[identity] = (0, 0, 255)
+    colored[prop_exclusion] = (255, 0, 0)
+    metadata = {
+        "policy": "drinking_reference_dog_blue_bowl_red_v2",
+        "split_status": "strict_geometry_refinement",
+        "fallback_used": False,
+        "subject_bbox": [left, top, right, bottom],
+        "bowl_search_bbox": [search_x0, search_y0, search_x1, bottom],
+        "bowl_zone_bbox": [bowl_left, bowl_top, bowl_right, bottom],
+        "bowl_detected_bottom": bowl_bottom,
+        "bowl_top_policy": bowl_top_policy,
+        "bowl_material_row_threshold": material_row_threshold,
+        "bowl_widest_row_px": widest_run,
+        "bowl_wide_row_threshold_px": wide_threshold,
+        "bowl_sustained_row_count": len(bowl_group),
+        "bowl_width_fraction": bowl_width_fraction,
+        "prop_exclusion_bbox": list(binary_bbox(prop_exclusion)),
+        "prop_fraction": prop_fraction,
+        "identity_pixels": identity_pixels,
+        "tongue_reclassified_as_identity": bool(np.any(tongue_support)),
+        "tongue_bbox": tongue_bbox,
+    }
+    return (
+        Image.fromarray(colored, mode="RGB"),
+        Image.fromarray(prop_exclusion.astype(np.uint8) * 255, mode="L"),
+        metadata,
+    )
+
+
 def make_reference_assets(
     reference_path: Path,
     canvas_size: tuple[int, int],
     separate_eating_prop: bool = False,
+    separate_drinking_prop: bool = False,
+    separate_toileting_prop: bool = False,
     contain_fraction: float = 0.84,
 ) -> tuple[Image.Image, Image.Image, dict[str, Any]]:
+    if sum(
+        (
+            separate_eating_prop,
+            separate_drinking_prop,
+            separate_toileting_prop,
+        )
+    ) > 1:
+        raise ValueError("Only one reference prop split may be requested")
     with Image.open(reference_path) as source:
         reference = source.convert("RGBA")
     reference_extraction = "existing_alpha"
@@ -4473,6 +5455,31 @@ def make_reference_assets(
         colored_mask, _prop_exclusion, reference_prop_metadata = (
             make_eating_reference_identity_mask(normalized)
         )
+    elif separate_drinking_prop:
+        colored_mask, _prop_exclusion, reference_prop_metadata = (
+            make_drinking_reference_identity_mask(normalized)
+        )
+    elif separate_toileting_prop:
+        toileting_exclusions, reference_prop_metadata = (
+            make_toileting_prop_exclusion_masks([normalized])
+        )
+        prop_exclusion = toileting_exclusions[0]
+        normalized = normalize_toileting_prop_rgb(
+            normalized,
+            prop_exclusion,
+            reference_prop_metadata,
+        )
+        normalized_alpha = normalized.getchannel("A")
+        hard_alpha = normalized_alpha.point(
+            lambda value: 255 if value >= 16 else 0
+        )
+        hard_alpha = hard_alpha.filter(ImageFilter.MaxFilter(5))
+        prop = np.asarray(prop_exclusion, dtype=np.uint8) >= 128
+        identity = (np.asarray(hard_alpha, dtype=np.uint8) >= 128) & ~prop
+        colored_pixels = np.zeros((*identity.shape, 3), dtype=np.uint8)
+        colored_pixels[identity] = (0, 0, 255)
+        colored_pixels[prop] = (255, 0, 0)
+        colored_mask = Image.fromarray(colored_pixels, mode="RGB")
     else:
         # SCAIL reference-mask background is black, same identity is pure blue.
         colored_mask = Image.new("RGB", canvas_size, (0, 0, 0))
@@ -4504,7 +5511,11 @@ def make_reference_assets(
             float(np.count_nonzero(prop_pixels))
             / float(canvas_size[0] * canvas_size[1])
         ),
-        "scene_prop_separated": separate_eating_prop,
+        "scene_prop_separated": (
+            separate_eating_prop
+            or separate_drinking_prop
+            or separate_toileting_prop
+        ),
         "scene_prop_metadata": reference_prop_metadata,
     }
     return normalized, colored_mask, metadata
@@ -5271,6 +6282,61 @@ def transparent_animation_loop_quality(
         "loop_to_adjacent_ratio": ratio,
         "permitted_transition_score": permitted_score,
         "acceptable": loop_score <= permitted_score,
+    }
+
+
+def close_transparent_action_tail_loop(
+    frames: list[tuple[np.ndarray, np.ndarray]],
+    *,
+    target_frame_index: int,
+    maximum_blend_frames: int = 9,
+) -> tuple[list[tuple[np.ndarray, np.ndarray]], dict[str, Any]]:
+    """Blend the published tail back to frame zero without changing duration."""
+
+    if len(frames) < 3:
+        raise ValueError("Action tail closure requires at least three frames.")
+    if not 1 <= target_frame_index < len(frames):
+        raise ValueError(
+            "Action tail closure target must be inside the source frame range."
+        )
+    if maximum_blend_frames < 3:
+        raise ValueError("Action tail closure requires at least three blend frames.")
+    blend_count = min(maximum_blend_frames, target_frame_index + 1)
+    blend_start = target_frame_index - blend_count + 1
+    first_rgb, first_alpha = frames[0]
+    closed = [(rgb.copy(), alpha.copy()) for rgb, alpha in frames]
+    for frame_index in range(blend_start, target_frame_index + 1):
+        phase = (frame_index - blend_start + 1) / float(blend_count)
+        weight = 0.5 - 0.5 * np.cos(np.pi * phase)
+        source_rgb, source_alpha = closed[frame_index]
+        blended_rgb = np.clip(
+            np.rint(
+                source_rgb.astype(np.float32) * (1.0 - weight)
+                + first_rgb.astype(np.float32) * weight
+            ),
+            0,
+            255,
+        ).astype(np.uint8)
+        blended_alpha = np.clip(
+            np.rint(
+                source_alpha.astype(np.float32) * (1.0 - weight)
+                + first_alpha.astype(np.float32) * weight
+            ),
+            0,
+            255,
+        ).astype(np.uint8)
+        closed[frame_index] = (blended_rgb, blended_alpha)
+    closed[target_frame_index] = (first_rgb.copy(), first_alpha.copy())
+    for frame_index in range(target_frame_index + 1, len(closed)):
+        closed[frame_index] = (first_rgb.copy(), first_alpha.copy())
+    return closed, {
+        "policy": ACTION_TAIL_COSINE_LOOP_POLICY,
+        "blend_start_frame_index": blend_start,
+        "target_frame_index": target_frame_index,
+        "blend_frame_count": blend_count,
+        "terminal_frame_matches_first": True,
+        "preserves_source_frame_count": len(closed) == len(frames),
+        "preserves_duration": True,
     }
 
 
@@ -6439,6 +7505,21 @@ def build_unstabilized_transparent_gif(
             )
             for index in range(gif_frames)
         ]
+        if action in {"drinking", "eating"}:
+            extracted_frames, action_loop_metadata = (
+                close_transparent_action_tail_loop(
+                    extracted_frames,
+                    target_frame_index=sampled_indices[-1],
+                )
+            )
+            temporal_cycle = {
+                **temporal_cycle,
+                **action_loop_metadata,
+                "action": action,
+                "applied": True,
+                "playback": "original_motion_with_short_cosine_tail_closure",
+                "closed_loop": True,
+            }
         sampled_original_source_indices = [
             source_index_map[source_index]
             for source_index in sampled_indices
@@ -6448,16 +7529,17 @@ def build_unstabilized_transparent_gif(
             sampled_indices,
         )
         temporal_cycle["sampled_loop_quality"] = sampled_loop_quality
+        loop_required = action in {"grooming", "drinking", "eating"}
         sampled_loop_acceptable = (
             bool(temporal_cycle["closed_loop"])
             and bool(temporal_cycle["preserves_source_frame_count"])
             and bool(sampled_loop_quality["acceptable"])
-            if action == "grooming"
+            if loop_required
             else True
         )
-        if action == "grooming" and not sampled_loop_acceptable:
+        if loop_required and not sampled_loop_acceptable:
             raise RuntimeError(
-                "Grooming sampled temporal loop failed its continuity contract: "
+                "Action sampled temporal loop failed its continuity contract: "
                 f"{json.dumps(temporal_cycle, ensure_ascii=False)}"
             )
         foreground_fractions: list[float] = []
@@ -6559,12 +7641,12 @@ def build_unstabilized_transparent_gif(
         temporal_cycle["acceptable"] = (
             bool(sampled_loop_acceptable)
             and bool(published_loop_quality["acceptable"])
-            if action == "grooming"
+            if loop_required
             else None
         )
-        if action == "grooming" and temporal_cycle["acceptable"] is not True:
+        if loop_required and temporal_cycle["acceptable"] is not True:
             raise RuntimeError(
-                "Grooming published temporal loop failed its continuity contract: "
+                "Action published temporal loop failed its continuity contract: "
                 f"{json.dumps(temporal_cycle, ensure_ascii=False)}"
             )
         os.replace(temporary, gif_target)
@@ -7394,6 +8476,8 @@ def main() -> int:
         args.reference,
         (args.width, args.height),
         separate_eating_prop=args.action == "eating",
+        separate_drinking_prop=args.action == "drinking",
+        separate_toileting_prop=args.action == "toileting",
         contain_fraction=(
             0.88
             if args.action in {"grooming", "sleeping", "standing", "toileting"}
@@ -7436,6 +8520,7 @@ def main() -> int:
         try:
             pose_frames, pose_masks, pose_metadata = (
                 make_drinking_reference_aligned_pose_frames(
+                    sampled,
                     reference,
                     reference_mask,
                     (args.width, args.height),
@@ -7462,6 +8547,7 @@ def main() -> int:
             (args.width, args.height),
             pose_background=(255, 255, 255),
             separate_eating_prop=False,
+            separate_toileting_prop=args.action == "toileting",
             white_maquette_cleanup=white_maquette_cleanup,
         )
     prop_metadata = pose_metadata.get("scene_prop_metadata")
@@ -7590,6 +8676,7 @@ def main() -> int:
             gif_metrics = build_unstabilized_transparent_gif(
                 video_path,
                 gif_path,
+                action=args.action,
                 guidance_mask_video=pose_mask_path,
                 output_size=(args.width, args.height),
                 source_fps=args.fps,

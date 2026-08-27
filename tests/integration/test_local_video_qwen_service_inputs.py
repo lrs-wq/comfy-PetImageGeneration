@@ -1878,6 +1878,21 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             ),
             "identity_safe_generated_candidate",
         )
+        geometry_failed = {
+            "identity_palette": {"acceptable": True},
+            "quality": {
+                "acceptable": False,
+                "issues": ["pose_not_low_or_wide_enough_for_bowl_action"],
+            },
+        }
+        self.assertEqual(
+            pipeline.exhausted_action_candidate_recovery_policy(
+                geometry_failed,
+                action="drinking",
+                approved_canonical_available=True,
+            ),
+            "identity_safe_generated_candidate_requires_final_action_gate",
+        )
         self.assertEqual(
             pipeline.exhausted_action_candidate_recovery_policy(
                 drifted,
