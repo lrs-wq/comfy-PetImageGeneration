@@ -33,7 +33,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertEqual(int(clean[60, 60]), 255)
         self.assertEqual(
             metadata["policy"],
-            "neutral_material_floor_shadow_rejection_v1",
+            "neutral_material_floor_shadow_rejection_v2",
         )
 
         tray_rgba = rgba.copy()
@@ -56,6 +56,40 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertFalse(
             pose_metadata["white_maquette_source_chroma_preserved"]
         )
+
+    def test_white_maquette_cleanup_recovers_green_spill_between_body_and_legs(
+        self,
+    ) -> None:
+        rgba = np.zeros((160, 160, 4), dtype=np.uint8)
+        neutral = (226, 226, 218, 255)
+        rgba[18:68, 38:122] = neutral
+        rgba[92:148, 42:66] = neutral
+        rgba[92:148, 94:118] = neutral
+        rgba[56:112, 48:112] = (170, 202, 138, 255)
+        rgba[140:156, 4:156] = (59, 76, 36, 210)
+
+        clean, metadata = scail_pipeline.white_maquette_semantic_silhouette(
+            rgba,
+        )
+
+        self.assertEqual(int(clean[82, 80]), 255)
+        self.assertEqual(int(clean[148, 8]), 0)
+        self.assertEqual(metadata["retained_components"], 1)
+        self.assertEqual(metadata["dominant_component_fraction"], 1.0)
+        self.assertGreater(metadata["green_spill_pixels_recovered"], 0)
+
+    def test_white_maquette_cleanup_rejects_large_disconnected_body_piece(
+        self,
+    ) -> None:
+        rgba = np.zeros((160, 160, 4), dtype=np.uint8)
+        rgba[16:86, 18:78] = (226, 226, 218, 255)
+        rgba[92:150, 92:144] = (226, 226, 218, 255)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "split the subject into large disconnected components",
+        ):
+            scail_pipeline.white_maquette_semantic_silhouette(rgba)
 
     def test_small_dog_extended_actions_have_qwen_and_scail_contracts(self) -> None:
         expected_tokens = {

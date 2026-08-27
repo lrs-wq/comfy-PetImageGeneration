@@ -644,11 +644,26 @@ def white_maquette_semantic_silhouette(
     )
     luma = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     green_shadow = ((green - red) >= 12) & ((green - blue) >= 24)
+    # White fur next to a green screen can keep enough reflected green to
+    # satisfy the shadow rule even though its red/blue channels remain much
+    # brighter and less saturated than the background.  Preserve that narrow
+    # high-luma band so chest and foreleg geometry are not cut apart.  The
+    # stricter red/blue and span limits continue to reject the green canvas and
+    # its darker floor shadow.
+    recoverable_green_spill = (
+        green_shadow
+        & (red >= 145)
+        & (blue >= 110)
+        & (luma >= 145)
+        & (channel_span <= 88)
+    )
     seed = (
         (alpha >= 16)
         & (luma >= 55)
-        & (channel_span <= 72)
-        & ~green_shadow
+        & (
+            ((channel_span <= 72) & ~green_shadow)
+            | recoverable_green_spill
+        )
     ).astype(np.uint8)
     # Thin neutral/green contact shadows can survive chroma extraction and
     # connect every paw to a fake floor shelf.  A vertical opening removes
@@ -679,6 +694,7 @@ def white_maquette_semantic_silhouette(
     minimum_area = max(64, int(largest_area * 0.004))
     semantic_seed = np.zeros_like(seed)
     retained_components = 0
+    retained_areas: list[int] = []
     for label in range(1, component_count):
         area = int(stats[label, cv2.CC_STAT_AREA])
         width = int(stats[label, cv2.CC_STAT_WIDTH])
@@ -689,6 +705,20 @@ def white_maquette_semantic_silhouette(
             continue
         semantic_seed[labels == label] = 255
         retained_components += 1
+        retained_areas.append(area)
+    retained_area = sum(retained_areas)
+    dominant_component_fraction = (
+        max(retained_areas, default=0) / retained_area
+        if retained_area
+        else 0.0
+    )
+    if retained_components > 0 and dominant_component_fraction < 0.93:
+        raise ValueError(
+            "White-maquette cleanup split the subject into large disconnected "
+            "components: dominant_component_fraction="
+            f"{dominant_component_fraction:.6f}, required=0.930000, "
+            f"components={retained_components}"
+        )
     contours, _ = cv2.findContours(
         semantic_seed,
         cv2.RETR_EXTERNAL,
@@ -706,11 +736,22 @@ def white_maquette_semantic_silhouette(
             f"visible_fraction={visible_fraction:.6f}"
         )
     return silhouette, {
-        "policy": "neutral_material_floor_shadow_rejection_v1",
+        "policy": "neutral_material_floor_shadow_rejection_v2",
         "retained_components": retained_components,
+        "dominant_component_fraction": round(
+            dominant_component_fraction,
+            6,
+        ),
         "visible_fraction": round(visible_fraction, 6),
+        "green_spill_pixels_recovered": int(
+            np.count_nonzero((alpha >= 16) & recoverable_green_spill)
+        ),
         "green_shadow_pixels_rejected": int(
-            np.count_nonzero((alpha >= 16) & green_shadow)
+            np.count_nonzero(
+                (alpha >= 16)
+                & green_shadow
+                & ~recoverable_green_spill
+            )
         ),
     }
 
