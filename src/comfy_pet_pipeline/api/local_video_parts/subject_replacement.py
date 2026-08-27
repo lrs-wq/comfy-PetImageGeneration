@@ -1837,6 +1837,17 @@ def revalidate_uploaded_qwen_references_before_scail(
 
     reference_paths = job.get("subject_reference_paths")
     qwen_reference_sha256s = job.get("qwen_action_keyframe_sha256s")
+    raw_canonical_identity_fallbacks = job.get(
+        "qwen_canonical_identity_fallbacks"
+    )
+    if raw_canonical_identity_fallbacks is None:
+        canonical_identity_fallbacks: dict[str, Any] = {}
+    elif isinstance(raw_canonical_identity_fallbacks, dict):
+        canonical_identity_fallbacks = raw_canonical_identity_fallbacks
+    else:
+        raise RuntimeError(
+            "Persisted Qwen canonical fallback provenance is invalid."
+        )
     fur_surface_status = job.get("fur_surface_gate_status")
     selected_surface_metrics = job.get("fur_surface_gate_selected_metrics")
     stored_surface_quality = job.get("subject_fur_surface_quality")
@@ -1879,6 +1890,15 @@ def revalidate_uploaded_qwen_references_before_scail(
             file_sha256(reference_path) if reference_path.is_file() else ""
         )
         action_config = effective_subject_config["actions"][action]
+        stored_canonical_fallback = canonical_identity_fallbacks.get(action)
+        configured_canonical_fallback = action_config.get(
+            "qwen_canonical_identity_fallback"
+        )
+        if stored_canonical_fallback != configured_canonical_fallback:
+            raise RuntimeError(
+                f"Persisted Qwen {action} canonical fallback provenance changed "
+                "before SCAIL."
+            )
         expected_reference_digest = (
             str(action_config.get("reference_sha256") or "").strip().lower()
         )
@@ -1902,6 +1922,33 @@ def revalidate_uploaded_qwen_references_before_scail(
             raise RuntimeError(
                 f"Persisted Qwen {action} reference changed before SCAIL."
             )
+        scail_reference_mode = action_config.get("scail_reference_mode")
+        if scail_reference_mode is not None:
+            if (
+                action != "eating"
+                or str(job.get("species") or "").strip().lower() != "dog"
+                or scail_reference_mode
+                != DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY
+                or not isinstance(stored_canonical_fallback, dict)
+                or stored_canonical_fallback.get("policy")
+                != DOG_EATING_CANONICAL_IDENTITY_FALLBACK_POLICY
+                or stored_canonical_fallback.get(
+                    "action_geometry_deferred_to_scail"
+                )
+                is not True
+                or stored_canonical_fallback.get(
+                    "published_reference_path"
+                )
+                != str(reference_path)
+                or stored_canonical_fallback.get(
+                    "published_reference_sha256"
+                )
+                != reference_digest
+            ):
+                raise RuntimeError(
+                    "Persisted Qwen dog-eating identity-only fallback "
+                    "contract changed before SCAIL."
+                )
         with Image.open(reference_path) as loaded_reference:
             alpha = loaded_reference.convert("RGBA").getchannel("A")
             alpha_minimum, alpha_maximum = alpha.getextrema()
@@ -2450,6 +2497,16 @@ def run_subject_replacement_job(job_id: str) -> None:
             run_id,
             "--prepare-only",
         ]
+        canonical_full_driver_eating_fallback = bool(
+            action == "eating"
+            and str(job.get("species") or "").strip().lower() == "dog"
+            and action_config.get("scail_reference_mode")
+            == DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY
+        )
+        if canonical_full_driver_eating_fallback:
+            command.append(
+                "--canonical-identity-full-driver-eating-fallback"
+            )
         # Subject-replacement identity, fur, action, camera, and prop rules are
         # profile-locked. User prose is retained in task metadata but is never
         # appended after the protected SCAIL prompt, where terms such as
@@ -2522,6 +2579,12 @@ def run_subject_replacement_job(job_id: str) -> None:
         }
         manifest["reference_policy"] = reference_policy
         manifest["reference_source_path"] = str(reference_path)
+        manifest["scail_reference_mode"] = action_config.get(
+            "scail_reference_mode"
+        )
+        manifest["qwen_canonical_identity_fallback"] = action_config.get(
+            "qwen_canonical_identity_fallback"
+        )
         expected_pose_policy = expected_pose_policies.get(action)
         require_expected_scail_pose_policy(
             manifest,
@@ -2552,7 +2615,34 @@ def run_subject_replacement_job(job_id: str) -> None:
                     bowl_motion_contract_issues.append(
                         "static_pose_fallback_forbidden"
                     )
-                if pose_metadata.get("driver_signal_only") is not True:
+                if canonical_full_driver_eating_fallback:
+                    if (
+                        pose_metadata.get("policy")
+                        != DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY
+                    ):
+                        bowl_motion_contract_issues.append(
+                            "canonical_full_driver_pose_policy_missing"
+                        )
+                    if pose_metadata.get("driver_input_used") is not True:
+                        bowl_motion_contract_issues.append(
+                            "eating_white_driver_not_used"
+                        )
+                    if (
+                        pose_metadata.get("full_white_driver_geometry")
+                        is not True
+                    ):
+                        bowl_motion_contract_issues.append(
+                            "full_white_driver_geometry_missing"
+                        )
+                    if pose_metadata.get("reference_identity_only") is not True:
+                        bowl_motion_contract_issues.append(
+                            "canonical_reference_not_identity_only"
+                        )
+                    if pose_metadata.get("driver_signal_only") is not False:
+                        bowl_motion_contract_issues.append(
+                            "full_white_driver_silhouette_not_preserved"
+                        )
+                elif pose_metadata.get("driver_signal_only") is not True:
                     bowl_motion_contract_issues.append(
                         "white_driver_motion_signal_missing"
                     )

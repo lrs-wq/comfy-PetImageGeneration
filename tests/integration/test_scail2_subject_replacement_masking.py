@@ -472,6 +472,53 @@ class EatingScenePropMaskTests(unittest.TestCase):
             len(poses),
         )
 
+    def test_dog_canonical_eating_fallback_never_guesses_bowl_from_identity(
+        self,
+    ) -> None:
+        canonical = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(canonical)
+        draw.ellipse((105, 75, 410, 455), fill=(223, 194, 152, 255))
+        # This broad warm lower-body patch reproduced the old false bowl split.
+        draw.rectangle((185, 292, 330, 445), fill=(205, 164, 118, 255))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            reference_path = Path(temporary) / "canonical.png"
+            canonical.save(reference_path)
+            _reference, reference_mask, reference_metadata = (
+                scail.make_reference_assets(
+                    reference_path,
+                    (512, 512),
+                    separate_eating_prop=False,
+                )
+            )
+
+        reference_pixels = np.asarray(reference_mask, dtype=np.uint8)
+        reference_red = np.all(reference_pixels == (255, 0, 0), axis=2)
+        reference_blue = np.all(reference_pixels == (0, 0, 255), axis=2)
+        self.assertFalse(reference_metadata["scene_prop_separated"])
+        self.assertEqual(reference_metadata["reference_prop_fraction"], 0.0)
+        self.assertFalse(np.any(reference_red))
+        self.assertTrue(np.any(reference_blue))
+
+        _poses, pose_masks, pose_metadata = (
+            scail.make_dog_eating_canonical_full_driver_pose_frames(
+                self._geometry_frames(full_body_motion=True),
+                (512, 512),
+            )
+        )
+        pose_pixels = np.asarray(pose_masks[2], dtype=np.uint8)
+        pose_red = np.all(pose_pixels == (255, 0, 0), axis=2)
+        self.assertTrue(np.any(pose_red))
+        self.assertEqual(
+            pose_metadata["policy"],
+            scail.DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
+        )
+        self.assertTrue(pose_metadata["reference_identity_only"])
+        self.assertTrue(pose_metadata["full_white_driver_geometry"])
+        self.assertTrue(pose_metadata["scene_prop_separated"])
+        self.assertFalse(pose_metadata["fallback_used"])
+        self.assertFalse(pose_metadata["driver_signal_only"])
+
     def test_full_eating_pose_rejects_head_only_motion(self) -> None:
         with self.assertRaisesRegex(
             ValueError,

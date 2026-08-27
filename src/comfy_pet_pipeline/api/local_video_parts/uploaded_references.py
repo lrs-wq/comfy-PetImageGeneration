@@ -1119,6 +1119,7 @@ def prepare_uploaded_subject_qwen_references(
         )
     canonical_reference: Path | None = None
     action_references: dict[str, str] = {}
+    canonical_identity_fallbacks_by_action: dict[str, dict[str, Any]] = {}
     for output in refreshed.get("outputs", []):
         filename = output.get("filename")
         if not isinstance(filename, str):
@@ -1132,7 +1133,85 @@ def prepare_uploaded_subject_qwen_references(
             and action in actions
             and candidate.is_file()
         ):
-            action_references[str(action)] = str(candidate)
+            normalized_action = str(action)
+            action_references[normalized_action] = str(candidate)
+            try:
+                pose_index = int(output.get("pose_index"))
+            except (TypeError, ValueError):
+                pose_index = 0
+            quality_path = (
+                job_dir
+                / "workflows"
+                / f"qwen_pose_{pose_index:02d}_quality.json"
+            )
+            if pose_index <= 0 or not quality_path.is_file():
+                raise RuntimeError(
+                    f"Qwen {normalized_action} reference lacks its selected "
+                    "quality provenance."
+                )
+            quality_record = json.loads(
+                quality_path.read_text(encoding="utf-8")
+            )
+            selected_fallback = quality_record.get(
+                "selected_canonical_identity_fallback"
+            )
+            if selected_fallback is not None:
+                if not isinstance(selected_fallback, dict):
+                    raise RuntimeError(
+                        f"Qwen {normalized_action} canonical fallback "
+                        "provenance is invalid."
+                    )
+                selected_fallback_path = Path(
+                    str(selected_fallback.get("selected_path") or "")
+                )
+                selected_fallback_sha256 = str(
+                    selected_fallback.get("selected_sha256") or ""
+                ).strip().lower()
+                published_sha256 = file_sha256(candidate)
+                if (
+                    not selected_fallback_path.is_file()
+                    or not re.fullmatch(
+                        r"[0-9a-f]{64}", selected_fallback_sha256
+                    )
+                    or file_sha256(selected_fallback_path)
+                    != selected_fallback_sha256
+                    or published_sha256 != selected_fallback_sha256
+                ):
+                    raise RuntimeError(
+                        f"Qwen {normalized_action} canonical fallback changed "
+                        "during transparent publication."
+                    )
+                fallback_record = {
+                    **selected_fallback,
+                    "pose_index": pose_index,
+                    "quality_record_path": str(quality_path),
+                    "quality_record_sha256": file_sha256(quality_path),
+                    "published_reference_path": str(candidate),
+                    "published_reference_sha256": published_sha256,
+                }
+                if species == "dog" and normalized_action == "eating":
+                    if (
+                        fallback_record.get("policy")
+                        != DOG_EATING_CANONICAL_IDENTITY_FALLBACK_POLICY
+                        or fallback_record.get(
+                            "action_geometry_deferred_to_scail"
+                        )
+                        is not True
+                        or fallback_record.get(
+                            "toileting_tray_geometry_prebound"
+                        )
+                        is True
+                    ):
+                        raise RuntimeError(
+                            "Qwen dog-eating canonical fallback lacks its "
+                            "identity-only SCAIL geometry contract."
+                        )
+                    fallback_record["scail_reference_mode"] = (
+                        DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY
+                    )
+                canonical_identity_fallbacks_by_action[
+                    normalized_action
+                ] = fallback_record
 
     missing_actions = [action for action in actions if action not in action_references]
     if canonical_reference is None:
@@ -1369,6 +1448,14 @@ def prepare_uploaded_subject_qwen_references(
         action_config["reference"] = reference
         action_config["reference_sha256"] = file_sha256(Path(reference))
         action_config["reference_kind"] = "qwen_generated_upload"
+        action_config["qwen_canonical_identity_fallback"] = (
+            canonical_identity_fallbacks_by_action.get(action)
+        )
+        action_config["scail_reference_mode"] = (
+            canonical_identity_fallbacks_by_action.get(action, {}).get(
+                "scail_reference_mode"
+            )
+        )
 
     update_job(
         job_id,
@@ -1378,6 +1465,9 @@ def prepare_uploaded_subject_qwen_references(
         qwen_subject_reference_paths=action_references,
         qwen_reference_actions=list(actions),
         qwen_reference_generated_actions=list(action_references),
+        qwen_canonical_identity_fallbacks=(
+            canonical_identity_fallbacks_by_action
+        ),
         canonical_reference_path=(
             str(canonical_reference) if canonical_reference is not None else None
         ),

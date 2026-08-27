@@ -190,6 +190,7 @@ def exhausted_action_candidate_recovery_policy(
         return "identity_safe_generated_candidate"
     if action in {
         "standing",
+        "eating",
         "drinking",
         "running",
         "sleeping",
@@ -6704,6 +6705,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     and fallback_action
                     in {
                         "standing",
+                        "eating",
                         "drinking",
                         "running",
                         "sleeping",
@@ -6819,9 +6821,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "upload_anchored_canonical_standing_reference_v1"
                         if standing_fallback
                         else (
-                            TOILETING_CANONICAL_TRAY_FALLBACK_POLICY
-                            if fallback_action == "toileting"
-                            else "upload_anchored_canonical_dog_action_reference_v1"
+                            DOG_EATING_CANONICAL_IDENTITY_FALLBACK_POLICY
+                            if fallback_action == "eating"
+                            else (
+                                TOILETING_CANONICAL_TRAY_FALLBACK_POLICY
+                                if fallback_action == "toileting"
+                                else (
+                                    "upload_anchored_canonical_dog_action_"
+                                    "reference_v1"
+                                )
+                            )
                         )
                     )
                     canonical_fallback = (

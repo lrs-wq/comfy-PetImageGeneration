@@ -86,6 +86,9 @@ GROOMING_TEMPORAL_LOOP_POLICY = (
 ACTION_TAIL_COSINE_LOOP_POLICY = (
     "drinking_eating_tail_cosine_blend_to_first_v1"
 )
+DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY = (
+    "canonical_identity_full_white_driver_eating_fallback_v1"
+)
 
 DEFAULT_PROMPT = (
     "A complete full-body premium stylized 3D cartoon cat matching the sleek "
@@ -424,6 +427,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=7200)
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument(
+        "--canonical-identity-full-driver-eating-fallback",
+        action="store_true",
+        help=(
+            "Dog-eating recovery only: keep --reference as an identity-only "
+            "mask and take the complete animated body and bowl geometry from "
+            "the digest-bound white-maquette --source."
+        ),
+    )
+    parser.add_argument(
         "--eating-geometry-guide-output",
         type=Path,
         help=(
@@ -450,6 +462,13 @@ def parse_args() -> argparse.Namespace:
         help="Optional JSON metadata path for --grooming-geometry-guide-output.",
     )
     args = parser.parse_args()
+    if args.canonical_identity_full_driver_eating_fallback and not (
+        args.species == "dog" and args.action == "eating"
+    ):
+        parser.error(
+            "--canonical-identity-full-driver-eating-fallback requires "
+            "--species dog --action eating"
+        )
     if args.prompt is None:
         if args.species == "dog":
             args.prompt = DOG_ACTION_PROMPTS.get(args.action, DOG_STANDING_PROMPT)
@@ -1834,6 +1853,43 @@ def make_full_eating_pose_and_mask_frames(
         }
     )
     return pose_frames, mask_frames, metadata
+
+
+def make_dog_eating_canonical_full_driver_pose_frames(
+    sampled_frames: list[Image.Image],
+    canvas_size: tuple[int, int],
+) -> tuple[list[Image.Image], list[Image.Image], dict[str, Any]]:
+    """Bind approved identity to the complete digest-bound eating driver.
+
+    This recovery deliberately does not inspect the canonical RGB image for a
+    bowl. The reference mask remains identity-only, while the white-maquette
+    video supplies every animated body and prop pixel through the normal full
+    eating motion gate.
+    """
+
+    pose_frames, pose_masks, pose_metadata = (
+        make_full_eating_pose_and_mask_frames(
+            sampled_frames,
+            canvas_size,
+        )
+    )
+    pose_metadata.update(
+        {
+            "policy": DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
+            "fallback_used": False,
+            "canonical_identity_reference": True,
+            "reference_identity_only": True,
+            "reference_scene_prop_inference_disabled": True,
+            "full_white_driver_geometry": True,
+            "driver_input_used": True,
+            "identity_authority": "approved_upload_canonical",
+            "action_geometry_authority": (
+                "digest_bound_white_maquette_video"
+            ),
+            "scene_prop_authority": "digest_bound_white_maquette_video",
+        }
+    )
+    return pose_frames, pose_masks, pose_metadata
 
 
 def _largest_binary_component(
@@ -8475,7 +8531,10 @@ def main() -> int:
     reference, reference_mask, reference_metadata = make_reference_assets(
         args.reference,
         (args.width, args.height),
-        separate_eating_prop=args.action == "eating",
+        separate_eating_prop=(
+            args.action == "eating"
+            and not args.canonical_identity_full_driver_eating_fallback
+        ),
         separate_drinking_prop=args.action == "drinking",
         separate_toileting_prop=args.action == "toileting",
         contain_fraction=(
@@ -8486,29 +8545,37 @@ def main() -> int:
     )
     if args.action == "eating":
         if args.species == "dog":
-            try:
+            if args.canonical_identity_full_driver_eating_fallback:
                 pose_frames, pose_masks, pose_metadata = (
-                    make_eating_reference_aligned_pose_frames(
+                    make_dog_eating_canonical_full_driver_pose_frames(
                         sampled,
-                        reference,
-                        reference_mask,
                         (args.width, args.height),
                     )
                 )
-            except ValueError as exc:
-                if not str(exc).startswith(
-                    "eating_reference_motion_unreliable:"
-                ):
-                    raise
-                pose_frames, pose_masks, pose_metadata = (
-                    make_static_reference_eating_pose_frames(
-                        reference,
-                        reference_mask,
-                        (args.width, args.height),
-                        frame_count=args.frames,
-                        fallback_reason=str(exc),
+            else:
+                try:
+                    pose_frames, pose_masks, pose_metadata = (
+                        make_eating_reference_aligned_pose_frames(
+                            sampled,
+                            reference,
+                            reference_mask,
+                            (args.width, args.height),
+                        )
                     )
-                )
+                except ValueError as exc:
+                    if not str(exc).startswith(
+                        "eating_reference_motion_unreliable:"
+                    ):
+                        raise
+                    pose_frames, pose_masks, pose_metadata = (
+                        make_static_reference_eating_pose_frames(
+                            reference,
+                            reference_mask,
+                            (args.width, args.height),
+                            frame_count=args.frames,
+                            fallback_reason=str(exc),
+                        )
+                    )
         else:
             pose_frames, pose_masks, pose_metadata = (
                 make_full_eating_pose_and_mask_frames(

@@ -1901,7 +1901,13 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             ),
             "upload_anchored_canonical",
         )
-        for action in ("drinking", "running", "sleeping", "toileting"):
+        for action in (
+            "eating",
+            "drinking",
+            "running",
+            "sleeping",
+            "toileting",
+        ):
             with self.subTest(action=action):
                 self.assertEqual(
                     pipeline.exhausted_action_candidate_recovery_policy(
@@ -1911,14 +1917,6 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                     ),
                     "upload_anchored_canonical",
                 )
-        self.assertEqual(
-            pipeline.exhausted_action_candidate_recovery_policy(
-                drifted,
-                action="eating",
-                approved_canonical_available=True,
-            ),
-            "reject",
-        )
 
     def test_eating_transparent_output_starts_at_validated_contact_phase(
         self,

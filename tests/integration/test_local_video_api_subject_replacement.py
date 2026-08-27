@@ -601,6 +601,7 @@ class SubjectReplacementEffectiveConfigTests(unittest.TestCase):
         for actual_policy in (
             pipeline.DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,
             pipeline.DOG_EATING_STATIC_POSE_FALLBACK_POLICY,
+            pipeline.DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
         ):
             pipeline.require_expected_scail_pose_policy(
                 {"pose_metadata": {"policy": actual_policy}},
