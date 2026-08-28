@@ -392,60 +392,6 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             )
             self.assertIn("KeyError", final_job["error"])
 
-    def test_strict_first_frame_quality_failure_requeues_without_fake_gif(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            output_root = Path(temporary)
-            job_id = "strict-first-frame-retry"
-            job_dir = output_root / job_id
-            job_dir.mkdir()
-            job = _accepted_job(job_id, ["eating"], status="running")
-            job.update(
-                qwen_first_frame_validated_required=True,
-                qwen_first_frame_retry_waves={"eating": 1},
-                qwen_first_frame_states={
-                    "eating": {
-                        "status": "retrying_with_new_seed_wave",
-                        "published": False,
-                    }
-                },
-            )
-            jobs = {job_id: job}
-            job_queue: queue.Queue[str] = queue.Queue(maxsize=8)
-            job_queue.put_nowait(job_id)
-            stop_event = Mock()
-            stop_event.is_set.side_effect = [False, True]
-
-            with (
-                patch.multiple(
-                    pipeline,
-                    **_fallback_patches(output_root, jobs, job_queue),
-                    STOP_EVENT=stop_event,
-                ),
-                patch.object(
-                    pipeline,
-                    "run_job",
-                    side_effect=pipeline.FirstFrameQualityRetry(
-                        "eating needs another seed wave"
-                    ),
-                ),
-                patch.object(pipeline, "wait_comfy_idle"),
-                patch.object(pipeline, "free_comfy_models"),
-            ):
-                pipeline.worker_loop()
-
-            final_job = jobs[job_id]
-            self.assertEqual(final_job["status"], "queued")
-            self.assertEqual(
-                final_job["stage"],
-                "queued_for_first_frame_quality_retry",
-            )
-            self.assertEqual(final_job["outputs"], [])
-            self.assertEqual(final_job["subject_replacement_results"], [])
-            self.assertEqual(job_queue.qsize(), 1)
-            self.assertEqual(job_queue.get_nowait(), job_id)
-
     def test_running_job_is_recovered_after_service_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output_root = Path(temporary)

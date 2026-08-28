@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely requeue a failed strict-first-frame job under the same job ID."""
+"""Safely requeue a failed first-frame job once under the same job ID."""
 
 from __future__ import annotations
 
@@ -14,7 +14,11 @@ from typing import Any
 
 
 JOB_ID_PATTERN = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{10}$")
-STRICT_POLICY = "strict_quality_gate_then_content_addressed_reuse_or_seed_wave_retry_v1"
+BOUNDED_POLICY = "strict_quality_gate_then_bounded_best_of_ten_selection_v2"
+COMPATIBLE_POLICIES = {
+    BOUNDED_POLICY,
+    "strict_quality_gate_then_content_addressed_reuse_or_seed_wave_retry_v1",
+}
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -57,8 +61,8 @@ def main() -> int:
         parser.error("status.json job_id does not match the requested job")
     if job.get("status") != "failed":
         parser.error("only failed jobs may be requeued by this maintenance tool")
-    if job.get("qwen_first_frame_publication_policy") != STRICT_POLICY:
-        parser.error("job does not use the strict first-frame publication policy")
+    if job.get("qwen_first_frame_publication_policy") not in COMPATIBLE_POLICIES:
+        parser.error("job does not use a compatible first-frame publication policy")
 
     previous_error = str(job.get("error") or "")
     history = list(job.get("qwen_first_frame_requeue_history") or [])
@@ -68,12 +72,12 @@ def main() -> int:
             "previous_status": "failed",
             "previous_stage": job.get("stage"),
             "previous_error": previous_error[:4000],
-            "reason": "resume_same_job_after_strict_first_frame_fix",
+            "reason": "resume_same_job_with_bounded_first_frame_budget",
         }
     )
     job.update(
         status="queued",
-        stage="queued_for_first_frame_quality_retry",
+        stage="queued_after_operator_bounded_first_frame_resume",
         error=None,
         active_prompt_id=None,
         finished_at=None,
@@ -81,7 +85,7 @@ def main() -> int:
         recovery_active=True,
         qwen_first_frame_manual_requeue=True,
         qwen_first_frame_last_retry_reason=(
-            "same job resumed after strict first-frame publication fix"
+            "same job resumed once with bounded best-of-ten first-frame generation"
         ),
         qwen_first_frame_requeue_history=history,
         updated_at=datetime.now(timezone.utc).isoformat(),

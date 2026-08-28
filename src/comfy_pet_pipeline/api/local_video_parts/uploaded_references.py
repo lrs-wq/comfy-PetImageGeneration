@@ -1135,6 +1135,7 @@ def prepare_uploaded_subject_qwen_references(
     canonical_reference: Path | None = None
     action_references: dict[str, str] = {}
     canonical_identity_fallbacks_by_action: dict[str, dict[str, Any]] = {}
+    best_effort_action_references: dict[str, dict[str, Any]] = {}
     for output in refreshed.get("outputs", []):
         filename = output.get("filename")
         if not isinstance(filename, str):
@@ -1167,6 +1168,50 @@ def prepare_uploaded_subject_qwen_references(
             quality_record = json.loads(
                 quality_path.read_text(encoding="utf-8")
             )
+            if quality_record.get("strict_first_frame_best_effort_selected") is True:
+                selected_reference_path = Path(
+                    str(quality_record.get("selected_reference_path") or "")
+                )
+                selected_reference_sha256 = str(
+                    quality_record.get("selected_reference_sha256") or ""
+                ).strip().lower()
+                if (
+                    quality_record.get("strict_first_frame_required") is not True
+                    or quality_record.get("strict_first_frame_attempt_limit")
+                    != QWEN_FIRST_FRAME_MAX_ATTEMPTS
+                    or selected_reference_path != candidate
+                    or not re.fullmatch(r"[0-9a-f]{64}", selected_reference_sha256)
+                    or file_sha256(candidate) != selected_reference_sha256
+                    or quality_record.get("original_upload_fallback_published")
+                    is not False
+                    or quality_record.get("action_removed") is not False
+                ):
+                    raise RuntimeError(
+                        f"Qwen {normalized_action} best-effort first-frame "
+                        "provenance is incomplete or changed."
+                    )
+                best_effort_action_references[normalized_action] = {
+                    "policy": "generated_candidate_identity_action_best_of_ten_v1",
+                    "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                    "selected_attempt": quality_record.get("selected_attempt"),
+                    "selected_profile": quality_record.get("selected_profile"),
+                    "selection_key": quality_record.get(
+                        "strict_first_frame_best_effort_selection_key"
+                    ),
+                    "issues": list(
+                        quality_record.get(
+                            "strict_first_frame_best_effort_issues"
+                        )
+                        or []
+                    ),
+                    "quality_record_path": str(quality_path),
+                    "quality_record_sha256": file_sha256(quality_path),
+                    "published_reference_path": str(candidate),
+                    "published_reference_sha256": selected_reference_sha256,
+                    "original_upload_fallback_published": False,
+                    "action_removed": False,
+                    "continues_to_scail": True,
+                }
             selected_fallback = quality_record.get(
                 "selected_canonical_identity_fallback"
             )
@@ -1237,6 +1282,16 @@ def prepare_uploaded_subject_qwen_references(
         raise RuntimeError(
             "Qwen reference generation did not produce transparent action references: "
             + ", ".join(missing_actions)
+        )
+    declared_best_effort_actions = {
+        str(action)
+        for action in refreshed.get("qwen_first_frame_best_effort_actions", [])
+        if str(action) in actions
+    }
+    if declared_best_effort_actions != set(best_effort_action_references):
+        raise RuntimeError(
+            "Qwen bounded first-frame best-effort state does not match its "
+            "published quality provenance."
         )
     successful_action_references = {
         action: reference
@@ -1481,6 +1536,9 @@ def prepare_uploaded_subject_qwen_references(
         action_config["qwen_canonical_identity_fallback"] = (
             canonical_identity_fallbacks_by_action.get(action)
         )
+        action_config["qwen_first_frame_best_effort"] = (
+            best_effort_action_references.get(action)
+        )
         action_config["scail_reference_mode"] = (
             canonical_identity_fallbacks_by_action.get(action, {}).get(
                 "scail_reference_mode"
@@ -1496,6 +1554,7 @@ def prepare_uploaded_subject_qwen_references(
         qwen_reference_actions=list(actions),
         qwen_reference_generated_actions=list(successful_action_references),
         qwen_reference_degraded_actions=degraded_reference_actions,
+        qwen_first_frame_best_effort_references=best_effort_action_references,
         qwen_reference_failure_isolation_policy=(
             "per_action_identity_anchored_fallback_continue_siblings_v1"
             if degraded_reference_actions

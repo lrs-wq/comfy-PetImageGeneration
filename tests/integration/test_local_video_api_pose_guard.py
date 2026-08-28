@@ -445,46 +445,88 @@ class ValidatedFirstFrameCacheTests(unittest.TestCase):
             if field != "candidate_path":
                 self.assertEqual(evaluator.call_args.kwargs[field], path)
 
-    def test_post_selection_first_frame_failure_requeues_same_job(self) -> None:
-        job = {
-            "qwen_first_frame_retry_waves": {},
-            "qwen_first_frame_states": {},
-        }
+    def test_strict_first_frame_profiles_are_bounded_to_ten_candidates(self) -> None:
+        profiles = [
+            {
+                "name": "initial",
+                "quality_retry": 1,
+                "user_loras": [{"model_name": "identity.safetensors"}],
+            },
+            {
+                "name": "safe",
+                "quality_retry": 5,
+                "user_loras": [],
+            },
+        ]
 
-        def update_job(_job_id: str, **changes: object) -> None:
-            job.update(changes)
+        selected = pipeline.bounded_strict_first_frame_profiles(
+            profiles,
+            max_attempts=10,
+        )
 
-        with (
-            patch.object(pipeline, "get_job", return_value=job),
-            patch.object(pipeline, "update_job", side_effect=update_job),
-            patch.object(pipeline, "append_recovery_event") as recovery_event,
-            self.assertRaises(pipeline.FirstFrameQualityRetry),
-        ):
-            pipeline.raise_strict_first_frame_quality_retry(
-                "same-job",
-                action="grooming",
-                pose_index=2,
-                retry_wave=0,
-                attempts=[{"attempt": 2}],
-                failure_summary="post-selection contract changed",
-                cache_status="rejected_after_selection",
-            )
+        self.assertEqual(pipeline.QWEN_FIRST_FRAME_MAX_ATTEMPTS, 10)
+        self.assertEqual(len(selected), 10)
+        self.assertEqual(selected[0]["name"], "initial")
+        self.assertEqual(selected[-1]["quality_retry"], 10)
+        self.assertEqual(len({item["name"] for item in selected}), 10)
+        selected[0]["user_loras"].append({"model_name": "mutated"})
+        self.assertEqual(len(profiles[0]["user_loras"]), 1)
 
-        self.assertEqual(job["stage"], "retrying_first_frame_quality")
-        self.assertEqual(job["qwen_first_frame_retry_waves"], {"grooming": 1})
-        self.assertEqual(
-            job["qwen_first_frame_states"]["grooming"]["status"],
-            "retrying_with_new_seed_wave",
+    def test_best_of_ten_prefers_identity_safe_eating_candidate(self) -> None:
+        def candidate(
+            *,
+            attempt: int,
+            palette_acceptable: bool,
+            action_acceptable: bool,
+        ) -> dict[str, object]:
+            return {
+                "attempt": attempt,
+                "cutout": f"candidate-{attempt}.png",
+                "chroma": {
+                    "acceptable": True,
+                    "transparent_edge_quality": {
+                        "acceptable": True,
+                        "penalty": 0.0,
+                    },
+                },
+                "identity_palette": {
+                    "acceptable": palette_acceptable,
+                    "penalty": 0.0 if palette_acceptable else 200.0,
+                },
+                "similarity": {"acceptable": True, "penalty": 0.0},
+                "fur_silhouette": None,
+                "quality": {
+                    "acceptable": action_acceptable,
+                    "issues": (
+                        [] if action_acceptable else ["eating_muzzle_not_at_bowl"]
+                    ),
+                    "penalty": 0.0 if action_acceptable else 50.0,
+                },
+                "combined_penalty": 0.0 if action_acceptable else 50.0,
+            }
+
+        identity_safe = candidate(
+            attempt=7,
+            palette_acceptable=True,
+            action_acceptable=False,
         )
-        self.assertFalse(
-            job["qwen_first_frame_states"]["grooming"][
-                "original_upload_fallback_published"
-            ]
+        identity_collapsed = candidate(
+            attempt=8,
+            palette_acceptable=False,
+            action_acceptable=True,
         )
-        self.assertFalse(
-            job["qwen_first_frame_states"]["grooming"]["action_removed"]
+
+        self.assertLess(
+            pipeline.strict_first_frame_best_effort_selection_key(
+                identity_safe,
+                action="eating",
+            ),
+            pipeline.strict_first_frame_best_effort_selection_key(
+                identity_collapsed,
+                action="eating",
+            ),
         )
-        recovery_event.assert_called_once()
+
 
 class WanRuntimeConfigTests(unittest.TestCase):
     def test_a14b_uses_121_frames_at_24_fps(self) -> None:

@@ -723,8 +723,8 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
         persist_identity_source_digest: bool = True,
         visual_audits_blocking: bool = True,
     ) -> tuple[dict[str, object], str, str]:
-        if pose_attempt not in {1, 2, 3, 4, 5, 6}:
-            raise ValueError("pose_attempt must be between 1 and 6")
+        if pose_attempt not in set(range(1, 11)):
+            raise ValueError("pose_attempt must be between 1 and 10")
         if main_case_raw_identity_chain is None:
             main_case_raw_identity_chain = (
                 action_identity_policy
@@ -1311,7 +1311,7 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
             attempt_number = next(
                 (
                     value
-                    for value in range(1, 7)
+                    for value in range(1, 11)
                     if f"attempt_{value:02d}" in source.name
                 ),
                 0,

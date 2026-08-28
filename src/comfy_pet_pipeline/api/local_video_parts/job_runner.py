@@ -8,6 +8,65 @@ from __future__ import annotations
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
+def bounded_strict_first_frame_profiles(
+    profiles: list[dict[str, Any]],
+    *,
+    max_attempts: int,
+) -> list[dict[str, Any]]:
+    """Return at most ``max_attempts`` seed-distinct first-frame profiles.
+
+    Action-specific profile builders retain control of the initial recovery
+    schedule. Once that schedule is exhausted, repeat its safest final profile
+    with a new name and monotonically stronger retry index. The caller binds a
+    distinct seed to every list position.
+    """
+
+    limit = max(1, int(max_attempts))
+    selected = [
+        {
+            **profile,
+            "user_loras": [dict(item) for item in profile.get("user_loras", [])],
+        }
+        for profile in profiles[:limit]
+    ]
+    if not selected:
+        return selected
+    safest = selected[-1]
+    while len(selected) < limit:
+        attempt = len(selected) + 1
+        repeated = {
+            **safest,
+            "user_loras": [dict(item) for item in safest.get("user_loras", [])],
+        }
+        repeated["name"] = f"{safest['name']}_bounded_seed_retry_{attempt:02d}"
+        repeated["quality_retry"] = max(
+            attempt,
+            int(repeated.get("quality_retry") or 0),
+        )
+        selected.append(repeated)
+    return selected
+
+
+def strict_first_frame_best_effort_selection_key(
+    record: dict[str, Any],
+    *,
+    action: str,
+) -> tuple[int | float, ...]:
+    """Rank generated candidates after the bounded strict budget is exhausted."""
+
+    chroma = record.get("chroma")
+    cutout_missing = bool(
+        not isinstance(chroma, dict)
+        or chroma.get("acceptable") is not True
+        or not record.get("cutout")
+    )
+    return (
+        int(cutout_missing),
+        *action_candidate_degraded_selection_key(record, action=action),
+        float(record.get("combined_penalty") or 0.0),
+    )
+
+
 def merge_identity_chroma_spill_cleanup(
     chroma: dict[str, Any],
     cleanup: dict[str, Any],
@@ -628,86 +687,6 @@ def strict_first_frame_record_issues(
         if isinstance(value, dict) and value.get("acceptable") is not True:
             issues.append(f"{field}_not_acceptable")
     return list(dict.fromkeys(issues))
-
-
-def raise_strict_first_frame_quality_retry(
-    job_id: str,
-    *,
-    action: str,
-    pose_index: int,
-    retry_wave: int,
-    attempts: list[dict[str, Any]],
-    failure_summary: str,
-    cache_status: str,
-) -> None:
-    """Keep a strict first-frame job alive and move it to a fresh seed wave."""
-
-    _sync_local_video_runtime(
-        globals(),
-        {"raise_strict_first_frame_quality_retry"},
-    )
-    normalized_action = action_key(action)
-    next_retry_wave = retry_wave + 1
-    retry_waves = dict(
-        get_job(job_id).get("qwen_first_frame_retry_waves") or {}
-    )
-    retry_waves[normalized_action] = next_retry_wave
-    first_frame_states = dict(
-        get_job(job_id).get("qwen_first_frame_states") or {}
-    )
-    first_frame_states[normalized_action] = {
-        "status": "retrying_with_new_seed_wave",
-        "completed": False,
-        "quality_passed": False,
-        "published": False,
-        "retry_wave": next_retry_wave,
-        "attempts_in_wave": len(attempts),
-        "last_failure_summary": failure_summary,
-        "original_upload_fallback_published": False,
-        "action_removed": False,
-    }
-    update_job(
-        job_id,
-        stage="retrying_first_frame_quality",
-        recovery_active=True,
-        recovery_attempt=next_retry_wave,
-        quality_retry=None,
-        qwen_first_frame_retry_waves=retry_waves,
-        qwen_first_frame_states=first_frame_states,
-        qwen_first_frame_current_action=normalized_action,
-        qwen_first_frame_cache_status=cache_status,
-        qwen_first_frame_last_failure={
-            "action": normalized_action,
-            "pose_index": pose_index,
-            "retry_wave": retry_wave,
-            "attempt_count": len(attempts),
-            "summary": failure_summary,
-        },
-        qwen_first_frame_original_fallback_disabled=True,
-        qwen_first_frame_action_removal_disabled=True,
-    )
-    append_recovery_event(
-        job_id,
-        {
-            "stage": "cartoon_keyframe",
-            "pose_index": pose_index,
-            "reason": "strict_first_frame_quality_changed",
-            "strategy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
-            "result": "job_requeued_with_fresh_seed_wave",
-            "action": normalized_action,
-            "completed_wave": retry_wave,
-            "next_wave": next_retry_wave,
-            "attempt_count": len(attempts),
-            "failure_summary": failure_summary,
-            "original_upload_fallback_published": False,
-            "action_removed": False,
-        },
-    )
-    raise FirstFrameQualityRetry(
-        f"{normalized_action} first frame did not pass strict quality gates "
-        f"in seed wave {retry_wave}; queued wave {next_retry_wave}: "
-        f"{failure_summary}"
-    )
 
 
 def validated_first_frame_cache_fingerprint(
@@ -3625,6 +3604,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             attempts: list[dict[str, Any]] = []
             best_attempt: dict[str, Any] | None = None
             best_action_candidate_degraded_attempt: dict[str, Any] | None = None
+            best_strict_first_frame_attempt: dict[str, Any] | None = None
             best_advisory_grooming_degraded_attempt: dict[str, Any] | None = None
             best_raw_attempt: dict[str, Any] | None = None
             best_semantic_source: dict[str, Any] | None = None
@@ -3644,6 +3624,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     and canonical_grooming_completion_capable
                 ),
             )
+            if strict_first_frame_required:
+                active_pose_profiles = bounded_strict_first_frame_profiles(
+                    active_pose_profiles,
+                    max_attempts=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                )
             grooming_geometry_canonical_reference = bool(
                 effective_pose_identity_input_policy
                 == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
@@ -4083,6 +4068,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "published": False,
                     "retry_wave": first_frame_retry_wave,
                     "attempt_budget": len(generation_pose_profiles),
+                    "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                    "current_attempt": 0,
                     "original_upload_fallback_published": False,
                     "action_removed": False,
                 }
@@ -4101,9 +4088,32 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         grooming_advisory_identity_refine_source,
                         dict,
                     )
+                    and not strict_first_frame_required
                 ):
                     break
                 raise_if_cancelled(job_id)
+                if strict_first_frame_required:
+                    first_frame_states = dict(
+                        get_job(job_id).get("qwen_first_frame_states") or {}
+                    )
+                    action_state = dict(first_frame_states.get(action_key(pose)) or {})
+                    action_state.update(
+                        status="generating_candidate",
+                        current_attempt=attempt,
+                        attempts_completed=attempt - 1,
+                        attempt_budget=len(generation_pose_profiles),
+                        attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                    )
+                    first_frame_states[action_key(pose)] = action_state
+                    update_job(
+                        job_id,
+                        qwen_first_frame_states=first_frame_states,
+                        qwen_first_frame_current_action=action_key(pose),
+                        qwen_first_frame_current_attempt=attempt,
+                        qwen_first_frame_attempt_limit=(
+                            QWEN_FIRST_FRAME_MAX_ATTEMPTS
+                        ),
+                    )
                 if attempt > 1:
                     update_job(
                         job_id,
@@ -4182,7 +4192,6 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
                 canonical_eating_identity_refine_active = bool(
                     canonical_action_reference
-                    and not dog_eating_prompt_only_action_transfer_active
                     and action_key(pose) == "eating"
                     and attempt >= EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
                     and isinstance(eating_identity_refine_source, dict)
@@ -5386,6 +5395,17 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         else QWEN_POSE_STYLE_LORA_STRENGTH
                     )
                 )
+                if (
+                    dog_prompt_only_action_transfer_active
+                    and pose_identity_palette_prompt_signature is not None
+                    and "SOURCE COAT PALETTE LOCK" not in attempt_prompt
+                ):
+                    # The specialized dog branches replace the generic prompt.
+                    # Rebind the uploaded palette after that replacement.
+                    attempt_prompt += "\n\n" + identity_palette_prompt(
+                        pose_identity_palette_prompt_signature,
+                        retry=attempt > 1,
+                    )
                 workflow = qwen_workflow(
                     attempt_primary_input_name,
                     attempt_prompt,
@@ -6072,7 +6092,6 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
                 if (
                     canonical_action_reference
-                    and not dog_eating_prompt_only_action_transfer_active
                     and action_key(pose) == "eating"
                     and attempt < EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
                     and chroma_metrics.get("acceptable")
@@ -6749,6 +6768,43 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             ),
                         }
                     )
+                    record["fur_silhouette"] = None
+                    record["action_candidate_gate"] = {
+                        "policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
+                        "required": action_candidate_audits_required,
+                        "advisory_retry_gate": (
+                            advisory_action_candidate_gate_required
+                        ),
+                        "acceptable": False,
+                        "attempt": attempt,
+                        "transparent_edge_quality": chroma_metrics.get(
+                            "transparent_edge_quality"
+                        ),
+                        "grooming_pose_gate_rejected": grooming_candidate_rejected,
+                        "fur_surface_gate_rejected": (
+                            fur_surface_candidate_rejected
+                        ),
+                    }
+                    if strict_first_frame_required:
+                        strict_selection_key = (
+                            strict_first_frame_best_effort_selection_key(
+                                record,
+                                action=action_key(pose),
+                            )
+                        )
+                        record[
+                            "strict_first_frame_best_effort_selection_key"
+                        ] = list(strict_selection_key)
+                        if (
+                            best_strict_first_frame_attempt is None
+                            or strict_selection_key
+                            < tuple(
+                                best_strict_first_frame_attempt[
+                                    "strict_first_frame_best_effort_selection_key"
+                                ]
+                            )
+                        ):
+                            best_strict_first_frame_attempt = record
                     if (
                         (
                             grooming_geometry_canonical
@@ -6883,9 +6939,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 action_key(pose) == "eating"
                                 and len(active_pose_profiles) > attempt
                             ),
-                            "blocks_scail": True,
+                            "blocks_scail": not strict_first_frame_required,
+                            "bounded_candidate_generation_continues": (
+                                strict_first_frame_required
+                            ),
                         }
-                        fur_surface_gate_status_by_action[action_key(pose)] = "failed"
+                        fur_surface_gate_status_by_action[action_key(pose)] = (
+                            "retrying_bounded_candidates"
+                            if strict_first_frame_required
+                            else "failed"
+                        )
                         update_job(
                             job_id,
                             fur_surface_gate_status=dict(
@@ -6897,7 +6960,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             ),
                             fur_surface_gate_final_quality={
                                 "scope": "qwen_action_reference_pre_scail",
-                                "status": "failed",
+                                "status": (
+                                    "retrying_bounded_candidates"
+                                    if strict_first_frame_required
+                                    else "failed"
+                                ),
                                 "actions": dict(fur_surface_gate_selected_metrics),
                                 "failure": fur_surface_gate_short_circuit,
                                 "final_video_frame_audit": False,
@@ -6912,7 +6979,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 "gate_version": FUR_SURFACE_GATE_VERSION,
                                 "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
                                 "thresholds": (fur_surface_thresholds_payload()),
-                                "fail_closed": True,
+                                "fail_closed": not strict_first_frame_required,
                                 "max_consecutive_rejections": (
                                     FUR_SURFACE_GATE_MAX_REJECTIONS
                                 ),
@@ -6929,12 +6996,20 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 ],
                             },
                         )
-                        raise RuntimeError(
-                            "Main_case fur surface gate rejected "
-                            f"{fur_surface_rejection_streak} consecutive "
-                            f"{action_key(pose)} Qwen candidates after attempt "
-                            f"{attempt} of {len(active_pose_profiles)}; "
-                            "blocking SCAIL."
+                        if not strict_first_frame_required:
+                            raise RuntimeError(
+                                "Main_case fur surface gate rejected "
+                                f"{fur_surface_rejection_streak} consecutive "
+                                f"{action_key(pose)} Qwen candidates after attempt "
+                                f"{attempt} of {len(active_pose_profiles)}; "
+                                "blocking SCAIL."
+                            )
+                        LOGGER.warning(
+                            "%s kept bounded first-frame candidate generation active "
+                            "after %s consecutive %s fur-surface rejections",
+                            job_id,
+                            fur_surface_rejection_streak,
+                            action_key(pose),
                         )
                     continue
                 if not chroma_metrics["acceptable"]:
@@ -6979,12 +7054,34 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             if key != "workflow"
                         }
                     )
-                    if semantic_recovery_candidate_eligible(
-                        record
-                    ) and not chroma_metrics.get(
+                    semantic_recovery_not_attempted = not chroma_metrics.get(
                         "semantic_recovery_attempted",
                         False,
-                    ):
+                    )
+                    if strict_first_frame_required and semantic_recovery_not_attempted:
+                        semantic_selection_key = (
+                            strict_first_frame_best_effort_selection_key(
+                                record,
+                                action=action_key(pose),
+                            )
+                        )
+                        record["strict_first_frame_semantic_selection_key"] = list(
+                            semantic_selection_key
+                        )
+                        if (
+                            best_semantic_source is None
+                            or semantic_selection_key
+                            < tuple(
+                                best_semantic_source.get(
+                                    "strict_first_frame_semantic_selection_key",
+                                    [float("inf")],
+                                )
+                            )
+                        ):
+                            best_semantic_source = record
+                    elif semantic_recovery_candidate_eligible(
+                        record
+                    ) and semantic_recovery_not_attempted:
                         # The first subject-replacement seed is the profile's
                         # empirically validated action seed. Preserve it as the
                         # primary semantic fallback; later seeds remain available
@@ -7201,6 +7298,26 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "transparent_edge_quality"
                     ),
                 }
+                if strict_first_frame_required:
+                    strict_selection_key = (
+                        strict_first_frame_best_effort_selection_key(
+                            record,
+                            action=action_key(pose),
+                        )
+                    )
+                    record["strict_first_frame_best_effort_selection_key"] = list(
+                        strict_selection_key
+                    )
+                    if (
+                        best_strict_first_frame_attempt is None
+                        or strict_selection_key
+                        < tuple(
+                            best_strict_first_frame_attempt[
+                                "strict_first_frame_best_effort_selection_key"
+                            ]
+                        )
+                    ):
+                        best_strict_first_frame_attempt = record
                 if advisory_action_candidate_gate_required:
                     degraded_selection_key = action_candidate_degraded_selection_key(
                         record,
@@ -7651,7 +7768,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                     if not identity_refine_fallback_eligible:
                         best_attempt = None
-                    break
+                    if not strict_first_frame_required:
+                        break
+                    continue
             if (
                 advisory_grooming_minimum_gate_required
                 and best_attempt is not None
@@ -7784,12 +7903,75 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "reason": "selected_first_frame_failed_strict_publication_gate",
                             "strategy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
                             "profile": best_attempt.get("profile"),
-                            "result": "rejected_and_seed_wave_retry_required",
+                            "result": "rejected_before_bounded_best_effort_selection",
                             "issues": strict_selection_issues,
                             "action": action_key(pose),
                         },
                     )
                     best_attempt = None
+            if (
+                best_attempt is None
+                and strict_first_frame_required
+                and best_strict_first_frame_attempt is not None
+            ):
+                best_attempt = best_strict_first_frame_attempt
+                strict_best_effort_issues = strict_first_frame_record_issues(
+                    best_attempt,
+                    action=action_key(pose),
+                )
+                selected_candidate_gate = dict(
+                    best_attempt.get("action_candidate_gate") or {}
+                )
+                selected_candidate_gate.update(
+                    strict_acceptable=False,
+                    best_effort_accepted=True,
+                    degraded_fallback_accepted=True,
+                    degraded_reason="bounded_first_frame_attempt_budget_exhausted",
+                    degraded_selection_policy=(
+                        "generated_candidate_identity_action_best_of_ten_v1"
+                    ),
+                    degraded_selection_key=list(
+                        best_attempt[
+                            "strict_first_frame_best_effort_selection_key"
+                        ]
+                    ),
+                    returns_original_upload=False,
+                    action_removed=False,
+                    blocks_job=False,
+                )
+                best_attempt["action_candidate_gate"] = selected_candidate_gate
+                best_attempt["strict_first_frame_best_effort_selected"] = True
+                best_attempt["strict_first_frame_best_effort_issues"] = (
+                    strict_best_effort_issues
+                )
+                append_recovery_event(
+                    job_id,
+                    {
+                        "stage": "cartoon_keyframe",
+                        "pose_index": index,
+                        "attempt": best_attempt["attempt"],
+                        "reason": "bounded_first_frame_attempt_budget_exhausted",
+                        "strategy": "select_generated_identity_action_best_of_ten",
+                        "profile": best_attempt["profile"],
+                        "result": "accepted_best_effort",
+                        "issues": strict_best_effort_issues,
+                        "selection_key": best_attempt[
+                            "strict_first_frame_best_effort_selection_key"
+                        ],
+                        "attempt_count": len(attempts),
+                        "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                        "original_upload_fallback_published": False,
+                        "action_removed": False,
+                    },
+                )
+                update_job(
+                    job_id,
+                    qwen_first_frame_best_effort_selected=True,
+                    qwen_first_frame_best_effort_action=action_key(pose),
+                    qwen_first_frame_best_effort_attempt=best_attempt["attempt"],
+                    qwen_first_frame_best_effort_issues=(strict_best_effort_issues),
+                    qwen_first_frame_attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                )
             if (
                 best_attempt is None
                 and advisory_action_candidate_gate_required
@@ -8296,18 +8478,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     f"{len(active_pose_profiles)} attempts: "
                     + pose_attempt_failure_summary(attempts)
                 )
-            if best_attempt is None and strict_first_frame_required:
-                failure_summary = pose_attempt_failure_summary(attempts)
-                raise_strict_first_frame_quality_retry(
-                    job_id,
-                    action=action_key(pose),
-                    pose_index=index,
-                    retry_wave=first_frame_retry_wave,
-                    attempts=attempts,
-                    failure_summary=failure_summary,
-                    cache_status="miss",
-                )
-            if best_attempt is None and force_qwen_reference:
+            if (
+                best_attempt is None
+                and force_qwen_reference
+                and not strict_first_frame_required
+            ):
                 failed_action = action_key(pose)
                 isolated_error = RuntimeError(
                     f"Pose {index} remained invalid after "
@@ -8907,6 +9082,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         advisory_action_candidate_gate_required
                     ),
                 )
+                semantic_best_effort_issues: list[str] = []
                 if semantic_rejection_reason is not None:
                     append_recovery_event(
                         job_id,
@@ -8917,7 +9093,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "reason": semantic_rejection_reason,
                             "strategy": "rembg_u2net_fallback",
                             "profile": "rembg_u2net_fallback",
-                            "result": "rejected",
+                            "result": (
+                                "accepted_best_effort"
+                                if strict_first_frame_required
+                                else "rejected"
+                            ),
                             "chroma": chroma_metrics,
                             "quality": quality,
                             "similarity": similarity,
@@ -8936,7 +9116,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         issues.extend(semantic_fur_silhouette_quality["issues"])
                     if semantic_fur_surface_quality is not None:
                         issues.extend(semantic_fur_surface_quality["issues"])
-                    if fur_surface_gate_required:
+                    semantic_best_effort_issues = list(dict.fromkeys(issues))
+                    if fur_surface_gate_required and not strict_first_frame_required:
                         update_job(
                             job_id,
                             fur_surface_gate_final_quality={
@@ -8951,10 +9132,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 "final_video_frame_audit": False,
                             },
                         )
-                    raise RuntimeError(
-                        f"Pose {index} semantic recovery failed quality checks: "
-                        + ", ".join(issues)
-                    )
+                    if not strict_first_frame_required:
+                        raise RuntimeError(
+                            f"Pose {index} semantic recovery failed quality checks: "
+                            + ", ".join(issues)
+                        )
                 best_attempt = {
                     **{
                         field: fallback_record.get(field)
@@ -9009,6 +9191,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "transparent": True,
                     "background_removal_failed": False,
                 }
+                if semantic_best_effort_issues:
+                    best_attempt["strict_first_frame_best_effort_selected"] = True
+                    best_attempt["strict_first_frame_best_effort_issues"] = (
+                        semantic_best_effort_issues
+                    )
+                    best_attempt["strict_first_frame_best_effort_semantic_recovery"] = (
+                        True
+                    )
                 attempts.append(
                     {
                         key: value
@@ -9048,82 +9238,223 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             )
             if fur_surface_gate_required and not reference_generation_degraded:
                 selected_surface = best_attempt.get("fur_surface_gate")
+                selected_digest = file_sha256(selected_keyframe)
+                selected_surface_issues: list[str] = []
                 if (
                     not isinstance(selected_surface, dict)
                     or selected_surface.get("acceptable") is not True
                     or selected_surface.get("status") != "passed"
                 ):
+                    selected_surface_issues.append(
+                        "post_selection_fur_surface_gate_not_acceptable"
+                    )
+                else:
+                    selected_gate_metadata = selected_surface.get("gate")
+                    if (
+                        not isinstance(selected_gate_metadata, dict)
+                        or selected_gate_metadata.get("policy")
+                        != FUR_SURFACE_GATE_POLICY
+                        or selected_gate_metadata.get("gate_version")
+                        != FUR_SURFACE_GATE_VERSION
+                        or selected_gate_metadata.get("threshold_version")
+                        != FUR_SURFACE_THRESHOLD_VERSION
+                        or selected_gate_metadata.get("action") != action_key(pose)
+                        or selected_gate_metadata.get("candidate_sha256")
+                        != selected_digest
+                    ):
+                        selected_surface_issues.append(
+                            "post_selection_fur_surface_provenance_changed"
+                        )
+                if selected_surface_issues:
                     fur_surface_gate_status_by_action[action_key(pose)] = "failed"
+                    if not strict_first_frame_required:
+                        update_job(
+                            job_id,
+                            fur_surface_gate_status=dict(
+                                fur_surface_gate_status_by_action
+                            ),
+                            fur_surface_gate_attempts=(
+                                fur_surface_gate_attempt_audits
+                            ),
+                        )
+                        raise RuntimeError(
+                            "Main_case fur surface gate selected an invalid "
+                            f"{action_key(pose)} candidate."
+                        )
+                    selected_surface = (
+                        json.loads(json.dumps(selected_surface))
+                        if isinstance(selected_surface, dict)
+                        else {}
+                    )
+                    selected_surface.update(
+                        acceptable=False,
+                        status="best_effort_selected",
+                        best_effort_accepted=True,
+                        strict_acceptable=False,
+                        blocks_scail=False,
+                        issues=list(
+                            dict.fromkeys(
+                                [
+                                    *(selected_surface.get("issues") or []),
+                                    *selected_surface_issues,
+                                ]
+                            )
+                        ),
+                        selected_candidate_path=str(selected_keyframe),
+                        selected_candidate_sha256=selected_digest,
+                        selected_attempt=best_attempt["attempt"],
+                    )
+                    best_attempt["fur_surface_gate"] = selected_surface
+                    best_attempt["strict_first_frame_best_effort_selected"] = True
+                    best_attempt["strict_first_frame_best_effort_issues"] = list(
+                        dict.fromkeys(
+                            [
+                                *(
+                                    best_attempt.get(
+                                        "strict_first_frame_best_effort_issues"
+                                    )
+                                    or []
+                                ),
+                                *selected_surface_issues,
+                            ]
+                        )
+                    )
+                    fur_surface_gate_selected_metrics[action_key(pose)] = (
+                        selected_surface
+                    )
+                    fur_surface_gate_status_by_action[action_key(pose)] = (
+                        "best_effort_selected"
+                    )
                     update_job(
                         job_id,
-                        fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
+                        fur_surface_gate_status=dict(
+                            fur_surface_gate_status_by_action
+                        ),
                         fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+                        fur_surface_gate_selected_metrics=(
+                            fur_surface_gate_selected_metrics
+                        ),
+                        fur_surface_gate_final_quality={
+                            "scope": "qwen_action_reference_pre_scail",
+                            "status": "best_effort_selected",
+                            "policy": FUR_SURFACE_GATE_POLICY,
+                            "gate_version": FUR_SURFACE_GATE_VERSION,
+                            "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+                            "actions": dict(fur_surface_gate_selected_metrics),
+                            "blocks_scail": False,
+                            "final_video_frame_audit": False,
+                        },
                     )
-                    raise RuntimeError(
-                        "Main_case fur surface gate selected an invalid "
-                        f"{action_key(pose)} candidate."
+                else:
+                    selected_surface = json.loads(json.dumps(selected_surface))
+                    selected_surface["selected_candidate_path"] = str(
+                        selected_keyframe
                     )
-                selected_digest = file_sha256(selected_keyframe)
-                selected_gate_metadata = selected_surface.get("gate")
-                if (
-                    not isinstance(selected_gate_metadata, dict)
-                    or selected_gate_metadata.get("policy") != FUR_SURFACE_GATE_POLICY
-                    or selected_gate_metadata.get("gate_version")
-                    != FUR_SURFACE_GATE_VERSION
-                    or selected_gate_metadata.get("threshold_version")
-                    != FUR_SURFACE_THRESHOLD_VERSION
-                    or selected_gate_metadata.get("action") != action_key(pose)
-                    or selected_gate_metadata.get("candidate_sha256") != selected_digest
-                ):
-                    raise RuntimeError(
-                        "Main_case fur surface selected-candidate provenance changed."
+                    selected_surface["selected_candidate_sha256"] = selected_digest
+                    selected_surface["selected_attempt"] = best_attempt["attempt"]
+                    best_attempt["fur_surface_gate"] = selected_surface
+                    fur_surface_gate_selected_metrics[action_key(pose)] = (
+                        selected_surface
                     )
-                selected_surface = json.loads(json.dumps(selected_surface))
-                selected_surface["selected_candidate_path"] = str(selected_keyframe)
-                selected_surface["selected_candidate_sha256"] = selected_digest
-                selected_surface["selected_attempt"] = best_attempt["attempt"]
-                best_attempt["fur_surface_gate"] = selected_surface
-                fur_surface_gate_selected_metrics[action_key(pose)] = selected_surface
-                fur_surface_gate_status_by_action[action_key(pose)] = "passed"
-                update_job(
-                    job_id,
-                    fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
-                    fur_surface_gate_attempts=fur_surface_gate_attempt_audits,
-                    fur_surface_gate_selected_metrics=(
-                        fur_surface_gate_selected_metrics
-                    ),
-                    fur_surface_gate_final_quality={
-                        "scope": "qwen_action_reference_pre_scail",
-                        "status": "running",
-                        "policy": FUR_SURFACE_GATE_POLICY,
-                        "gate_version": FUR_SURFACE_GATE_VERSION,
-                        "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
-                        "actions": dict(fur_surface_gate_selected_metrics),
-                        "final_video_frame_audit": False,
-                    },
-                )
+                    fur_surface_gate_status_by_action[action_key(pose)] = "passed"
+                    update_job(
+                        job_id,
+                        fur_surface_gate_status=dict(
+                            fur_surface_gate_status_by_action
+                        ),
+                        fur_surface_gate_attempts=fur_surface_gate_attempt_audits,
+                        fur_surface_gate_selected_metrics=(
+                            fur_surface_gate_selected_metrics
+                        ),
+                        fur_surface_gate_final_quality={
+                            "scope": "qwen_action_reference_pre_scail",
+                            "status": "running",
+                            "policy": FUR_SURFACE_GATE_POLICY,
+                            "gate_version": FUR_SURFACE_GATE_VERSION,
+                            "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
+                            "actions": dict(fur_surface_gate_selected_metrics),
+                            "final_video_frame_audit": False,
+                        },
+                    )
             if grooming_pose_gate_required and not reference_generation_degraded:
                 selected_gate = best_attempt.get("grooming_pose_gate")
                 if not isinstance(selected_gate, dict) or not selected_gate.get(
                     "acceptable"
                 ):
+                    if not strict_first_frame_required:
+                        update_job(
+                            job_id,
+                            grooming_pose_gate_status="failed",
+                            grooming_pose_gate_attempts=(
+                                grooming_pose_gate_attempt_audits
+                            ),
+                        )
+                        raise RuntimeError(
+                            "Main_case grooming pose gate selected an invalid "
+                            "candidate."
+                        )
+                    selected_gate = (
+                        json.loads(json.dumps(selected_gate))
+                        if isinstance(selected_gate, dict)
+                        else {}
+                    )
+                    selected_gate.update(
+                        acceptable=False,
+                        status="best_effort_selected",
+                        best_effort_accepted=True,
+                        strict_acceptable=False,
+                        blocks_scail=False,
+                        issues=list(
+                            dict.fromkeys(
+                                [
+                                    *(selected_gate.get("issues") or []),
+                                    "post_selection_grooming_pose_gate_not_acceptable",
+                                ]
+                            )
+                        ),
+                    )
+                    best_attempt["grooming_pose_gate"] = selected_gate
+                    best_attempt["strict_first_frame_best_effort_selected"] = True
+                    best_attempt["strict_first_frame_best_effort_issues"] = list(
+                        dict.fromkeys(
+                            [
+                                *(
+                                    best_attempt.get(
+                                        "strict_first_frame_best_effort_issues"
+                                    )
+                                    or []
+                                ),
+                                "post_selection_grooming_pose_gate_not_acceptable",
+                            ]
+                        )
+                    )
+                    grooming_pose_gate_selected_metrics[action_key(pose)] = (
+                        selected_gate
+                    )
                     update_job(
                         job_id,
-                        grooming_pose_gate_status="failed",
-                        grooming_pose_gate_attempts=(grooming_pose_gate_attempt_audits),
+                        grooming_pose_gate_status="best_effort_selected",
+                        grooming_pose_gate_attempts=(
+                            grooming_pose_gate_attempt_audits
+                        ),
+                        grooming_pose_gate_selected_metrics=(
+                            grooming_pose_gate_selected_metrics
+                        ),
                     )
-                    raise RuntimeError(
-                        "Main_case grooming pose gate selected an invalid candidate."
+                else:
+                    grooming_pose_gate_selected_metrics[action_key(pose)] = (
+                        selected_gate
                     )
-                grooming_pose_gate_selected_metrics[action_key(pose)] = selected_gate
-                update_job(
-                    job_id,
-                    grooming_pose_gate_status="passed",
-                    grooming_pose_gate_attempts=(grooming_pose_gate_attempt_audits),
-                    grooming_pose_gate_selected_metrics=(
-                        grooming_pose_gate_selected_metrics
-                    ),
-                )
+                    update_job(
+                        job_id,
+                        grooming_pose_gate_status="passed",
+                        grooming_pose_gate_attempts=(
+                            grooming_pose_gate_attempt_audits
+                        ),
+                        grooming_pose_gate_selected_metrics=(
+                            grooming_pose_gate_selected_metrics
+                        ),
+                    )
             if (
                 advisory_grooming_minimum_gate_required
                 and not reference_generation_degraded
@@ -9167,39 +9498,81 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     != file_sha256(pose_palette_reference_path)
                 ):
                     if strict_first_frame_required:
+                        invalid_minimum_gate = (
+                            dict(selected_minimum_gate)
+                            if isinstance(selected_minimum_gate, dict)
+                            else {}
+                        )
+                        invalid_minimum_issues = list(
+                            invalid_minimum_gate.get("issues") or []
+                        )
+                        invalid_minimum_issues.append(
+                            "post_selection_grooming_minimum_contract_invalid"
+                        )
+                        invalid_minimum_gate.update(
+                            policy=GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
+                            version=GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
+                            acceptable=False,
+                            issues=list(dict.fromkeys(invalid_minimum_issues)),
+                            candidate_sha256=selected_digest,
+                            degraded_fallback_accepted=True,
+                            strict_acceptable=False,
+                            best_effort_accepted=True,
+                            degraded_reason=(
+                                "bounded_first_frame_attempt_budget_exhausted"
+                            ),
+                            blocks_scail=False,
+                        )
+                        if pose_palette_reference_path is not None:
+                            invalid_minimum_gate.update(
+                                identity_palette_reference_path=str(
+                                    pose_palette_reference_path
+                                ),
+                                identity_palette_reference_sha256=file_sha256(
+                                    pose_palette_reference_path
+                                ),
+                            )
+                        if grooming_identity_contract_reference_path is not None:
+                            invalid_minimum_gate.update(
+                                identity_reference_path=str(
+                                    grooming_identity_contract_reference_path
+                                ),
+                                identity_reference_sha256=file_sha256(
+                                    grooming_identity_contract_reference_path
+                                ),
+                            )
+                        selected_minimum_gate = invalid_minimum_gate
+                        best_attempt[
+                            "strict_first_frame_best_effort_selected"
+                        ] = True
+                        best_attempt[
+                            "strict_first_frame_best_effort_issues"
+                        ] = invalid_minimum_gate["issues"]
                         update_job(
                             job_id,
                             grooming_pose_gate_status=(
-                                "minimum_contract_retrying"
+                                "minimum_contract_best_effort_selected"
                             ),
-                            grooming_advisory_minimum_gate_status="retrying",
+                            grooming_advisory_minimum_gate_status=(
+                                "best_effort_selected"
+                            ),
                             grooming_advisory_minimum_gate_attempts=(
                                 grooming_advisory_minimum_gate_attempts
                             ),
                         )
-                        raise_strict_first_frame_quality_retry(
+                    else:
+                        update_job(
                             job_id,
-                            action=action_key(pose),
-                            pose_index=index,
-                            retry_wave=first_frame_retry_wave,
-                            attempts=attempts,
-                            failure_summary=(
-                                "post_selection_grooming_minimum_contract_invalid"
+                            grooming_pose_gate_status="minimum_contract_failed",
+                            grooming_advisory_minimum_gate_status="failed",
+                            grooming_advisory_minimum_gate_attempts=(
+                                grooming_advisory_minimum_gate_attempts
                             ),
-                            cache_status="rejected_after_selection",
                         )
-                    update_job(
-                        job_id,
-                        grooming_pose_gate_status="minimum_contract_failed",
-                        grooming_advisory_minimum_gate_status="failed",
-                        grooming_advisory_minimum_gate_attempts=(
-                            grooming_advisory_minimum_gate_attempts
-                        ),
-                    )
-                    raise RuntimeError(
-                        "Advisory grooming selected candidate lost its minimum "
-                        "action/identity contract."
-                    )
+                        raise RuntimeError(
+                            "Advisory grooming selected candidate lost its minimum "
+                            "action/identity contract."
+                        )
                 selected_minimum_gate = json.loads(
                     json.dumps(selected_minimum_gate)
                 )
@@ -9282,9 +9655,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             write_workflow(
                 job_dir, f"qwen_pose_{index:02d}.json", best_attempt["workflow"]
             )
-            write_json_atomic(
-                job_dir / "workflows" / f"qwen_pose_{index:02d}_quality.json",
-                {
+            selected_quality_record = {
                     "selected_attempt": best_attempt["attempt"],
                     "selected_profile": best_attempt["profile"],
                     "identity_input_policy": (effective_pose_identity_input_policy),
@@ -9369,29 +9740,58 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "background_removal_error"
                     ),
                     "attempts": attempts,
-                },
-            )
+                }
             if strict_first_frame_required:
                 strict_final_issues = strict_first_frame_record_issues(
                     best_attempt,
                     action=action_key(pose),
                 )
-                if strict_final_issues:
-                    raise_strict_first_frame_quality_retry(
+                best_effort_selected = bool(
+                    best_attempt.get("strict_first_frame_best_effort_selected")
+                    or strict_final_issues
+                )
+                if best_effort_selected:
+                    best_attempt["strict_first_frame_best_effort_selected"] = True
+                    best_attempt["strict_first_frame_best_effort_issues"] = list(
+                        dict.fromkeys(
+                            [
+                                *(
+                                    best_attempt.get(
+                                        "strict_first_frame_best_effort_issues"
+                                    )
+                                    or []
+                                ),
+                                *strict_final_issues,
+                            ]
+                        )
+                    )
+                    append_recovery_event(
                         job_id,
-                        action=action_key(pose),
-                        pose_index=index,
-                        retry_wave=first_frame_retry_wave,
-                        attempts=attempts,
-                        failure_summary=(
-                            "post_selection_strict_invariant_changed: "
-                            + ", ".join(strict_final_issues)
-                        ),
-                        cache_status="rejected_after_selection",
+                        {
+                            "stage": "cartoon_keyframe",
+                            "pose_index": index,
+                            "attempt": best_attempt.get("attempt"),
+                            "reason": "bounded_first_frame_best_effort_publication",
+                            "strategy": (
+                                "publish_best_generated_candidate_and_continue_scail"
+                            ),
+                            "profile": best_attempt.get("profile"),
+                            "result": "published_best_effort",
+                            "issues": best_attempt[
+                                "strict_first_frame_best_effort_issues"
+                            ],
+                            "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                            "original_upload_fallback_published": False,
+                            "action_removed": False,
+                        },
                     )
                 cache_info = best_attempt.get("validated_first_frame_cache")
-                cache_status = "hit"
-                if not isinstance(cache_info, dict):
+                cache_status = (
+                    "best_effort_not_cached" if best_effort_selected else "hit"
+                )
+                if best_effort_selected:
+                    cache_info = None
+                elif not isinstance(cache_info, dict):
                     try:
                         cache_info = store_validated_first_frame_cache(
                             job_id,
@@ -9414,13 +9814,32 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     get_job(job_id).get("qwen_first_frame_states") or {}
                 )
                 first_frame_states[action_key(pose)] = {
-                    "status": "validated",
+                    "status": (
+                        "best_effort_selected"
+                        if best_effort_selected
+                        else "validated"
+                    ),
                     "completed": True,
-                    "quality_passed": True,
+                    "quality_passed": not best_effort_selected,
                     "published": True,
                     "retry_wave": first_frame_retry_wave,
+                    "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                    "attempts_completed": min(
+                        len(attempts),
+                        QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                    ),
                     "selected_attempt": best_attempt["attempt"],
                     "selected_profile": best_attempt["profile"],
+                    "selection_policy": (
+                        "generated_candidate_identity_action_best_of_ten_v1"
+                        if best_effort_selected
+                        else "strict_quality_gate_first_pass_v1"
+                    ),
+                    "best_effort": best_effort_selected,
+                    "best_effort_issues": best_attempt.get(
+                        "strict_first_frame_best_effort_issues",
+                        [],
+                    ),
                     "reference": str(selected_keyframe),
                     "reference_sha256": file_sha256(selected_keyframe),
                     "cache_status": cache_status,
@@ -9428,27 +9847,69 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "original_upload_fallback_published": False,
                     "action_removed": False,
                 }
-                validated_actions = sorted(
+                validated_action_set = set(
+                    get_job(job_id).get(
+                        "qwen_first_frame_validated_actions",
+                        [],
+                    )
+                    or []
+                )
+                if best_effort_selected:
+                    validated_action_set.discard(action_key(pose))
+                else:
+                    validated_action_set.add(action_key(pose))
+                validated_actions = sorted(validated_action_set)
+                best_effort_actions = sorted(
                     {
                         *(
                             get_job(job_id).get(
-                                "qwen_first_frame_validated_actions",
+                                "qwen_first_frame_best_effort_actions",
                                 [],
                             )
                             or []
                         ),
-                        action_key(pose),
+                        *([action_key(pose)] if best_effort_selected else []),
                     }
                 )
                 update_job(
                     job_id,
                     qwen_first_frame_states=first_frame_states,
                     qwen_first_frame_validated_actions=validated_actions,
+                    qwen_first_frame_best_effort_actions=best_effort_actions,
                     qwen_first_frame_current_action=action_key(pose),
+                    qwen_first_frame_current_attempt=best_attempt["attempt"],
+                    qwen_first_frame_attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
                     qwen_first_frame_cache_status=cache_status,
                     qwen_first_frame_original_fallback_disabled=True,
                     qwen_first_frame_action_removal_disabled=True,
                 )
+            selected_quality_record.update(
+                strict_first_frame_required=strict_first_frame_required,
+                strict_first_frame_best_effort_selected=bool(
+                    best_attempt.get("strict_first_frame_best_effort_selected")
+                ),
+                strict_first_frame_best_effort_issues=list(
+                    best_attempt.get("strict_first_frame_best_effort_issues") or []
+                ),
+                strict_first_frame_best_effort_selection_key=(
+                    best_attempt.get(
+                        "strict_first_frame_best_effort_selection_key"
+                    )
+                ),
+                strict_first_frame_attempt_limit=(
+                    QWEN_FIRST_FRAME_MAX_ATTEMPTS
+                    if strict_first_frame_required
+                    else None
+                ),
+                selected_reference_path=str(selected_keyframe),
+                selected_reference_sha256=file_sha256(selected_keyframe),
+                original_upload_fallback_published=False,
+                action_removed=False,
+            )
+            write_json_atomic(
+                job_dir / "workflows" / f"qwen_pose_{index:02d}_quality.json",
+                selected_quality_record,
+            )
             if not reference_generation_degraded:
                 accepted_pose_similarity_references.append(
                     {

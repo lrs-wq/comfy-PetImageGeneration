@@ -1899,6 +1899,14 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
                 "Image 1 is the only identity"
             )
         )
+        self.assertIn(
+            "SOURCE COAT PALETTE LOCK",
+            workflow["6"]["inputs"]["prompt"],
+        )
+        self.assertIn(
+            "coordinate mask with zero color",
+            workflow["6"]["inputs"]["prompt"],
+        )
         self.assertEqual(workflow["7"]["inputs"]["prompt"], "")
         self.assertEqual(
             workflow["14"]["inputs"]["steps"],
@@ -1907,6 +1915,70 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertEqual(
             workflow["14"]["inputs"]["denoise"],
             pipeline.DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
+        )
+
+    def test_dog_eating_attempt4_uses_pose_safe_uploaded_identity_refine(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="eating",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=4,
+                identity_palette_guard=True,
+                canonical_action_palette_drift_attempts={3},
+                action_chroma_acceptable_attempts={3},
+                visual_audits_blocking=False,
+                species="dog",
+            )
+
+        load_images = {
+            node_id: node["inputs"]["image"]
+            for node_id, node in workflow.items()
+            if node.get("class_type") == "LoadImage"
+        }
+        refine_input = (
+            "local_video_api/capture-eating/eating_identity_refine_source.png"
+        )
+        expected_canonical = "local_video_api/capture-eating/cartoon_reference.png"
+        self.assertEqual(load_images["1"], refine_input)
+        self.assertEqual(
+            set(load_images.values()),
+            {refine_input, expected_canonical, uploaded_input},
+        )
+        self.assertNotIn(pose_input, load_images.values())
+        prompt = workflow["6"]["inputs"]["prompt"]
+        self.assertIn("CRITICAL EATING IDENTITY REFINE", prompt)
+        self.assertIn("SOURCE COAT PALETTE LOCK", prompt)
+        self.assertIn("Previous output recolored the pet", prompt)
+        self.assertEqual(
+            workflow["14"]["inputs"]["steps"],
+            pipeline.EATING_CANONICAL_IDENTITY_REFINE_STEPS,
+        )
+        self.assertEqual(
+            workflow["14"]["inputs"]["denoise"],
+            pipeline.EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
+        )
+
+    def test_strict_dog_eating_generation_reaches_tenth_distinct_candidate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, _uploaded_input, _pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="eating",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=10,
+                identity_palette_guard=True,
+                species="dog",
+            )
+
+        expected_seed = 123 + pipeline.pose_seed_offset("eating", 1) + 9 * 1009
+        self.assertEqual(workflow["14"]["inputs"]["seed"], expected_seed)
+        self.assertIn(
+            "SOURCE COAT PALETTE LOCK",
+            workflow["6"]["inputs"]["prompt"],
         )
 
     def test_dog_drinking_workflow_loads_white_model_as_geometry_only(self) -> None:

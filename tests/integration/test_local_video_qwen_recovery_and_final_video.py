@@ -24,6 +24,45 @@ from tests.integration.local_video_subject_replacement_test_support import (
 )
 
 
+def _record_fake_action_quality(
+    job_dir: Path,
+    *,
+    action: str,
+    pose_index: int,
+    reference: Path,
+    best_effort: bool = False,
+) -> None:
+    workflow_dir = job_dir / "workflows"
+    workflow_dir.mkdir(parents=True, exist_ok=True)
+    (workflow_dir / f"qwen_pose_{pose_index:02d}_quality.json").write_text(
+        json.dumps(
+            {
+                "selected_attempt": 1,
+                "selected_profile": "test_fixture",
+                "strict_first_frame_required": best_effort,
+                "strict_first_frame_best_effort_selected": best_effort,
+                "strict_first_frame_best_effort_issues": (
+                    ["identity_palette_not_acceptable"] if best_effort else []
+                ),
+                "strict_first_frame_best_effort_selection_key": (
+                    [0, 0, 1, 0.0] if best_effort else None
+                ),
+                "strict_first_frame_attempt_limit": (
+                    pipeline.QWEN_FIRST_FRAME_MAX_ATTEMPTS
+                    if best_effort
+                    else None
+                ),
+                "selected_reference_path": str(reference),
+                "selected_reference_sha256": pipeline.file_sha256(reference),
+                "original_upload_fallback_published": False,
+                "action_removed": False,
+                "action": action,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenReferenceTestBase):
     def test_canonical_grooming_requires_pet3d_repair_surface_lora(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1900,7 +1939,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                     },
                 )
                 selected_surface_metrics: dict[str, object] = {}
-                for action in ("eating", "grooming"):
+                for pose_index, action in enumerate(("eating", "grooming"), start=1):
                     target = job_dir / f"{action}_transparent.png"
                     image = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
                     image.paste((80, 80, 80, 255), (128, 96, 384, 416))
@@ -1910,8 +1949,15 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                         {
                             "type": "transparent_keyframe",
                             "action": action,
+                            "pose_index": pose_index,
                             "filename": target.name,
                         },
+                    )
+                    _record_fake_action_quality(
+                        job_dir,
+                        action=action,
+                        pose_index=pose_index,
+                        reference=target,
                     )
                     selected_candidate = job_dir / f"{action}_selected_candidate.png"
                     selected_candidate.write_bytes(target.read_bytes())
@@ -2255,7 +2301,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
             final_job["pose_reference_guide_styles"],
             {
                 "eating": (
-                    "texture_free_compressed_neutral_anatomy_with_explicit_"
+                    "single_tone_neutral_action_silhouette_with_explicit_"
                     "muzzle_overlap_and_semantic_food_on_pure_green"
                 ),
                 "grooming": (pipeline.GROOMING_QWEN_GUIDE_STYLE),
@@ -2828,11 +2874,20 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                     {
                         "type": "transparent_keyframe",
                         "action": "eating",
+                        "pose_index": 1,
                         "filename": action.name,
                     },
                 )
+                _record_fake_action_quality(
+                    job_dir,
+                    action="eating",
+                    pose_index=1,
+                    reference=action,
+                    best_effort=True,
+                )
                 pipeline.update_job(
                     job_id,
+                    qwen_first_frame_best_effort_actions=["eating"],
                     fur_surface_gate_selected_metrics={
                         "eating": _passed_surface_metric(action, "eating")
                     },
@@ -2880,6 +2935,12 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                     job_id,
                     ["eating"],
                 )
+                pipeline.revalidate_uploaded_qwen_references_before_scail(
+                    job_id,
+                    jobs[job_id],
+                    jobs[job_id]["effective_subject_config"],
+                    ["eating"],
+                )
 
             final_job = jobs[job_id]
 
@@ -2894,6 +2955,17 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
         self.assertNotIn(
             "frozen queue-time expanded coat ban",
             final_job["subject_profile_fur_negative"],
+        )
+        self.assertEqual(
+            final_job["qwen_first_frame_best_effort_references"]["eating"][
+                "published_reference_sha256"
+            ],
+            final_job["qwen_action_keyframe_sha256s"]["eating"],
+        )
+        self.assertTrue(
+            final_job["qwen_first_frame_best_effort_references"]["eating"][
+                "continues_to_scail"
+            ]
         )
 
     def test_uploaded_qwen_stage_fails_closed_on_opaque_action_reference(self) -> None:
@@ -2959,8 +3031,15 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                     {
                         "type": "transparent_keyframe",
                         "action": "eating",
+                        "pose_index": 1,
                         "filename": opaque.name,
                     },
+                )
+                _record_fake_action_quality(
+                    job_dir,
+                    action="eating",
+                    pose_index=1,
+                    reference=opaque,
                 )
 
             with (

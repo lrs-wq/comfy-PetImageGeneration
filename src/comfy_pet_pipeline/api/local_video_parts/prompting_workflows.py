@@ -518,9 +518,14 @@ def build_dog_eating_prompt_only_action_transfer_prompt(
         raise ValueError("Prompt-only dog eating transfer supports only eating.")
     del profile_fur_lock
     return (
-        "Image 1 is the only identity and appearance authority. Image 2 is a "
-        "neutral white action-geometry guide: copy only its eating pose, camera, "
-        "ground contact, and bowl placement. Never copy Image 2's breed, skull, "
+        "Image 1 is the only identity and appearance authority. Image 2 is a neutral "
+        "white action-geometry guide and flat synthetic label, not a picture of the "
+        "target dog: copy only "
+        "its eating joints, camera, ground contact, muzzle-to-food contact, and bowl "
+        "placement. Treat every white or gray animal pixel in Image 2 as a coordinate "
+        "mask with zero color, value, material, texture, lighting, marking, breed, or "
+        "identity meaning. Erase that synthetic surface instead of rendering it. "
+        "Never copy Image 2's breed, skull, "
         "ears, muzzle, body proportions, tail, color, material, lighting, or "
         "surface. Edit Image 1. Keep this exact dog and its restrained stylized 3D "
         "identity unchanged. Preserve its exact apparent age and breed geometry: "
@@ -561,9 +566,14 @@ def build_dog_drinking_prompt_only_action_transfer_prompt(
         raise ValueError("Prompt-only dog drinking transfer supports only drinking.")
     del profile_fur_lock
     return (
-        "Image 1 is the only identity and appearance authority. Image 2 is a "
-        "neutral white action-geometry guide: copy only its drinking pose, camera, "
-        "ground contact, head-to-water contact, and bowl placement. Never copy "
+        "Image 1 is the only identity and appearance authority. Image 2 is a neutral "
+        "white action-geometry guide and flat synthetic label, not a picture of the "
+        "target dog: copy only "
+        "its drinking joints, camera, ground contact, head-to-water contact, and bowl "
+        "placement. Treat every white or gray animal pixel in Image 2 as a coordinate "
+        "mask with zero color, value, material, texture, lighting, marking, breed, or "
+        "identity meaning. Erase that synthetic surface instead of rendering it. "
+        "Never copy "
         "Image 2's breed, skull, ears, muzzle, body proportions, tail, color, "
         "material, lighting, or surface. Edit Image 1. Keep this exact dog and its "
         "restrained stylized 3D "
@@ -605,9 +615,13 @@ def build_dog_toileting_prompt_only_action_transfer_prompt(
         raise ValueError("Prompt-only dog toileting transfer supports only toileting.")
     del profile_fur_lock
     return (
-        "Image 1 is the only identity and appearance authority. Image 2 is a "
-        "neutral white action-geometry guide: copy only its seated toileting pose, "
-        "camera, paw contact, and complete tray footprint. Never copy Image 2's "
+        "Image 1 is the only identity and appearance authority. Image 2 is a neutral "
+        "white action-geometry guide and flat synthetic label, not a picture of the "
+        "target dog: copy only "
+        "its seated toileting joints, camera, paw contact, and complete tray footprint. "
+        "Treat every white or gray animal pixel in Image 2 as a coordinate mask with "
+        "zero color, value, material, texture, lighting, marking, breed, or identity "
+        "meaning. Erase that synthetic surface instead of rendering it. Never copy Image 2's "
         "breed, skull, ears, muzzle, body proportions, tail, color, material, "
         "lighting, or surface. Edit Image 1. Keep this exact dog and its restrained "
         "stylized 3D "

@@ -2159,6 +2159,26 @@ def revalidate_uploaded_qwen_references_before_scail(
 
     reference_paths = job.get("subject_reference_paths")
     qwen_reference_sha256s = job.get("qwen_action_keyframe_sha256s")
+    raw_best_effort_references = job.get(
+        "qwen_first_frame_best_effort_references"
+    )
+    if raw_best_effort_references is None:
+        best_effort_references: dict[str, Any] = {}
+    elif isinstance(raw_best_effort_references, dict):
+        best_effort_references = raw_best_effort_references
+    else:
+        raise RuntimeError(
+            "Persisted Qwen bounded first-frame provenance is invalid."
+        )
+    declared_best_effort_actions = {
+        str(action)
+        for action in job.get("qwen_first_frame_best_effort_actions", [])
+        if str(action) in actions
+    }
+    if declared_best_effort_actions != set(best_effort_references):
+        raise RuntimeError(
+            "Persisted Qwen bounded first-frame action set changed before SCAIL."
+        )
     raw_canonical_identity_fallbacks = job.get(
         "qwen_canonical_identity_fallbacks"
     )
@@ -2217,6 +2237,45 @@ def revalidate_uploaded_qwen_references_before_scail(
             file_sha256(reference_path) if reference_path.is_file() else ""
         )
         action_config = effective_subject_config["actions"][action]
+        stored_best_effort = best_effort_references.get(action)
+        configured_best_effort = action_config.get("qwen_first_frame_best_effort")
+        if stored_best_effort != configured_best_effort:
+            raise RuntimeError(
+                f"Persisted Qwen {action} best-effort provenance changed before "
+                "SCAIL."
+            )
+        if stored_best_effort is not None:
+            if not isinstance(stored_best_effort, dict):
+                raise RuntimeError(
+                    f"Persisted Qwen {action} best-effort provenance is invalid."
+                )
+            quality_record_path = Path(
+                str(stored_best_effort.get("quality_record_path") or "")
+            )
+            quality_record_sha256 = str(
+                stored_best_effort.get("quality_record_sha256") or ""
+            ).strip().lower()
+            if (
+                stored_best_effort.get("policy")
+                != "generated_candidate_identity_action_best_of_ten_v1"
+                or stored_best_effort.get("attempt_limit")
+                != QWEN_FIRST_FRAME_MAX_ATTEMPTS
+                or stored_best_effort.get("published_reference_path")
+                != str(reference_path)
+                or stored_best_effort.get("published_reference_sha256")
+                != reference_digest
+                or stored_best_effort.get("original_upload_fallback_published")
+                is not False
+                or stored_best_effort.get("action_removed") is not False
+                or stored_best_effort.get("continues_to_scail") is not True
+                or not quality_record_path.is_file()
+                or not re.fullmatch(r"[0-9a-f]{64}", quality_record_sha256)
+                or file_sha256(quality_record_path) != quality_record_sha256
+            ):
+                raise RuntimeError(
+                    f"Persisted Qwen {action} best-effort reference contract "
+                    "is incomplete before SCAIL."
+                )
         stored_canonical_fallback = canonical_identity_fallbacks.get(action)
         configured_canonical_fallback = action_config.get(
             "qwen_canonical_identity_fallback"

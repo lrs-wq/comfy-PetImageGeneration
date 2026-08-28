@@ -477,6 +477,8 @@
       retrying_first_frame_quality: '首帧未通过质量门禁，正在换种子继续生成',
       queued_for_first_frame_quality_retry: '首帧自动重试已排队',
       queued_for_first_frame_retry_capacity: '首帧自动重试等待队列空位',
+      queued_after_service_restart_bounded_first_frame: '服务重启后，首帧候选任务已恢复排队',
+      queued_after_operator_bounded_first_frame_resume: '首帧候选任务已人工恢复排队',
       finalizing_keyframes: '正在整理生成图片',
       completed_keyframes_only: '图片生成完成',
       generating_subject_replacement: '正在使用 SCAIL 生成主体替换视频',
@@ -1139,9 +1141,19 @@
       if (job.qwen_first_frame_validated_required) {
         const currentAction = job.qwen_first_frame_current_action;
         const state = (job.qwen_first_frame_states || {})[currentAction] || {};
-        if (state.status === 'retrying_with_new_seed_wave'
+        const attemptLimit = Number(job.qwen_first_frame_attempt_limit || state.attempt_limit || 10);
+        const currentAttempt = Number(job.qwen_first_frame_current_attempt || state.current_attempt || 0);
+        if (state.status === 'generating_candidate'
+          || ['retrying_cartoon_keyframe', 'queued_after_service_restart_bounded_first_frame', 'queued_after_operator_bounded_first_frame_resume'].includes(job.stage)) {
+          const attemptText = currentAttempt > 0 ? `（第 ${currentAttempt}/${attemptLimit} 个）` : '';
+          notices.push(`当前${actionLabels[currentAction] || currentAction || '动作'}首帧正在生成不同 seed 候选${attemptText}；最多 ${attemptLimit} 个，全部未严格通过时会选择身份优先的最优生成候选继续，不会发布原图占位，也不会移除动作。`);
+        } else if (state.status === 'retrying_with_new_seed_wave'
           || ['retrying_first_frame_quality', 'queued_for_first_frame_quality_retry'].includes(job.stage)) {
-          notices.push(`当前${actionLabels[currentAction] || currentAction || '动作'}首帧尚未通过质量门禁，系统正在自动换种子重试；不会发布原图占位，也不会移除该动作。`);
+          notices.push('这是旧版首帧重试状态；服务恢复后将按最多 10 个候选的有界策略执行。');
+        }
+        const bestEffortActions = job.qwen_first_frame_best_effort_actions || [];
+        if (bestEffortActions.length) {
+          notices.push(`首帧候选预算已耗尽：${bestEffortActions.map(action => actionLabels[action] || action).join('、')}已选择身份优先的最优生成候选继续后续链路。`);
         }
       }
       const degradedActions = Object.keys(job.qwen_reference_degraded_actions || {});

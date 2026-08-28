@@ -129,7 +129,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.35"
+API_VERSION = "2.26.36"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -293,18 +293,26 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.41"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.42"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
-    "strict_quality_gate_then_content_addressed_reuse_or_seed_wave_retry_v1"
+    "strict_quality_gate_then_bounded_best_of_ten_selection_v2"
 )
-QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION = "validated_qwen_first_frame_v1"
+QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION = "validated_qwen_first_frame_v2"
 QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
     {
         "1.40.38",
         "1.40.39",
         "1.40.40",
+        "1.40.41",
         QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
     }
+)
+QWEN_FIRST_FRAME_MAX_ATTEMPTS = max(
+    1,
+    min(
+        10,
+        int(os.environ.get("QWEN_FIRST_FRAME_MAX_ATTEMPTS", "10")),
+    ),
 )
 QWEN_FIRST_FRAME_SEED_WAVE_STRIDE = max(
     10_000,
@@ -467,8 +475,8 @@ GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = len(
     GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT
 )
 DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
-    "canonical_identity_image1_plus_white_model_geometry_image2_"
-    "four_step_direct_eating_action_v2"
+    "canonical_identity_image1_plus_white_model_geometry_image2_then_"
+    "pose_safe_uploaded_identity_refine_v3"
 )
 DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
 DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
@@ -1548,10 +1556,6 @@ TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 
 class JobCancelled(RuntimeError):
     """Raised when a user requests cancellation of a generation job."""
-
-
-class FirstFrameQualityRetry(RuntimeError):
-    """Raised to requeue an accepted job with a fresh first-frame seed wave."""
 
 
 Image.MAX_IMAGE_PIXELS = 40_000_000
@@ -6912,9 +6916,6 @@ revalidate_cached_grooming_minimum_gate = (
 strict_first_frame_record_issues = (
     _local_video_job_runner.strict_first_frame_record_issues
 )
-raise_strict_first_frame_quality_retry = (
-    _local_video_job_runner.raise_strict_first_frame_quality_retry
-)
 validated_first_frame_cache_fingerprint = (
     _local_video_job_runner.validated_first_frame_cache_fingerprint
 )
@@ -6936,6 +6937,12 @@ resolve_action_identity_palette_reference = (
 
 action_candidate_degraded_selection_key = (
     _local_video_job_runner.action_candidate_degraded_selection_key
+)
+bounded_strict_first_frame_profiles = (
+    _local_video_job_runner.bounded_strict_first_frame_profiles
+)
+strict_first_frame_best_effort_selection_key = (
+    _local_video_job_runner.strict_first_frame_best_effort_selection_key
 )
 exhausted_action_candidate_recovery_policy = (
     _local_video_job_runner.exhausted_action_candidate_recovery_policy
@@ -6996,48 +7003,6 @@ def worker_loop() -> None:
             LOGGER.info("Starting job %s", job_id)
             run_job(job_id)
             LOGGER.info("Completed job %s", job_id)
-        except FirstFrameQualityRetry as exc:
-            with JOBS_LOCK:
-                retry_job = dict(JOBS.get(job_id) or {})
-            if retry_job.get("cancel_requested"):
-                LOGGER.info(
-                    "First-frame retry for %s was cancelled by the user",
-                    job_id,
-                )
-                mark_job_cancelled(job_id)
-            else:
-                update_job(
-                    job_id,
-                    status="queued",
-                    stage="queued_for_first_frame_quality_retry",
-                    error=None,
-                    active_prompt_id=None,
-                    finished_at=None,
-                    recovery_active=True,
-                    qwen_first_frame_last_retry_reason=str(exc),
-                )
-                try:
-                    JOB_QUEUE.put_nowait(job_id)
-                except queue.Full:
-                    threading.Thread(
-                        target=JOB_QUEUE.put,
-                        args=(job_id,),
-                        name=f"first-frame-requeue-{job_id}",
-                        daemon=True,
-                    ).start()
-                LOGGER.warning(
-                    "Requeued %s for a fresh validated first-frame seed wave: %s",
-                    job_id,
-                    exc,
-                )
-            try:
-                wait_comfy_idle(timeout=120)
-                free_comfy_models()
-            except Exception:  # noqa: BLE001 - best effort cleanup
-                LOGGER.exception(
-                    "GPU cleanup after first-frame retry %s also failed",
-                    job_id,
-                )
         except JobCancelled:
             LOGGER.info("Job %s was cancelled by the user", job_id)
             mark_job_cancelled(job_id)
@@ -7143,7 +7108,7 @@ def restore_jobs() -> None:
             update_job(
                 job_id,
                 status="queued",
-                stage="queued_for_first_frame_quality_retry",
+                stage="queued_after_service_restart_bounded_first_frame",
                 error=None,
                 finished_at=None,
                 qwen_first_frame_restart_requeued=True,
@@ -7661,6 +7626,10 @@ async def create_subject_replacement_api_job(
             ),
             "qwen_first_frame_retry_waves": {},
             "qwen_first_frame_states": {},
+            "qwen_first_frame_attempt_limit": (
+                QWEN_FIRST_FRAME_MAX_ATTEMPTS if raw is not None else None
+            ),
+            "qwen_first_frame_best_effort_actions": [],
             "generation_audit_policy": GENERATION_AUDIT_POLICY,
             "visual_content_audit_mode": (
                 "blocking" if GENERATION_VISUAL_AUDITS_BLOCKING else "advisory"
