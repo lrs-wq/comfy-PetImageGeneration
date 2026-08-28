@@ -1915,6 +1915,77 @@ class ToiletingScailTemporalIdentityArtifactTests(unittest.TestCase):
         self.assertEqual(second_controls["pose_strength_multiplier"], 1.18)
         self.assertEqual(third_controls["pose_strength_multiplier"], 1.32)
 
+    def test_eating_retry_controls_increase_and_cap_pose_strength(self) -> None:
+        workflow = {
+            "17": {
+                "class_type": "WanSCAILToVideo",
+                "inputs": {"pose_strength": 1.10},
+            },
+            "20": {
+                "class_type": "SamplerCustom",
+                "inputs": {"noise_seed": 20260825},
+            },
+        }
+
+        second, _, second_controls = pipeline.scail_workflow_with_retry_controls(
+            workflow,
+            seed=20260826,
+            action="eating",
+            attempt=2,
+        )
+        tenth, _, tenth_controls = pipeline.scail_workflow_with_retry_controls(
+            workflow,
+            seed=20260834,
+            action="eating",
+            attempt=10,
+        )
+
+        self.assertAlmostEqual(second["17"]["inputs"]["pose_strength"], 1.166)
+        self.assertGreater(
+            second["17"]["inputs"]["pose_strength"],
+            workflow["17"]["inputs"]["pose_strength"],
+        )
+        self.assertEqual(
+            tenth["17"]["inputs"]["pose_strength"],
+            pipeline.SCAIL_EATING_POSE_STRENGTH_MAX,
+        )
+        self.assertFalse(second_controls["eating_pose_strength_cap_applied"])
+        self.assertTrue(tenth_controls["eating_pose_strength_cap_applied"])
+        self.assertEqual(pipeline.EATING_SCAIL_MAX_ATTEMPTS, 10)
+
+    def test_eating_best_effort_prefers_stronger_weakest_motion_axis(self) -> None:
+        weaker = pipeline.eating_scail_best_effort_score(
+            {
+                "adjacent_grayscale_mae_mean": 0.225011,
+                "adjacent_grayscale_mae_minimum": 0.55,
+                "first_frame_grayscale_mae_max": 3.599163,
+                "first_frame_grayscale_mae_max_minimum": 3.0,
+            }
+        )
+        stronger = pipeline.eating_scail_best_effort_score(
+            {
+                "adjacent_grayscale_mae_mean": 0.329975,
+                "adjacent_grayscale_mae_minimum": 0.55,
+                "first_frame_grayscale_mae_max": 3.885506,
+                "first_frame_grayscale_mae_max_minimum": 3.0,
+            }
+        )
+
+        self.assertGreater(stronger["score"], weaker["score"])
+        self.assertEqual(
+            pipeline.scail_action_attempt_status(
+                [
+                    {
+                        "selected": True,
+                        "temporal_identity_quality": {
+                            "acceptable": False,
+                        },
+                    }
+                ]
+            ),
+            "best_effort",
+        )
+
 
 class CanonicalChromaIntegrityTests(unittest.TestCase):
     def test_canonical_cutout_rejects_large_central_neck_hole(self) -> None:

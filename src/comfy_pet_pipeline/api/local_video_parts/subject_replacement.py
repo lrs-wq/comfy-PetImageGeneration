@@ -88,9 +88,25 @@ DRINKING_OUTPUT_SOURCE_SILHOUETTE_RETENTION_RATIO_MIN = 0.65
 DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN = 0.75
 DRINKING_SCAIL_BACKGROUND_DISTANCE_MIN = 24.0
 
-EATING_SCAIL_TEMPORAL_ACTION_POLICY = "eating_visible_motion_energy_gate_v1"
-EATING_SCAIL_MAX_ATTEMPTS = 2
-EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (1.0, 0.94)
+EATING_SCAIL_TEMPORAL_ACTION_POLICY = "eating_visible_motion_energy_gate_v2"
+EATING_SCAIL_BEST_EFFORT_POLICY = "eating_motion_energy_best_of_ten_v1"
+EATING_SCAIL_MAX_ATTEMPTS = 10
+# A retry for insufficient eating motion must strengthen, never weaken, the
+# white-model pose signal.  Later attempts stay at the safe 1.35 effective
+# strength cap and vary the seed, giving the bounded search several chances to
+# preserve the head-nod without importing the maquette's coat appearance.
+EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (
+    1.0,
+    1.06,
+    1.12,
+    1.18,
+    1.24,
+    1.30,
+    1.36,
+    1.42,
+    1.48,
+    1.54,
+)
 EATING_SCAIL_ADJACENT_MAE_MIN = 0.55
 EATING_SCAIL_FIRST_FRAME_MAE_MAX_MIN = 3.0
 
@@ -717,6 +733,59 @@ def eating_scail_video_motion_quality(
     }
 
 
+def eating_scail_best_effort_score(
+    quality: dict[str, Any],
+) -> dict[str, Any]:
+    """Rank rejected eating videos by their weakest normalized motion axis."""
+
+    _sync_local_video_runtime(globals(), {"eating_scail_best_effort_score"})
+    adjacent = max(
+        0.0,
+        float(quality.get("adjacent_grayscale_mae_mean") or 0.0),
+    )
+    excursion = max(
+        0.0,
+        float(quality.get("first_frame_grayscale_mae_max") or 0.0),
+    )
+    adjacent_minimum = max(
+        1e-9,
+        float(
+            quality.get("adjacent_grayscale_mae_minimum")
+            or EATING_SCAIL_ADJACENT_MAE_MIN
+        ),
+    )
+    excursion_minimum = max(
+        1e-9,
+        float(
+            quality.get("first_frame_grayscale_mae_max_minimum")
+            or EATING_SCAIL_FIRST_FRAME_MAE_MAX_MIN
+        ),
+    )
+    adjacent_ratio = adjacent / adjacent_minimum
+    excursion_ratio = excursion / excursion_minimum
+    return {
+        "policy": EATING_SCAIL_BEST_EFFORT_POLICY,
+        "score": round(min(adjacent_ratio, excursion_ratio), 6),
+        "adjacent_motion_ratio": round(adjacent_ratio, 6),
+        "action_excursion_ratio": round(excursion_ratio, 6),
+    }
+
+
+def scail_action_attempt_status(records: list[dict[str, Any]]) -> str:
+    """Summarize whether an action selected a strict or best-effort attempt."""
+
+    for record in records:
+        if record.get("selected") is not True:
+            continue
+        quality = record.get("temporal_identity_quality")
+        return (
+            "passed"
+            if isinstance(quality, dict) and quality.get("acceptable") is True
+            else "best_effort"
+        )
+    return "failed"
+
+
 def evaluate_drinking_scail_video_motion(
     video_path: Path,
     *,
@@ -899,7 +968,13 @@ def scail_workflow_with_retry_controls(
         if not isinstance(inputs, dict) or "pose_strength" not in inputs:
             continue
         original = float(inputs["pose_strength"])
-        effective = round(original * multiplier, 6)
+        requested_effective = original * multiplier
+        effective = round(
+            min(requested_effective, SCAIL_EATING_POSE_STRENGTH_MAX)
+            if normalized_action == "eating"
+            else requested_effective,
+            6,
+        )
         inputs["pose_strength"] = effective
         updated_pose_nodes.append(str(node_id))
         original_strengths[str(node_id)] = original
@@ -919,6 +994,20 @@ def scail_workflow_with_retry_controls(
             "updated_pose_nodes": updated_pose_nodes,
             "original_pose_strengths": original_strengths,
             "effective_pose_strengths": effective_strengths,
+            "eating_pose_strength_cap": (
+                SCAIL_EATING_POSE_STRENGTH_MAX
+                if normalized_action == "eating"
+                else None
+            ),
+            "eating_pose_strength_cap_applied": bool(
+                normalized_action == "eating"
+                and any(
+                    original_strengths[node_id]
+                    * multiplier
+                    > SCAIL_EATING_POSE_STRENGTH_MAX
+                    for node_id in updated_pose_nodes
+                )
+            ),
         },
     )
 
@@ -3375,6 +3464,7 @@ def run_subject_replacement_job(job_id: str) -> None:
         scail_attempt_records: list[dict[str, Any]] = []
         selected_scail_candidate: Path | None = None
         selected_scail_seed: int | None = None
+        selected_scail_best_effort = False
         for scail_attempt in range(1, maximum_scail_attempts + 1):
             attempt_seed = base_scail_seed + (
                 (scail_attempt - 1) * TOILETING_SCAIL_RETRY_SEED_STEP
@@ -3473,6 +3563,12 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "temporal_identity_quality": temporal_identity_quality,
                 "selected": False,
             }
+            if dog_eating_motion_gate:
+                attempt_record["best_effort_score"] = (
+                    eating_scail_best_effort_score(
+                        temporal_identity_quality,
+                    )
+                )
             scail_attempt_records.append(attempt_record)
             if temporal_identity_quality.get("acceptable") is True:
                 selected_scail_candidate = attempt_target
@@ -3488,20 +3584,54 @@ def run_subject_replacement_job(job_id: str) -> None:
                 temporal_identity_quality.get("issues"),
             )
 
+        if (
+            selected_scail_candidate is None
+            and selected_scail_seed is None
+            and dog_eating_motion_gate
+            and scail_attempt_records
+        ):
+            best_attempt = max(
+                scail_attempt_records,
+                key=lambda record: float(
+                    (record.get("best_effort_score") or {}).get("score")
+                    or 0.0
+                ),
+            )
+            best_attempt_path = job_dir / str(best_attempt["video"])
+            if best_attempt_path.is_file():
+                selected_scail_candidate = best_attempt_path
+                selected_scail_seed = int(best_attempt["seed"])
+                selected_scail_best_effort = True
+                best_attempt["selected"] = True
+                best_attempt["selected_best_effort"] = True
+                best_attempt["best_effort_policy"] = (
+                    EATING_SCAIL_BEST_EFFORT_POLICY
+                )
+                update_job(
+                    job_id,
+                    stage="selecting_best_effort_subject_replacement",
+                    progress=action_start + action_span * 0.72,
+                    scail_retry_action=action,
+                    scail_retry_attempt=len(scail_attempt_records),
+                    scail_retry_max_attempts=maximum_scail_attempts,
+                    scail_best_effort_selected_attempt=int(
+                        best_attempt["attempt"]
+                    ),
+                    scail_best_effort_selection=(
+                        best_attempt["best_effort_score"]
+                    ),
+                    scail_best_effort_policy=(
+                        EATING_SCAIL_BEST_EFFORT_POLICY
+                    ),
+                )
+
         scail_video_attempts_by_action[action] = scail_attempt_records
         if selected_scail_candidate is None or selected_scail_seed is None:
             update_job(
                 job_id,
                 scail_video_attempts=dict(scail_video_attempts_by_action),
                 scail_video_temporal_identity_status={
-                    selected_action: (
-                        "passed"
-                        if any(
-                            record.get("selected") is True
-                            for record in records
-                        )
-                        else "failed"
-                    )
+                    selected_action: scail_action_attempt_status(records)
                     for selected_action, records in (
                         scail_video_attempts_by_action.items()
                     )
@@ -3544,14 +3674,7 @@ def run_subject_replacement_job(job_id: str) -> None:
             job_id,
             scail_video_attempts=dict(scail_video_attempts_by_action),
             scail_video_temporal_identity_status={
-                selected_action: (
-                    "passed"
-                    if any(
-                        record.get("selected") is True
-                        for record in records
-                    )
-                    else "failed"
-                )
+                selected_action: scail_action_attempt_status(records)
                 for selected_action, records in (
                     scail_video_attempts_by_action.items()
                 )
@@ -3800,8 +3923,14 @@ def run_subject_replacement_job(job_id: str) -> None:
             "video_engine": "scail2-14b-fp8",
             "output_exists": True,
             "generation_succeeded": True,
-            "quality_passed": True,
-            "degraded": False,
+            "quality_passed": not selected_scail_best_effort,
+            "degraded": selected_scail_best_effort,
+            "best_effort": selected_scail_best_effort,
+            "best_effort_policy": (
+                EATING_SCAIL_BEST_EFFORT_POLICY
+                if selected_scail_best_effort
+                else None
+            ),
             "requested_effective_seed": base_scail_seed,
             "selected_effective_seed": selected_scail_seed,
             "scail_attempt_count": len(scail_attempt_records),
@@ -4280,8 +4409,14 @@ def run_subject_replacement_job(job_id: str) -> None:
                     "video_engine": "scail2-14b-fp8",
                     "output_exists": True,
                     "generation_succeeded": True,
-                    "quality_passed": True,
-                    "degraded": False,
+                    "quality_passed": not selected_scail_best_effort,
+                    "degraded": selected_scail_best_effort,
+                    "best_effort": selected_scail_best_effort,
+                    "best_effort_policy": (
+                        EATING_SCAIL_BEST_EFFORT_POLICY
+                        if selected_scail_best_effort
+                        else None
+                    ),
                     "driving_template": Path(action_config["driving_animation"]).name,
                     "edge_mode": "clean_hard_alpha_no_dither",
                     "temporal_cycle": temporal_cycle_output,
@@ -4306,8 +4441,14 @@ def run_subject_replacement_job(job_id: str) -> None:
                         "video_engine": "scail2-14b-fp8",
                         "output_exists": True,
                         "generation_succeeded": True,
-                        "quality_passed": True,
-                        "degraded": False,
+                        "quality_passed": not selected_scail_best_effort,
+                        "degraded": selected_scail_best_effort,
+                        "best_effort": selected_scail_best_effort,
+                        "best_effort_policy": (
+                            EATING_SCAIL_BEST_EFFORT_POLICY
+                            if selected_scail_best_effort
+                            else None
+                        ),
                         "driving_template": Path(
                             action_config["driving_animation"]
                         ).name,
@@ -4354,8 +4495,14 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "output_playback": action_timing,
                 "output_exists": True,
                 "generation_succeeded": True,
-                "quality_passed": True,
-                "degraded": False,
+                "quality_passed": not selected_scail_best_effort,
+                "degraded": selected_scail_best_effort,
+                "best_effort": selected_scail_best_effort,
+                "best_effort_policy": (
+                    EATING_SCAIL_BEST_EFFORT_POLICY
+                    if selected_scail_best_effort
+                    else None
+                ),
             }
         )
         update_job(

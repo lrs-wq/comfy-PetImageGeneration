@@ -90,6 +90,7 @@ DRINKING_FULL_DRIVER_CHANGE_RATIO_MIN = 0.01
 DRINKING_REFERENCE_HEAD_LIFT_PX = 36.0
 DRINKING_REFERENCE_HEAD_LIFT_MIN_PX = 14.0
 DRINKING_REFERENCE_LAP_CYCLES = 3
+EATING_REFERENCE_HEAD_LIFT_PX = 36.0
 GROOMING_TEMPORAL_LOOP_POLICY = (
     "grooming_second_half_ping_pong_closed_loop_v1"
 )
@@ -3173,7 +3174,7 @@ def make_eating_reference_aligned_pose_frames(
     reference_mask: Image.Image,
     canvas_size: tuple[int, int],
     *,
-    maximum_head_lift_px: float = 18.0,
+    maximum_head_lift_px: float = EATING_REFERENCE_HEAD_LIFT_PX,
     target_muzzle_food_overlap_px: float = (
         EATING_TARGET_MUZZLE_FOOD_OVERLAP_PX
     ),

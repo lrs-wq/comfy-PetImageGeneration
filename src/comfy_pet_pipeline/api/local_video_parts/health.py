@@ -806,6 +806,22 @@ def health() -> dict[str, Any]:
                 ),
                 "canonical_identity_reference_prop_inference": False,
                 "canonical_fallback_full_white_driver_body_and_bowl": True,
+                "reference_aligned_head_lift_px": (
+                    EATING_REFERENCE_HEAD_LIFT_PX
+                ),
+                "output_temporal_action_gate": {
+                    "policy": EATING_SCAIL_TEMPORAL_ACTION_POLICY,
+                    "max_attempts": EATING_SCAIL_MAX_ATTEMPTS,
+                    "pose_strength_multipliers": list(
+                        EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS
+                    ),
+                    "pose_strength_cap": SCAIL_EATING_POSE_STRENGTH_MAX,
+                    "retry_strength_direction": "non_decreasing",
+                    "best_effort_policy": EATING_SCAIL_BEST_EFFORT_POLICY,
+                    "selects_best_generated_attempt_on_exhaustion": True,
+                    "original_upload_loop_on_exhaustion": False,
+                    "required_before_transparent_extraction": True,
+                },
             },
             "species_routes": {
                 "cat": {

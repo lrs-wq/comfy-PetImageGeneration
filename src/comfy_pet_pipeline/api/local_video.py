@@ -92,6 +92,7 @@ from ..media.transparent_animation import (
 from ..pipeline.subject_replacement import (
     DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN,
     DRINKING_STATIC_BOWL_ALPHA_RETENTION_POLICY,
+    EATING_REFERENCE_HEAD_LIFT_PX,
     GROOMING_TEMPORAL_LOOP_POLICY,
     clean_transparent_edge_halo,
     white_maquette_semantic_silhouette,
@@ -129,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.37"
+API_VERSION = "2.26.38"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -6847,6 +6848,12 @@ eating_scail_video_motion_quality = (
 evaluate_eating_scail_video_motion = (
     _local_video_subject_replacement.evaluate_eating_scail_video_motion
 )
+eating_scail_best_effort_score = (
+    _local_video_subject_replacement.eating_scail_best_effort_score
+)
+scail_action_attempt_status = (
+    _local_video_subject_replacement.scail_action_attempt_status
+)
 scail_workflow_with_retry_seed = (
     _local_video_subject_replacement.scail_workflow_with_retry_seed
 )
@@ -6906,6 +6913,12 @@ EATING_SCAIL_TEMPORAL_ACTION_POLICY = (
 )
 EATING_SCAIL_MAX_ATTEMPTS = (
     _local_video_subject_replacement.EATING_SCAIL_MAX_ATTEMPTS
+)
+EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (
+    _local_video_subject_replacement.EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS
+)
+EATING_SCAIL_BEST_EFFORT_POLICY = (
+    _local_video_subject_replacement.EATING_SCAIL_BEST_EFFORT_POLICY
 )
 pose_attempt_provenance = _local_video_job_runner.pose_attempt_provenance
 strict_first_frame_identity_palette_evidence = (

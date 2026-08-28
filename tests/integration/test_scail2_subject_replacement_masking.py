@@ -913,7 +913,14 @@ class EatingScenePropMaskTests(unittest.TestCase):
             metadata["low_phase_muzzle_food_overlap_pixels"],
             0,
         )
-        self.assertLessEqual(metadata["vertical_control_abs_max_px"], 18.0)
+        self.assertLessEqual(
+            metadata["vertical_control_abs_max_px"],
+            scail.EATING_REFERENCE_HEAD_LIFT_PX,
+        )
+        self.assertEqual(
+            metadata["head_lift_px_max"],
+            scail.EATING_REFERENCE_HEAD_LIFT_PX,
+        )
         self.assertEqual(metadata["reference_face_seed_bbox"], [230, 299, 271, 324])
         self.assertGreaterEqual(metadata["head_lift_px_max"], 12.0)
         self.assertEqual(len(poses), 13)
@@ -1121,7 +1128,10 @@ class EatingScenePropMaskTests(unittest.TestCase):
             metadata["low_phase_muzzle_food_overlap_pixels"],
             0,
         )
-        self.assertLessEqual(metadata["vertical_control_abs_max_px"], 18.0)
+        self.assertLessEqual(
+            metadata["vertical_control_abs_max_px"],
+            scail.EATING_REFERENCE_HEAD_LIFT_PX,
+        )
 
         first_pose = np.asarray(poses[0].convert("RGB"), dtype=np.uint8)
         first_mask = np.asarray(masks[0].convert("RGB"), dtype=np.uint8)
