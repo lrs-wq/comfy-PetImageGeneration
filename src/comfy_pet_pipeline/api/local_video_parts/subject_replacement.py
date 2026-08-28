@@ -60,6 +60,9 @@ TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY = (
     "driver_pose_mask_for_narrow_toileting_reference_v1"
 )
 TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = 0.70
+DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY = (
+    "drinking_full_driver_subject_and_bowl_adaptive_matte_v1"
+)
 
 TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY = (
     "toileting_temporal_lateral_dark_band_and_symbol_gate_v2"
@@ -96,13 +99,14 @@ def select_transparent_guidance_policy(
     action: str,
     manifest: dict[str, Any],
 ) -> dict[str, Any]:
-    """Choose reference guidance only when a toilet tray is already prebound.
+    """Choose role-aware guidance for validated drinking/toileting props.
 
     A broad toileting reference contains both the uploaded animal and its tray.
     Reusing the narrower white-model pose mask for that reference compares two
-    different silhouettes and can reject an otherwise correct SCAIL video.
-    Other actions, and legacy narrow toileting references, keep their existing
-    frame-varying driver guidance.
+    different silhouettes and can reject an otherwise correct SCAIL video. A
+    full-driver drinking mask already binds the animated dog and static bowl,
+    so it also enables adaptive subject-plus-prop extraction. Other actions and
+    legacy narrow references keep their frame-varying driver guidance.
     """
 
     normalized_action = str(action or "").strip().lower()
@@ -123,6 +127,25 @@ def select_transparent_guidance_policy(
             else None
         ),
     }
+    pose_metadata = manifest.get("pose_metadata")
+    if (
+        normalized_action == "drinking"
+        and isinstance(pose_metadata, dict)
+        and pose_metadata.get("primary_policy") is True
+        and pose_metadata.get("driver_signal_only") is False
+        and pose_metadata.get("driver_silhouette_preserved") is True
+        and pose_metadata.get("full_white_driver_geometry") is True
+        and pose_metadata.get("pose_geometry_scope")
+        == "full_white_driver_subject_per_frame"
+        and pose_metadata.get("scene_prop_authority")
+        == "digest_bound_white_maquette_video"
+    ):
+        return {
+            **default,
+            "policy": DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY,
+            "reference_aligned_uniform_background": True,
+            "static_prop_required": True,
+        }
     if normalized_action != "toileting":
         return default
 

@@ -90,6 +90,8 @@ from ..media.transparent_animation import (
     retime_video_playback,
 )
 from ..pipeline.subject_replacement import (
+    DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN,
+    DRINKING_STATIC_BOWL_ALPHA_RETENTION_POLICY,
     GROOMING_TEMPORAL_LOOP_POLICY,
     clean_transparent_edge_halo,
     white_maquette_semantic_silhouette,
@@ -127,7 +129,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.30"
+API_VERSION = "2.26.31"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -6816,6 +6818,9 @@ TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY = (
 )
 TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = (
     _local_video_subject_replacement.TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO
+)
+DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY = (
+    _local_video_subject_replacement.DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY
 )
 TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY = (
     _local_video_subject_replacement.TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY

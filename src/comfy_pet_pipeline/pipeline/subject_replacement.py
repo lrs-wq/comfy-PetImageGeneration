@@ -6728,6 +6728,11 @@ REFERENCE_ALIGNED_HYBRID_EXTRACTION_POLICY = (
 )
 REFERENCE_ALIGNED_BOUNDED_CANVAS_BORDER_DISTANCE_P999_MAX = 8.0
 REFERENCE_ALIGNED_HYBRID_CANVAS_BORDER_DISTANCE_P999_MAX = 32.0
+DRINKING_STATIC_BOWL_ALPHA_RETENTION_POLICY = (
+    "drinking_static_bowl_guidance_alpha_retention_gate_v1"
+)
+DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN = 0.90
+DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS = 6
 
 
 def _canvas_border_color_distance_p999(rgb: np.ndarray) -> float:
@@ -6768,6 +6773,79 @@ def reference_aligned_transparent_extraction_strategy(
     ):
         return REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY
     return REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY
+
+
+def _merge_reference_aligned_static_prop(
+    rgb: np.ndarray,
+    alpha: np.ndarray,
+    bounded_rgb: np.ndarray,
+    bounded_alpha: np.ndarray,
+    static_prop_guidance: np.ndarray,
+    *,
+    dilation_radius: int = DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS,
+) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
+    """Recover only the validated static prop around its guidance footprint."""
+
+    if rgb.shape != bounded_rgb.shape or rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError("Static prop recovery requires matching RGB frames")
+    if (
+        alpha.shape != bounded_alpha.shape
+        or alpha.shape != static_prop_guidance.shape
+        or alpha.shape != rgb.shape[:2]
+    ):
+        raise ValueError("Static prop recovery requires matching alpha masks")
+    if dilation_radius < 0:
+        raise ValueError("Static prop recovery dilation radius cannot be negative")
+
+    static_prop = static_prop_guidance.astype(bool)
+    static_prop_pixels = int(np.count_nonzero(static_prop))
+    if static_prop_pixels < 64:
+        raise RuntimeError("Static prop guidance is empty or too small")
+    if dilation_radius:
+        diameter = dilation_radius * 2 + 1
+        envelope = cv2.dilate(
+            static_prop.astype(np.uint8),
+            cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (diameter, diameter),
+            ),
+            iterations=1,
+        ).astype(bool)
+    else:
+        envelope = static_prop
+
+    recovered_support = envelope & (bounded_alpha > alpha)
+    output_rgb = rgb.copy()
+    output_alpha = alpha.copy()
+    output_rgb[recovered_support] = bounded_rgb[recovered_support]
+    output_alpha[envelope] = np.maximum(
+        output_alpha[envelope],
+        bounded_alpha[envelope],
+    )
+    output_rgb[output_alpha == 0] = 0
+
+    retained_pixels = int(
+        np.count_nonzero((output_alpha >= 128) & static_prop)
+    )
+    input_retained_pixels = int(
+        np.count_nonzero((alpha >= 128) & static_prop)
+    )
+    return output_rgb, output_alpha, {
+        "static_prop_guidance_pixels": float(static_prop_pixels),
+        "static_prop_input_retention_ratio": (
+            input_retained_pixels / float(static_prop_pixels)
+        ),
+        "static_prop_output_retention_ratio": (
+            retained_pixels / float(static_prop_pixels)
+        ),
+        "static_prop_recovered_pixels": float(
+            np.count_nonzero(recovered_support)
+        ),
+        "static_prop_recovery_envelope_pixels": float(
+            np.count_nonzero(envelope)
+        ),
+        "static_prop_recovery_dilation_radius": float(dilation_radius),
+    }
 
 
 def _reference_guided_uniform_background_mask(
@@ -7202,6 +7280,10 @@ def build_unstabilized_transparent_gif(
         normalized_source = [normalized_rgb(frame) for frame in source_frames]
         reference_aligned_border_distance_p999_values: list[float] = []
         reference_aligned_extraction_strategy: str | None = None
+        drinking_static_prop_recovery_required = bool(
+            normalized_action == "drinking"
+            and reference_aligned_uniform_background
+        )
         if reference_aligned_uniform_background:
             if guidance_frames is None:
                 raise RuntimeError(
@@ -7217,6 +7299,21 @@ def build_unstabilized_transparent_gif(
                     max(reference_aligned_border_distance_p999_values)
                 )
             )
+            if drinking_static_prop_recovery_required:
+                if (
+                    reference_aligned_extraction_strategy
+                    == REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY
+                ):
+                    raise RuntimeError(
+                        "Drinking static bowl recovery requires a bounded "
+                        "uniform canvas"
+                    )
+                # Keep U2Net's cleaner animal edge, then recover only the bowl
+                # from the bounded-canvas matte. Applying the bounded matte to
+                # the whole pale animal creates a noisy silhouette.
+                reference_aligned_extraction_strategy = (
+                    REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY
+                )
 
         def normalized_guidance_roles(
             index: int,
@@ -7261,6 +7358,7 @@ def build_unstabilized_transparent_gif(
             list[tuple[np.ndarray, np.ndarray]] | None
         ) = None
         reference_aligned_bounded_metrics: list[dict[str, float]] = []
+        static_prop_recovery_metrics: list[dict[str, float]] = []
         if (
             not chroma_usable
             and reference_aligned_extraction_strategy
@@ -7588,9 +7686,35 @@ def build_unstabilized_transparent_gif(
                     bounded_rgb, bounded_alpha = (
                         reference_aligned_bounded_frames[index]
                     )
-                    bounded_additions = bounded_alpha > alpha
-                    rgb[bounded_additions] = bounded_rgb[bounded_additions]
-                    alpha = np.maximum(alpha, bounded_alpha).astype(np.uint8)
+                    if drinking_static_prop_recovery_required:
+                        _guidance, static_prop_guidance = (
+                            normalized_guidance_roles(index)
+                        )
+                        if static_prop_guidance is None:
+                            raise RuntimeError(
+                                "Drinking transparent extraction requires "
+                                "static bowl guidance"
+                            )
+                        rgb, alpha, recovery_metrics = (
+                            _merge_reference_aligned_static_prop(
+                                rgb,
+                                alpha,
+                                bounded_rgb,
+                                bounded_alpha,
+                                static_prop_guidance,
+                            )
+                        )
+                        static_prop_recovery_metrics.append(
+                            recovery_metrics
+                        )
+                    else:
+                        bounded_additions = bounded_alpha > alpha
+                        rgb[bounded_additions] = bounded_rgb[
+                            bounded_additions
+                        ]
+                        alpha = np.maximum(alpha, bounded_alpha).astype(
+                            np.uint8
+                        )
                 alpha[:2, :] = 0
                 alpha[-2:, :] = 0
                 alpha[:, :2] = 0
@@ -7882,6 +8006,39 @@ def build_unstabilized_transparent_gif(
             edge_cleanup_metrics.append(cleanup_metrics)
         extracted_frames = cleaned_extracted_frames
 
+        drinking_static_prop_alpha_retentions: list[float] = []
+        if drinking_static_prop_recovery_required:
+            for index, (_rgb, alpha) in enumerate(extracted_frames):
+                _guidance, static_prop_guidance = normalized_guidance_roles(
+                    index
+                )
+                if static_prop_guidance is None:
+                    raise RuntimeError(
+                        "Drinking transparent extraction requires static bowl "
+                        "guidance in every frame"
+                    )
+                static_prop_pixels = int(
+                    np.count_nonzero(static_prop_guidance)
+                )
+                if static_prop_pixels < 64:
+                    raise RuntimeError(
+                        "Drinking transparent extraction static bowl guidance "
+                        f"is empty at frame {index}"
+                    )
+                retention = float(
+                    np.count_nonzero(
+                        (alpha >= 128) & static_prop_guidance
+                    )
+                ) / float(static_prop_pixels)
+                drinking_static_prop_alpha_retentions.append(retention)
+                if retention < DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN:
+                    raise RuntimeError(
+                        "Drinking transparent extraction lost the static bowl "
+                        f"at frame {index}: alpha_retention={retention:.4f}, "
+                        "required="
+                        f"{DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN:.4f}"
+                    )
+
         sampled_indices = [
             min(
                 len(source_frames) - 1,
@@ -8137,6 +8294,42 @@ def build_unstabilized_transparent_gif(
                     default=None,
                 ),
             },
+            "drinking_static_bowl_retention": {
+                "policy": DRINKING_STATIC_BOWL_ALPHA_RETENTION_POLICY,
+                "required": drinking_static_prop_recovery_required,
+                "acceptable": (
+                    min(
+                        drinking_static_prop_alpha_retentions,
+                        default=0.0,
+                    )
+                    >= DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN
+                    if drinking_static_prop_recovery_required
+                    else None
+                ),
+                "alpha_retention_min": min(
+                    drinking_static_prop_alpha_retentions,
+                    default=None,
+                ),
+                "alpha_retention_required_min": (
+                    DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN
+                ),
+                "input_alpha_retention_min": min(
+                    (
+                        item["static_prop_input_retention_ratio"]
+                        for item in static_prop_recovery_metrics
+                    ),
+                    default=None,
+                ),
+                "recovered_pixels_total": int(
+                    sum(
+                        item["static_prop_recovered_pixels"]
+                        for item in static_prop_recovery_metrics
+                    )
+                ),
+                "recovery_dilation_radius": (
+                    DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS
+                ),
+            },
             "silhouette_edge_cleanup": {
                 "policy": "local_inward_color_alpha_dark_halo_v2",
                 "action": action,
@@ -8322,6 +8515,16 @@ def build_unstabilized_transparent_gif(
                 "area_ratio_required_min": guidance_area_ratio_required_min,
                 "toileting_tray_retention_required": (
                     normalized_action == "toileting"
+                ),
+                "drinking_bowl_retention_required": (
+                    drinking_static_prop_recovery_required
+                ),
+                "drinking_bowl_alpha_retention_min": min(
+                    drinking_static_prop_alpha_retentions,
+                    default=None,
+                ),
+                "drinking_bowl_alpha_retention_required_min": (
+                    DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN
                 ),
                 "semantic_core_retention_min": min(
                     (

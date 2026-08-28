@@ -762,6 +762,20 @@ def health() -> dict[str, Any]:
                     "required_before_transparent_extraction": True,
                     "fail_closed": True,
                 },
+                "transparent_bowl_retention_gate": {
+                    "guidance_policy": (
+                        DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY
+                    ),
+                    "policy": DRINKING_STATIC_BOWL_ALPHA_RETENTION_POLICY,
+                    "uses_blue_subject_and_red_static_bowl_roles": True,
+                    "semantic_animal_plus_bounded_bowl_hybrid": True,
+                    "whole_animal_bounded_canvas_union": False,
+                    "per_frame_alpha_retention_ratio_min": (
+                        DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN
+                    ),
+                    "required_for_transparent_output": True,
+                    "fail_closed": True,
+                },
             },
             "dog_eating_scail_pose": {
                 "policy": DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,

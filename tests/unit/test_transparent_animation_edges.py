@@ -17,11 +17,14 @@ from src.comfy_pet_pipeline.media.transparent_animation import (
     validate_animation,
 )
 from src.comfy_pet_pipeline.pipeline.subject_replacement import (
+    DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN,
+    DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS,
     REFERENCE_ALIGNED_ADAPTIVE_EXTRACTION_POLICY,
     REFERENCE_ALIGNED_BOUNDED_CANVAS_EXTRACTION_STRATEGY,
     REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY,
     REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY,
     REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY,
+    _merge_reference_aligned_static_prop,
     _reference_guided_uniform_background_mask,
     encode_static_mask_video,
     reference_aligned_transparent_extraction_strategy,
@@ -292,6 +295,48 @@ class TransparentVideoCliTests(unittest.TestCase):
             int(output_rgb[100, 24, 1]),
             int(output_rgb[100, 24, 2]),
         )
+
+    def test_drinking_static_bowl_recovery_does_not_replace_animal_matte(self):
+        rgb = np.zeros((96, 96, 3), dtype=np.uint8)
+        alpha = np.zeros((96, 96), dtype=np.uint8)
+        bounded_rgb = np.zeros((96, 96, 3), dtype=np.uint8)
+        bounded_alpha = np.zeros((96, 96), dtype=np.uint8)
+        static_bowl = np.zeros((96, 96), dtype=np.uint8)
+
+        cv2.circle(rgb, (40, 36), 18, (212, 176, 125), -1)
+        cv2.circle(alpha, (40, 36), 18, 255, -1)
+        bounded_rgb[:] = rgb
+        bounded_rgb[64:78, 46:82] = (172, 178, 176)
+        bounded_alpha[:] = alpha
+        bounded_alpha[64:78, 46:82] = 255
+        static_bowl[66:76, 48:80] = 1
+        # Simulate noisy bounded-canvas pixels far from the bowl. They must not
+        # expand the otherwise clean semantic animal silhouette.
+        bounded_rgb[10:16, 10:16] = (220, 220, 220)
+        bounded_alpha[10:16, 10:16] = 255
+
+        output_rgb, output_alpha, metrics = (
+            _merge_reference_aligned_static_prop(
+                rgb,
+                alpha,
+                bounded_rgb,
+                bounded_alpha,
+                static_bowl.astype(bool),
+            )
+        )
+
+        self.assertEqual(int(output_alpha[70, 60]), 255)
+        self.assertEqual(int(output_alpha[12, 12]), 0)
+        self.assertEqual(tuple(output_rgb[70, 60]), (172, 178, 176))
+        self.assertGreaterEqual(
+            metrics["static_prop_output_retention_ratio"],
+            DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN,
+        )
+        self.assertEqual(
+            metrics["static_prop_recovery_dilation_radius"],
+            float(DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS),
+        )
+        self.assertGreater(metrics["static_prop_recovered_pixels"], 300)
 
     @unittest.skipUnless(importlib.util.find_spec("av"), "PyAV is not installed")
     def test_static_reference_mask_normalizes_black_background_losslessly(self):

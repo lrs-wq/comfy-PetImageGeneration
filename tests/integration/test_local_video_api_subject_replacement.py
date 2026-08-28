@@ -1396,6 +1396,34 @@ class TransparentGuidanceSelectionTests(unittest.TestCase):
         self.assertEqual(drinking["policy"], "driver_pose_mask_v1")
         self.assertEqual(drinking["source_key"], "pose_mask_video")
 
+    def test_full_driver_drinking_uses_static_bowl_retaining_matte(self) -> None:
+        plan = pipeline.select_transparent_guidance_policy(
+            "drinking",
+            {
+                "pose_metadata": {
+                    "primary_policy": True,
+                    "driver_signal_only": False,
+                    "driver_silhouette_preserved": True,
+                    "full_white_driver_geometry": True,
+                    "pose_geometry_scope": (
+                        "full_white_driver_subject_per_frame"
+                    ),
+                    "scene_prop_authority": (
+                        "digest_bound_white_maquette_video"
+                    ),
+                }
+            },
+        )
+
+        self.assertEqual(
+            plan["policy"],
+            pipeline.DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY,
+        )
+        self.assertEqual(plan["source_key"], "pose_mask_video")
+        self.assertFalse(plan["static_reference_mask"])
+        self.assertTrue(plan["reference_aligned_uniform_background"])
+        self.assertTrue(plan["static_prop_required"])
+
     def test_borderline_real_tray_reference_uses_static_reference_mask(self) -> None:
         plan = pipeline.select_transparent_guidance_policy(
             "toileting",
