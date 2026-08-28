@@ -129,7 +129,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.36"
+API_VERSION = "2.26.37"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -293,7 +293,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.42"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.43"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
     "strict_quality_gate_then_bounded_best_of_ten_selection_v2"
 )
@@ -304,6 +304,7 @@ QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
         "1.40.39",
         "1.40.40",
         "1.40.41",
+        "1.40.42",
         QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
     }
 )

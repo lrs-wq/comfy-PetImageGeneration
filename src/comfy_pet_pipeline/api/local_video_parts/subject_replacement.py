@@ -2255,6 +2255,12 @@ def revalidate_uploaded_qwen_references_before_scail(
             quality_record_sha256 = str(
                 stored_best_effort.get("quality_record_sha256") or ""
             ).strip().lower()
+            selected_candidate_path = Path(
+                str(stored_best_effort.get("selected_candidate_path") or "")
+            )
+            selected_candidate_sha256 = str(
+                stored_best_effort.get("selected_candidate_sha256") or ""
+            ).strip().lower()
             if (
                 stored_best_effort.get("policy")
                 != "generated_candidate_identity_action_best_of_ten_v1"
@@ -2264,6 +2270,14 @@ def revalidate_uploaded_qwen_references_before_scail(
                 != str(reference_path)
                 or stored_best_effort.get("published_reference_sha256")
                 != reference_digest
+                or not selected_candidate_path.is_file()
+                or selected_candidate_path.parent != reference_path.parent
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", selected_candidate_sha256
+                )
+                or file_sha256(selected_candidate_path)
+                != selected_candidate_sha256
+                or selected_candidate_sha256 != reference_digest
                 or stored_best_effort.get("original_upload_fallback_published")
                 is not False
                 or stored_best_effort.get("action_removed") is not False

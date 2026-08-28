@@ -30,8 +30,10 @@ def _record_fake_action_quality(
     action: str,
     pose_index: int,
     reference: Path,
+    selected_reference: Path | None = None,
     best_effort: bool = False,
 ) -> None:
+    selected_reference = selected_reference or reference
     workflow_dir = job_dir / "workflows"
     workflow_dir.mkdir(parents=True, exist_ok=True)
     (workflow_dir / f"qwen_pose_{pose_index:02d}_quality.json").write_text(
@@ -52,8 +54,10 @@ def _record_fake_action_quality(
                     if best_effort
                     else None
                 ),
-                "selected_reference_path": str(reference),
-                "selected_reference_sha256": pipeline.file_sha256(reference),
+                "selected_reference_path": str(selected_reference),
+                "selected_reference_sha256": pipeline.file_sha256(
+                    selected_reference
+                ),
                 "original_upload_fallback_published": False,
                 "action_removed": False,
                 "action": action,
@@ -2865,10 +2869,12 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                         "transparent": True,
                     },
                 )
-                action = job_dir / "eating_transparent.png"
+                selected_action = job_dir / "pose_01_qwen_cutout.png"
+                action = job_dir / "pose_01_keyframe_transparent.png"
                 image = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
                 image.paste((80, 80, 80, 255), (128, 96, 384, 416))
-                image.save(action)
+                image.save(selected_action)
+                action.write_bytes(selected_action.read_bytes())
                 pipeline.append_output(
                     job_id,
                     {
@@ -2883,6 +2889,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                     action="eating",
                     pose_index=1,
                     reference=action,
+                    selected_reference=selected_action,
                     best_effort=True,
                 )
                 pipeline.update_job(
@@ -2941,6 +2948,19 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                     jobs[job_id]["effective_subject_config"],
                     ["eating"],
                 )
+                (job_dir / "pose_01_qwen_cutout.png").write_bytes(
+                    b"tampered-selected-candidate"
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "best-effort reference contract",
+                ):
+                    pipeline.revalidate_uploaded_qwen_references_before_scail(
+                        job_id,
+                        jobs[job_id],
+                        jobs[job_id]["effective_subject_config"],
+                        ["eating"],
+                    )
 
             final_job = jobs[job_id]
 
@@ -2959,6 +2979,17 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
         self.assertEqual(
             final_job["qwen_first_frame_best_effort_references"]["eating"][
                 "published_reference_sha256"
+            ],
+            final_job["qwen_action_keyframe_sha256s"]["eating"],
+        )
+        self.assertTrue(
+            final_job["qwen_first_frame_best_effort_references"]["eating"][
+                "byte_preserved_publish_alias"
+            ]
+        )
+        self.assertEqual(
+            final_job["qwen_first_frame_best_effort_references"]["eating"][
+                "selected_candidate_sha256"
             ],
             final_job["qwen_action_keyframe_sha256s"]["eating"],
         )

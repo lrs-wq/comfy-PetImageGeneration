@@ -9741,6 +9741,38 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                     "attempts": attempts,
                 }
+
+            def persist_selected_quality_record() -> None:
+                selected_quality_record.update(
+                    strict_first_frame_required=strict_first_frame_required,
+                    strict_first_frame_best_effort_selected=bool(
+                        best_attempt.get("strict_first_frame_best_effort_selected")
+                    ),
+                    strict_first_frame_best_effort_issues=list(
+                        best_attempt.get("strict_first_frame_best_effort_issues") or []
+                    ),
+                    strict_first_frame_best_effort_selection_key=(
+                        best_attempt.get(
+                            "strict_first_frame_best_effort_selection_key"
+                        )
+                    ),
+                    strict_first_frame_attempt_limit=(
+                        QWEN_FIRST_FRAME_MAX_ATTEMPTS
+                        if strict_first_frame_required
+                        else None
+                    ),
+                    selected_reference_path=str(selected_keyframe),
+                    selected_reference_sha256=file_sha256(selected_keyframe),
+                    original_upload_fallback_published=False,
+                    action_removed=False,
+                )
+                write_json_atomic(
+                    job_dir
+                    / "workflows"
+                    / f"qwen_pose_{index:02d}_quality.json",
+                    selected_quality_record,
+                )
+
             if strict_first_frame_required:
                 strict_final_issues = strict_first_frame_record_issues(
                     best_attempt,
@@ -9785,6 +9817,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "action_removed": False,
                         },
                     )
+                # The validated cache is content-addressed from the selected audit.
+                # Persist that audit before attempting to store a strict cache hit.
+                persist_selected_quality_record()
                 cache_info = best_attempt.get("validated_first_frame_cache")
                 cache_status = (
                     "best_effort_not_cached" if best_effort_selected else "hit"
@@ -9883,33 +9918,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     qwen_first_frame_original_fallback_disabled=True,
                     qwen_first_frame_action_removal_disabled=True,
                 )
-            selected_quality_record.update(
-                strict_first_frame_required=strict_first_frame_required,
-                strict_first_frame_best_effort_selected=bool(
-                    best_attempt.get("strict_first_frame_best_effort_selected")
-                ),
-                strict_first_frame_best_effort_issues=list(
-                    best_attempt.get("strict_first_frame_best_effort_issues") or []
-                ),
-                strict_first_frame_best_effort_selection_key=(
-                    best_attempt.get(
-                        "strict_first_frame_best_effort_selection_key"
-                    )
-                ),
-                strict_first_frame_attempt_limit=(
-                    QWEN_FIRST_FRAME_MAX_ATTEMPTS
-                    if strict_first_frame_required
-                    else None
-                ),
-                selected_reference_path=str(selected_keyframe),
-                selected_reference_sha256=file_sha256(selected_keyframe),
-                original_upload_fallback_published=False,
-                action_removed=False,
-            )
-            write_json_atomic(
-                job_dir / "workflows" / f"qwen_pose_{index:02d}_quality.json",
-                selected_quality_record,
-            )
+            else:
+                persist_selected_quality_record()
             if not reference_generation_degraded:
                 accepted_pose_similarity_references.append(
                     {

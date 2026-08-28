@@ -1175,13 +1175,17 @@ def prepare_uploaded_subject_qwen_references(
                 selected_reference_sha256 = str(
                     quality_record.get("selected_reference_sha256") or ""
                 ).strip().lower()
+                candidate_sha256 = file_sha256(candidate)
                 if (
                     quality_record.get("strict_first_frame_required") is not True
                     or quality_record.get("strict_first_frame_attempt_limit")
                     != QWEN_FIRST_FRAME_MAX_ATTEMPTS
-                    or selected_reference_path != candidate
+                    or not selected_reference_path.is_file()
+                    or selected_reference_path.parent != job_dir
                     or not re.fullmatch(r"[0-9a-f]{64}", selected_reference_sha256)
-                    or file_sha256(candidate) != selected_reference_sha256
+                    or file_sha256(selected_reference_path)
+                    != selected_reference_sha256
+                    or candidate_sha256 != selected_reference_sha256
                     or quality_record.get("original_upload_fallback_published")
                     is not False
                     or quality_record.get("action_removed") is not False
@@ -1206,8 +1210,13 @@ def prepare_uploaded_subject_qwen_references(
                     ),
                     "quality_record_path": str(quality_path),
                     "quality_record_sha256": file_sha256(quality_path),
+                    "selected_candidate_path": str(selected_reference_path),
+                    "selected_candidate_sha256": selected_reference_sha256,
                     "published_reference_path": str(candidate),
-                    "published_reference_sha256": selected_reference_sha256,
+                    "published_reference_sha256": candidate_sha256,
+                    "byte_preserved_publish_alias": (
+                        selected_reference_path != candidate
+                    ),
                     "original_upload_fallback_published": False,
                     "action_removed": False,
                     "continues_to_scail": True,
