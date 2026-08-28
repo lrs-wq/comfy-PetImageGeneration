@@ -2,7 +2,9 @@
 
 服务地址：`http://39.106.120.253/api/local-video`
 
-当前候选主体替换版本为 `local-video-api v2.26.33`。上传任务采用 Qwen Image Edit 与 SCAIL-2 串行编排，单张 A10 GPU 通过异步队列执行。原始上传照只用于建立身份，不能作为动作首帧、SCAIL 动作参考或正常结果。动作 Profile 仅提供动作几何与时序，不再向上传宠物注入外观身份词。接口字段、默认 Profile 和自动物种路由保持不变；中型犬/小型犬只由测试平台通过既有 `subject_profile` 字段显式选择。
+当前候选主体替换版本为 `local-video-api v2.26.34`。上传任务采用 Qwen Image Edit 与 SCAIL-2 串行编排，单张 A10 GPU 通过异步队列执行。原始上传照只用于建立身份，不能作为动作首帧、SCAIL 动作参考或正常结果。动作 Profile 仅提供动作几何与时序，不再向上传宠物注入外观身份词。接口字段、默认 Profile 和自动物种路由保持不变；中型犬/小型犬只由测试平台通过既有 `subject_profile` 字段显式选择。
+
+`v2.26.34` 修正舔毛已验证缓存的色盘复验：历史舔毛记录没有通用 `identity_palette` 时，允许读取已验签的 `grooming_advisory_minimum_gate.identity_palette`；若当前任务实际生成了通用色盘复验结果，则该结果优先，不能被历史证据绕过。
 
 `v2.26.33` 将动作首帧改为严格发布合同。只有动作几何、上传身份、色盘、主体完整性与透明边缘全部通过的候选才可进入 SCAIL。系统按上传视图摘要、Profile 摘要、动作导图摘要、模型参数及策略版本建立内容寻址缓存；命中后仍在当前任务中重新执行关键门禁。缓存未命中或本轮全部候选不合格时，任务以新的大步长 seed 波次自动重新排队，不标记完成、不移除动作，也不再发布原图呼吸 GIF。服务重启期间处于首帧阶段的任务同样重新排队，不走终端降级输出。状态中的 `qwen_first_frame_states`、`qwen_first_frame_retry_waves` 和健康接口的 `first_frame_publication` 公开该合同。
 

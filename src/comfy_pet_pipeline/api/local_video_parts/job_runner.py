@@ -488,6 +488,38 @@ def pose_attempt_provenance(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def strict_first_frame_identity_palette_evidence(
+    record: dict[str, Any],
+    *,
+    action: str,
+) -> tuple[bool, str]:
+    """Resolve the authoritative palette gate for a validated first frame."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"strict_first_frame_identity_palette_evidence"},
+    )
+    palette = record.get("identity_palette")
+    if isinstance(palette, dict):
+        return (
+            palette.get("acceptable") is True,
+            "current_uploaded_identity_palette",
+        )
+
+    grooming_minimum = record.get("grooming_advisory_minimum_gate")
+    grooming_palette = (
+        grooming_minimum.get("identity_palette")
+        if isinstance(grooming_minimum, dict)
+        else None
+    )
+    if action_key(action) == "grooming" and isinstance(grooming_palette, dict):
+        return (
+            grooming_palette.get("acceptable") is True,
+            "persisted_grooming_minimum_contract",
+        )
+    return False, "missing_identity_palette_evidence"
+
+
 def strict_first_frame_record_issues(
     record: dict[str, Any],
     *,
@@ -529,7 +561,6 @@ def strict_first_frame_record_issues(
     ):
         issues.append("action_candidate_gate_not_strictly_acceptable")
 
-    palette = record.get("identity_palette")
     grooming_minimum = record.get("grooming_advisory_minimum_gate")
     if action == "grooming":
         if (
@@ -545,23 +576,10 @@ def strict_first_frame_record_issues(
             != str(record.get("keyframe_sha256") or "")
         ):
             issues.append("grooming_minimum_gate_candidate_digest_changed")
-        grooming_palette = (
-            grooming_minimum.get("identity_palette")
-            if isinstance(grooming_minimum, dict)
-            else None
-        )
-        if (
-            isinstance(palette, dict)
-            and palette.get("acceptable") is not True
-        ) or (
-            palette is None
-            and (
-                not isinstance(grooming_palette, dict)
-                or grooming_palette.get("acceptable") is not True
-            )
-        ):
-            issues.append("identity_palette_not_acceptable")
-    elif not isinstance(palette, dict) or palette.get("acceptable") is not True:
+    palette_acceptable, _palette_source = (
+        strict_first_frame_identity_palette_evidence(record, action=action)
+    )
+    if not palette_acceptable:
         issues.append("identity_palette_not_acceptable")
 
     for field in ("fur_silhouette", "fur_surface_gate", "grooming_pose_gate"):
@@ -3731,18 +3749,19 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     cached_gate = dict(
                         cached_attempt.get("action_candidate_gate") or {}
                     )
+                    (
+                        cached_palette_acceptable,
+                        cached_palette_source,
+                    ) = strict_first_frame_identity_palette_evidence(
+                        cached_attempt,
+                        action=action_key(pose),
+                    )
                     cached_gate.update(
                         acceptable=bool(
                             cached_quality.get("acceptable") is True
                             and cached_attempt["similarity"].get("acceptable")
                             is True
-                            and isinstance(
-                                cached_attempt.get("identity_palette"), dict
-                            )
-                            and cached_attempt["identity_palette"].get(
-                                "acceptable"
-                            )
-                            is True
+                            and cached_palette_acceptable
                             and (
                                 not isinstance(
                                     cached_attempt.get("fur_silhouette"), dict
@@ -3756,6 +3775,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         degraded_fallback_accepted=False,
                         cache_revalidated=True,
                         cache_revalidated_at=utc_now(),
+                        cache_identity_palette_source=cached_palette_source,
                     )
                     cached_attempt["action_candidate_gate"] = cached_gate
                     cached_attempt["combined_penalty"] = round(

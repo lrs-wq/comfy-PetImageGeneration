@@ -340,6 +340,73 @@ class ValidatedFirstFrameCacheTests(unittest.TestCase):
                 all(current_id in name for name in provenance["workflow_load_image_names"])
             )
 
+    def test_grooming_cache_accepts_palette_from_strict_minimum_contract(self) -> None:
+        accepted = {"available": True, "acceptable": True, "issues": []}
+        record = {
+            "chroma": {
+                **accepted,
+                "transparent_edge_quality": dict(accepted),
+            },
+            "quality": dict(accepted),
+            "similarity": dict(accepted),
+            "action_candidate_gate": {
+                "acceptable": True,
+                "degraded_fallback_accepted": False,
+            },
+            "grooming_advisory_minimum_gate": {
+                "acceptable": True,
+                "degraded_fallback_accepted": False,
+                "identity_palette": dict(accepted),
+            },
+        }
+
+        palette_acceptable, palette_source = (
+            pipeline.strict_first_frame_identity_palette_evidence(
+                record,
+                action="grooming",
+            )
+        )
+
+        self.assertTrue(palette_acceptable)
+        self.assertEqual(
+            palette_source,
+            "persisted_grooming_minimum_contract",
+        )
+        self.assertEqual(
+            pipeline.strict_first_frame_record_issues(
+                record,
+                action="grooming",
+            ),
+            [],
+        )
+
+    def test_current_palette_revalidation_overrides_grooming_cache_evidence(self) -> None:
+        accepted = {"available": True, "acceptable": True, "issues": []}
+        record = {
+            "identity_palette": {
+                "available": True,
+                "acceptable": False,
+                "issues": ["identity_palette_drift"],
+            },
+            "grooming_advisory_minimum_gate": {
+                "acceptable": True,
+                "identity_palette": dict(accepted),
+            },
+        }
+
+        palette_acceptable, palette_source = (
+            pipeline.strict_first_frame_identity_palette_evidence(
+                record,
+                action="grooming",
+            )
+        )
+
+        self.assertFalse(palette_acceptable)
+        self.assertEqual(
+            palette_source,
+            "current_uploaded_identity_palette",
+        )
+
 class WanRuntimeConfigTests(unittest.TestCase):
     def test_a14b_uses_121_frames_at_24_fps(self) -> None:
         self.assertEqual(pipeline.FRAME_COUNT, 121)
