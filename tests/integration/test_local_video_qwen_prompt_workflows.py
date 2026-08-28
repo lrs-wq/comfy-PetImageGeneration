@@ -229,7 +229,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         # tight v3 fingerprint instead of treating that expected mask delta as speed.
         self.assertLess(audit["lower_quarter_change_ratio_max"], 0.015)
 
-    def test_digest_bound_dog_drinking_loop_passes_dynamic_full_driver_fallback(
+    def test_digest_bound_dog_drinking_loop_is_full_driver_primary(
         self,
     ) -> None:
         profile = pipeline.load_subject_profile(
@@ -245,9 +245,6 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             scail_pipeline.make_full_drinking_pose_and_mask_frames(
                 sampled,
                 (512, 512),
-                reference_retarget_failure=(
-                    "drinking_reference_motion_unreliable: test_retarget"
-                ),
             )
         )
 
@@ -255,8 +252,10 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertEqual(len(mask_frames), 81)
         self.assertEqual(
             metadata["policy"],
-            scail_pipeline.DRINKING_FULL_WHITE_DRIVER_FALLBACK_POLICY,
+            scail_pipeline.DRINKING_FULL_WHITE_DRIVER_POSE_POLICY,
         )
+        self.assertTrue(metadata["primary_policy"])
+        self.assertIsNone(metadata["reference_retarget_failure"])
         self.assertFalse(metadata["fallback_used"])
         self.assertTrue(metadata["driver_input_used"])
         self.assertFalse(metadata["driver_signal_only"])

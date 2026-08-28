@@ -100,18 +100,25 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         ]
         self.assertEqual(
             dog_drinking_pose["policy"],
-            pipeline.DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
+            pipeline.DOG_DRINKING_FULL_DRIVER_POSE_POLICY,
         )
         self.assertTrue(dog_drinking_pose["driver_input_used"])
-        self.assertEqual(
-            dog_drinking_pose["dynamic_full_white_driver_fallback_policy"],
-            pipeline.DOG_DRINKING_FULL_DRIVER_FALLBACK_POLICY,
+        self.assertTrue(dog_drinking_pose["driver_silhouette_preserved"])
+        self.assertTrue(dog_drinking_pose["full_white_driver_geometry"])
+        self.assertFalse(
+            dog_drinking_pose[
+                "reference_aligned_head_only_policy_high_quality_allowed"
+            ]
         )
         self.assertTrue(
-            dog_drinking_pose["dynamic_fallback_full_white_driver_geometry"]
+            dog_drinking_pose["pre_scail_source_driver_gate"][
+                "required_before_gpu_submission"
+            ]
         )
         self.assertTrue(
-            dog_drinking_pose["dynamic_fallback_static_bowl_mask_and_rgb"]
+            dog_drinking_pose["output_temporal_action_gate"][
+                "compares_output_directly_to_source_white_driver"
+            ]
         )
         toileting_guidance = payload["subject_replacement"][
             "dog_toileting_first_frame"

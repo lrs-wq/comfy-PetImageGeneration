@@ -77,8 +77,14 @@ EATING_FULL_POSE_LOWER_QUARTER_CHANGE_RATIO_MIN = 0.011
 DRINKING_REFERENCE_ALIGNED_POSE_POLICY = (
     "reference_space_white_driver_head_path_static_bowl_v3"
 )
+DRINKING_FULL_WHITE_DRIVER_POSE_POLICY = (
+    "full_white_driver_drinking_pose_static_bowl_v2"
+)
+# Kept as an import-compatible alias for callers that previously treated the
+# complete driver as a fallback.  It is now the only high-quality dog drinking
+# geometry policy.
 DRINKING_FULL_WHITE_DRIVER_FALLBACK_POLICY = (
-    "full_white_driver_drinking_pose_static_bowl_v1"
+    DRINKING_FULL_WHITE_DRIVER_POSE_POLICY
 )
 DRINKING_FULL_DRIVER_CHANGE_RATIO_MIN = 0.01
 DRINKING_REFERENCE_HEAD_LIFT_PX = 36.0
@@ -4466,15 +4472,16 @@ def make_full_drinking_pose_and_mask_frames(
     sampled_frames: list[Image.Image],
     canvas_size: tuple[int, int],
     *,
-    reference_retarget_failure: str,
+    reference_retarget_failure: str | None = None,
 ) -> tuple[list[Image.Image], list[Image.Image], dict[str, Any]]:
-    """Use the complete white driver when reference-space retargeting is unsafe.
+    """Use the complete white driver as dog drinking's geometry authority.
 
     The approved upload remains SCAIL's identity reference.  Only action geometry
     comes from the digest-bound white maquette: the dog silhouette varies on every
     frame, while a temporal vote freezes the bowl mask and bowl RGB for the loop.
-    This is intentionally dynamic; a static reference is not an acceptable
-    drinking fallback because it removes the action signal before GPU submission.
+    A reference-space head-only retarget is not a high-quality alternative because
+    it removes the approach, body shift, contact, and release phases before GPU
+    submission.
     """
 
     frame_count = len(sampled_frames)
@@ -4658,9 +4665,14 @@ def make_full_drinking_pose_and_mask_frames(
         pose_frames,
         mask_frames,
         {
-            "policy": DRINKING_FULL_WHITE_DRIVER_FALLBACK_POLICY,
+            "policy": DRINKING_FULL_WHITE_DRIVER_POSE_POLICY,
+            "primary_policy": reference_retarget_failure is None,
             "fallback_used": False,
-            "reference_retarget_failure": reference_retarget_failure[:1000],
+            "reference_retarget_failure": (
+                reference_retarget_failure[:1000]
+                if reference_retarget_failure
+                else None
+            ),
             "driver_input_used": True,
             "driver_signal_only": False,
             "driver_rgb_preserved": False,
@@ -8902,45 +8914,25 @@ def main() -> int:
     elif args.action == "drinking" and args.species == "dog":
         try:
             pose_frames, pose_masks, pose_metadata = (
-                make_drinking_reference_aligned_pose_frames(
+                make_full_drinking_pose_and_mask_frames(
                     sampled,
-                    reference,
-                    reference_mask,
                     (args.width, args.height),
-                    frame_count=args.frames,
                 )
             )
         except ValueError as exc:
             if not str(exc).startswith(
-                "drinking_reference_motion_unreliable:"
+                "drinking_full_driver_fallback_unreliable:"
             ):
                 raise
-            reference_retarget_failure = str(exc)
-            try:
-                pose_frames, pose_masks, pose_metadata = (
-                    make_full_drinking_pose_and_mask_frames(
-                        sampled,
-                        (args.width, args.height),
-                        reference_retarget_failure=reference_retarget_failure,
-                    )
+            pose_frames, pose_masks, pose_metadata = (
+                make_static_reference_drinking_pose_frames(
+                    reference,
+                    reference_mask,
+                    (args.width, args.height),
+                    frame_count=args.frames,
+                    fallback_reason=str(exc),
                 )
-            except ValueError as full_driver_exc:
-                if not str(full_driver_exc).startswith(
-                    "drinking_full_driver_fallback_unreliable:"
-                ):
-                    raise
-                pose_frames, pose_masks, pose_metadata = (
-                    make_static_reference_drinking_pose_frames(
-                        reference,
-                        reference_mask,
-                        (args.width, args.height),
-                        frame_count=args.frames,
-                        fallback_reason=(
-                            f"{reference_retarget_failure}; "
-                            f"{full_driver_exc}"
-                        ),
-                    )
-                )
+            )
     else:
         pose_frames, pose_masks, pose_metadata = make_pose_and_mask_frames(
             sampled,

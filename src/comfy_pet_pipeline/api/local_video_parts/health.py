@@ -713,29 +713,46 @@ def health() -> dict[str, Any]:
                 },
             },
             "dog_drinking_scail_pose": {
-                "policy": DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
-                "pose_source": "approved_upload_anchored_drinking_reference",
-                "motion_scope": "bounded_closed_loop_head_lapping_only",
+                "policy": DOG_DRINKING_FULL_DRIVER_POSE_POLICY,
+                "pose_source": "digest_bound_white_maquette_video",
+                "motion_scope": "complete_approach_contact_drinking_release_loop",
                 "driver_input_used": True,
                 "driver_rgb_preserved": False,
-                "driver_silhouette_preserved": False,
-                "body_ears_paws_tail_locked_to_reference": True,
+                "driver_silhouette_preserved": True,
+                "full_white_driver_geometry": True,
+                "identity_source": "approved_upload_anchored_drinking_reference",
+                "scene_prop_source": "digest_bound_white_maquette_video",
+                "reference_aligned_head_only_policy_high_quality_allowed": False,
+                "reference_aligned_head_only_degraded_policy": (
+                    DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY
+                ),
                 "static_identity_safe_fallback_policy": (
                     DOG_DRINKING_STATIC_POSE_FALLBACK_POLICY
                 ),
-                "dynamic_full_white_driver_fallback_policy": (
-                    DOG_DRINKING_FULL_DRIVER_FALLBACK_POLICY
-                ),
-                "dynamic_fallback_full_white_driver_geometry": True,
-                "dynamic_fallback_static_bowl_mask_and_rgb": True,
+                "static_bowl_mask_and_rgb_from_white_driver": True,
+                "pre_scail_source_driver_gate": {
+                    "compares_prepared_pose_to_source_driver": True,
+                    "prepared_pose_source_driver_retention_ratio_min": (
+                        DRINKING_PREPARED_SOURCE_SILHOUETTE_RETENTION_RATIO_MIN
+                    ),
+                    "prepared_bowl_area_retention_ratio_min": (
+                        DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN
+                    ),
+                    "required_before_gpu_submission": True,
+                    "fail_closed": True,
+                },
                 "output_temporal_action_gate": {
                     "policy": DRINKING_SCAIL_TEMPORAL_ACTION_POLICY,
                     "compares_output_to_prepared_white_model_pose": True,
+                    "compares_output_directly_to_source_white_driver": True,
                     "expected_silhouette_excursion_min": (
                         DRINKING_SCAIL_EXPECTED_SILHOUETTE_EXCURSION_MIN
                     ),
                     "silhouette_excursion_retention_ratio_min": (
                         DRINKING_SCAIL_SILHOUETTE_RETENTION_RATIO_MIN
+                    ),
+                    "output_source_driver_retention_ratio_min": (
+                        DRINKING_OUTPUT_SOURCE_SILHOUETTE_RETENTION_RATIO_MIN
                     ),
                     "max_attempts": DRINKING_SCAIL_MAX_ATTEMPTS,
                     "pose_strength_multipliers": list(

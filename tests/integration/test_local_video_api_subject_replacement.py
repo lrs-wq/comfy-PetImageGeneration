@@ -623,33 +623,33 @@ class SubjectReplacementEffectiveConfigTests(unittest.TestCase):
                 pipeline.DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,
             )
 
-    def test_dog_drinking_pose_policy_accepts_only_current_motion_paths(
+    def test_dog_drinking_pose_policy_accepts_only_full_driver_primary(
         self,
     ) -> None:
-        for actual_policy in (
+        pipeline.require_expected_scail_pose_policy(
+            {
+                "pose_metadata": {
+                    "policy": pipeline.DOG_DRINKING_FULL_DRIVER_POSE_POLICY,
+                }
+            },
+            "drinking",
+            pipeline.DOG_DRINKING_FULL_DRIVER_POSE_POLICY,
+        )
+
+        for forbidden_policy in (
             pipeline.DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
             pipeline.DOG_DRINKING_STATIC_POSE_FALLBACK_POLICY,
-            pipeline.DOG_DRINKING_FULL_DRIVER_FALLBACK_POLICY,
+            "reference_space_identity_locked_head_lapping_v1",
         ):
-            pipeline.require_expected_scail_pose_policy(
-                {"pose_metadata": {"policy": actual_policy}},
-                "drinking",
-                pipeline.DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
-            )
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "SCAIL drinking pose policy changed before GPU submission",
-        ):
-            pipeline.require_expected_scail_pose_policy(
-                {
-                    "pose_metadata": {
-                        "policy": "reference_space_identity_locked_head_lapping_v1",
-                    }
-                },
-                "drinking",
-                pipeline.DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY,
-            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "SCAIL drinking pose policy changed before GPU submission",
+            ):
+                pipeline.require_expected_scail_pose_policy(
+                    {"pose_metadata": {"policy": forbidden_policy}},
+                    "drinking",
+                    pipeline.DOG_DRINKING_FULL_DRIVER_POSE_POLICY,
+                )
 
     def test_cat_full_driver_policy_still_rejects_dog_static_fallback(
         self,
@@ -1624,6 +1624,77 @@ class ToiletingScailTemporalIdentityArtifactTests(unittest.TestCase):
             collapsed["silhouette_excursion_retention_ratio_minimum"],
         )
         self.assertTrue(faithful["acceptable"], faithful)
+
+    def test_drinking_motion_gate_compares_prepared_and_output_to_source(
+        self,
+    ) -> None:
+        background = np.full((256, 256, 3), (0, 255, 0), dtype=np.uint8)
+        source: list[np.ndarray] = []
+        collapsed: list[np.ndarray] = []
+        for index in range(13):
+            source_frame = background.copy()
+            cv2.rectangle(
+                source_frame,
+                (58, 104),
+                (170, 230),
+                (190, 155, 110),
+                -1,
+            )
+            cv2.circle(
+                source_frame,
+                (174, 62 + index * 10),
+                46,
+                (155, 120, 90),
+                -1,
+            )
+            source.append(source_frame)
+
+            collapsed_frame = background.copy()
+            cv2.rectangle(
+                collapsed_frame,
+                (58, 104),
+                (170, 230),
+                (190, 155, 110),
+                -1,
+            )
+            cv2.circle(
+                collapsed_frame,
+                (174, 104 + index * 2),
+                46,
+                (155, 120, 90),
+                -1,
+            )
+            collapsed.append(collapsed_frame)
+
+        rejected = pipeline.drinking_scail_video_motion_quality(
+            collapsed,
+            expected_pose_frames=collapsed,
+            source_driver_frames=source,
+        )
+        accepted = pipeline.drinking_scail_video_motion_quality(
+            source,
+            expected_pose_frames=source,
+            source_driver_frames=source,
+        )
+
+        self.assertFalse(rejected["acceptable"], rejected)
+        self.assertIn(
+            "drinking_prepared_pose_source_driver_geometry_retention_too_low",
+            rejected["issues"],
+        )
+        self.assertIn(
+            "drinking_output_source_driver_geometry_retention_too_low",
+            rejected["issues"],
+        )
+        self.assertLess(
+            rejected[
+                "prepared_pose_to_source_driver_silhouette_retention_ratio"
+            ],
+            rejected[
+                "prepared_pose_to_source_driver_silhouette_retention_ratio_minimum"
+            ],
+        )
+        self.assertTrue(accepted["acceptable"], accepted)
 
     def test_drinking_retry_controls_increase_pose_strength(self) -> None:
         workflow = {

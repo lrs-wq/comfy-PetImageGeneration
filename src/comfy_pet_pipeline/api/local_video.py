@@ -127,7 +127,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.29"
+API_VERSION = "2.26.30"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -693,8 +693,11 @@ DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY = (
 DOG_DRINKING_STATIC_POSE_FALLBACK_POLICY = (
     "static_reference_drinking_pose_identity_fallback_v1"
 )
+DOG_DRINKING_FULL_DRIVER_POSE_POLICY = (
+    "full_white_driver_drinking_pose_static_bowl_v2"
+)
 DOG_DRINKING_FULL_DRIVER_FALLBACK_POLICY = (
-    "full_white_driver_drinking_pose_static_bowl_v1"
+    DOG_DRINKING_FULL_DRIVER_POSE_POLICY
 )
 UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY = (
     "uploaded_subject_absolute_animation_roughness_v1"
@@ -2348,7 +2351,7 @@ def configure_uploaded_subject_validation(
                 )
         elif action == "drinking" and dog_profile:
             expected_pose_policies[action] = (
-                DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY
+                DOG_DRINKING_FULL_DRIVER_POSE_POLICY
             )
 
     frozen["prompt_profile"] = (
@@ -6790,6 +6793,9 @@ drinking_scail_video_motion_quality = (
 evaluate_drinking_scail_video_motion = (
     _local_video_subject_replacement.evaluate_drinking_scail_video_motion
 )
+evaluate_drinking_prepared_pose_motion = (
+    _local_video_subject_replacement.evaluate_drinking_prepared_pose_motion
+)
 eating_scail_video_motion_quality = (
     _local_video_subject_replacement.eating_scail_video_motion_quality
 )
@@ -6837,6 +6843,15 @@ DRINKING_SCAIL_EXPECTED_SILHOUETTE_EXCURSION_MIN = (
 )
 DRINKING_SCAIL_SILHOUETTE_RETENTION_RATIO_MIN = (
     _local_video_subject_replacement.DRINKING_SCAIL_SILHOUETTE_RETENTION_RATIO_MIN
+)
+DRINKING_PREPARED_SOURCE_SILHOUETTE_RETENTION_RATIO_MIN = (
+    _local_video_subject_replacement.DRINKING_PREPARED_SOURCE_SILHOUETTE_RETENTION_RATIO_MIN
+)
+DRINKING_OUTPUT_SOURCE_SILHOUETTE_RETENTION_RATIO_MIN = (
+    _local_video_subject_replacement.DRINKING_OUTPUT_SOURCE_SILHOUETTE_RETENTION_RATIO_MIN
+)
+DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN = (
+    _local_video_subject_replacement.DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN
 )
 EATING_SCAIL_TEMPORAL_ACTION_POLICY = (
     _local_video_subject_replacement.EATING_SCAIL_TEMPORAL_ACTION_POLICY
