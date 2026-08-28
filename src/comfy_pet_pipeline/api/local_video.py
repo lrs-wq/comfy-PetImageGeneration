@@ -129,7 +129,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.34"
+API_VERSION = "2.26.35"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -293,13 +293,18 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.40"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.41"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
     "strict_quality_gate_then_content_addressed_reuse_or_seed_wave_retry_v1"
 )
 QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION = "validated_qwen_first_frame_v1"
 QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
-    {"1.40.38", "1.40.39", QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION}
+    {
+        "1.40.38",
+        "1.40.39",
+        "1.40.40",
+        QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
+    }
 )
 QWEN_FIRST_FRAME_SEED_WAVE_STRIDE = max(
     10_000,
@@ -6901,8 +6906,14 @@ pose_attempt_provenance = _local_video_job_runner.pose_attempt_provenance
 strict_first_frame_identity_palette_evidence = (
     _local_video_job_runner.strict_first_frame_identity_palette_evidence
 )
+revalidate_cached_grooming_minimum_gate = (
+    _local_video_job_runner.revalidate_cached_grooming_minimum_gate
+)
 strict_first_frame_record_issues = (
     _local_video_job_runner.strict_first_frame_record_issues
+)
+raise_strict_first_frame_quality_retry = (
+    _local_video_job_runner.raise_strict_first_frame_quality_retry
 )
 validated_first_frame_cache_fingerprint = (
     _local_video_job_runner.validated_first_frame_cache_fingerprint

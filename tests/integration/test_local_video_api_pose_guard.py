@@ -370,7 +370,7 @@ class ValidatedFirstFrameCacheTests(unittest.TestCase):
         self.assertTrue(palette_acceptable)
         self.assertEqual(
             palette_source,
-            "persisted_grooming_minimum_contract",
+            "grooming_minimum_contract",
         )
         self.assertEqual(
             pipeline.strict_first_frame_record_issues(
@@ -406,6 +406,85 @@ class ValidatedFirstFrameCacheTests(unittest.TestCase):
             palette_source,
             "current_uploaded_identity_palette",
         )
+
+    def test_grooming_cache_contract_is_revalidated_with_current_job_inputs(self) -> None:
+        record = {
+            "attempt": 2,
+            "validated_first_frame_cache": {"source_job_id": "source-job"},
+        }
+        current_gate = {
+            "policy": "grooming_action_identity_minimum_contract_v10",
+            "version": "10.0",
+            "acceptable": True,
+            "issues": [],
+        }
+        paths = {
+            "candidate_path": Path("/current/candidate.png"),
+            "identity_palette_reference_path": Path("/current/upload.png"),
+            "identity_reference_path": Path("/current/canonical.png"),
+            "geometry_guide": Path("/current/guide.png"),
+            "geometry_metadata": Path("/current/guide.json"),
+        }
+
+        with patch.object(
+            pipeline,
+            "evaluate_advisory_grooming_minimum_gate",
+            return_value=current_gate,
+        ) as evaluator:
+            result = pipeline.revalidate_cached_grooming_minimum_gate(
+                record,
+                identity_reference_palette={"gray": 1.0},
+                **paths,
+            )
+
+        self.assertTrue(result["cache_revalidated"])
+        self.assertEqual(result["cache_source_job_id"], "source-job")
+        self.assertIs(record["grooming_advisory_minimum_gate"], result)
+        self.assertEqual(evaluator.call_args.kwargs["attempt"], 2)
+        for field, path in paths.items():
+            if field != "candidate_path":
+                self.assertEqual(evaluator.call_args.kwargs[field], path)
+
+    def test_post_selection_first_frame_failure_requeues_same_job(self) -> None:
+        job = {
+            "qwen_first_frame_retry_waves": {},
+            "qwen_first_frame_states": {},
+        }
+
+        def update_job(_job_id: str, **changes: object) -> None:
+            job.update(changes)
+
+        with (
+            patch.object(pipeline, "get_job", return_value=job),
+            patch.object(pipeline, "update_job", side_effect=update_job),
+            patch.object(pipeline, "append_recovery_event") as recovery_event,
+            self.assertRaises(pipeline.FirstFrameQualityRetry),
+        ):
+            pipeline.raise_strict_first_frame_quality_retry(
+                "same-job",
+                action="grooming",
+                pose_index=2,
+                retry_wave=0,
+                attempts=[{"attempt": 2}],
+                failure_summary="post-selection contract changed",
+                cache_status="rejected_after_selection",
+            )
+
+        self.assertEqual(job["stage"], "retrying_first_frame_quality")
+        self.assertEqual(job["qwen_first_frame_retry_waves"], {"grooming": 1})
+        self.assertEqual(
+            job["qwen_first_frame_states"]["grooming"]["status"],
+            "retrying_with_new_seed_wave",
+        )
+        self.assertFalse(
+            job["qwen_first_frame_states"]["grooming"][
+                "original_upload_fallback_published"
+            ]
+        )
+        self.assertFalse(
+            job["qwen_first_frame_states"]["grooming"]["action_removed"]
+        )
+        recovery_event.assert_called_once()
 
 class WanRuntimeConfigTests(unittest.TestCase):
     def test_a14b_uses_121_frames_at_24_fps(self) -> None:

@@ -515,9 +515,50 @@ def strict_first_frame_identity_palette_evidence(
     if action_key(action) == "grooming" and isinstance(grooming_palette, dict):
         return (
             grooming_palette.get("acceptable") is True,
-            "persisted_grooming_minimum_contract",
+            "grooming_minimum_contract",
         )
     return False, "missing_identity_palette_evidence"
+
+
+def revalidate_cached_grooming_minimum_gate(
+    record: dict[str, Any],
+    *,
+    candidate_path: Path,
+    identity_reference_palette: dict[str, Any],
+    identity_palette_reference_path: Path,
+    identity_reference_path: Path,
+    geometry_guide: Path,
+    geometry_metadata: Path,
+) -> dict[str, Any]:
+    """Rebind and rerun a cached grooming contract against current-job inputs."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"revalidate_cached_grooming_minimum_gate"},
+    )
+    gate = evaluate_advisory_grooming_minimum_gate(
+        candidate_path,
+        identity_reference_palette=identity_reference_palette,
+        identity_palette_reference_path=identity_palette_reference_path,
+        identity_reference_path=identity_reference_path,
+        geometry_guide=geometry_guide,
+        geometry_metadata=geometry_metadata,
+        attempt=max(1, int(record.get("attempt") or 1)),
+    )
+    gate = json.loads(json.dumps(gate))
+    gate.update(
+        cache_revalidated=True,
+        cache_revalidated_at=utc_now(),
+        cache_source_job_id=(
+            (record.get("validated_first_frame_cache") or {}).get(
+                "source_job_id"
+            )
+            if isinstance(record.get("validated_first_frame_cache"), dict)
+            else None
+        ),
+    )
+    record["grooming_advisory_minimum_gate"] = gate
+    return gate
 
 
 def strict_first_frame_record_issues(
@@ -587,6 +628,86 @@ def strict_first_frame_record_issues(
         if isinstance(value, dict) and value.get("acceptable") is not True:
             issues.append(f"{field}_not_acceptable")
     return list(dict.fromkeys(issues))
+
+
+def raise_strict_first_frame_quality_retry(
+    job_id: str,
+    *,
+    action: str,
+    pose_index: int,
+    retry_wave: int,
+    attempts: list[dict[str, Any]],
+    failure_summary: str,
+    cache_status: str,
+) -> None:
+    """Keep a strict first-frame job alive and move it to a fresh seed wave."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"raise_strict_first_frame_quality_retry"},
+    )
+    normalized_action = action_key(action)
+    next_retry_wave = retry_wave + 1
+    retry_waves = dict(
+        get_job(job_id).get("qwen_first_frame_retry_waves") or {}
+    )
+    retry_waves[normalized_action] = next_retry_wave
+    first_frame_states = dict(
+        get_job(job_id).get("qwen_first_frame_states") or {}
+    )
+    first_frame_states[normalized_action] = {
+        "status": "retrying_with_new_seed_wave",
+        "completed": False,
+        "quality_passed": False,
+        "published": False,
+        "retry_wave": next_retry_wave,
+        "attempts_in_wave": len(attempts),
+        "last_failure_summary": failure_summary,
+        "original_upload_fallback_published": False,
+        "action_removed": False,
+    }
+    update_job(
+        job_id,
+        stage="retrying_first_frame_quality",
+        recovery_active=True,
+        recovery_attempt=next_retry_wave,
+        quality_retry=None,
+        qwen_first_frame_retry_waves=retry_waves,
+        qwen_first_frame_states=first_frame_states,
+        qwen_first_frame_current_action=normalized_action,
+        qwen_first_frame_cache_status=cache_status,
+        qwen_first_frame_last_failure={
+            "action": normalized_action,
+            "pose_index": pose_index,
+            "retry_wave": retry_wave,
+            "attempt_count": len(attempts),
+            "summary": failure_summary,
+        },
+        qwen_first_frame_original_fallback_disabled=True,
+        qwen_first_frame_action_removal_disabled=True,
+    )
+    append_recovery_event(
+        job_id,
+        {
+            "stage": "cartoon_keyframe",
+            "pose_index": pose_index,
+            "reason": "strict_first_frame_quality_changed",
+            "strategy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
+            "result": "job_requeued_with_fresh_seed_wave",
+            "action": normalized_action,
+            "completed_wave": retry_wave,
+            "next_wave": next_retry_wave,
+            "attempt_count": len(attempts),
+            "failure_summary": failure_summary,
+            "original_upload_fallback_published": False,
+            "action_removed": False,
+        },
+    )
+    raise FirstFrameQualityRetry(
+        f"{normalized_action} first frame did not pass strict quality gates "
+        f"in seed wave {retry_wave}; queued wave {next_retry_wave}: "
+        f"{failure_summary}"
+    )
 
 
 def validated_first_frame_cache_fingerprint(
@@ -3690,7 +3811,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                     pose_candidate_matte_policy=(QWEN_ACTION_CANDIDATE_MATTE_POLICY),
                 )
-            if strict_first_frame_required:
+            if strict_first_frame_required and first_frame_retry_wave == 0:
                 cached_attempt = load_validated_first_frame_cache(
                     job_id,
                     get_job(job_id),
@@ -3700,6 +3821,92 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
                 if cached_attempt is not None:
                     cached_path = job_dir / str(cached_attempt["keyframe"])
+                    if (
+                        action_key(pose) == "grooming"
+                        and advisory_grooming_minimum_gate_required
+                    ):
+                        if (
+                            advisory_grooming_identity_palette_reference is None
+                            or pose_palette_reference_path is None
+                            or grooming_identity_contract_reference_path is None
+                            or grooming_pose_gate_guide_path is None
+                            or grooming_pose_gate_metadata_path is None
+                        ):
+                            cached_minimum_gate = {
+                                "policy": GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
+                                "version": GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
+                                "available": False,
+                                "acceptable": False,
+                                "issues": [
+                                    "cache_revalidation_references_unavailable"
+                                ],
+                                "cache_revalidated": False,
+                            }
+                            cached_attempt[
+                                "grooming_advisory_minimum_gate"
+                            ] = cached_minimum_gate
+                        else:
+                            try:
+                                cached_minimum_gate = (
+                                    revalidate_cached_grooming_minimum_gate(
+                                        cached_attempt,
+                                        candidate_path=cached_path,
+                                        identity_reference_palette=(
+                                            advisory_grooming_identity_palette_reference
+                                        ),
+                                        identity_palette_reference_path=(
+                                            pose_palette_reference_path
+                                        ),
+                                        identity_reference_path=(
+                                            grooming_identity_contract_reference_path
+                                        ),
+                                        geometry_guide=grooming_pose_gate_guide_path,
+                                        geometry_metadata=(
+                                            grooming_pose_gate_metadata_path
+                                        ),
+                                    )
+                                )
+                            except (OSError, ValueError, KeyError, RuntimeError) as exc:
+                                LOGGER.warning(
+                                    "%s cached grooming minimum-contract "
+                                    "revalidation failed: %s",
+                                    job_id,
+                                    exc,
+                                )
+                                cached_minimum_gate = {
+                                    "policy": (
+                                        GROOMING_ADVISORY_MINIMUM_GATE_POLICY
+                                    ),
+                                    "version": (
+                                        GROOMING_ADVISORY_MINIMUM_GATE_VERSION
+                                    ),
+                                    "available": False,
+                                    "acceptable": False,
+                                    "issues": [
+                                        "cache_minimum_contract_revalidation_failed"
+                                    ],
+                                    "error": str(exc),
+                                    "cache_revalidated": False,
+                                }
+                                cached_attempt[
+                                    "grooming_advisory_minimum_gate"
+                                ] = cached_minimum_gate
+                        grooming_advisory_minimum_gate_attempts.append(
+                            {
+                                "pose_index": index,
+                                "pose": pose,
+                                "action": action_key(pose),
+                                "attempt": cached_attempt.get("attempt"),
+                                "seed": cached_attempt.get("seed"),
+                                "gate": cached_minimum_gate,
+                                "result": (
+                                    "cache_revalidated_passed"
+                                    if cached_minimum_gate.get("acceptable")
+                                    is True
+                                    else "cache_revalidated_rejected"
+                                ),
+                            }
+                        )
                     cached_quality = pose_cutout_quality(
                         cached_path,
                         pose,
@@ -3853,6 +4060,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             action_key(pose),
                             cache_issues,
                         )
+            elif strict_first_frame_required:
+                update_job(
+                    job_id,
+                    qwen_first_frame_cache_status="bypassed_after_retry_wave",
+                    qwen_first_frame_cache_bypassed_action=action_key(pose),
+                    qwen_first_frame_cache_bypassed_retry_wave=(
+                        first_frame_retry_wave
+                    ),
+                )
             generation_pose_profiles = (
                 [] if best_attempt is not None else active_pose_profiles
             )
@@ -8081,68 +8297,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     + pose_attempt_failure_summary(attempts)
                 )
             if best_attempt is None and strict_first_frame_required:
-                failed_action = action_key(pose)
-                next_retry_wave = first_frame_retry_wave + 1
-                retry_waves = dict(
-                    get_job(job_id).get("qwen_first_frame_retry_waves") or {}
-                )
-                retry_waves[failed_action] = next_retry_wave
-                first_frame_states = dict(
-                    get_job(job_id).get("qwen_first_frame_states") or {}
-                )
                 failure_summary = pose_attempt_failure_summary(attempts)
-                first_frame_states[failed_action] = {
-                    "status": "retrying_with_new_seed_wave",
-                    "completed": False,
-                    "quality_passed": False,
-                    "published": False,
-                    "retry_wave": next_retry_wave,
-                    "attempts_in_wave": len(active_pose_profiles),
-                    "last_failure_summary": failure_summary,
-                    "original_upload_fallback_published": False,
-                    "action_removed": False,
-                }
-                update_job(
+                raise_strict_first_frame_quality_retry(
                     job_id,
-                    stage="retrying_first_frame_quality",
-                    recovery_active=True,
-                    recovery_attempt=next_retry_wave,
-                    quality_retry=None,
-                    qwen_first_frame_retry_waves=retry_waves,
-                    qwen_first_frame_states=first_frame_states,
-                    qwen_first_frame_current_action=failed_action,
-                    qwen_first_frame_cache_status="miss",
-                    qwen_first_frame_last_failure={
-                        "action": failed_action,
-                        "pose_index": index,
-                        "retry_wave": first_frame_retry_wave,
-                        "attempt_count": len(active_pose_profiles),
-                        "summary": failure_summary,
-                    },
-                    qwen_first_frame_original_fallback_disabled=True,
-                    qwen_first_frame_action_removal_disabled=True,
-                )
-                append_recovery_event(
-                    job_id,
-                    {
-                        "stage": "cartoon_keyframe",
-                        "pose_index": index,
-                        "reason": "strict_first_frame_attempt_wave_exhausted",
-                        "strategy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
-                        "result": "job_requeued_with_fresh_seed_wave",
-                        "action": failed_action,
-                        "completed_wave": first_frame_retry_wave,
-                        "next_wave": next_retry_wave,
-                        "attempt_count": len(active_pose_profiles),
-                        "failure_summary": failure_summary,
-                        "original_upload_fallback_published": False,
-                        "action_removed": False,
-                    },
-                )
-                raise FirstFrameQualityRetry(
-                    f"{failed_action} first frame did not pass strict quality "
-                    f"gates in seed wave {first_frame_retry_wave}; queued wave "
-                    f"{next_retry_wave}."
+                    action=action_key(pose),
+                    pose_index=index,
+                    retry_wave=first_frame_retry_wave,
+                    attempts=attempts,
+                    failure_summary=failure_summary,
+                    cache_status="miss",
                 )
             if best_attempt is None and force_qwen_reference:
                 failed_action = action_key(pose)
@@ -9003,6 +9166,28 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                     != file_sha256(pose_palette_reference_path)
                 ):
+                    if strict_first_frame_required:
+                        update_job(
+                            job_id,
+                            grooming_pose_gate_status=(
+                                "minimum_contract_retrying"
+                            ),
+                            grooming_advisory_minimum_gate_status="retrying",
+                            grooming_advisory_minimum_gate_attempts=(
+                                grooming_advisory_minimum_gate_attempts
+                            ),
+                        )
+                        raise_strict_first_frame_quality_retry(
+                            job_id,
+                            action=action_key(pose),
+                            pose_index=index,
+                            retry_wave=first_frame_retry_wave,
+                            attempts=attempts,
+                            failure_summary=(
+                                "post_selection_grooming_minimum_contract_invalid"
+                            ),
+                            cache_status="rejected_after_selection",
+                        )
                     update_job(
                         job_id,
                         grooming_pose_gate_status="minimum_contract_failed",
@@ -9192,10 +9377,17 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     action=action_key(pose),
                 )
                 if strict_final_issues:
-                    raise RuntimeError(
-                        "Strict first-frame publication invariant changed after "
-                        f"selection for {action_key(pose)}: "
-                        + ", ".join(strict_final_issues)
+                    raise_strict_first_frame_quality_retry(
+                        job_id,
+                        action=action_key(pose),
+                        pose_index=index,
+                        retry_wave=first_frame_retry_wave,
+                        attempts=attempts,
+                        failure_summary=(
+                            "post_selection_strict_invariant_changed: "
+                            + ", ".join(strict_final_issues)
+                        ),
+                        cache_status="rejected_after_selection",
                     )
                 cache_info = best_attempt.get("validated_first_frame_cache")
                 cache_status = "hit"
