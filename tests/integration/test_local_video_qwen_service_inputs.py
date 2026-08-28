@@ -153,10 +153,24 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertEqual(
             guard["geometry_generator_policy"],
             {
-                "eating": "driving_eating_geometry_image2_v6",
+                "eating": "driving_eating_geometry_image2_v7",
                 "grooming": pipeline.GROOMING_QWEN_GEOMETRY_GUIDE_POLICY,
             },
         )
+        isolation = guard["action_isolation_contract"]
+        self.assertEqual(
+            isolation["species_actions"]["cat"],
+            list(pipeline.CAT_SUBJECT_REPLACEMENT_ACTIONS),
+        )
+        self.assertEqual(
+            isolation["species_actions"]["small_dog"],
+            list(pipeline.SMALL_DOG_SUBJECT_REPLACEMENT_ACTIONS),
+        )
+        self.assertEqual(isolation["execution"], "serial_per_action")
+        self.assertTrue(isolation["per_action_scail_experiment"])
+        self.assertTrue(isolation["successful_sibling_outputs_preserved"])
+        self.assertFalse(isolation["failed_action_enters_scail"])
+        self.assertFalse(isolation["fully_statistically_independent"])
         self.assertEqual(
             guard["grooming_geometry_isolation"]["qwen_foreground_rgb"],
             list(pipeline.GROOMING_QWEN_GUIDE_FOREGROUND_RGB),
@@ -640,6 +654,11 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         )
         self.assertTrue(eating_refine["persists_for_remaining_attempts"])
         self.assertTrue(eating_refine["generic_full_redraw_forbidden_after_source"])
+        self.assertIn(
+            "invented_stripe_pattern",
+            eating_refine["unsafe_source_palette_issues"],
+        )
+        self.assertFalse(eating_refine["invented_stripe_candidate_can_seed_refine"])
         self.assertTrue(eating_refine["qwen_lightning_only"])
         self.assertIsNone(eating_refine["style_lora"])
         self.assertIsNone(eating_refine["sampler_noise_mask"])
@@ -1258,9 +1277,7 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                 Image.new("RGB", (512, 512), (0, 255, 0)).save(target)
                 with Image.open(target) as loaded:
                     image = loaded.copy()
-                image.paste((120, 120, 120), (96, 80, 202, 432))
-                image.paste((144, 144, 144), (202, 80, 310, 432))
-                image.paste((168, 168, 168), (310, 80, 416, 432))
+                image.paste((132, 132, 132), (96, 80, 416, 432))
                 image.paste((214, 208, 196), (180, 360, 330, 420))
                 image.paste((232, 228, 218), (180, 360, 330, 370))
                 image.paste((142, 86, 45), (220, 365, 260, 390))
@@ -1271,10 +1288,10 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                 metadata_path.write_text(
                     json.dumps(
                         {
-                            "policy": "driving_eating_geometry_image2_v6",
+                            "policy": "driving_eating_geometry_image2_v7",
                             "method": (
-                                "temporal_head_lowering_compressed_anatomy_"
-                                "semantic_food_fields_v7"
+                                "temporal_head_lowering_flat_subject_"
+                                "semantic_food_fields_v8"
                             ),
                             "source_sha256": pipeline.file_sha256(source),
                             "sampled_frame_count": 81,
@@ -1318,17 +1335,11 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                                 "high_frequency_outline_preserved": False,
                             },
                             "semantic_structure": {
-                                "method": (
-                                    "compressed_blurred_quantized_neutral_anatomy_v1"
-                                ),
-                                "subject_gray_range": [120, 168],
-                                "subject_gray_values": [120, 144, 168],
-                                "subject_unique_rgb_count": 3,
-                                "internal_luma_variation": True,
+                                "method": "flat_uniform_subject_silhouette_v3",
+                                "subject_rgb": [132, 132, 132],
+                                "subject_unique_rgb_count": 1,
+                                "internal_luma_variation": False,
                                 "appearance_bearing_face_detail": False,
-                                "anatomy_gaussian_sigma": 10.0,
-                                "source_luma_contrast": 48.0,
-                                "quantum": 8,
                                 "source_luma_values_preserved": False,
                                 "source_rgb_preserved": False,
                                 "source_chroma_preserved": False,
@@ -1336,9 +1347,7 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                             },
                             "palette": {
                                 "background": [0, 255, 0],
-                                "subject_gray_range": [120, 168],
-                                "subject_gray_values": [120, 144, 168],
-                                "quantum": 8,
+                                "subject_rgb": [132, 132, 132],
                                 "prop_semantic_colors": {
                                     "bowl": [214, 208, 196],
                                     "bowl_rim": [232, 228, 218],
@@ -1384,11 +1393,11 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertIn("--eating-geometry-guide-metadata", command)
         self.assertEqual(
             metadata["policy"],
-            "driving_eating_geometry_image2_v6",
+            "driving_eating_geometry_image2_v7",
         )
         self.assertEqual(
             metadata["method"],
-            "temporal_head_lowering_compressed_anatomy_semantic_food_fields_v7",
+            "temporal_head_lowering_flat_subject_semantic_food_fields_v8",
         )
         self.assertEqual(
             metadata["muzzle_contact_semantic"]["muzzle_food_gap_px"],
@@ -1397,7 +1406,7 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertTrue(metadata["semantic_food"]["passed"])
         self.assertFalse(metadata["palette"]["source_rgb_preserved"])
         self.assertTrue(metadata["head_lowering_selection"]["passed"])
-        self.assertTrue(metadata["semantic_structure"]["internal_luma_variation"])
+        self.assertFalse(metadata["semantic_structure"]["internal_luma_variation"])
         self.assertFalse(metadata["semantic_structure"]["source_luma_values_preserved"])
         self.assertRegex(metadata["guide_sha256"], r"^[0-9a-f]{64}$")
 
@@ -1975,7 +1984,7 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             "pose_reference_metadata": {
                 "eating": {
                     "generator_metadata": {
-                        "policy": "driving_eating_geometry_image2_v6",
+                        "policy": "driving_eating_geometry_image2_v7",
                         "selected_frame_index": 56,
                         "head_lowering_selection": {"passed": True},
                     }

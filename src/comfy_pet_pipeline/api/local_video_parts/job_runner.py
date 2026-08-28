@@ -2307,6 +2307,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
     fur_surface_gate_status_by_action: dict[str, str] = {}
     pose_effective_lora_policies: dict[str, str] = {}
     fur_surface_gate_short_circuit: dict[str, Any] | None = None
+    reference_generation_degraded_actions: dict[str, dict[str, Any]] = {}
     for index, pose in enumerate(poses, start=1):
         raise_if_cancelled(job_id)
         update_job(
@@ -4997,6 +4998,19 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         )
                     )
                 )
+                eating_refine_palette_issues = (
+                    {
+                        str(issue)
+                        for issue in palette_quality.get("issues", [])
+                        if str(issue).strip()
+                    }
+                    if isinstance(palette_quality, dict)
+                    else set()
+                )
+                eating_refine_unsafe_palette_issues = sorted(
+                    eating_refine_palette_issues
+                    & EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES
+                )
                 if (
                     canonical_action_reference
                     and not dog_eating_prompt_only_action_transfer_active
@@ -5008,6 +5022,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     and isinstance(palette_quality, dict)
                     and palette_quality.get("available") is True
                     and palette_quality.get("acceptable") is not True
+                    and not eating_refine_unsafe_palette_issues
                 ):
                     eating_refine_selection_key = (
                         float(palette_quality.get("penalty", 0.0)),
@@ -5029,6 +5044,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "pose_safe_allowed_issues": sorted(
                                 eating_refine_pose_issues
                             ),
+                            "unsafe_palette_issues": [],
                             "identity_palette_quality": palette_quality,
                             "selection_key": list(eating_refine_selection_key),
                             "source_role": (
@@ -7198,6 +7214,119 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     f"{len(active_pose_profiles)} attempts: "
                     + pose_attempt_failure_summary(attempts)
                 )
+            if best_attempt is None and force_qwen_reference:
+                failed_action = action_key(pose)
+                isolated_error = RuntimeError(
+                    f"Pose {index} remained invalid after "
+                    f"{len(active_pose_profiles)} attempts: "
+                    + pose_attempt_failure_summary(attempts)
+                )
+                degraded_result, degraded_source = (
+                    recover_subject_replacement_action_with_fallback(
+                        job_id,
+                        get_job(job_id),
+                        action=failed_action,
+                        pose_index=index,
+                        error=isolated_error,
+                    )
+                )
+                fallback_reference = Path(str(degraded_result["reference"]))
+                if (
+                    not fallback_reference.is_file()
+                    or fallback_reference.parent != job_dir
+                ):
+                    raise RuntimeError(
+                        "Isolated Qwen action fallback did not produce a local "
+                        "identity reference."
+                    )
+                refreshed_results = [
+                    dict(item)
+                    for item in get_job(job_id).get(
+                        "subject_replacement_results",
+                        [],
+                    )
+                    if isinstance(item, dict)
+                    and str(item.get("action") or "") != failed_action
+                ]
+                refreshed_results.append(degraded_result)
+                failure_record = {
+                    "action": failed_action,
+                    "pose_index": index,
+                    "error": f"RuntimeError: {str(isolated_error)[:4000]}",
+                    "attempt_count": len(active_pose_profiles),
+                    "fallback_reference": str(fallback_reference),
+                    "fallback_reference_sha256": file_sha256(fallback_reference),
+                    "fallback_source": degraded_source,
+                    "sibling_actions_continue": True,
+                    "scail_skipped": True,
+                }
+                reference_generation_degraded_actions[failed_action] = failure_record
+                update_job(
+                    job_id,
+                    qwen_reference_degraded_actions=dict(
+                        reference_generation_degraded_actions
+                    ),
+                    qwen_reference_failure_isolation_policy=(
+                        "per_action_identity_anchored_fallback_continue_siblings_v1"
+                    ),
+                    subject_replacement_results=refreshed_results,
+                    degraded_output_actions=sorted(
+                        reference_generation_degraded_actions
+                    ),
+                )
+                append_recovery_event(
+                    job_id,
+                    {
+                        "stage": "cartoon_keyframe",
+                        "pose_index": index,
+                        "reason": failure_record["error"],
+                        "strategy": (
+                            "isolate_failed_action_and_continue_sibling_keyframes"
+                        ),
+                        "result": "accepted_identity_anchored_action_fallback",
+                        "action": failed_action,
+                        "fallback_reference": str(fallback_reference),
+                        "fallback_reference_sha256": failure_record[
+                            "fallback_reference_sha256"
+                        ],
+                    },
+                )
+                fallback_template = dict(record)
+                best_attempt = {
+                    **fallback_template,
+                    "attempt": len(active_pose_profiles) + 1,
+                    "profile": "isolated_action_identity_fallback",
+                    "keyframe": fallback_reference.name,
+                    "cutout": fallback_reference.name,
+                    "chroma": {
+                        "acceptable": True,
+                        "issues": [],
+                        "method": "identity_anchored_action_fallback_rgba",
+                    },
+                    "quality": {
+                        "available": True,
+                        "acceptable": False,
+                        "issues": ["qwen_action_reference_generation_failed"],
+                        "penalty": 1000.0,
+                    },
+                    "similarity": {
+                        "available": True,
+                        "acceptable": True,
+                        "warning": True,
+                        "issues": ["degraded_identity_anchor_not_action_keyframe"],
+                        "comparisons": [],
+                        "penalty": 1000.0,
+                    },
+                    "identity_palette": None,
+                    "fur_silhouette": None,
+                    "fur_surface_gate": None,
+                    "grooming_pose_gate": None,
+                    "combined_penalty": 2000.0,
+                    "transparent": True,
+                    "background_removal_failed": False,
+                    "reference_generation_degraded": True,
+                    "reference_generation_failure": failure_record,
+                }
             if best_attempt is None:
                 if best_semantic_source is None:
                     evaluated_surface_attempts = [
@@ -7821,7 +7950,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 selected_keyframe = keyframe_cutout
             else:
                 selected_keyframe = keyframe
-            if fur_surface_gate_required:
+            reference_generation_degraded = bool(
+                best_attempt.get("reference_generation_degraded")
+            )
+            if fur_surface_gate_required and not reference_generation_degraded:
                 selected_surface = best_attempt.get("fur_surface_gate")
                 if (
                     not isinstance(selected_surface, dict)
@@ -7877,7 +8009,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "final_video_frame_audit": False,
                     },
                 )
-            if grooming_pose_gate_required:
+            if grooming_pose_gate_required and not reference_generation_degraded:
                 selected_gate = best_attempt.get("grooming_pose_gate")
                 if not isinstance(selected_gate, dict) or not selected_gate.get(
                     "acceptable"
@@ -7899,7 +8031,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         grooming_pose_gate_selected_metrics
                     ),
                 )
-            if advisory_grooming_minimum_gate_required:
+            if (
+                advisory_grooming_minimum_gate_required
+                and not reference_generation_degraded
+            ):
                 selected_minimum_gate = best_attempt.get(
                     "grooming_advisory_minimum_gate"
                 )
@@ -8121,14 +8256,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "attempts": attempts,
                 },
             )
-            accepted_pose_similarity_references.append(
-                {
-                    "label": f"pose_{index}",
-                    "pose_index": index,
-                    "pose": pose,
-                    "path": selected_keyframe,
-                }
-            )
+            if not reference_generation_degraded:
+                accepted_pose_similarity_references.append(
+                    {
+                        "label": f"pose_{index}",
+                        "pose_index": index,
+                        "pose": pose,
+                        "path": selected_keyframe,
+                    }
+                )
             effective_pose_lora_attempts.append(
                 {
                     "pose_index": index,
@@ -8185,6 +8321,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "grooming_pose_gate": best_attempt.get("grooming_pose_gate"),
                     "grooming_advisory_minimum_gate": best_attempt.get(
                         "grooming_advisory_minimum_gate"
+                    ),
+                    "reference_generation_degraded": (
+                        reference_generation_degraded
+                    ),
+                    "reference_generation_failure": best_attempt.get(
+                        "reference_generation_failure"
                     ),
                 }
             )
@@ -8256,7 +8398,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             )
 
     if fur_surface_gate_status_by_action:
-        expected_surface_actions = list(fur_surface_gate_status_by_action)
+        expected_surface_actions = [
+            action
+            for action in fur_surface_gate_status_by_action
+            if action not in reference_generation_degraded_actions
+        ]
         missing_surface_actions = [
             action
             for action in expected_surface_actions
@@ -8275,11 +8421,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             fur_surface_gate_selected_metrics=(fur_surface_gate_selected_metrics),
             fur_surface_gate_final_quality={
                 "scope": "qwen_action_reference_pre_scail",
-                "status": "passed",
+                "status": (
+                    "partial_degraded"
+                    if reference_generation_degraded_actions
+                    else "passed"
+                ),
                 "policy": FUR_SURFACE_GATE_POLICY,
                 "gate_version": FUR_SURFACE_GATE_VERSION,
                 "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
                 "actions": dict(fur_surface_gate_selected_metrics),
+                "degraded_actions": dict(reference_generation_degraded_actions),
                 "final_video_frame_audit": False,
             },
         )

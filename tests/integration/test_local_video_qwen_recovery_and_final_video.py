@@ -2170,7 +2170,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
         self.assertEqual(
             final_job["pose_reference_policy"],
             {
-                "eating": ("main_case_eating_driver_geometry_image2_guide_v6"),
+                "eating": ("main_case_eating_driver_geometry_image2_guide_v7"),
                 "grooming": pipeline.GROOMING_QWEN_POSE_REFERENCE_POLICY,
             },
         )
@@ -2268,7 +2268,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
         eating_metadata = final_job["pose_reference_metadata"]["eating"]
         self.assertEqual(
             eating_metadata["policy"],
-            "main_case_eating_driver_geometry_image2_guide_v6",
+            "main_case_eating_driver_geometry_image2_guide_v7",
         )
         self.assertEqual(
             eating_metadata["image_role"],
@@ -2279,7 +2279,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
             "image1_qwen_full_body_canonical",
         )
         self.assertFalse(eating_metadata["source_rgb_preserved"])
-        self.assertTrue(eating_metadata["qwen_guide_internal_luma_variation"])
+        self.assertFalse(eating_metadata["qwen_guide_internal_luma_variation"])
         self.assertFalse(
             eating_metadata[
                 "qwen_guide_appearance_bearing_internal_luma_variation"

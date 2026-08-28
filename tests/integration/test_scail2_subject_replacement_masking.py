@@ -668,7 +668,7 @@ class EatingScenePropMaskTests(unittest.TestCase):
         )
         self.assertEqual(
             metadata["policy"],
-            "driving_eating_geometry_image2_v6",
+            "driving_eating_geometry_image2_v7",
         )
         self.assertFalse(metadata["palette"]["source_rgb_preserved"])
         self.assertFalse(
@@ -677,12 +677,11 @@ class EatingScenePropMaskTests(unittest.TestCase):
         structure = metadata["semantic_structure"]
         self.assertEqual(
             structure["method"],
-            "compressed_blurred_quantized_neutral_anatomy_v1",
+            "flat_uniform_subject_silhouette_v3",
         )
-        self.assertEqual(structure["subject_gray_range"], [120, 168])
-        self.assertGreaterEqual(structure["subject_unique_rgb_count"], 2)
-        self.assertLessEqual(structure["subject_unique_rgb_count"], 7)
-        self.assertTrue(structure["internal_luma_variation"])
+        self.assertEqual(structure["subject_rgb"], [132, 132, 132])
+        self.assertEqual(structure["subject_unique_rgb_count"], 1)
+        self.assertFalse(structure["internal_luma_variation"])
         self.assertFalse(structure["appearance_bearing_face_detail"])
         self.assertFalse(structure["source_luma_values_preserved"])
         self.assertLessEqual(
@@ -708,13 +707,7 @@ class EatingScenePropMaskTests(unittest.TestCase):
         self.assertTrue(np.all(subject_foreground[:, 0] == subject_foreground[:, 1]))
         self.assertTrue(np.all(subject_foreground[:, 1] == subject_foreground[:, 2]))
         subject_gray_values = np.unique(subject_foreground[:, 0]).tolist()
-        self.assertEqual(
-            subject_gray_values,
-            structure["subject_gray_values"],
-        )
-        self.assertGreaterEqual(min(subject_gray_values), 120)
-        self.assertLessEqual(max(subject_gray_values), 168)
-        self.assertTrue(all(value % 8 == 0 for value in subject_gray_values))
+        self.assertEqual(subject_gray_values, [132])
         self.assertTrue(metadata["semantic_food"]["semantic_chroma_only"])
         self.assertTrue(
             all(

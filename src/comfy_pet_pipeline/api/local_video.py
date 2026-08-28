@@ -129,7 +129,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.31"
+API_VERSION = "2.26.32"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -290,7 +290,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.37"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.38"
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -606,6 +606,14 @@ EATING_CANONICAL_IDENTITY_REFINE_STEPS = 12
 EATING_CANONICAL_IDENTITY_REFINE_DENOISE = 0.65
 EATING_CANONICAL_IDENTITY_REFINE_POSE_SAFE_ISSUES = frozenset(
     {"eating_bowl_contact_unreliable"}
+)
+EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES = frozenset(
+    {
+        "invented_stripe_pattern",
+        "achromatic_coat_value_balance_lost",
+        "canonical_action_achromatic_value_balance_drift",
+        "canonical_action_light_identity_dark_feature_expansion",
+    }
 )
 GROOMING_QWEN_FORELEG_REPAIR_MASK_DILATION_PX = 18
 GROOMING_QWEN_FORELEG_REPAIR_SEED_LOWPASS_SIGMA_PX = 2.5

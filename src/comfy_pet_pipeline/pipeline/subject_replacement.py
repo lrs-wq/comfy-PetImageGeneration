@@ -2624,11 +2624,12 @@ def make_eating_geometry_guide(
 ) -> tuple[Image.Image, dict[str, Any]]:
     """Build an identity-free Image 2 that retains only eating action geometry.
 
-    The guide deliberately contains no source RGB pixels. A heavily blurred,
-    compressed neutral-gray field describes low-frequency head/muzzle anatomy,
-    while fixed semantic beige/brown fields describe the bowl and kibble. Every
-    remaining pixel is pure green. This removes coat color, collar, tag,
-    watermark and fur texture while retaining readable eating geometry.
+    The guide deliberately contains no source RGB or luma pixels. A flat
+    neutral-gray field describes only the cleaned eating silhouette, while fixed
+    semantic beige/brown fields describe the bowl and kibble. Every remaining
+    pixel is pure green. Keeping the subject single-tone prevents low-frequency
+    white-maquette shading from being reinterpreted as coat markings or facial
+    identity by the image editor.
     """
     if len(sampled_frames) < 9:
         raise ValueError(
@@ -2831,72 +2832,11 @@ def make_eating_geometry_guide(
             "eating_geometry_guide_unreliable: outline_smoothing_failed"
         )
 
-    # Preserve only heavily blurred, compressed luminance from the selected
-    # contact frame. A flat silhouette erased the ears/head/muzzle relationship
-    # and let Qwen reinterpret the animal as a head-up cat looking at the bowl.
-    # Weighted blurring avoids pulling pure-green background into the anatomy;
-    # the narrow quantized neutral range removes source color, markings and fur
-    # texture while keeping the low-frequency eating geometry readable.
-    selected_rgb = np.asarray(
-        normalized_frames[int(selected["index"])].convert("RGB"),
-        dtype=np.uint8,
-    )
-    selected_luma = cv2.cvtColor(
-        selected_rgb,
-        cv2.COLOR_RGB2GRAY,
-    ).astype(np.float32)
-    anatomy_support = selected_subject.astype(np.float32)
-    anatomy_sigma = max(4.0, min(canvas_size) * 10.0 / 512.0)
-    anatomy_weighted_luma = cv2.GaussianBlur(
-        selected_luma * anatomy_support,
-        (0, 0),
-        sigmaX=anatomy_sigma,
-        sigmaY=anatomy_sigma,
-    )
-    anatomy_blurred_support = cv2.GaussianBlur(
-        anatomy_support,
-        (0, 0),
-        sigmaX=anatomy_sigma,
-        sigmaY=anatomy_sigma,
-    )
-    low_frequency_anatomy = anatomy_weighted_luma / np.maximum(
-        anatomy_blurred_support,
-        0.01,
-    )
-    anatomy_values = low_frequency_anatomy[selected_subject]
-    anatomy_p05, anatomy_p95 = np.percentile(anatomy_values, (5, 95))
-    anatomy_span = float(anatomy_p95 - anatomy_p05)
-    if anatomy_span < 6.0:
-        raise ValueError(
-            "eating_geometry_guide_unreliable: "
-            f"low_frequency_anatomy_contrast={anatomy_span:.3f}"
-        )
-    normalized_anatomy = np.clip(
-        (low_frequency_anatomy - float(anatomy_p05)) / anatomy_span,
-        0.0,
-        1.0,
-    )
-    anatomy_gray_min = 120
-    anatomy_gray_max = 168
-    anatomy_quantum = 8
-    anatomy_gray = (
-        anatomy_gray_min
-        + normalized_anatomy * (anatomy_gray_max - anatomy_gray_min)
-    )
-    anatomy_gray = (
-        np.round(anatomy_gray / anatomy_quantum) * anatomy_quantum
-    ).astype(np.uint8)
-    anatomy_gray = np.clip(
-        anatomy_gray,
-        anatomy_gray_min,
-        anatomy_gray_max,
-    ).astype(np.uint8)
-    anatomy_unique_values = np.unique(anatomy_gray[selected_subject])
-    if anatomy_unique_values.size < 2:
-        raise ValueError(
-            "eating_geometry_guide_unreliable: "
-            "compressed_anatomy_field_is_flat"
-        )
+    # The silhouette, selected low-head frame and source-anchored food contact
+    # carry the complete geometry contract. Never preserve even blurred source
+    # luma here: on the white maquette it forms broad curved bands which Qwen can
+    # faithfully but incorrectly render as tabby stripes.
+    subject_semantic_rgb = np.array([132, 132, 132], dtype=np.uint8)
 
     median_rgb = np.median(
         np.stack(
@@ -3020,19 +2960,15 @@ def make_eating_geometry_guide(
     )
     guide = np.zeros((canvas_size[1], canvas_size[0], 3), dtype=np.uint8)
     guide[:] = (0, 255, 0)
-    guide[selected_subject] = np.repeat(
-        anatomy_gray[selected_subject][:, None],
-        3,
-        axis=1,
-    )
+    guide[selected_subject] = subject_semantic_rgb
     guide[prop_union] = bowl_semantic_rgb
     guide[bowl_rim] = bowl_rim_semantic_rgb
     guide[food_core] = food_semantic_rgb
 
     metadata = {
-        "policy": "driving_eating_geometry_image2_v6",
+        "policy": "driving_eating_geometry_image2_v7",
         "method": (
-            "temporal_head_lowering_compressed_anatomy_semantic_food_fields_v7"
+            "temporal_head_lowering_flat_subject_semantic_food_fields_v8"
         ),
         "selected_frame_index": int(selected["index"]),
         "muzzle_bowl_gap_px": int(selected["muzzle_bowl_gap_px"]),
@@ -3094,17 +3030,11 @@ def make_eating_geometry_guide(
             "high_frequency_outline_preserved": False,
         },
         "semantic_structure": {
-            "method": "compressed_blurred_quantized_neutral_anatomy_v1",
-            "subject_gray_range": [anatomy_gray_min, anatomy_gray_max],
-            "subject_gray_values": anatomy_unique_values.tolist(),
-            "subject_unique_rgb_count": int(anatomy_unique_values.size),
-            "internal_luma_variation": True,
+            "method": "flat_uniform_subject_silhouette_v3",
+            "subject_rgb": subject_semantic_rgb.tolist(),
+            "subject_unique_rgb_count": 1,
+            "internal_luma_variation": False,
             "appearance_bearing_face_detail": False,
-            "anatomy_gaussian_sigma": round(anatomy_sigma, 3),
-            "source_luma_p05": round(float(anatomy_p05), 3),
-            "source_luma_p95": round(float(anatomy_p95), 3),
-            "source_luma_contrast": round(anatomy_span, 3),
-            "quantum": anatomy_quantum,
             "bowl_gaussian_sigma": round(bowl_structure_sigma, 3),
             "bowl_luma_p10": round(float(bowl_luma_p10), 3),
             "bowl_luma_p90": round(float(bowl_luma_p90), 3),
@@ -3116,9 +3046,7 @@ def make_eating_geometry_guide(
         },
         "palette": {
             "background": [0, 255, 0],
-            "subject_gray_range": [anatomy_gray_min, anatomy_gray_max],
-            "subject_gray_values": anatomy_unique_values.tolist(),
-            "quantum": anatomy_quantum,
+            "subject_rgb": subject_semantic_rgb.tolist(),
             "prop_semantic_colors": {
                 "bowl": bowl_semantic_rgb.tolist(),
                 "bowl_rim": bowl_rim_semantic_rgb.tolist(),

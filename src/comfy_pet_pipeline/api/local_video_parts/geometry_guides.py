@@ -84,10 +84,10 @@ def prepare_eating_qwen_geometry_guide(
         raise RuntimeError("Eating geometry guide frame rate does not match.")
     if not 0 <= int(metadata.get("selected_frame_index", -1)) < int(frames):
         raise RuntimeError("Eating geometry guide selected frame is invalid.")
-    if metadata.get("policy") != "driving_eating_geometry_image2_v6":
+    if metadata.get("policy") != "driving_eating_geometry_image2_v7":
         raise RuntimeError("Eating geometry guide policy is unsupported.")
     if metadata.get("method") != (
-        "temporal_head_lowering_compressed_anatomy_semantic_food_fields_v7"
+        "temporal_head_lowering_flat_subject_semantic_food_fields_v8"
     ):
         raise RuntimeError("Eating geometry guide method is unsupported.")
     if not 0 <= int(metadata.get("muzzle_bowl_gap_px", -1)) <= 4:
@@ -141,36 +141,14 @@ def prepare_eating_qwen_geometry_guide(
     ):
         raise RuntimeError("Eating geometry guide retained source outline texture.")
     semantic_structure = metadata.get("semantic_structure")
-    subject_gray_min = 120
-    subject_gray_max = 168
-    subject_gray_quantum = 8
-    semantic_gray_values = (
-        semantic_structure.get("subject_gray_values")
-        if isinstance(semantic_structure, dict)
-        else None
-    )
     if (
         not isinstance(semantic_structure, dict)
         or semantic_structure.get("method")
-        != "compressed_blurred_quantized_neutral_anatomy_v1"
-        or semantic_structure.get("subject_gray_range")
-        != [subject_gray_min, subject_gray_max]
-        or not isinstance(semantic_gray_values, list)
-        or not 2 <= len(semantic_gray_values) <= 7
-        or semantic_gray_values != sorted(set(semantic_gray_values))
-        or any(
-            not isinstance(value, int)
-            or not subject_gray_min <= value <= subject_gray_max
-            or value % subject_gray_quantum != 0
-            for value in semantic_gray_values
-        )
-        or int(semantic_structure.get("subject_unique_rgb_count", -1))
-        != len(semantic_gray_values)
-        or semantic_structure.get("internal_luma_variation") is not True
+        != "flat_uniform_subject_silhouette_v3"
+        or semantic_structure.get("subject_rgb") != [132, 132, 132]
+        or int(semantic_structure.get("subject_unique_rgb_count", -1)) != 1
+        or semantic_structure.get("internal_luma_variation") is not False
         or semantic_structure.get("appearance_bearing_face_detail") is not False
-        or float(semantic_structure.get("anatomy_gaussian_sigma", 0.0)) < 4.0
-        or float(semantic_structure.get("source_luma_contrast", 0.0)) < 6.0
-        or int(semantic_structure.get("quantum", -1)) != subject_gray_quantum
         or semantic_structure.get("source_luma_values_preserved") is not False
         or semantic_structure.get("source_rgb_preserved") is not False
         or semantic_structure.get("source_chroma_preserved") is not False
@@ -188,10 +166,7 @@ def prepare_eating_qwen_geometry_guide(
     if (
         not isinstance(palette, dict)
         or palette.get("background") != [0, 255, 0]
-        or palette.get("subject_gray_range")
-        != [subject_gray_min, subject_gray_max]
-        or palette.get("subject_gray_values") != semantic_gray_values
-        or int(palette.get("quantum", -1)) != subject_gray_quantum
+        or palette.get("subject_rgb") != [132, 132, 132]
         or palette.get("prop_semantic_colors") != expected_prop_colors
         or palette.get("source_rgb_preserved") is not False
         or palette.get("source_chroma_preserved") is not False
@@ -226,13 +201,10 @@ def prepare_eating_qwen_geometry_guide(
             "Eating geometry guide contains unsupported chromatic identity color."
         )
     grayscale_values = foreground_rgb[grayscale, 0]
-    persisted_gray_values = np.unique(grayscale_values).tolist()
     if (
         grayscale_values.size == 0
-        or np.any(grayscale_values < subject_gray_min)
-        or np.any(grayscale_values > subject_gray_max)
-        or np.any(grayscale_values % subject_gray_quantum != 0)
-        or persisted_gray_values != semantic_gray_values
+        or np.any(grayscale_values != 132)
+        or int(np.unique(grayscale_values).size) != 1
         or int(grayscale_values.size) != int(metadata.get("subject_pixels", -1))
         or int(grayscale_values.size) < 500
     ):

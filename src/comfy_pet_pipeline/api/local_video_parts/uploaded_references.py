@@ -407,13 +407,13 @@ def prepare_uploaded_subject_qwen_references(
             pose_reference_policies[action] = (
                 "digest_bound_static_eating_geometry_image2_recovery_v1"
                 if eating_geometry_recovered
-                else "main_case_eating_driver_geometry_image2_guide_v6"
+                else "main_case_eating_driver_geometry_image2_guide_v7"
             )
             pose_reference_guide_styles[action] = (
                 "single_tone_digest_bound_action_silhouette_on_pure_green"
                 if eating_geometry_recovered
                 else (
-                    "texture_free_compressed_neutral_anatomy_with_explicit_"
+                    "single_tone_neutral_action_silhouette_with_explicit_"
                     "muzzle_overlap_and_semantic_food_on_pure_green"
                 )
             )
@@ -436,10 +436,8 @@ def prepare_uploaded_subject_qwen_references(
                 "main_case_driver_used": not white_maquette_driver,
                 "uploaded_white_maquette_driver_used": white_maquette_driver,
                 "driver_appearance_authority": False,
-                "qwen_guide_internal_luma_variation": True,
-                "qwen_guide_internal_luma_variation_role": (
-                    "compressed_low_frequency_action_anatomy_only"
-                ),
+                "qwen_guide_internal_luma_variation": False,
+                "qwen_guide_internal_luma_variation_role": "none",
                 "qwen_guide_appearance_bearing_internal_luma_variation": False,
                 "source_sha256": source_digest,
                 "guide_sha256": guide_metadata.get("guide_sha256"),
@@ -894,6 +892,9 @@ def prepare_uploaded_subject_qwen_references(
         eating_identity_refine_steps=EATING_CANONICAL_IDENTITY_REFINE_STEPS,
         eating_identity_refine_denoise=(EATING_CANONICAL_IDENTITY_REFINE_DENOISE),
         eating_identity_refine_style_lora=None,
+        eating_identity_refine_unsafe_palette_issues=sorted(
+            EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES
+        ),
         eating_identity_refine_global_thresholds_changed=False,
         grooming_pose_lora_policy=(
             "canonical_identity_open_channel_seed_bound_pose_safe_refine_v11"
@@ -1108,6 +1109,13 @@ def prepare_uploaded_subject_qwen_references(
     raise_if_cancelled(job_id)
 
     refreshed = get_job(job_id)
+    degraded_reference_actions = {
+        str(action): dict(details)
+        for action, details in dict(
+            refreshed.get("qwen_reference_degraded_actions") or {}
+        ).items()
+        if str(action) in actions and isinstance(details, dict)
+    }
     canonical_bypassed = bool(
         refreshed.get("generated_canonical_bypassed")
         or refreshed.get("bypass_generated_canonical")
@@ -1223,6 +1231,11 @@ def prepare_uploaded_subject_qwen_references(
             "Qwen reference generation did not produce transparent action references: "
             + ", ".join(missing_actions)
         )
+    successful_action_references = {
+        action: reference
+        for action, reference in action_references.items()
+        if action not in degraded_reference_actions
+    }
     canonical_public_reference = Path(
         str(refreshed.get("canonical_public_reference_path") or "")
     )
@@ -1324,6 +1337,8 @@ def prepare_uploaded_subject_qwen_references(
         )
     if GENERATION_VISUAL_AUDITS_BLOCKING:
         for action in expected_surface_gate_actions:
+            if action in degraded_reference_actions:
+                continue
             require_uploaded_fur_surface_gate(
                 effective_subject_config["actions"][action],
                 action,
@@ -1331,18 +1346,24 @@ def prepare_uploaded_subject_qwen_references(
     gated_surface_actions = (
         expected_surface_gate_actions if GENERATION_VISUAL_AUDITS_BLOCKING else []
     )
+    required_surface_actions = [
+        action
+        for action in gated_surface_actions
+        if action not in degraded_reference_actions
+    ]
     fur_surface_quality_by_action: dict[str, Any] = {}
     selected_surface_metrics = refreshed.get("fur_surface_gate_selected_metrics")
     if (
         GENERATION_VISUAL_AUDITS_BLOCKING
+        and required_surface_actions
         and not isinstance(selected_surface_metrics, dict)
     ):
         raise RuntimeError(
             "Qwen references lack selected fur surface metrics; refusing "
             "to enter SCAIL."
         )
-    for action in gated_surface_actions:
-        reference = action_references[action]
+    for action in required_surface_actions:
+        reference = successful_action_references[action]
         selected_surface = selected_surface_metrics.get(action)
         if (
             not isinstance(selected_surface, dict)
@@ -1420,7 +1441,9 @@ def prepare_uploaded_subject_qwen_references(
 
     fur_silhouette_quality_by_action: dict[str, Any] = {}
     for action, reference in (
-        action_references.items() if GENERATION_VISUAL_AUDITS_BLOCKING else ()
+        successful_action_references.items()
+        if GENERATION_VISUAL_AUDITS_BLOCKING
+        else ()
     ):
         action_config = effective_subject_config["actions"][action]
         fur_gate = action_config.get("fur_silhouette_gate")
@@ -1439,7 +1462,7 @@ def prepare_uploaded_subject_qwen_references(
             )
 
     effective_subject_config = json.loads(json.dumps(effective_subject_config))
-    for action, reference in action_references.items():
+    for action, reference in successful_action_references.items():
         action_config = effective_subject_config["actions"][action]
         action_config.setdefault("profile_reference", action_config.get("reference"))
         action_config.setdefault(
@@ -1461,10 +1484,16 @@ def prepare_uploaded_subject_qwen_references(
         job_id,
         subject_source="qwen_generated_upload",
         effective_subject_source="qwen_generated_upload",
-        subject_reference_paths=action_references,
-        qwen_subject_reference_paths=action_references,
+        subject_reference_paths=successful_action_references,
+        qwen_subject_reference_paths=successful_action_references,
         qwen_reference_actions=list(actions),
-        qwen_reference_generated_actions=list(action_references),
+        qwen_reference_generated_actions=list(successful_action_references),
+        qwen_reference_degraded_actions=degraded_reference_actions,
+        qwen_reference_failure_isolation_policy=(
+            "per_action_identity_anchored_fallback_continue_siblings_v1"
+            if degraded_reference_actions
+            else "per_action_quality_isolation_ready_v1"
+        ),
         qwen_canonical_identity_fallbacks=(
             canonical_identity_fallbacks_by_action
         ),
@@ -1485,7 +1514,7 @@ def prepare_uploaded_subject_qwen_references(
         qwen_action_reference_byte_preserved=True,
         qwen_action_keyframe_sha256s={
             action: file_sha256(Path(reference))
-            for action, reference in action_references.items()
+            for action, reference in successful_action_references.items()
         },
         reference_normalization_status="completed",
         uploaded_identity_anchor_path=str(upload_integrity["source_path"]),
@@ -1527,23 +1556,35 @@ def prepare_uploaded_subject_qwen_references(
         subject_fur_surface_quality=fur_surface_quality_by_action,
         fur_surface_gate_status={
             action: (
-                "passed"
-                if GENERATION_VISUAL_AUDITS_BLOCKING
-                else "skipped_advisory"
+                "degraded_action_isolated"
+                if action in degraded_reference_actions
+                else (
+                    "passed"
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else "skipped_advisory"
+                )
             )
             for action in actions
         },
         surface_texture_gate_status=(
-            "passed"
-            if GENERATION_VISUAL_AUDITS_BLOCKING
-            else "skipped_advisory"
+            "partial_degraded"
+            if degraded_reference_actions
+            else (
+                "passed"
+                if GENERATION_VISUAL_AUDITS_BLOCKING
+                else "skipped_advisory"
+            )
         ),
         fur_surface_gate_final_quality={
             "scope": "qwen_action_reference_pre_scail",
             "status": (
-                "passed"
-                if GENERATION_VISUAL_AUDITS_BLOCKING
-                else "skipped_advisory"
+                "partial_degraded"
+                if degraded_reference_actions
+                else (
+                    "passed"
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else "skipped_advisory"
+                )
             ),
             "blocking": GENERATION_VISUAL_AUDITS_BLOCKING,
             "generation_audit_policy": GENERATION_AUDIT_POLICY,
@@ -1554,13 +1595,17 @@ def prepare_uploaded_subject_qwen_references(
             "pre_scail_revalidated": True,
             "final_video_frame_audit": False,
         },
-        reference_generation_status="completed",
+        reference_generation_status=(
+            "completed_with_degraded_actions"
+            if degraded_reference_actions
+            else "completed"
+        ),
         reference_generation_completed=True,
         effective_subject_config=effective_subject_config,
         stage="subject_references_ready",
         progress=35,
     )
-    return action_references
+    return successful_action_references
 
 
 def prepare_uploaded_subject_scail_references(

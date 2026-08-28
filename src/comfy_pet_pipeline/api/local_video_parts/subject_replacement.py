@@ -31,7 +31,7 @@ def resolve_transparent_output_phase_start_index(
     if (
         not isinstance(generator_metadata, dict)
         or generator_metadata.get("policy")
-        != "driving_eating_geometry_image2_v6"
+        != "driving_eating_geometry_image2_v7"
         or not isinstance(generator_metadata.get("head_lowering_selection"), dict)
         or generator_metadata["head_lowering_selection"].get("passed") is not True
     ):
@@ -2054,10 +2054,28 @@ def revalidate_uploaded_qwen_references_before_scail(
 
     job_dir = OUTPUT_ROOT / job_id
     verify_uploaded_identity_submission(job, job_dir)
+    degraded_reference_actions = {
+        str(action)
+        for action, details in dict(
+            job.get("qwen_reference_degraded_actions") or {}
+        ).items()
+        if isinstance(details, dict)
+    }
+    partial_reference_stage = bool(degraded_reference_actions)
+    if any(action in degraded_reference_actions for action in actions):
+        raise RuntimeError(
+            "A degraded Qwen action was scheduled for SCAIL instead of being "
+            "isolated to its identity-anchored fallback."
+        )
     if (
         job.get("subject_source") != "qwen_generated_upload"
         or job.get("reference_generation_completed") is not True
-        or job.get("reference_generation_status") != "completed"
+        or job.get("reference_generation_status")
+        not in (
+            {"completed", "completed_with_degraded_actions"}
+            if partial_reference_stage
+            else {"completed"}
+        )
         or job.get("reference_normalization_status") != "completed"
         or job.get("canonical_reference_generated") is not True
         or job.get("canonical_reference_used") is not True
@@ -2070,7 +2088,12 @@ def revalidate_uploaded_qwen_references_before_scail(
         or job.get("qwen_action_reference_byte_preserved") is not True
         or (
             GENERATION_VISUAL_AUDITS_BLOCKING
-            and job.get("surface_texture_gate_status") != "passed"
+            and job.get("surface_texture_gate_status")
+            not in (
+                {"passed", "partial_degraded"}
+                if partial_reference_stage
+                else {"passed"}
+            )
         )
     ):
         raise RuntimeError(
@@ -2162,7 +2185,12 @@ def revalidate_uploaded_qwen_references_before_scail(
         and isinstance(selected_surface_metrics, dict)
         and isinstance(stored_surface_quality, dict)
         and isinstance(final_surface_quality, dict)
-        and final_surface_quality.get("status") == "passed"
+        and final_surface_quality.get("status")
+        in (
+            {"passed", "partial_degraded"}
+            if partial_reference_stage
+            else {"passed"}
+        )
     )
     if (
         not isinstance(reference_paths, dict)
@@ -2553,6 +2581,13 @@ def run_subject_replacement_job(job_id: str) -> None:
             raise RuntimeError(
                 "Uploaded identity reference stage lost the effective subject config."
             )
+    degraded_reference_actions = {
+        str(action): dict(details)
+        for action, details in dict(
+            job.get("qwen_reference_degraded_actions") or {}
+        ).items()
+        if str(action) in actions and isinstance(details, dict)
+    }
     if uploaded_job and GENERATION_VISUAL_AUDITS_BLOCKING:
         refreshed_upload_validation = effective_subject_config.get("upload_validation")
         if (
@@ -2565,10 +2600,15 @@ def run_subject_replacement_job(job_id: str) -> None:
                 "fur surface contract."
             )
         for action in actions:
+            if action in degraded_reference_actions:
+                continue
             require_uploaded_fur_surface_gate(
                 effective_subject_config["actions"][action],
                 action,
             )
+    scail_actions = [
+        action for action in actions if action not in degraded_reference_actions
+    ]
 
     generated_reference_paths: dict[str, str] | None = None
     if job.get("subject_source") == "qwen_generated_upload":
@@ -2580,12 +2620,13 @@ def run_subject_replacement_job(job_id: str) -> None:
             for reference_action, reference_path in raw_generated_paths.items()
             if str(reference_path).strip()
         }
-        revalidate_uploaded_qwen_references_before_scail(
-            job_id,
-            job,
-            effective_subject_config,
-            actions,
-        )
+        if scail_actions:
+            revalidate_uploaded_qwen_references_before_scail(
+                job_id,
+                job,
+                effective_subject_config,
+                scail_actions,
+            )
         job = get_job(job_id)
         refreshed_effective_subject_config = job.get("effective_subject_config")
         if not isinstance(refreshed_effective_subject_config, dict):
@@ -2601,13 +2642,13 @@ def run_subject_replacement_job(job_id: str) -> None:
             generated_reference_paths,
             action,
         )
-        for action in actions
+        for action in scail_actions
     }
     effective_reference_paths = {
-        action: str(selected_references[action][0]) for action in actions
+        action: str(selected_references[action][0]) for action in scail_actions
     }
     selected_reference_policies = {
-        action: selected_references[action][1] for action in actions
+        action: selected_references[action][1] for action in scail_actions
     }
     uploaded_reference_policies = {
         "qwen_action_identity_with_bowl_mapped_red",
@@ -2620,7 +2661,9 @@ def run_subject_replacement_job(job_id: str) -> None:
     ]
     if uploaded_job:
         missing_uploaded_actions = [
-            action for action in actions if action not in uploaded_applied_actions
+            action
+            for action in scail_actions
+            if action not in uploaded_applied_actions
         ]
         if missing_uploaded_actions:
             raise RuntimeError(
@@ -2670,15 +2713,25 @@ def run_subject_replacement_job(job_id: str) -> None:
             str(job.get("subject_source")) if uploaded_job else "profile"
         ),
     )
-    require_subject_replacement_assets(
-        profile or {"action_references": effective_reference_paths},
-        actions,
-        reference_paths=effective_reference_paths,
-        effective_config=effective_subject_config,
-        expected_pose_policies=expected_pose_policies,
-    )
+    if scail_actions:
+        require_subject_replacement_assets(
+            profile or {"action_references": effective_reference_paths},
+            scail_actions,
+            reference_paths=effective_reference_paths,
+            effective_config=effective_subject_config,
+            expected_pose_policies={
+                action: policy
+                for action, policy in expected_pose_policies.items()
+                if action in scail_actions
+            },
+        )
     total_actions = len(actions)
-    results: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = [
+        dict(result)
+        for result in job.get("subject_replacement_results") or []
+        if isinstance(result, dict)
+        and str(result.get("action") or "") in degraded_reference_actions
+    ]
     final_video_fur_surface_by_action: dict[str, Any] = {}
     scail_reference_policies = dict(job.get("scail_reference_policy") or {})
     scail_scene_prop_policies = dict(job.get("scail_scene_prop_policy") or {})
@@ -2699,28 +2752,37 @@ def run_subject_replacement_job(job_id: str) -> None:
     # actions first so a later eating failure cannot discard an already valid
     # standing animation; terminal recovery will preserve that output and fill
     # only the failed/missing action.
-    execution_actions = list(actions)
+    execution_actions = list(scail_actions)
     if str(job.get("species") or "").strip().lower() == "dog":
         execution_actions.sort(key=lambda action: action == "eating")
 
     update_job(
         job_id,
         status="running",
-        stage="waiting_for_gpu",
+        stage=(
+            "waiting_for_gpu"
+            if execution_actions
+            else "finalizing_degraded_actions"
+        ),
         progress=36 if reference_generation_chain else 1,
         started_at=job.get("started_at") or utc_now(),
         error=None,
         current_action=None,
         subject_replacement_execution_order=execution_actions,
         subject_replacement_failure_isolation_policy=(
-            "independent_dog_actions_before_strict_eating_v1"
-            if execution_actions != actions
-            else "requested_action_order_v1"
+            "per_action_reference_and_output_isolation_v2"
+            if degraded_reference_actions
+            else (
+                "independent_dog_actions_before_strict_eating_v1"
+                if execution_actions != actions
+                else "requested_action_order_v1"
+            )
         ),
     )
-    wait_comfy_idle(timeout=21600, job_id=job_id)
-    raise_if_cancelled(job_id)
-    free_comfy_models()
+    if execution_actions:
+        wait_comfy_idle(timeout=21600, job_id=job_id)
+        raise_if_cancelled(job_id)
+        free_comfy_models()
 
     for index, action in enumerate(execution_actions, start=1):
         raise_if_cancelled(job_id)
@@ -3557,9 +3619,35 @@ def run_subject_replacement_job(job_id: str) -> None:
                     if isinstance(failed_frames, list)
                     else str(final_video_fur_surface.get("error") or "unknown")
                 )
-                raise RuntimeError(
+                action_error = RuntimeError(
                     f"{action}_final_video_fur_surface_gate_failed: {detail}"
                 )
+                degraded_result, _fallback_source = (
+                    recover_subject_replacement_action_with_fallback(
+                        job_id,
+                        get_job(job_id),
+                        action=action,
+                        pose_index=actions.index(action) + 1,
+                        error=action_error,
+                    )
+                )
+                degraded_result.update(
+                    {
+                        "scail_attempt_count": len(scail_attempt_records),
+                        "scail_video_attempts": scail_attempt_records,
+                        "scail_generation_succeeded": True,
+                        "scail_video_filename": generated_video.name,
+                        "final_video_fur_surface": final_video_fur_surface,
+                        "final_video_fur_surface_failed": True,
+                    }
+                )
+                results.append(degraded_result)
+                update_job(
+                    job_id,
+                    progress=action_start + action_span,
+                    subject_replacement_results=results,
+                )
+                continue
             append_output(
                 job_id,
                 {
@@ -3919,10 +4007,36 @@ def run_subject_replacement_job(job_id: str) -> None:
                         ),
                         grooming_temporal_loop_quality=temporal_cycle,
                     )
-                    raise RuntimeError(
+                    action_error = RuntimeError(
                         "grooming_temporal_loop_failed: the published animation "
                         "did not preserve the closed-loop action contract"
                     )
+                    degraded_result, _fallback_source = (
+                        recover_subject_replacement_action_with_fallback(
+                            job_id,
+                            get_job(job_id),
+                            action=action,
+                            pose_index=actions.index(action) + 1,
+                            error=action_error,
+                        )
+                    )
+                    degraded_result.update(
+                        {
+                            "scail_attempt_count": len(scail_attempt_records),
+                            "scail_video_attempts": scail_attempt_records,
+                            "scail_generation_succeeded": True,
+                            "scail_video_filename": generated_video.name,
+                            "grooming_temporal_loop": temporal_cycle,
+                            "grooming_temporal_loop_failed": True,
+                        }
+                    )
+                    results.append(degraded_result)
+                    update_job(
+                        job_id,
+                        progress=action_start + action_span,
+                        subject_replacement_results=results,
+                    )
+                    continue
                 temporal_cycle_output = {
                     "policy": GROOMING_TEMPORAL_LOOP_POLICY,
                     "playback": temporal_cycle.get("playback"),
@@ -4038,10 +4152,36 @@ def run_subject_replacement_job(job_id: str) -> None:
                     fur_contour_gate_action=action,
                     fur_contour_gate_quality=fur_contour_quality,
                 )
-                raise RuntimeError(
+                action_error = RuntimeError(
                     "eating_fur_contour_gate_failed: "
                     + ", ".join(fur_contour_quality["issues"])
                 )
+                degraded_result, _fallback_source = (
+                    recover_subject_replacement_action_with_fallback(
+                        job_id,
+                        get_job(job_id),
+                        action=action,
+                        pose_index=actions.index(action) + 1,
+                        error=action_error,
+                    )
+                )
+                degraded_result.update(
+                    {
+                        "scail_attempt_count": len(scail_attempt_records),
+                        "scail_video_attempts": scail_attempt_records,
+                        "scail_generation_succeeded": True,
+                        "scail_video_filename": generated_video.name,
+                        "fur_contour_quality": fur_contour_quality,
+                        "fur_contour_gate_failed": True,
+                    }
+                )
+                results.append(degraded_result)
+                update_job(
+                    job_id,
+                    progress=action_start + action_span,
+                    subject_replacement_results=results,
+                )
+                continue
             if fur_contour_quality is not None:
                 update_job(
                     job_id,

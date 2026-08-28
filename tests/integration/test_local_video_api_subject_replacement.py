@@ -1099,6 +1099,165 @@ class SubjectReplacementEffectiveConfigTests(unittest.TestCase):
                 [],
             )
 
+    def test_failed_qwen_action_is_excluded_while_sibling_reaches_scail(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            job_id = "test-qwen-action-isolation"
+            (root / job_id).mkdir()
+            eating_profile = root / "eating-profile.png"
+            grooming_profile = root / "grooming-profile.png"
+            qwen_grooming = root / "qwen-grooming.png"
+            degraded_eating = root / job_id / "eating_degraded_fallback_reference.png"
+            for path, payload in (
+                (eating_profile, b"eating-profile"),
+                (grooming_profile, b"grooming-profile"),
+                (qwen_grooming, b"qwen-grooming"),
+                (degraded_eating, b"degraded-eating"),
+            ):
+                path.write_bytes(payload)
+            effective_config = {
+                "profile_id": "sleek_tabby_cat_v1",
+                "frames": 81,
+                "fps": 16.0,
+                "steps": 6,
+                "upload_validation": _qwen_upload_validation(
+                    ("eating", "grooming")
+                ),
+                "actions": {
+                    "eating": {
+                        "reference": str(eating_profile),
+                        "reference_sha256": pipeline.file_sha256(eating_profile),
+                        "fur_surface_gate": _test_fur_surface_gate(
+                            "eating",
+                            eating_profile,
+                        ),
+                    },
+                    "grooming": {
+                        "reference": str(grooming_profile),
+                        "reference_sha256": pipeline.file_sha256(grooming_profile),
+                        "fur_surface_gate": _test_fur_surface_gate(
+                            "grooming",
+                            grooming_profile,
+                        ),
+                    },
+                },
+            }
+            jobs = {
+                job_id: {
+                    "job_id": job_id,
+                    "actions": ["eating", "grooming"],
+                    "species": "cat",
+                    "subject_source": "upload_pending_qwen",
+                    "expected_pose_policies": {
+                        "eating": pipeline.FULL_DRIVER_EATING_POSE_POLICY,
+                    },
+                    "effective_subject_config": effective_config,
+                    "subject_replacement_results": [],
+                }
+            }
+
+            def fake_prepare(_job_id: str, qwen_actions: list[str]) -> None:
+                self.assertEqual(qwen_actions, ["eating", "grooming"])
+                updated = json.loads(json.dumps(effective_config))
+                grooming = updated["actions"]["grooming"]
+                grooming["profile_reference"] = grooming["reference"]
+                grooming["profile_reference_sha256"] = grooming["reference_sha256"]
+                grooming["reference"] = str(qwen_grooming)
+                grooming["reference_sha256"] = pipeline.file_sha256(qwen_grooming)
+                grooming["reference_kind"] = "qwen_generated_upload"
+                pipeline.update_job(
+                    job_id,
+                    subject_source="qwen_generated_upload",
+                    subject_reference_paths={"grooming": str(qwen_grooming)},
+                    qwen_subject_reference_paths={"grooming": str(qwen_grooming)},
+                    qwen_reference_generated_actions=["grooming"],
+                    qwen_reference_degraded_actions={
+                        "eating": {
+                            "fallback_reference": str(degraded_eating),
+                            "sibling_actions_continue": True,
+                            "scail_skipped": True,
+                        }
+                    },
+                    reference_generation_completed=True,
+                    reference_generation_status="completed_with_degraded_actions",
+                    subject_replacement_results=[
+                        {
+                            "action": "eating",
+                            "reference": str(degraded_eating),
+                            "transparent_gif": (
+                                "eating_subject_replacement_transparent_512.gif"
+                            ),
+                            "output_exists": True,
+                            "generation_succeeded": False,
+                            "quality_passed": False,
+                            "degraded": True,
+                        }
+                    ],
+                    effective_subject_config=updated,
+                )
+
+            revalidated_actions: list[list[str]] = []
+            required_actions: list[list[str]] = []
+
+            def record_revalidation(
+                _job_id: str,
+                _job: dict[str, object],
+                _config: dict[str, object],
+                actions: list[str],
+            ) -> None:
+                revalidated_actions.append(list(actions))
+
+            def record_required_assets(
+                _profile: dict[str, object],
+                actions: list[str],
+                **_kwargs: object,
+            ) -> None:
+                required_actions.append(list(actions))
+
+            with (
+                patch.multiple(pipeline, OUTPUT_ROOT=root, JOBS=jobs),
+                patch.object(
+                    pipeline,
+                    "prepare_uploaded_subject_qwen_references",
+                    side_effect=fake_prepare,
+                ),
+                patch.object(
+                    pipeline,
+                    "revalidate_uploaded_qwen_references_before_scail",
+                    side_effect=record_revalidation,
+                ),
+                patch.object(
+                    pipeline,
+                    "require_subject_replacement_assets",
+                    side_effect=record_required_assets,
+                ),
+                patch.object(
+                    pipeline,
+                    "wait_comfy_idle",
+                    side_effect=RuntimeError("stop-before-gpu"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "stop-before-gpu"):
+                    pipeline.run_subject_replacement_job(job_id)
+
+            self.assertEqual(revalidated_actions, [["grooming"]])
+            self.assertEqual(required_actions, [["grooming"]])
+            self.assertEqual(
+                jobs[job_id]["subject_replacement_execution_order"],
+                ["grooming"],
+            )
+            self.assertEqual(
+                jobs[job_id]["scail_reference_policy"],
+                {"grooming": "qwen_action_specific_identity"},
+            )
+            self.assertEqual(
+                jobs[job_id]["subject_replacement_failure_isolation_policy"],
+                "per_action_reference_and_output_isolation_v2",
+            )
+            self.assertTrue(
+                jobs[job_id]["subject_replacement_results"][0]["degraded"]
+            )
+
     def test_uploaded_subject_fails_closed_before_gpu_without_qwen_identity(
         self,
     ) -> None:
@@ -2527,6 +2686,33 @@ class AdvisoryGenerationAuditTests(unittest.TestCase):
                     effective_config,
                     ["eating"],
                 )
+
+                jobs[job_id].update(
+                    reference_generation_status="completed_with_degraded_actions",
+                    surface_texture_gate_status="partial_degraded",
+                    qwen_reference_degraded_actions={
+                        "grooming": {
+                            "sibling_actions_continue": True,
+                            "scail_skipped": True,
+                        }
+                    },
+                )
+                pipeline.revalidate_uploaded_qwen_references_before_scail(
+                    job_id,
+                    jobs[job_id],
+                    effective_config,
+                    ["eating"],
+                )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "degraded Qwen action was scheduled for SCAIL",
+                ):
+                    pipeline.revalidate_uploaded_qwen_references_before_scail(
+                        job_id,
+                        jobs[job_id],
+                        effective_config,
+                        ["grooming"],
+                    )
 
             self.assertTrue(jobs[job_id]["qwen_reference_pre_scail_revalidated"])
             self.assertEqual(

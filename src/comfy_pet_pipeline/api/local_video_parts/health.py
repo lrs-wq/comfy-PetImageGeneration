@@ -1156,6 +1156,31 @@ def health() -> dict[str, Any]:
                     "action_keyframes_normalized_transparent_required": True,
                 },
                 "scail_reference_kind": "qwen_generated_upload",
+                "action_isolation_contract": {
+                    "species_actions": {
+                        "cat": list(CAT_SUBJECT_REPLACEMENT_ACTIONS),
+                        "dog": list(DOG_SUBJECT_REPLACEMENT_ACTIONS),
+                        "small_dog": list(SMALL_DOG_SUBJECT_REPLACEMENT_ACTIONS),
+                    },
+                    "shared_identity_anchor": "one_qwen_canonical_per_job",
+                    "shared_gpu_queue": True,
+                    "execution": "serial_per_action",
+                    "per_action_geometry_guide": True,
+                    "per_action_prompt": True,
+                    "per_action_seed_offset": True,
+                    "per_action_scail_experiment": True,
+                    "per_action_output_paths": True,
+                    "qwen_quality_exhaustion": (
+                        "identity_anchored_fallback_for_failed_action_continue_siblings"
+                    ),
+                    "scail_quality_failure": (
+                        "identity_anchored_fallback_for_failed_action_continue_siblings"
+                    ),
+                    "failed_action_enters_scail": False,
+                    "successful_sibling_outputs_preserved": True,
+                    "canonical_or_infrastructure_failure_scope": "whole_job",
+                    "fully_statistically_independent": False,
+                },
                 "upload_state_transition": [
                     "upload_pending_qwen",
                     "qwen_generated_upload",
@@ -1183,18 +1208,16 @@ def health() -> dict[str, Any]:
                     "per_action_qwen_canonical_and_main_case_geometry_roles"
                 ),
                 "upload_pose_reference_policy": {
-                    "eating": "main_case_eating_driver_geometry_image2_guide_v6",
+                    "eating": "main_case_eating_driver_geometry_image2_guide_v7",
                     "grooming": GROOMING_QWEN_POSE_REFERENCE_POLICY,
                 },
                 "geometry_generator_policy": {
-                    "eating": "driving_eating_geometry_image2_v6",
+                    "eating": "driving_eating_geometry_image2_v7",
                     "grooming": GROOMING_QWEN_GEOMETRY_GUIDE_POLICY,
                 },
                 "eating_geometry_isolation": {
-                    "qwen_internal_luma_variation": True,
-                    "qwen_internal_luma_variation_role": (
-                        "compressed_low_frequency_action_anatomy_only"
-                    ),
+                    "qwen_internal_luma_variation": False,
+                    "qwen_internal_luma_variation_role": "none",
                     "qwen_appearance_bearing_internal_luma_variation": False,
                     "source_rgb_preserved": False,
                     "source_chroma_preserved": False,
@@ -1666,6 +1689,10 @@ def health() -> dict[str, Any]:
                     "persists_for_remaining_attempts": True,
                     "generic_full_redraw_forbidden_after_source": True,
                     "source": ("best_prior_pose_and_bowl_safe_palette_drift_candidate"),
+                    "unsafe_source_palette_issues": sorted(
+                        EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES
+                    ),
+                    "invented_stripe_candidate_can_seed_refine": False,
                     "steps": EATING_CANONICAL_IDENTITY_REFINE_STEPS,
                     "denoise": EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
                     "qwen_lightning_only": True,
