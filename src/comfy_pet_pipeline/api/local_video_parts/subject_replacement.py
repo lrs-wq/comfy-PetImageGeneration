@@ -89,11 +89,11 @@ DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN = 0.75
 DRINKING_SCAIL_BACKGROUND_DISTANCE_MIN = 24.0
 
 EATING_SCAIL_TEMPORAL_ACTION_POLICY = "eating_visible_motion_energy_gate_v2"
-EATING_SCAIL_BEST_EFFORT_POLICY = "eating_motion_energy_best_of_ten_v1"
-EATING_SCAIL_MAX_ATTEMPTS = 10
+EATING_SCAIL_BEST_EFFORT_POLICY = "eating_motion_energy_best_of_five_v1"
+EATING_SCAIL_MAX_ATTEMPTS = 5
 # A retry for insufficient eating motion must strengthen, never weaken, the
 # white-model pose signal.  Later attempts stay at the safe 1.35 effective
-# strength cap and vary the seed, giving the bounded search several chances to
+# strength cap and vary the seed, giving the bounded search five chances to
 # preserve the head-nod without importing the maquette's coat appearance.
 EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (
     1.0,
@@ -101,11 +101,6 @@ EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (
     1.12,
     1.18,
     1.24,
-    1.30,
-    1.36,
-    1.42,
-    1.48,
-    1.54,
 )
 EATING_SCAIL_ADJACENT_MAE_MIN = 0.55
 EATING_SCAIL_FIRST_FRAME_MAE_MAX_MIN = 3.0

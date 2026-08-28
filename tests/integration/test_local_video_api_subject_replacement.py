@@ -1933,11 +1933,11 @@ class ToiletingScailTemporalIdentityArtifactTests(unittest.TestCase):
             action="eating",
             attempt=2,
         )
-        tenth, _, tenth_controls = pipeline.scail_workflow_with_retry_controls(
+        fifth, _, fifth_controls = pipeline.scail_workflow_with_retry_controls(
             workflow,
-            seed=20260834,
+            seed=20260829,
             action="eating",
-            attempt=10,
+            attempt=5,
         )
 
         self.assertAlmostEqual(second["17"]["inputs"]["pose_strength"], 1.166)
@@ -1946,12 +1946,12 @@ class ToiletingScailTemporalIdentityArtifactTests(unittest.TestCase):
             workflow["17"]["inputs"]["pose_strength"],
         )
         self.assertEqual(
-            tenth["17"]["inputs"]["pose_strength"],
+            fifth["17"]["inputs"]["pose_strength"],
             pipeline.SCAIL_EATING_POSE_STRENGTH_MAX,
         )
         self.assertFalse(second_controls["eating_pose_strength_cap_applied"])
-        self.assertTrue(tenth_controls["eating_pose_strength_cap_applied"])
-        self.assertEqual(pipeline.EATING_SCAIL_MAX_ATTEMPTS, 10)
+        self.assertTrue(fifth_controls["eating_pose_strength_cap_applied"])
+        self.assertEqual(pipeline.EATING_SCAIL_MAX_ATTEMPTS, 5)
 
     def test_eating_best_effort_prefers_stronger_weakest_motion_axis(self) -> None:
         weaker = pipeline.eating_scail_best_effort_score(
