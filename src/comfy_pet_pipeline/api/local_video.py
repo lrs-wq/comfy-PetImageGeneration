@@ -129,7 +129,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.32"
+API_VERSION = "2.26.33"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -144,6 +144,9 @@ COMFY_INPUT = DATA_ROOT / "comfyui" / "input"
 COMFY_OUTPUT = DATA_ROOT / "comfyui" / "output"
 MODEL_ROOT = DATA_ROOT / "models" / "comfyui"
 OUTPUT_ROOT = DATA_ROOT / "outputs" / "local_video_api"
+VALIDATED_FIRST_FRAME_CACHE_ROOT = (
+    DATA_ROOT / "cache" / "validated_qwen_first_frames"
+)
 USER_LORA_DIR = MODEL_ROOT / "loras" / "user_uploads"
 JOB_CALLBACK_REPORTER = JobCallbackReporter.from_environment(
     output_root=OUTPUT_ROOT,
@@ -290,7 +293,25 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.38"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.39"
+QWEN_VALIDATED_FIRST_FRAME_POLICY = (
+    "strict_quality_gate_then_content_addressed_reuse_or_seed_wave_retry_v1"
+)
+QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION = "validated_qwen_first_frame_v1"
+QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
+    {"1.40.38", QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION}
+)
+QWEN_FIRST_FRAME_SEED_WAVE_STRIDE = max(
+    10_000,
+    int(os.environ.get("QWEN_FIRST_FRAME_SEED_WAVE_STRIDE", "104729")),
+)
+QWEN_FIRST_FRAME_CACHE_HISTORY_SCAN_LIMIT = max(
+    1,
+    min(
+        5000,
+        int(os.environ.get("QWEN_FIRST_FRAME_CACHE_HISTORY_SCAN_LIMIT", "500")),
+    ),
+)
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
     "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
 )
@@ -1522,6 +1543,10 @@ TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
 
 class JobCancelled(RuntimeError):
     """Raised when a user requests cancellation of a generation job."""
+
+
+class FirstFrameQualityRetry(RuntimeError):
+    """Raised to requeue an accepted job with a fresh first-frame seed wave."""
 
 
 Image.MAX_IMAGE_PIXELS = 40_000_000
@@ -6873,6 +6898,18 @@ EATING_SCAIL_MAX_ATTEMPTS = (
     _local_video_subject_replacement.EATING_SCAIL_MAX_ATTEMPTS
 )
 pose_attempt_provenance = _local_video_job_runner.pose_attempt_provenance
+strict_first_frame_record_issues = (
+    _local_video_job_runner.strict_first_frame_record_issues
+)
+validated_first_frame_cache_fingerprint = (
+    _local_video_job_runner.validated_first_frame_cache_fingerprint
+)
+load_validated_first_frame_cache = (
+    _local_video_job_runner.load_validated_first_frame_cache
+)
+store_validated_first_frame_cache = (
+    _local_video_job_runner.store_validated_first_frame_cache
+)
 merge_identity_chroma_spill_cleanup = (
     _local_video_job_runner.merge_identity_chroma_spill_cleanup
 )
@@ -6904,6 +6941,13 @@ def try_recover_subject_replacement_output(
     with JOBS_LOCK:
         failed_job = dict(JOBS.get(job_id) or {})
     if failed_job.get("generation_mode") != "subject_replacement":
+        return False
+    if (
+        failed_job.get("qwen_first_frame_validated_required") is True
+        and failed_job.get("reference_generation_status") == "running"
+    ):
+        # A generated upload may never be converted into a plausible-looking
+        # original-image loop while frame zero is still unvalidated.
         return False
     try:
         return recover_subject_replacement_job_with_fallback(job_id, error)
@@ -6938,6 +6982,48 @@ def worker_loop() -> None:
             LOGGER.info("Starting job %s", job_id)
             run_job(job_id)
             LOGGER.info("Completed job %s", job_id)
+        except FirstFrameQualityRetry as exc:
+            with JOBS_LOCK:
+                retry_job = dict(JOBS.get(job_id) or {})
+            if retry_job.get("cancel_requested"):
+                LOGGER.info(
+                    "First-frame retry for %s was cancelled by the user",
+                    job_id,
+                )
+                mark_job_cancelled(job_id)
+            else:
+                update_job(
+                    job_id,
+                    status="queued",
+                    stage="queued_for_first_frame_quality_retry",
+                    error=None,
+                    active_prompt_id=None,
+                    finished_at=None,
+                    recovery_active=True,
+                    qwen_first_frame_last_retry_reason=str(exc),
+                )
+                try:
+                    JOB_QUEUE.put_nowait(job_id)
+                except queue.Full:
+                    threading.Thread(
+                        target=JOB_QUEUE.put,
+                        args=(job_id,),
+                        name=f"first-frame-requeue-{job_id}",
+                        daemon=True,
+                    ).start()
+                LOGGER.warning(
+                    "Requeued %s for a fresh validated first-frame seed wave: %s",
+                    job_id,
+                    exc,
+                )
+            try:
+                wait_comfy_idle(timeout=120)
+                free_comfy_models()
+            except Exception:  # noqa: BLE001 - best effort cleanup
+                LOGGER.exception(
+                    "GPU cleanup after first-frame retry %s also failed",
+                    job_id,
+                )
         except JobCancelled:
             LOGGER.info("Job %s was cancelled by the user", job_id)
             mark_job_cancelled(job_id)
@@ -7033,6 +7119,24 @@ def restore_jobs() -> None:
 
     retry_after_recovery: list[str] = []
     for job_id in interrupted:
+        with JOBS_LOCK:
+            interrupted_job = dict(JOBS.get(job_id) or {})
+        strict_first_frame_interrupted = bool(
+            interrupted_job.get("qwen_first_frame_validated_required") is True
+            and interrupted_job.get("reference_generation_status") == "running"
+        )
+        if strict_first_frame_interrupted:
+            update_job(
+                job_id,
+                status="queued",
+                stage="queued_for_first_frame_quality_retry",
+                error=None,
+                finished_at=None,
+                qwen_first_frame_restart_requeued=True,
+                qwen_first_frame_original_fallback_disabled=True,
+            )
+            retry_after_recovery.append(job_id)
+            continue
         restart_error = RuntimeError(
             "API service restarted while this accepted job was running."
         )
@@ -7056,6 +7160,23 @@ def restore_jobs() -> None:
     for job_id in restored_queue[:available_slots]:
         JOB_QUEUE.put_nowait(job_id)
     for job_id in restored_queue[available_slots:]:
+        with JOBS_LOCK:
+            overflow_job = dict(JOBS.get(job_id) or {})
+        if overflow_job.get("qwen_first_frame_validated_required") is True:
+            update_job(
+                job_id,
+                status="queued",
+                stage="queued_for_first_frame_retry_capacity",
+                error=None,
+                finished_at=None,
+            )
+            threading.Thread(
+                target=JOB_QUEUE.put,
+                args=(job_id,),
+                name=f"restored-first-frame-requeue-{job_id}",
+                daemon=True,
+            ).start()
+            continue
         overflow_error = RuntimeError(
             "Queue capacity was exceeded while restoring this accepted job."
         )
@@ -7517,6 +7638,15 @@ async def create_subject_replacement_api_job(
             "reference_pipeline_version": (
                 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION if raw is not None else None
             ),
+            "qwen_first_frame_validated_required": raw is not None,
+            "qwen_first_frame_publication_policy": (
+                QWEN_VALIDATED_FIRST_FRAME_POLICY if raw is not None else None
+            ),
+            "qwen_first_frame_cache_version": (
+                QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION if raw is not None else None
+            ),
+            "qwen_first_frame_retry_waves": {},
+            "qwen_first_frame_states": {},
             "generation_audit_policy": GENERATION_AUDIT_POLICY,
             "visual_content_audit_mode": (
                 "blocking" if GENERATION_VISUAL_AUDITS_BLOCKING else "advisory"

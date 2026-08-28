@@ -120,6 +120,18 @@ def health() -> dict[str, Any]:
         "qwen_full_body_required": True,
         "qwen_action_keyframes_required": True,
         "normalized_transparent_references_required": True,
+        "first_frame_publication": {
+            "policy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
+            "cache_version": QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION,
+            "strict_quality_gate_required": True,
+            "content_addressed_exact_input_reuse": True,
+            "cache_integrity_sha256_required": True,
+            "current_gate_revalidation_on_hit": True,
+            "seed_wave_retry_until_validated": True,
+            "original_upload_fallback_published": False,
+            "failed_action_removed": False,
+            "seed_wave_stride": QWEN_FIRST_FRAME_SEED_WAVE_STRIDE,
+        },
         "identity_upload_view_counts": [1, 3],
         "three_view_roles": list(UPLOADED_IDENTITY_VIEW_ROLES),
         "three_view_policy": UPLOADED_IDENTITY_VIEW_POLICY,
@@ -1959,6 +1971,14 @@ def health() -> dict[str, Any]:
                 "bowl_max_attempts": (
                     QWEN_POSE_MAX_ATTEMPTS + QWEN_BOWL_POSE_EXTRA_ATTEMPTS
                 ),
+                "first_frame_publication_policy": (
+                    QWEN_VALIDATED_FIRST_FRAME_POLICY
+                ),
+                "first_frame_cache_version": (
+                    QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION
+                ),
+                "first_frame_seed_wave_retry": True,
+                "first_frame_original_upload_fallback": False,
                 "bowl_palette_bottom_exclusion": (
                     BOWL_IDENTITY_PALETTE_BOTTOM_EXCLUSION
                 ),

@@ -488,6 +488,628 @@ def pose_attempt_provenance(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def strict_first_frame_record_issues(
+    record: dict[str, Any],
+    *,
+    action: str,
+) -> list[str]:
+    """Explain why an action reference is unsafe to publish as frame zero."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"strict_first_frame_record_issues"},
+    )
+    issues: list[str] = []
+    if record.get("reference_generation_degraded") is True:
+        issues.append("reference_generation_degraded")
+    if record.get("candidate_gate_degraded_fallback") is True:
+        issues.append("candidate_gate_degraded_fallback")
+    if isinstance(record.get("canonical_identity_fallback"), dict):
+        issues.append("canonical_identity_fallback")
+
+    for field in ("chroma", "quality", "similarity"):
+        value = record.get(field)
+        if not isinstance(value, dict) or value.get("acceptable") is not True:
+            issues.append(f"{field}_not_acceptable")
+
+    chroma = record.get("chroma")
+    edge = (
+        chroma.get("transparent_edge_quality")
+        if isinstance(chroma, dict)
+        else None
+    )
+    if not isinstance(edge, dict) or edge.get("acceptable") is not True:
+        issues.append("transparent_edge_not_acceptable")
+
+    candidate_gate = record.get("action_candidate_gate")
+    if (
+        not isinstance(candidate_gate, dict)
+        or candidate_gate.get("acceptable") is not True
+        or candidate_gate.get("degraded_fallback_accepted") is True
+    ):
+        issues.append("action_candidate_gate_not_strictly_acceptable")
+
+    palette = record.get("identity_palette")
+    grooming_minimum = record.get("grooming_advisory_minimum_gate")
+    if action == "grooming":
+        if (
+            not isinstance(grooming_minimum, dict)
+            or grooming_minimum.get("acceptable") is not True
+            or grooming_minimum.get("degraded_fallback_accepted") is True
+        ):
+            issues.append("grooming_minimum_gate_not_strictly_acceptable")
+        if (
+            isinstance(record.get("validated_first_frame_cache"), dict)
+            and isinstance(grooming_minimum, dict)
+            and str(grooming_minimum.get("candidate_sha256") or "")
+            != str(record.get("keyframe_sha256") or "")
+        ):
+            issues.append("grooming_minimum_gate_candidate_digest_changed")
+        grooming_palette = (
+            grooming_minimum.get("identity_palette")
+            if isinstance(grooming_minimum, dict)
+            else None
+        )
+        if (
+            isinstance(palette, dict)
+            and palette.get("acceptable") is not True
+        ) or (
+            palette is None
+            and (
+                not isinstance(grooming_palette, dict)
+                or grooming_palette.get("acceptable") is not True
+            )
+        ):
+            issues.append("identity_palette_not_acceptable")
+    elif not isinstance(palette, dict) or palette.get("acceptable") is not True:
+        issues.append("identity_palette_not_acceptable")
+
+    for field in ("fur_silhouette", "fur_surface_gate", "grooming_pose_gate"):
+        value = record.get(field)
+        if isinstance(value, dict) and value.get("acceptable") is not True:
+            issues.append(f"{field}_not_acceptable")
+    return list(dict.fromkeys(issues))
+
+
+def validated_first_frame_cache_fingerprint(
+    job: dict[str, Any],
+    action: str,
+) -> str:
+    """Build an identity/action fingerprint that excludes stochastic Qwen output."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"validated_first_frame_cache_fingerprint"},
+    )
+    normalized_action = action_key(action)
+    views = job.get("uploaded_identity_views")
+    identity_views: list[dict[str, str]] = []
+    if isinstance(views, dict):
+        for role in sorted(views):
+            view = views.get(role)
+            if not isinstance(view, dict):
+                continue
+            identity_views.append(
+                {
+                    "role": str(role),
+                    "input_sha256": str(view.get("input_sha256") or ""),
+                    "source_sha256": str(view.get("source_sha256") or ""),
+                }
+            )
+    pose_reference_sha256s = job.get("pose_reference_input_sha256s")
+    pose_source_sha256s = job.get("pose_reference_source_sha256s")
+    pose_policies = job.get("pose_identity_input_policies")
+    pose_reference_policies = job.get("pose_reference_policy")
+    required_digests = [
+        str(job.get("subject_profile_sha256") or ""),
+        str(
+            pose_reference_sha256s.get(normalized_action, "")
+            if isinstance(pose_reference_sha256s, dict)
+            else ""
+        ),
+        *[
+            digest
+            for view in identity_views
+            for digest in (view["input_sha256"], view["source_sha256"])
+        ],
+    ]
+    if (
+        not identity_views
+        or any(not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in required_digests)
+    ):
+        raise ValueError(
+            "Validated first-frame cache requires digest-bound upload views, "
+            "Profile, and action guide."
+        )
+    payload = {
+        "cache_version": QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION,
+        "action": normalized_action,
+        "species": str(job.get("species") or "").strip().lower(),
+        "identity_views": identity_views,
+        "subject_profile_sha256": str(job.get("subject_profile_sha256") or ""),
+        "reference_image_profile": str(job.get("reference_image_profile") or ""),
+        "reference_image_profile_revision": str(
+            job.get("reference_image_profile_revision") or ""
+        ),
+        "pose_reference_input_sha256": str(
+            pose_reference_sha256s.get(normalized_action, "")
+            if isinstance(pose_reference_sha256s, dict)
+            else ""
+        ),
+        "pose_reference_source_sha256": str(
+            pose_source_sha256s.get(normalized_action, "")
+            if isinstance(pose_source_sha256s, dict)
+            else ""
+        ),
+        "pose_identity_input_policy": str(
+            pose_policies.get(
+                normalized_action,
+                job.get("pose_identity_input_policy") or "",
+            )
+            if isinstance(pose_policies, dict)
+            else job.get("pose_identity_input_policy") or ""
+        ),
+        "pose_reference_policy": str(
+            pose_reference_policies.get(normalized_action, "")
+            if isinstance(pose_reference_policies, dict)
+            else pose_reference_policies or ""
+        ),
+        "qwen_reference_prompt_en": str(job.get("qwen_reference_prompt_en") or ""),
+        "qwen_seed": int(job.get("qwen_seed", job.get("seed", 0)) or 0),
+        "qwen_steps": int(job.get("qwen_steps", 0) or 0),
+        "qwen_cfg": float(job.get("qwen_cfg", 0.0) or 0.0),
+        "qwen_denoise": float(job.get("qwen_denoise", 0.0) or 0.0),
+        "user_loras": job.get("user_loras") or [],
+        "action_candidate_gate_policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
+        "first_frame_policy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validated_first_frame_image_issues(
+    path: Path,
+    *,
+    expected_sha256: str,
+) -> list[str]:
+    issues: list[str] = []
+    if not path.is_file():
+        return ["reference_missing"]
+    actual_sha256 = file_sha256(path)
+    if actual_sha256 != expected_sha256:
+        issues.append("reference_digest_changed")
+    try:
+        with Image.open(path) as loaded:
+            rgba = loaded.convert("RGBA")
+            if rgba.size != (TRANSPARENT_GIF_SIZE, TRANSPARENT_GIF_SIZE):
+                issues.append("reference_size_changed")
+            alpha = np.asarray(rgba.getchannel("A"), dtype=np.uint8)
+    except (OSError, ValueError, UnidentifiedImageError):
+        return [*issues, "reference_image_unreadable"]
+    foreground_fraction = float(np.count_nonzero(alpha >= 16)) / float(alpha.size)
+    if foreground_fraction < 0.02 or foreground_fraction > 0.92:
+        issues.append("reference_alpha_subject_fraction_invalid")
+    if any(int(alpha[y, x]) != 0 for x, y in ((0, 0), (-1, 0), (0, -1), (-1, -1))):
+        issues.append("reference_alpha_corner_not_clear")
+    return list(dict.fromkeys(issues))
+
+
+def _quality_record_as_first_frame_attempt(
+    quality: dict[str, Any],
+    workflow: dict[str, Any],
+    *,
+    reference_name: str,
+    source_job_id: str,
+    current_job_id: str,
+    cache_fingerprint: str,
+    reference_sha256: str,
+) -> dict[str, Any]:
+    selected_attempt = int(quality.get("selected_attempt") or 1)
+    selected_attempt_record = next(
+        (
+            item
+            for item in list(quality.get("attempts") or [])
+            if isinstance(item, dict)
+            and int(item.get("attempt") or -1) == selected_attempt
+        ),
+        {},
+    )
+
+    def remap(value: Any) -> Any:
+        if isinstance(value, str):
+            return value.replace(
+                f"local_video_api/{source_job_id}/",
+                f"local_video_api/{current_job_id}/",
+            )
+        if isinstance(value, list):
+            return [remap(item) for item in value]
+        if isinstance(value, dict):
+            return {key: remap(item) for key, item in value.items()}
+        return value
+
+    settings = remap(dict(quality.get("selected_settings") or {}))
+    record: dict[str, Any] = {
+        "attempt": selected_attempt,
+        "profile": str(quality.get("selected_profile") or "validated_cache"),
+        "seed": selected_attempt_record.get("seed"),
+        "identity_input_policy": quality.get("identity_input_policy"),
+        "image1_input_name": remap(quality.get("image1_input_name")),
+        "image2_input_name": remap(quality.get("image2_input_name")),
+        "image3_input_name": remap(quality.get("image3_input_name")),
+        "sampler_latent_input_name": remap(
+            quality.get("sampler_latent_input_name")
+        ),
+        "sampler_noise_mask_input_name": remap(
+            quality.get("sampler_noise_mask_input_name")
+        ),
+        "identity_input_name": remap(quality.get("identity_input_name")),
+        "geometry_input_name": remap(quality.get("geometry_input_name")),
+        "keyframe": reference_name,
+        "keyframe_sha256": reference_sha256,
+        "cutout": reference_name,
+        "chroma": json.loads(json.dumps(quality.get("selected_chroma") or {})),
+        "quality": json.loads(json.dumps(quality.get("selected_quality") or {})),
+        "similarity": json.loads(
+            json.dumps(quality.get("selected_similarity") or {})
+        ),
+        "identity_palette": json.loads(
+            json.dumps(quality.get("selected_identity_palette"))
+        ),
+        "candidate_identity_palette": json.loads(
+            json.dumps(quality.get("selected_candidate_identity_palette"))
+        ),
+        "candidate_upper_body_identity_palette": json.loads(
+            json.dumps(
+                quality.get("selected_candidate_upper_body_identity_palette")
+            )
+        ),
+        "action_candidate_gate": json.loads(
+            json.dumps(quality.get("selected_action_candidate_gate") or {})
+        ),
+        "canonical_identity_fallback": quality.get(
+            "selected_canonical_identity_fallback"
+        ),
+        "fur_silhouette": json.loads(
+            json.dumps(quality.get("selected_fur_silhouette"))
+        ),
+        "fur_surface_gate": json.loads(
+            json.dumps(quality.get("selected_fur_surface_gate"))
+        ),
+        "grooming_pose_gate": json.loads(
+            json.dumps(quality.get("selected_grooming_pose_gate"))
+        ),
+        "grooming_advisory_minimum_gate": json.loads(
+            json.dumps(quality.get("selected_grooming_advisory_minimum_gate"))
+        ),
+        "color_recovery": json.loads(
+            json.dumps(quality.get("selected_color_recovery"))
+        ),
+        "grooming_foreleg_repair": quality.get("grooming_foreleg_repair"),
+        "settings": settings,
+        "workflow": remap(json.loads(json.dumps(workflow))),
+        "transparent": True,
+        "background_removal_failed": False,
+        "reference_generation_degraded": False,
+        "validated_first_frame_cache": {
+            "policy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
+            "cache_version": QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION,
+            "fingerprint": cache_fingerprint,
+            "source_job_id": source_job_id,
+            "source_reference_sha256": reference_sha256,
+            "integrity_verified": True,
+            "strict_quality_record_verified": True,
+        },
+    }
+    record["combined_penalty"] = round(
+        sum(
+            float(value.get("penalty", 0.0))
+            for value in (
+                record.get("quality"),
+                record.get("similarity"),
+                record.get("identity_palette"),
+                record.get("fur_silhouette"),
+                record.get("fur_surface_gate"),
+                record.get("grooming_pose_gate"),
+                record.get("grooming_advisory_minimum_gate"),
+            )
+            if isinstance(value, dict)
+        ),
+        6,
+    )
+    return record
+
+
+def _write_validated_first_frame_cache_entry(
+    *,
+    fingerprint: str,
+    action: str,
+    source_job_id: str,
+    reference_path: Path,
+    quality: dict[str, Any],
+    workflow: dict[str, Any],
+) -> dict[str, Any]:
+    reference_sha256 = file_sha256(reference_path)
+    image_issues = _validated_first_frame_image_issues(
+        reference_path,
+        expected_sha256=reference_sha256,
+    )
+    record = _quality_record_as_first_frame_attempt(
+        quality,
+        workflow,
+        reference_name="reference.png",
+        source_job_id=source_job_id,
+        current_job_id=source_job_id,
+        cache_fingerprint=fingerprint,
+        reference_sha256=reference_sha256,
+    )
+    quality_issues = strict_first_frame_record_issues(record, action=action)
+    if image_issues or quality_issues:
+        raise RuntimeError(
+            "Refusing to cache an unvalidated first frame: "
+            + ", ".join([*image_issues, *quality_issues])
+        )
+    cache_dir = VALIDATED_FIRST_FRAME_CACHE_ROOT / fingerprint
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_reference = cache_dir / "reference.png"
+    temporary_reference = cache_dir / f".reference.{uuid4().hex}.tmp"
+    shutil.copy2(reference_path, temporary_reference)
+    if file_sha256(temporary_reference) != reference_sha256:
+        temporary_reference.unlink(missing_ok=True)
+        raise RuntimeError("Validated first-frame cache copy changed its digest.")
+    os.replace(temporary_reference, cache_reference)
+    manifest = {
+        "cache_version": QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION,
+        "policy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
+        "fingerprint": fingerprint,
+        "action": action,
+        "source_job_id": source_job_id,
+        "source_pipeline_version": QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
+        "reference_filename": cache_reference.name,
+        "reference_sha256": reference_sha256,
+        "quality": quality,
+        "workflow": workflow,
+        "created_at": utc_now(),
+    }
+    write_json_atomic(cache_dir / "manifest.json", manifest)
+    return {
+        "fingerprint": fingerprint,
+        "source_job_id": source_job_id,
+        "reference_sha256": reference_sha256,
+        "manifest": str(cache_dir / "manifest.json"),
+    }
+
+
+def _promote_historical_validated_first_frame(
+    *,
+    current_job_id: str,
+    action: str,
+    fingerprint: str,
+) -> dict[str, Any] | None:
+    status_paths = sorted(
+        OUTPUT_ROOT.glob("*/status.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )[:QWEN_FIRST_FRAME_CACHE_HISTORY_SCAN_LIMIT]
+    for source_status_path in status_paths:
+        source_job_id = source_status_path.parent.name
+        if source_job_id == current_job_id:
+            continue
+        try:
+            source_job = json.loads(source_status_path.read_text(encoding="utf-8"))
+            if source_job.get("status") != "completed":
+                continue
+            if source_job.get("reference_pipeline_version") not in (
+                QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS
+            ):
+                continue
+            degraded = source_job.get("qwen_reference_degraded_actions")
+            if isinstance(degraded, dict) and action in degraded:
+                continue
+            if validated_first_frame_cache_fingerprint(source_job, action) != fingerprint:
+                continue
+            source_actions = [
+                action_key(value) for value in list(source_job.get("actions") or [])
+            ]
+            if action not in source_actions:
+                continue
+            source_pose_index = source_actions.index(action) + 1
+            quality_path = (
+                source_status_path.parent
+                / "workflows"
+                / f"qwen_pose_{source_pose_index:02d}_quality.json"
+            )
+            workflow_path = (
+                source_status_path.parent
+                / "workflows"
+                / f"qwen_pose_{source_pose_index:02d}.json"
+            )
+            reference_paths = source_job.get("subject_reference_paths")
+            source_reference = Path(
+                str(
+                    reference_paths.get(action, "")
+                    if isinstance(reference_paths, dict)
+                    else ""
+                )
+            )
+            source_root = source_status_path.parent.resolve()
+            try:
+                source_reference.resolve().relative_to(source_root)
+            except (OSError, ValueError):
+                continue
+            effective_config = source_job.get("effective_subject_config")
+            effective_action = (
+                effective_config.get("actions", {}).get(action)
+                if isinstance(effective_config, dict)
+                else None
+            )
+            if isinstance(effective_action, dict):
+                configured_reference = Path(
+                    str(effective_action.get("reference") or "")
+                )
+                configured_sha256 = str(
+                    effective_action.get("reference_sha256") or ""
+                )
+                if (
+                    configured_reference.resolve() != source_reference.resolve()
+                    or configured_sha256 != file_sha256(source_reference)
+                ):
+                    continue
+            if not quality_path.is_file() or not workflow_path.is_file():
+                continue
+            quality = json.loads(quality_path.read_text(encoding="utf-8"))
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            return _write_validated_first_frame_cache_entry(
+                fingerprint=fingerprint,
+                action=action,
+                source_job_id=source_job_id,
+                reference_path=source_reference,
+                quality=quality,
+                workflow=workflow,
+            )
+        except (OSError, ValueError, KeyError, json.JSONDecodeError, RuntimeError):
+            LOGGER.warning(
+                "Ignoring invalid historical first-frame candidate %s for %s",
+                source_job_id,
+                action,
+                exc_info=True,
+            )
+    return None
+
+
+def load_validated_first_frame_cache(
+    job_id: str,
+    job: dict[str, Any],
+    *,
+    action: str,
+    pose_index: int,
+    job_dir: Path,
+) -> dict[str, Any] | None:
+    """Return a digest-checked, strictly gated frame from this exact input set."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"load_validated_first_frame_cache"},
+    )
+    normalized_action = action_key(action)
+    try:
+        fingerprint = validated_first_frame_cache_fingerprint(
+            job,
+            normalized_action,
+        )
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "%s cannot use the validated first-frame cache for %s because its "
+            "input digest contract is incomplete",
+            job_id,
+            normalized_action,
+        )
+        return None
+    cache_dir = VALIDATED_FIRST_FRAME_CACHE_ROOT / fingerprint
+    manifest_path = cache_dir / "manifest.json"
+    if not manifest_path.is_file():
+        _promote_historical_validated_first_frame(
+            current_job_id=job_id,
+            action=normalized_action,
+            fingerprint=fingerprint,
+        )
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if (
+            manifest.get("cache_version")
+            != QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION
+            or manifest.get("policy") != QWEN_VALIDATED_FIRST_FRAME_POLICY
+            or manifest.get("fingerprint") != fingerprint
+            or manifest.get("action") != normalized_action
+        ):
+            return None
+        reference_sha256 = str(manifest.get("reference_sha256") or "")
+        reference_filename = str(
+            manifest.get("reference_filename") or "reference.png"
+        )
+        if Path(reference_filename).name != reference_filename:
+            return None
+        cache_reference = cache_dir / reference_filename
+        if _validated_first_frame_image_issues(
+            cache_reference,
+            expected_sha256=reference_sha256,
+        ):
+            return None
+        quality = manifest.get("quality")
+        workflow = manifest.get("workflow")
+        if not isinstance(quality, dict) or not isinstance(workflow, dict):
+            return None
+        target = job_dir / f"pose_{pose_index:02d}_validated_first_frame_cache.png"
+        temporary_target = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        shutil.copy2(cache_reference, temporary_target)
+        if file_sha256(temporary_target) != reference_sha256:
+            temporary_target.unlink(missing_ok=True)
+            return None
+        os.replace(temporary_target, target)
+        record = _quality_record_as_first_frame_attempt(
+            quality,
+            workflow,
+            reference_name=target.name,
+            source_job_id=str(manifest.get("source_job_id") or ""),
+            current_job_id=job_id,
+            cache_fingerprint=fingerprint,
+            reference_sha256=reference_sha256,
+        )
+        if strict_first_frame_record_issues(record, action=normalized_action):
+            return None
+        return record
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        LOGGER.warning(
+            "Ignoring invalid validated first-frame cache entry %s",
+            manifest_path,
+            exc_info=True,
+        )
+        return None
+
+
+def store_validated_first_frame_cache(
+    job_id: str,
+    job: dict[str, Any],
+    *,
+    action: str,
+    pose_index: int,
+    reference_path: Path,
+) -> dict[str, Any]:
+    """Publish a selected frame only after its persisted strict audit is complete."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"store_validated_first_frame_cache"},
+    )
+    quality_path = (
+        reference_path.parent
+        / "workflows"
+        / f"qwen_pose_{pose_index:02d}_quality.json"
+    )
+    workflow_path = (
+        reference_path.parent / "workflows" / f"qwen_pose_{pose_index:02d}.json"
+    )
+    if not quality_path.is_file() or not workflow_path.is_file():
+        raise RuntimeError("Selected first-frame audit files are incomplete.")
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    fingerprint = validated_first_frame_cache_fingerprint(job, action)
+    return _write_validated_first_frame_cache_entry(
+        fingerprint=fingerprint,
+        action=action_key(action),
+        source_job_id=job_id,
+        reference_path=reference_path,
+        quality=quality,
+        workflow=workflow,
+    )
+
+
 def resolve_action_identity_palette_reference(
     *,
     uploaded_reference_job: bool,
@@ -2354,6 +2976,20 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         require_eating_mouth_contact = bool(
             force_qwen_reference and action_key(pose) == "eating"
         )
+        strict_first_frame_required = bool(
+            force_qwen_reference
+            and job.get("qwen_first_frame_validated_required", True)
+        )
+        first_frame_retry_waves = {
+            str(key): int(value)
+            for key, value in dict(
+                get_job(job_id).get("qwen_first_frame_retry_waves") or {}
+            ).items()
+        }
+        first_frame_retry_wave = max(
+            0,
+            int(first_frame_retry_waves.get(action_key(pose), 0)),
+        )
         pose_qwen_input_name = qwen_input_name
         pose_qwen_secondary_input_name = pose_reference_input_name
         pose_identity_input_name = qwen_input_name
@@ -3036,7 +3672,191 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                     pose_candidate_matte_policy=(QWEN_ACTION_CANDIDATE_MATTE_POLICY),
                 )
-            for attempt, profile in enumerate(active_pose_profiles, start=1):
+            if strict_first_frame_required:
+                cached_attempt = load_validated_first_frame_cache(
+                    job_id,
+                    get_job(job_id),
+                    action=action_key(pose),
+                    pose_index=index,
+                    job_dir=job_dir,
+                )
+                if cached_attempt is not None:
+                    cached_path = job_dir / str(cached_attempt["keyframe"])
+                    cached_quality = pose_cutout_quality(
+                        cached_path,
+                        pose,
+                        require_eating_mouth_contact=(
+                            require_eating_mouth_contact
+                        ),
+                    )
+                    cached_similarity = pose_similarity_quality(
+                        cached_path,
+                        pose=pose,
+                        canonical_path=canonical_similarity_reference,
+                        previous_poses=accepted_pose_similarity_references,
+                    )
+                    cached_attempt["quality"] = cached_quality
+                    if action_key(pose) == "grooming":
+                        cached_attempt["cache_revalidation_similarity_probe"] = (
+                            cached_similarity
+                        )
+                    else:
+                        cached_attempt["similarity"] = cached_similarity
+                    if pose_palette_reference_path is not None:
+                        cached_palette = evaluate_pose_identity_palette(
+                            cached_path,
+                            primary_reference=pose_reference_identity_palette,
+                            upper_body_reference=(
+                                pose_reference_upper_body_identity_palette
+                            ),
+                            bottom_exclusion=pose_palette_bottom_exclusion,
+                            bowl_action=bowl_action,
+                        )
+                        cached_attempt["identity_palette"] = cached_palette[
+                            "quality"
+                        ]
+                        cached_attempt["candidate_identity_palette"] = (
+                            cached_palette["candidate"]
+                        )
+                        cached_attempt[
+                            "candidate_upper_body_identity_palette"
+                        ] = cached_palette["upper_body_candidate"]
+                    if pose_fur_reference_path is not None:
+                        cached_attempt["fur_silhouette"] = (
+                            eating_fur_silhouette_quality(
+                                cached_path,
+                                pose_fur_reference_path,
+                            )
+                        )
+                    cached_gate = dict(
+                        cached_attempt.get("action_candidate_gate") or {}
+                    )
+                    cached_gate.update(
+                        acceptable=bool(
+                            cached_quality.get("acceptable") is True
+                            and cached_attempt["similarity"].get("acceptable")
+                            is True
+                            and isinstance(
+                                cached_attempt.get("identity_palette"), dict
+                            )
+                            and cached_attempt["identity_palette"].get(
+                                "acceptable"
+                            )
+                            is True
+                            and (
+                                not isinstance(
+                                    cached_attempt.get("fur_silhouette"), dict
+                                )
+                                or cached_attempt["fur_silhouette"].get(
+                                    "acceptable"
+                                )
+                                is True
+                            )
+                        ),
+                        degraded_fallback_accepted=False,
+                        cache_revalidated=True,
+                        cache_revalidated_at=utc_now(),
+                    )
+                    cached_attempt["action_candidate_gate"] = cached_gate
+                    cached_attempt["combined_penalty"] = round(
+                        sum(
+                            float(value.get("penalty", 0.0))
+                            for value in (
+                                cached_attempt.get("quality"),
+                                cached_attempt.get("similarity"),
+                                cached_attempt.get("identity_palette"),
+                                cached_attempt.get("fur_silhouette"),
+                                cached_attempt.get("fur_surface_gate"),
+                                cached_attempt.get("grooming_pose_gate"),
+                                cached_attempt.get(
+                                    "grooming_advisory_minimum_gate"
+                                ),
+                            )
+                            if isinstance(value, dict)
+                        ),
+                        6,
+                    )
+                    cache_issues = strict_first_frame_record_issues(
+                        cached_attempt,
+                        action=action_key(pose),
+                    )
+                    if not cache_issues:
+                        best_attempt = cached_attempt
+                        attempts.append(
+                            {
+                                key: value
+                                for key, value in cached_attempt.items()
+                                if key != "workflow"
+                            }
+                        )
+                        first_frame_states = dict(
+                            get_job(job_id).get("qwen_first_frame_states") or {}
+                        )
+                        first_frame_states[action_key(pose)] = {
+                            "status": "validated_cache_hit",
+                            "retry_wave": first_frame_retry_wave,
+                            "source": cached_attempt[
+                                "validated_first_frame_cache"
+                            ],
+                            "quality_revalidated": True,
+                        }
+                        update_job(
+                            job_id,
+                            qwen_first_frame_states=first_frame_states,
+                            qwen_first_frame_current_action=action_key(pose),
+                            qwen_first_frame_cache_status="hit",
+                            qwen_first_frame_cache_fingerprint=(
+                                cached_attempt["validated_first_frame_cache"][
+                                    "fingerprint"
+                                ]
+                            ),
+                        )
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "cartoon_keyframe",
+                                "pose_index": index,
+                                "reason": "exact_input_validated_first_frame_cache_hit",
+                                "strategy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
+                                "result": "accepted_after_current_gate_revalidation",
+                                "action": action_key(pose),
+                                "cache": cached_attempt[
+                                    "validated_first_frame_cache"
+                                ],
+                            },
+                        )
+                    else:
+                        LOGGER.warning(
+                            "%s rejected cached first frame for %s after current "
+                            "gate revalidation: %s",
+                            job_id,
+                            action_key(pose),
+                            cache_issues,
+                        )
+            generation_pose_profiles = (
+                [] if best_attempt is not None else active_pose_profiles
+            )
+            if strict_first_frame_required and generation_pose_profiles:
+                first_frame_states = dict(
+                    get_job(job_id).get("qwen_first_frame_states") or {}
+                )
+                first_frame_states[action_key(pose)] = {
+                    "status": "generating_candidates",
+                    "completed": False,
+                    "quality_passed": False,
+                    "published": False,
+                    "retry_wave": first_frame_retry_wave,
+                    "attempt_budget": len(generation_pose_profiles),
+                    "original_upload_fallback_published": False,
+                    "action_removed": False,
+                }
+                update_job(
+                    job_id,
+                    qwen_first_frame_states=first_frame_states,
+                    qwen_first_frame_current_action=action_key(pose),
+                    qwen_first_frame_cache_status="miss",
+                )
+            for attempt, profile in enumerate(generation_pose_profiles, start=1):
                 if (
                     advisory_grooming_action_transfer_active
                     and attempt
@@ -3057,7 +3877,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         recovery_attempt=attempt,
                     )
                 attempt_seed = (
-                    base_seed + pose_seed_offset(pose, index) + (attempt - 1) * 1009
+                    base_seed
+                    + pose_seed_offset(pose, index)
+                    + first_frame_retry_wave * QWEN_FIRST_FRAME_SEED_WAVE_STRIDE
+                    + (attempt - 1) * 1009
                 )
                 prefix = f"local_video_api/{job_id}/qwen_pose_{index:02d}_attempt_{attempt:02d}"
                 attempt_prompt = build_qwen_prompt(
@@ -6710,9 +7533,31 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     },
                 )
                 best_attempt = None
+            if strict_first_frame_required and best_attempt is not None:
+                strict_selection_issues = strict_first_frame_record_issues(
+                    best_attempt,
+                    action=action_key(pose),
+                )
+                if strict_selection_issues:
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_keyframe",
+                            "pose_index": index,
+                            "attempt": best_attempt.get("attempt"),
+                            "reason": "selected_first_frame_failed_strict_publication_gate",
+                            "strategy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
+                            "profile": best_attempt.get("profile"),
+                            "result": "rejected_and_seed_wave_retry_required",
+                            "issues": strict_selection_issues,
+                            "action": action_key(pose),
+                        },
+                    )
+                    best_attempt = None
             if (
                 best_attempt is None
                 and advisory_action_candidate_gate_required
+                and not strict_first_frame_required
                 and best_action_candidate_degraded_attempt is not None
             ):
                 fallback_action = action_key(pose)
@@ -7117,6 +7962,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             if (
                 best_attempt is None
                 and advisory_grooming_minimum_gate_required
+                and not strict_first_frame_required
                 and best_advisory_grooming_degraded_attempt is not None
             ):
                 best_attempt = best_advisory_grooming_degraded_attempt
@@ -7213,6 +8059,70 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     f"Pose {index} remained invalid after "
                     f"{len(active_pose_profiles)} attempts: "
                     + pose_attempt_failure_summary(attempts)
+                )
+            if best_attempt is None and strict_first_frame_required:
+                failed_action = action_key(pose)
+                next_retry_wave = first_frame_retry_wave + 1
+                retry_waves = dict(
+                    get_job(job_id).get("qwen_first_frame_retry_waves") or {}
+                )
+                retry_waves[failed_action] = next_retry_wave
+                first_frame_states = dict(
+                    get_job(job_id).get("qwen_first_frame_states") or {}
+                )
+                failure_summary = pose_attempt_failure_summary(attempts)
+                first_frame_states[failed_action] = {
+                    "status": "retrying_with_new_seed_wave",
+                    "completed": False,
+                    "quality_passed": False,
+                    "published": False,
+                    "retry_wave": next_retry_wave,
+                    "attempts_in_wave": len(active_pose_profiles),
+                    "last_failure_summary": failure_summary,
+                    "original_upload_fallback_published": False,
+                    "action_removed": False,
+                }
+                update_job(
+                    job_id,
+                    stage="retrying_first_frame_quality",
+                    recovery_active=True,
+                    recovery_attempt=next_retry_wave,
+                    quality_retry=None,
+                    qwen_first_frame_retry_waves=retry_waves,
+                    qwen_first_frame_states=first_frame_states,
+                    qwen_first_frame_current_action=failed_action,
+                    qwen_first_frame_cache_status="miss",
+                    qwen_first_frame_last_failure={
+                        "action": failed_action,
+                        "pose_index": index,
+                        "retry_wave": first_frame_retry_wave,
+                        "attempt_count": len(active_pose_profiles),
+                        "summary": failure_summary,
+                    },
+                    qwen_first_frame_original_fallback_disabled=True,
+                    qwen_first_frame_action_removal_disabled=True,
+                )
+                append_recovery_event(
+                    job_id,
+                    {
+                        "stage": "cartoon_keyframe",
+                        "pose_index": index,
+                        "reason": "strict_first_frame_attempt_wave_exhausted",
+                        "strategy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
+                        "result": "job_requeued_with_fresh_seed_wave",
+                        "action": failed_action,
+                        "completed_wave": first_frame_retry_wave,
+                        "next_wave": next_retry_wave,
+                        "attempt_count": len(active_pose_profiles),
+                        "failure_summary": failure_summary,
+                        "original_upload_fallback_published": False,
+                        "action_removed": False,
+                    },
+                )
+                raise FirstFrameQualityRetry(
+                    f"{failed_action} first frame did not pass strict quality "
+                    f"gates in seed wave {first_frame_retry_wave}; queued wave "
+                    f"{next_retry_wave}."
                 )
             if best_attempt is None and force_qwen_reference:
                 failed_action = action_key(pose)
@@ -8256,6 +9166,77 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "attempts": attempts,
                 },
             )
+            if strict_first_frame_required:
+                strict_final_issues = strict_first_frame_record_issues(
+                    best_attempt,
+                    action=action_key(pose),
+                )
+                if strict_final_issues:
+                    raise RuntimeError(
+                        "Strict first-frame publication invariant changed after "
+                        f"selection for {action_key(pose)}: "
+                        + ", ".join(strict_final_issues)
+                    )
+                cache_info = best_attempt.get("validated_first_frame_cache")
+                cache_status = "hit"
+                if not isinstance(cache_info, dict):
+                    try:
+                        cache_info = store_validated_first_frame_cache(
+                            job_id,
+                            get_job(job_id),
+                            action=action_key(pose),
+                            pose_index=index,
+                            reference_path=selected_keyframe,
+                        )
+                        cache_status = "stored"
+                    except (OSError, ValueError, KeyError, RuntimeError):
+                        LOGGER.warning(
+                            "%s could not persist validated first-frame cache for %s",
+                            job_id,
+                            action_key(pose),
+                            exc_info=True,
+                        )
+                        cache_info = None
+                        cache_status = "store_failed"
+                first_frame_states = dict(
+                    get_job(job_id).get("qwen_first_frame_states") or {}
+                )
+                first_frame_states[action_key(pose)] = {
+                    "status": "validated",
+                    "completed": True,
+                    "quality_passed": True,
+                    "published": True,
+                    "retry_wave": first_frame_retry_wave,
+                    "selected_attempt": best_attempt["attempt"],
+                    "selected_profile": best_attempt["profile"],
+                    "reference": str(selected_keyframe),
+                    "reference_sha256": file_sha256(selected_keyframe),
+                    "cache_status": cache_status,
+                    "cache": cache_info,
+                    "original_upload_fallback_published": False,
+                    "action_removed": False,
+                }
+                validated_actions = sorted(
+                    {
+                        *(
+                            get_job(job_id).get(
+                                "qwen_first_frame_validated_actions",
+                                [],
+                            )
+                            or []
+                        ),
+                        action_key(pose),
+                    }
+                )
+                update_job(
+                    job_id,
+                    qwen_first_frame_states=first_frame_states,
+                    qwen_first_frame_validated_actions=validated_actions,
+                    qwen_first_frame_current_action=action_key(pose),
+                    qwen_first_frame_cache_status=cache_status,
+                    qwen_first_frame_original_fallback_disabled=True,
+                    qwen_first_frame_action_removal_disabled=True,
+                )
             if not reference_generation_degraded:
                 accepted_pose_similarity_references.append(
                     {

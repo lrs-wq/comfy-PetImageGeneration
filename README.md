@@ -2,7 +2,7 @@
 
 猫狗图片与双动作 GIF 生成服务。调用方上传一张必选正面图，以及最多两张可选侧面图；系统先强制二分类为猫或狗，再生成并归一化 canonical 全身参考。猫生成 `eating`、`grooming`，狗生成 `eating`、`standing`，其中狗的 `standing` 暂时同时映射到兼容字段 `grooming`。
 
-当前 API 版本：`2.26.32`。上传图先建立共享身份 canonical，各动作再使用独立提示词、单色几何引导、seed 偏移、SCAIL 实验目录和输出路径。吃饭几何图禁止携带白膜内部明暗，避免将阴影解释为条纹；不安全的条纹/黑色扩张候选也不能进入身份修复重试。单个动作重试或质量门禁失败只降级该动作并继续兄弟动作。猫支持 `eating / grooming`，默认犬和中型犬支持 `eating / standing`，测试平台显式选择小型犬后支持 `eating / drinking / running / sleeping / toileting / standing`。
+当前 API 版本：`2.26.33`。上传图先建立共享身份 canonical，各动作再使用独立提示词、单色几何引导、seed 偏移、SCAIL 实验目录和输出路径。吃饭几何图禁止携带白膜内部明暗，避免将阴影解释为条纹；不安全的条纹/黑色扩张候选也不能进入身份修复重试。动作首帧只有在动作、身份、色盘和透明边缘门禁全部通过后才可进入 SCAIL；同一输入优先复用摘要绑定的已验证首帧并重新验门，未命中或未通过时自动换种子波次继续生成，不再发布原图呼吸循环或移除该动作。猫支持 `eating / grooming`，默认犬和中型犬支持 `eating / standing`，测试平台显式选择小型犬后支持 `eating / drinking / running / sleeping / toileting / standing`。
 
 ## 主要入口
 

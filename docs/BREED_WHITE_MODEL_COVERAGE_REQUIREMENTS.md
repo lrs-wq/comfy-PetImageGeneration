@@ -335,7 +335,7 @@
 }
 ```
 
-## 13. 运行时动作几何合同（API 2.26.32）
+## 13. 运行时动作几何合同（API 2.26.33）
 
 犬类喝水的唯一高质量几何策略是 `full_white_driver_drinking_pose_static_bowl_v2`。上传身份参考只作为 SCAIL 身份权威；接近水碗、低头接触、饮水、抬头返回、身体/四肢变化和场景道具必须来自摘要绑定的完整动态白膜。系统逐帧保留白膜主体轮廓，以至少 60% 帧可检出的食盆为依据做 25% 时间投票，固定食盆遮罩和中值 RGB。旧的 `reference_space_white_driver_head_path_static_bowl_v3` 只移动局部头部并锁定身体，不得进入高质量 SCAIL 主链路。完整白膜处理失败时可以产出身份锚定降级结果，但静态或局部动作不得标记为高质量喝水结果。
 
@@ -351,4 +351,4 @@ GPU 提交前必须把准备后的 `tm_pose` 与原始白膜直接比较：首�
 
 猫/狗吃饭的 Qwen 几何图中，主体必须是单一 `RGB(132,132,132)` 的平滑轮廓；不得保留白膜或驱动视频的 RGB、色度、原始亮度值及低频明暗分区。头部降低、连续嘴部接触、食盆边缘和食物可以用固定语义色表达，但主体内部灰度层级不得承担解剖语义。带新增条纹、非黑白身份的明暗平衡漂移或暗色特征扩张的候选不得作为后续 identity-refine sampler。
 
-动作配置按物种和动作分别冻结：猫为 `eating / grooming`，默认犬为 `eating / standing`，小型犬测试 Profile 为 `eating / drinking / running / sleeping / toileting / standing`。每个动作使用独立几何引导、提示词、seed 偏移、SCAIL 实验目录、质量记录和输出路径；任务内只共享上传身份 canonical 与串行 GPU 资源。单动作 Qwen 重试耗尽或 SCAIL/透明输出质量失败时必须只降级该动作、跳过其后续高质量阶段并继续兄弟动作。canonical 建立失败、上传摘要失配、模型/存储/GPU 等基础设施故障仍属于任务级失败。
+动作配置按物种和动作分别冻结：猫为 `eating / grooming`，默认犬为 `eating / standing`，小型犬测试 Profile 为 `eating / drinking / running / sleeping / toileting / standing`。每个动作使用独立几何引导、提示词、seed 偏移、SCAIL 实验目录、质量记录和输出路径；任务内只共享上传身份 canonical 与串行 GPU 资源。单动作 Qwen 首帧重试耗尽时不得降级为原图、不得移除动作，也不得进入 SCAIL；必须使用新的 seed 波次重新排队，直至得到严格门禁通过的首帧或用户主动取消。同一上传视图、Profile、动作导图和策略摘要可以复用已验证首帧，但必须验证缓存 SHA，并在当前任务中重新执行动作、身份、色盘及透明边缘门禁。首帧已经通过后，SCAIL/透明输出质量失败仍按动作隔离并保留真实失败审计。canonical 建立失败、上传摘要失配、模型/存储/GPU 等基础设施故障仍属于任务级失败。

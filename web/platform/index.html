@@ -474,6 +474,9 @@
       generating_cartoon_keyframes: '正在生成姿态图片',
       generating_keyframes: '正在生成姿态图片',
       retrying_cartoon_keyframe: '姿态完整性不足，正在换种子重试',
+      retrying_first_frame_quality: '首帧未通过质量门禁，正在换种子继续生成',
+      queued_for_first_frame_quality_retry: '首帧自动重试已排队',
+      queued_for_first_frame_retry_capacity: '首帧自动重试等待队列空位',
       finalizing_keyframes: '正在整理生成图片',
       completed_keyframes_only: '图片生成完成',
       generating_subject_replacement: '正在使用 SCAIL 生成主体替换视频',
@@ -1133,6 +1136,18 @@
       if (opaqueFallback && job.request_kind === 'image') {
         notices.push('部分图片无法可靠移除背景，已返回未抠图原图。');
       }
+      if (job.qwen_first_frame_validated_required) {
+        const currentAction = job.qwen_first_frame_current_action;
+        const state = (job.qwen_first_frame_states || {})[currentAction] || {};
+        if (state.status === 'retrying_with_new_seed_wave'
+          || ['retrying_first_frame_quality', 'queued_for_first_frame_quality_retry'].includes(job.stage)) {
+          notices.push(`当前${actionLabels[currentAction] || currentAction || '动作'}首帧尚未通过质量门禁，系统正在自动换种子重试；不会发布原图占位，也不会移除该动作。`);
+        }
+      }
+      const degradedActions = Object.keys(job.qwen_reference_degraded_actions || {});
+      if (degradedActions.length) {
+        notices.push(`旧版降级结果：${degradedActions.map(action => actionLabels[action] || action).join('、')}未生成合格动作首帧；所示原图循环不是动作生成结果。`);
+      }
       if (job.warning) notices.push(String(job.warning));
       if (notices.length) {
         $('warning').style.display = 'block';
@@ -1154,9 +1169,12 @@
       $('gallery').replaceChildren();
       const sorted = [...outputs].sort((a, b) => Number(Boolean(b.primary)) - Number(Boolean(a.primary)));
       sorted.forEach(output => {
+        const degraded = output.degraded === true
+          || output.quality_passed === false
+          || output.generation_succeeded === false;
         const card = document.createElement('article');
         card.className = 'output';
-        if (output.background_removal_failed) card.classList.add('warning-output');
+        if (output.background_removal_failed || degraded) card.classList.add('warning-output');
         const media = document.createElement('div');
         media.className = 'media';
         if (output.background_removal_failed || output.transparent === false) media.classList.add('opaque');
@@ -1181,7 +1199,7 @@
         const text = document.createElement('div');
         const strong = document.createElement('strong');
         const action = actionLabels[output.action] || output.action;
-        strong.textContent = `${labels[output.type] || output.type || '生成结果'}${action ? ` · ${action}` : ''}`;
+        strong.textContent = `${degraded ? '降级占位（非动作结果）' : (labels[output.type] || output.type || '生成结果')}${action ? ` · ${action}` : ''}`;
         const small = document.createElement('small');
         small.textContent = [
           output.width && output.height ? `${output.width}×${output.height}` : '',
@@ -1189,7 +1207,8 @@
           output.fps ? `${output.fps} FPS` : '',
           output.duration_seconds ? `${output.duration_seconds}秒` : '',
           output.pose_index ? `姿态 ${output.pose_index}` : '',
-          output.background_removal_failed ? '未抠图' : ''
+          output.background_removal_failed ? '未抠图' : '',
+          degraded ? '质量未通过' : ''
         ].filter(Boolean).join(' · ');
         text.append(strong, small);
         const link = document.createElement('a');
@@ -1214,6 +1233,9 @@
         output.action,
         Boolean(output.primary),
         Boolean(output.background_removal_failed),
+        Boolean(output.degraded),
+        output.quality_passed,
+        output.generation_succeeded,
         output.transparent,
         output.width,
         output.height,

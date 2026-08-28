@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -189,6 +190,155 @@ class UserLoraCapTests(unittest.TestCase):
             3.0,
         )
 
+
+class ValidatedFirstFrameCacheTests(unittest.TestCase):
+    @staticmethod
+    def _job(job_id: str) -> dict[str, object]:
+        return {
+            "job_id": job_id,
+            "status": "completed",
+            "actions": ["eating"],
+            "species": "cat",
+            "reference_pipeline_version": "1.40.38",
+            "reference_image_profile": "test-profile",
+            "reference_image_profile_revision": "test-v1",
+            "subject_profile_sha256": "a" * 64,
+            "uploaded_identity_views": {
+                "front": {
+                    "input_sha256": "b" * 64,
+                    "source_sha256": "c" * 64,
+                }
+            },
+            "pose_reference_input_sha256s": {"eating": "d" * 64},
+            "pose_reference_source_sha256s": {"eating": "e" * 64},
+            "pose_identity_input_policy": "canonical_character_image1",
+            "pose_identity_input_policies": {
+                "eating": "canonical_character_image1"
+            },
+            "pose_reference_policy": {"eating": "test-guide-v1"},
+            "qwen_reference_prompt_en": "same identity",
+            "qwen_seed": 123,
+            "qwen_steps": 6,
+            "qwen_cfg": 1.0,
+            "qwen_denoise": 1.0,
+            "user_loras": [],
+            "qwen_reference_degraded_actions": {},
+        }
+
+    def test_exact_input_history_is_promoted_and_remapped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output_root = root / "outputs"
+            cache_root = root / "cache"
+            source_id = "source-job"
+            current_id = "current-job"
+            source_dir = output_root / source_id
+            current_dir = output_root / current_id
+            (source_dir / "workflows").mkdir(parents=True)
+            current_dir.mkdir(parents=True)
+            reference = source_dir / "pose_01_keyframe_transparent.png"
+            image = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            ImageDraw.Draw(image).ellipse(
+                (128, 96, 384, 416),
+                fill=(160, 140, 120, 255),
+            )
+            image.save(reference)
+            source_job = self._job(source_id)
+            source_job["subject_reference_paths"] = {
+                "eating": str(reference)
+            }
+            (source_dir / "status.json").write_text(
+                json.dumps(source_job),
+                encoding="utf-8",
+            )
+            accepted = {"available": True, "acceptable": True, "issues": [], "penalty": 0.0}
+            quality = {
+                "selected_attempt": 2,
+                "selected_profile": "pose_retry",
+                "identity_input_policy": "canonical_character_image1",
+                "image1_input_name": f"local_video_api/{source_id}/cartoon_reference.png",
+                "image2_input_name": f"local_video_api/{source_id}/eating_guide.png",
+                "sampler_latent_input_name": f"local_video_api/{source_id}/cartoon_reference.png",
+                "identity_input_name": f"local_video_api/{source_id}/cartoon_reference.png",
+                "geometry_input_name": f"local_video_api/{source_id}/eating_guide.png",
+                "selected_chroma": {
+                    **accepted,
+                    "transparent_edge_quality": dict(accepted),
+                },
+                "selected_quality": dict(accepted),
+                "selected_similarity": dict(accepted),
+                "selected_identity_palette": dict(accepted),
+                "selected_action_candidate_gate": {
+                    "acceptable": True,
+                    "degraded_fallback_accepted": False,
+                },
+                "selected_settings": {
+                    "steps": 10,
+                    "cfg": 1.0,
+                    "denoise": 1.0,
+                    "user_loras": [],
+                    "user_lora_strength_scale": 0.0,
+                    "user_lora_mode": "stack",
+                    "quality_retry": 2,
+                    "total_strength_cap": 0.0,
+                    "per_lora_strength_cap": 0.0,
+                },
+                "attempts": [{"attempt": 2, "seed": 456}],
+            }
+            (source_dir / "workflows" / "qwen_pose_01_quality.json").write_text(
+                json.dumps(quality),
+                encoding="utf-8",
+            )
+            workflow = {
+                "1": {
+                    "class_type": "LoadImage",
+                    "inputs": {
+                        "image": f"local_video_api/{source_id}/cartoon_reference.png"
+                    },
+                },
+                "2": {
+                    "class_type": "LoadImage",
+                    "inputs": {
+                        "image": f"local_video_api/{source_id}/eating_guide.png"
+                    },
+                },
+            }
+            (source_dir / "workflows" / "qwen_pose_01.json").write_text(
+                json.dumps(workflow),
+                encoding="utf-8",
+            )
+            current_job = self._job(current_id)
+            current_job["status"] = "running"
+
+            with patch.multiple(
+                pipeline,
+                OUTPUT_ROOT=output_root,
+                VALIDATED_FIRST_FRAME_CACHE_ROOT=cache_root,
+                QWEN_FIRST_FRAME_CACHE_HISTORY_SCAN_LIMIT=20,
+            ):
+                record = pipeline.load_validated_first_frame_cache(
+                    current_id,
+                    current_job,
+                    action="eating",
+                    pose_index=1,
+                    job_dir=current_dir,
+                )
+
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(
+                pipeline.strict_first_frame_record_issues(
+                    record,
+                    action="eating",
+                ),
+                [],
+            )
+            self.assertTrue((current_dir / record["keyframe"]).is_file())
+            provenance = pipeline.pose_attempt_provenance(record)
+            self.assertTrue(provenance["complete"])
+            self.assertTrue(
+                all(current_id in name for name in provenance["workflow_load_image_names"])
+            )
 
 class WanRuntimeConfigTests(unittest.TestCase):
     def test_a14b_uses_121_frames_at_24_fps(self) -> None:
