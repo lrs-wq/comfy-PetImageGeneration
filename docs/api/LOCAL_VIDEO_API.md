@@ -1,6 +1,6 @@
 # 本地萌宠生成接口
 
-服务地址：`http://39.106.120.253/api/local-video`
+服务地址：`https://ai.hzzootech.com/api/local-video`
 
 当前候选主体替换版本为 `local-video-api v2.26.48`。上传任务采用 Qwen Image Edit 与 SCAIL-2 串行编排，单张 A10 GPU 通过异步队列执行。原始上传照只用于建立身份、审计和必要的身份回绘佐证，不能作为动作首帧、SCAIL 动作参考或最终降级输出。动作 Profile 仅提供动作几何与时序，不再向上传宠物注入外观身份词。接口字段、默认 Profile 和自动物种路由保持不变；中型犬/小型犬只由测试平台通过既有 `subject_profile` 字段显式选择。
 
@@ -202,7 +202,7 @@ API Key 不应提交到代码仓库或放入公开网页前端。当前接口为
 省略上传图片时，任务进入 `standard_direct`，直接发布 Profile 中冻结的动作标准产物；该分支不运行 Qwen、SCAIL 或 GPU 推理。
 
 ```bash
-curl -sS -X POST 'http://39.106.120.253/api/local-video/jobs' \
+curl -sS -X POST 'https://ai.hzzootech.com/api/local-video/jobs' \
   -H "X-API-Key: $API_KEY" \
   -F 'generation_mode=subject_replacement' \
   -F 'image=@/path/to/pet.jpg' \
@@ -213,7 +213,7 @@ curl -sS -X POST 'http://39.106.120.253/api/local-video/jobs' \
 三视角接口示例：
 
 ```bash
-curl -sS -X POST 'http://39.106.120.253/api/local-video/jobs' \
+curl -sS -X POST 'https://ai.hzzootech.com/api/local-video/jobs' \
   -H "X-API-Key: $API_KEY" \
   -F 'generation_mode=subject_replacement' \
   -F 'image=@/path/to/pet-front.jpg' \
@@ -257,7 +257,7 @@ curl -sS -X POST 'http://39.106.120.253/api/local-video/jobs' \
 8. 输出 512×512、20fps、100 帧、5000ms、无限循环的 GIF 和 APNG。
 
 ```bash
-curl -sS -X POST 'http://39.106.120.253/api/local-video/jobs' \
+curl -sS -X POST 'https://ai.hzzootech.com/api/local-video/jobs' \
   -H "X-API-Key: $API_KEY" \
   -F 'generation_mode=keyframe_video' \
   -F 'image=@/path/to/reference.jpg' \
@@ -352,7 +352,7 @@ API 2.18 保留图片抠图失败时返回未抠图原图、视频任务正常�
 不传 `output_format` 时默认输出 MP4：
 
 ```bash
-curl -sS -X POST 'http://39.106.120.253/api/local-video/jobs' \
+curl -sS -X POST 'https://ai.hzzootech.com/api/local-video/jobs' \
   -H "X-API-Key: $API_KEY" \
   -F 'generation_mode=keyframe_video' \
   -F 'image=@/path/to/reference.jpg' \
@@ -368,16 +368,16 @@ curl -sS -X POST 'http://39.106.120.253/api/local-video/jobs' \
 
 ```bash
 curl -sS -H "X-API-Key: $API_KEY" \
-  'http://39.106.120.253/api/local-video/jobs/JOB_ID'
+  'https://ai.hzzootech.com/api/local-video/jobs/JOB_ID'
 
 curl -L -H "X-API-Key: $API_KEY" -o pose.gif \
-  'http://39.106.120.253/api/local-video/jobs/JOB_ID/files/pose_01_transparent_512.gif'
+  'https://ai.hzzootech.com/api/local-video/jobs/JOB_ID/files/pose_01_transparent_512.gif'
 
 curl -L -H "X-API-Key: $API_KEY" -o pose-soft.png \
-  'http://39.106.120.253/api/local-video/jobs/JOB_ID/files/pose_01_transparent_512_soft.png'
+  'https://ai.hzzootech.com/api/local-video/jobs/JOB_ID/files/pose_01_transparent_512_soft.png'
 
 curl -X POST -H "X-API-Key: $API_KEY" \
-  'http://39.106.120.253/api/local-video/jobs/JOB_ID/cancel'
+  'https://ai.hzzootech.com/api/local-video/jobs/JOB_ID/cancel'
 ```
 
 任务状态为 `queued`、`running`、`completed`、`failed` 或 `cancelled`。排队任务取消后立即进入 `cancelled`；运行任务先进入 `stage=cancel_requested`，活动 ComfyUI prompt 或子进程停止后进入 `status=cancelled, stage=cancelled`。对终态任务重复调用取消接口是幂等操作。任务文件保存在 `/data/comfy-pet-pipeline/outputs/local_video_api/JOB_ID/`。

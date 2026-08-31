@@ -7,7 +7,7 @@
 ## 当前对外能力
 
 - 简化 GIF API：端口 `8051`，同一 `/api` 端点使用 `type=upload` 提交、`type=query` 查询。
-- 本地视频 API：端口 `8770`，路径 `/api/local-video`。
+- 本地视频 API：端口 `8770`，路径 `/api/local-video`；公开入口为 `https://ai.hzzootech.com/api/local-video`，裸 IP 的 HTTP 默认站点按 Nginx 安全策略返回 `404`。
 - ComfyUI：端口 `8188`，承担底层工作流执行。
 - 测试平台：用于显式测试犬型及扩展动作，不代表默认公开 API 动作集合已经变化。
 
