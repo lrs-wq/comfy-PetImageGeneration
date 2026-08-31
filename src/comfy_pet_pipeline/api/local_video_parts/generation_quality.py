@@ -2490,6 +2490,286 @@ def eating_horizontal_foreground_shelf_quality(
     }
 
 
+def eating_neutral_muzzle_bowl_contact_quality(path: Path) -> dict[str, Any]:
+    """Corroborate mouth contact without reusing the SCAIL prop splitter.
+
+    Warm orange coats can merge with brown kibble and make the strict SCAIL
+    bowl splitter fail closed even when a pale bowl and pale muzzle remain
+    geometrically unambiguous. This probe only recognizes a broad lower
+    neutral bowl plus a compact neutral muzzle above it. It never produces or
+    changes the downstream identity/prop mask.
+    """
+    _sync_local_video_runtime(
+        globals(),
+        {"eating_neutral_muzzle_bowl_contact_quality"},
+    )
+
+    rgba = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if rgba is None or rgba.ndim != 3 or rgba.shape[2] < 4:
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["eating_neutral_contact_alpha_unavailable"],
+            "policy": EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY,
+        }
+    alpha = rgba[:, :, 3] >= 64
+    rows, columns = np.where(alpha)
+    if not columns.size:
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["eating_neutral_contact_no_foreground"],
+            "policy": EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY,
+        }
+    left = int(columns.min())
+    top = int(rows.min())
+    right = int(columns.max()) + 1
+    bottom = int(rows.max()) + 1
+    subject_width = right - left
+    subject_height = bottom - top
+    if subject_width < 64 or subject_height < 64:
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["eating_neutral_contact_subject_too_small"],
+            "policy": EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY,
+        }
+
+    blue = rgba[:, :, 0].astype(np.int16)
+    green = rgba[:, :, 1].astype(np.int16)
+    red = rgba[:, :, 2].astype(np.int16)
+    channel_max = np.maximum(np.maximum(red, green), blue)
+    channel_min = np.minimum(np.minimum(red, green), blue)
+    channel_spread = channel_max - channel_min
+    luma = (red + green + blue) / 3.0
+    row_indices, _column_indices = np.indices(alpha.shape)
+    neutral = (
+        alpha
+        & (row_indices >= top + int(round(subject_height * 0.55)))
+        & (luma >= 120.0)
+        & (channel_spread <= 45)
+    )
+
+    horizontal_neutral = cv2.morphologyEx(
+        neutral.astype(np.uint8),
+        cv2.MORPH_OPEN,
+        np.ones((5, 21), dtype=np.uint8),
+    )
+    bowl_count, _bowl_labels, bowl_stats, bowl_centroids = (
+        cv2.connectedComponentsWithStats(horizontal_neutral, connectivity=8)
+    )
+    subject_center_x = (left + right) / 2.0
+    bowl_candidates: list[tuple[int, float, int, dict[str, Any]]] = []
+    minimum_bowl_area = max(320, int(round(np.count_nonzero(alpha) * 0.003)))
+    for label in range(1, bowl_count):
+        component_left = int(bowl_stats[label, cv2.CC_STAT_LEFT])
+        component_top = int(bowl_stats[label, cv2.CC_STAT_TOP])
+        component_width = int(bowl_stats[label, cv2.CC_STAT_WIDTH])
+        component_height = int(bowl_stats[label, cv2.CC_STAT_HEIGHT])
+        component_area = int(bowl_stats[label, cv2.CC_STAT_AREA])
+        width_subject_ratio = component_width / float(subject_width)
+        aspect_ratio = component_width / float(max(1, component_height))
+        center_x = float(bowl_centroids[label][0])
+        center_offset_subject_ratio = abs(center_x - subject_center_x) / float(
+            subject_width
+        )
+        if (
+            component_area < minimum_bowl_area
+            or not (
+                EATING_NEUTRAL_BOWL_WIDTH_SUBJECT_RATIO_MIN
+                <= width_subject_ratio
+                <= EATING_NEUTRAL_BOWL_WIDTH_SUBJECT_RATIO_MAX
+            )
+            or aspect_ratio < EATING_NEUTRAL_BOWL_ASPECT_RATIO_MIN
+            or component_top < top + int(round(subject_height * 0.62))
+            or center_offset_subject_ratio > 0.30
+        ):
+            continue
+        audit = {
+            "label": label,
+            "bbox": [
+                component_left,
+                component_top,
+                component_left + component_width,
+                component_top + component_height,
+            ],
+            "area": component_area,
+            "width_subject_ratio": round(width_subject_ratio, 6),
+            "aspect_ratio": round(aspect_ratio, 6),
+            "center_offset_subject_ratio": round(
+                center_offset_subject_ratio,
+                6,
+            ),
+        }
+        bowl_candidates.append(
+            (
+                component_area,
+                -center_offset_subject_ratio,
+                label,
+                audit,
+            )
+        )
+    if not bowl_candidates:
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["eating_neutral_bowl_not_detected"],
+            "policy": EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY,
+            "foreground_bbox": [left, top, right, bottom],
+        }
+
+    _area_rank, _center_rank, _bowl_label, bowl = max(bowl_candidates)
+    bowl_left, bowl_top, bowl_right, bowl_bottom = bowl["bbox"]
+    bowl_width = bowl_right - bowl_left
+    detailed_neutral = cv2.morphologyEx(
+        neutral.astype(np.uint8),
+        cv2.MORPH_OPEN,
+        np.ones((3, 9), dtype=np.uint8),
+    )
+    muzzle_count, _muzzle_labels, muzzle_stats, muzzle_centroids = (
+        cv2.connectedComponentsWithStats(detailed_neutral, connectivity=8)
+    )
+    muzzle_candidates: list[dict[str, Any]] = []
+    valid_muzzles: list[tuple[int, int, float, dict[str, Any]]] = []
+    center_margin = bowl_width * 0.10
+    center_min = bowl_left - center_margin
+    center_max = bowl_right + center_margin
+    bowl_center_x = (bowl_left + bowl_right) / 2.0
+    maximum_muzzle_width = int(round(bowl_width * 0.40))
+    maximum_muzzle_height = int(round(bowl_width * 0.25))
+    for label in range(1, muzzle_count):
+        component_left = int(muzzle_stats[label, cv2.CC_STAT_LEFT])
+        component_top = int(muzzle_stats[label, cv2.CC_STAT_TOP])
+        component_width = int(muzzle_stats[label, cv2.CC_STAT_WIDTH])
+        component_height = int(muzzle_stats[label, cv2.CC_STAT_HEIGHT])
+        component_area = int(muzzle_stats[label, cv2.CC_STAT_AREA])
+        component_bottom = component_top + component_height
+        center_x = float(muzzle_centroids[label][0])
+        component_gap = bowl_top - component_bottom
+        center_offset_bowl_ratio = abs(center_x - bowl_center_x) / float(
+            max(1, bowl_width)
+        )
+        if (
+            component_bottom > bowl_top
+            or component_top < top + int(round(subject_height * 0.50))
+            or not center_min <= center_x <= center_max
+            or component_area < EATING_NEUTRAL_MUZZLE_AREA_MIN_PX
+            or not 9 <= component_width <= maximum_muzzle_width
+            or not 3 <= component_height <= maximum_muzzle_height
+            or center_offset_bowl_ratio
+            > EATING_MUZZLE_COMPONENT_CENTER_OFFSET_BOWL_RATIO_MAX
+        ):
+            continue
+        rejection_reasons = []
+        if not 0 <= component_gap <= EATING_MUZZLE_BOWL_GAP_MAX_PX:
+            rejection_reasons.append("gap_outside_contact_range")
+        audit = {
+            "label": label,
+            "bbox": [
+                component_left,
+                component_top,
+                component_left + component_width,
+                component_bottom,
+            ],
+            "area": component_area,
+            "gap_px": component_gap,
+            "width_bowl_ratio": round(
+                component_width / float(max(1, bowl_width)),
+                6,
+            ),
+            "height_bowl_ratio": round(
+                component_height / float(max(1, bowl_width)),
+                6,
+            ),
+            "center_offset_bowl_ratio": round(
+                center_offset_bowl_ratio,
+                6,
+            ),
+            "rejection_reasons": rejection_reasons,
+        }
+        muzzle_candidates.append(audit)
+        if not rejection_reasons:
+            valid_muzzles.append(
+                (
+                    component_bottom,
+                    component_area,
+                    -abs(center_x - bowl_center_x),
+                    audit,
+                )
+            )
+    muzzle_candidates.sort(
+        key=lambda item: (
+            abs(int(item["gap_px"])),
+            len(item["rejection_reasons"]),
+            -int(item["area"]),
+        )
+    )
+    thresholds = {
+        "gap_px_min": 0,
+        "gap_px_max": EATING_MUZZLE_BOWL_GAP_MAX_PX,
+        "bowl_width_subject_ratio_min": (
+            EATING_NEUTRAL_BOWL_WIDTH_SUBJECT_RATIO_MIN
+        ),
+        "bowl_width_subject_ratio_max": (
+            EATING_NEUTRAL_BOWL_WIDTH_SUBJECT_RATIO_MAX
+        ),
+        "bowl_aspect_ratio_min": EATING_NEUTRAL_BOWL_ASPECT_RATIO_MIN,
+        "muzzle_area_min_px": EATING_NEUTRAL_MUZZLE_AREA_MIN_PX,
+        "muzzle_width_bowl_ratio_max": 0.40,
+        "muzzle_height_bowl_ratio_max": 0.25,
+    }
+    if not muzzle_candidates:
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["eating_neutral_muzzle_not_detected"],
+            "policy": EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY,
+            "foreground_bbox": [left, top, right, bottom],
+            "bowl": bowl,
+            "thresholds": thresholds,
+        }
+    if not valid_muzzles:
+        return {
+            "available": True,
+            "acceptable": False,
+            "issues": ["eating_muzzle_not_at_bowl"],
+            "penalty": 125.0,
+            "method": EATING_MOUTH_BOWL_CONTACT_POLICY,
+            "evidence_policy": (
+                EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY
+            ),
+            "foreground_bbox": [left, top, right, bottom],
+            "bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
+            "bowl": bowl,
+            "component_candidates": muzzle_candidates[:12],
+            "thresholds": thresholds,
+        }
+
+    _bottom_rank, _area_rank, _center_rank, selected = max(
+        valid_muzzles,
+        key=lambda item: item[:3],
+    )
+    return {
+        "available": True,
+        "acceptable": True,
+        "issues": [],
+        "penalty": round(float(selected["gap_px"]) * 0.5, 6),
+        "method": EATING_MOUTH_BOWL_CONTACT_POLICY,
+        "evidence_policy": EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY,
+        "foreground_bbox": [left, top, right, bottom],
+        "bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
+        "bowl": bowl,
+        "muzzle_bowl_gap_px": int(selected["gap_px"]),
+        "muzzle_anchor": [
+            int(round((selected["bbox"][0] + selected["bbox"][2]) / 2.0)),
+            int(selected["bbox"][3]) - 1,
+        ],
+        "selected_component": selected,
+        "component_candidates": muzzle_candidates[:12],
+        "thresholds": thresholds,
+    }
+
+
 def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
     """Require a real face/muzzle anchor immediately above the detected food bowl.
 
@@ -2516,6 +2796,14 @@ def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
         )
     except Exception as exc:  # noqa: BLE001 - convert splitter failures to gate data
         error = f"{type(exc).__name__}: {str(exc)[:1000]}"
+        neutral_contact = eating_neutral_muzzle_bowl_contact_quality(path)
+        if neutral_contact.get("available") is True:
+            return {
+                **neutral_contact,
+                "strict_prop_split_error": error,
+                "strict_prop_split_fallback_used": True,
+                "downstream_prop_mask_thresholds_unchanged": True,
+            }
         lowered = str(exc).lower()
         if any(
             token in lowered
@@ -2538,6 +2826,7 @@ def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
             "penalty": 125.0,
             "method": EATING_MOUTH_BOWL_CONTACT_POLICY,
             "error": error,
+            "neutral_muzzle_fallback": neutral_contact,
         }
 
     reference_rgba = np.asarray(reference, dtype=np.uint8)

@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.44"
+API_VERSION = "2.26.45"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -295,7 +295,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.48"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.49"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
     "strict_quality_gate_then_fixed_best_of_five_selection_v3"
 )
@@ -312,6 +312,7 @@ QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
         "1.40.45",
         "1.40.46",
         "1.40.47",
+        "1.40.48",
         QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
     }
 )
@@ -718,7 +719,12 @@ FINAL_VIDEO_VALIDATED_ACTION_REFERENCE_POLICIES = {
     "eating": "qwen_action_identity_with_bowl_mapped_red",
     "grooming": "qwen_action_specific_identity",
 }
-EATING_MOUTH_BOWL_CONTACT_POLICY = "warm_face_component_above_detected_bowl_v4"
+EATING_MOUTH_BOWL_CONTACT_POLICY = (
+    "warm_face_or_neutral_muzzle_above_detected_bowl_v5"
+)
+EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY = (
+    "neutral_muzzle_above_horizontal_neutral_bowl_v1"
+)
 DRINKING_MOUTH_BOWL_CONTACT_POLICY = "detached_bowl_subject_proximity_v1"
 DRINKING_MOUTH_BOWL_GAP_MAX_PX = 12
 TOILETING_TRAY_SPATIAL_POLICY = "wide_tray_beneath_subject_silhouette_v1"
@@ -736,6 +742,10 @@ EATING_MUZZLE_COMPONENT_CENTER_MARGIN_BOWL_RATIO = 0.10
 EATING_MUZZLE_COMPONENT_CENTER_OFFSET_BOWL_RATIO_MAX = 0.35
 EATING_MUZZLE_COMPONENT_HEIGHT_MIN_PX = 4
 EATING_MUZZLE_COMPONENT_AREA_MIN_PX = 24
+EATING_NEUTRAL_BOWL_WIDTH_SUBJECT_RATIO_MIN = 0.25
+EATING_NEUTRAL_BOWL_WIDTH_SUBJECT_RATIO_MAX = 0.70
+EATING_NEUTRAL_BOWL_ASPECT_RATIO_MIN = 1.50
+EATING_NEUTRAL_MUZZLE_AREA_MIN_PX = 64
 FULL_DRIVER_EATING_POSE_POLICY = "full_driver_pose_with_separate_bowl_v1"
 DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY = (
     "reference_space_head_nod_food_overlap_v2"
@@ -6288,6 +6298,9 @@ pose_attempt_failure_summary = _local_video_generation_quality.pose_attempt_fail
 
 eating_mouth_bowl_contact_quality = (
     _local_video_generation_quality.eating_mouth_bowl_contact_quality
+)
+eating_neutral_muzzle_bowl_contact_quality = (
+    _local_video_generation_quality.eating_neutral_muzzle_bowl_contact_quality
 )
 
 

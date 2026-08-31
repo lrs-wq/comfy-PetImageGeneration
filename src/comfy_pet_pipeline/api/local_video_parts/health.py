@@ -1210,6 +1210,13 @@ def health() -> dict[str, Any]:
                 ),
                 "eating_mouth_contact_gate": {
                     "policy": EATING_MOUTH_BOWL_CONTACT_POLICY,
+                    "neutral_muzzle_fallback_policy": (
+                        EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY
+                    ),
+                    "neutral_muzzle_fallback_scope": (
+                        "first_frame_contact_gate_only_after_strict_prop_split_failure"
+                    ),
+                    "downstream_scail_prop_mask_thresholds_unchanged": True,
                     "thin_warm_rim_fallback_policy": (
                         EATING_BOWL_SPLIT_FALLBACK_POLICY
                     ),

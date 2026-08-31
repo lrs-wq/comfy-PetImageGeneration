@@ -16,6 +16,7 @@ from tests.integration.local_video_subject_replacement_test_support import (
     SubjectReplacementQwenReferenceTestBase,
     _subject_profile_v2,
     _write_eating_contact_fixture,
+    _write_neutral_muzzle_bowl_contact_fixture,
     _write_thin_warm_rim_beige_bowl_fixture,
 )
 
@@ -742,6 +743,17 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertEqual(
             guard["eating_mouth_contact_gate"]["gap_px_max"],
             8,
+        )
+        self.assertEqual(
+            guard["eating_mouth_contact_gate"][
+                "neutral_muzzle_fallback_policy"
+            ],
+            pipeline.EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY,
+        )
+        self.assertTrue(
+            guard["eating_mouth_contact_gate"][
+                "downstream_scail_prop_mask_thresholds_unchanged"
+            ]
         )
         self.assertEqual(
             guard["normalization_contract"]["action_keyframes"],
@@ -1779,6 +1791,57 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertEqual(
             result["selected_component"]["rejection_reasons"],
             [],
+        )
+
+    def test_eating_contact_gate_accepts_neutral_muzzle_when_warm_prop_split_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = _write_neutral_muzzle_bowl_contact_fixture(
+                Path(temporary),
+                name="neutral-contact",
+                muzzle_gap_px=8,
+            )
+            with patch(
+                "scail2_subject_replacement_test.make_eating_reference_identity_mask",
+                side_effect=ValueError(
+                    "eating_reference_prop_split_unreliable: prop_fraction=0.2673"
+                ),
+            ):
+                result = pipeline.eating_mouth_bowl_contact_quality(candidate)
+
+        self.assertTrue(result["acceptable"], result)
+        self.assertEqual(result["muzzle_bowl_gap_px"], 8)
+        self.assertTrue(result["strict_prop_split_fallback_used"])
+        self.assertTrue(result["downstream_prop_mask_thresholds_unchanged"])
+        self.assertEqual(
+            result["evidence_policy"],
+            pipeline.EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY,
+        )
+
+    def test_eating_contact_gate_rejects_neutral_muzzle_with_real_air_gap(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = _write_neutral_muzzle_bowl_contact_fixture(
+                Path(temporary),
+                name="neutral-gap",
+                muzzle_gap_px=20,
+            )
+            with patch(
+                "scail2_subject_replacement_test.make_eating_reference_identity_mask",
+                side_effect=ValueError(
+                    "eating_reference_prop_split_unreliable: safe_width_fraction=0.1464"
+                ),
+            ):
+                result = pipeline.eating_mouth_bowl_contact_quality(candidate)
+
+        self.assertFalse(result["acceptable"], result)
+        self.assertEqual(result["issues"], ["eating_muzzle_not_at_bowl"])
+        self.assertEqual(result["component_candidates"][0]["gap_px"], 20)
+        self.assertIn(
+            "gap_outside_contact_range",
+            result["component_candidates"][0]["rejection_reasons"],
         )
 
     def test_eating_prop_split_falls_back_from_thin_warm_rim_to_beige_bowl(

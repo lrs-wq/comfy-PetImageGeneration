@@ -118,6 +118,14 @@
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
     },
     {
+      "id": "comfy.quality.eating_contact_corroboration",
+      "type": "business_rule",
+      "name": "吃饭中性食盆与口鼻接触独立佐证",
+      "status": "active",
+      "tags": ["eating", "contact", "neutral-bowl", "neutral-muzzle", "scail-mask-unchanged"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/generation_quality.py"
+    },
+    {
       "id": "comfy.module.transparent_animation",
       "type": "module",
       "name": "透明动画生成",
@@ -251,6 +259,12 @@
       "relation": "checked_by",
       "to": "comfy.quality.source_evidence_stripe_gate",
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "checked_by",
+      "to": "comfy.quality.eating_contact_corroboration",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/generation_quality.py"
     },
     {
       "from": "comfy.module.pipeline",

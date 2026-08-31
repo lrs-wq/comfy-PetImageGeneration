@@ -81,6 +81,34 @@ def _write_eating_contact_fixture(
     return candidate, colored_mask
 
 
+def _write_neutral_muzzle_bowl_contact_fixture(
+    root: Path,
+    *,
+    name: str,
+    muzzle_gap_px: int,
+) -> Path:
+    """Create an orange subject whose pale muzzle sits above a pale bowl."""
+
+    bowl_left, bowl_top, bowl_right, bowl_bottom = 101, 352, 310, 425
+    muzzle_left, muzzle_right = 212, 246
+    muzzle_bottom = bowl_top - muzzle_gap_px
+    image = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((55, 88, 455, 425), fill=(224, 128, 52, 255))
+    draw.ellipse(
+        (muzzle_left, muzzle_bottom - 17, muzzle_right - 1, muzzle_bottom - 1),
+        fill=(232, 222, 210, 255),
+    )
+    draw.rounded_rectangle(
+        (bowl_left, bowl_top, bowl_right, bowl_bottom),
+        radius=18,
+        fill=(214, 208, 196, 255),
+    )
+    candidate = root / f"{name}.png"
+    image.save(candidate)
+    return candidate
+
+
 def _write_thin_warm_rim_beige_bowl_fixture(path: Path) -> None:
     """Create a beige bowl whose thin warm rim joins the warm kibble union."""
 
