@@ -1875,7 +1875,10 @@ def health() -> dict[str, Any]:
                     ),
                     "prealignment_fixed_region": "bowl_and_lower_body",
                     "sampler_noise_mask": (
-                        "whole_head_neck_to_fixed_bowl_corridor_v2"
+                        "lower_muzzle_to_fixed_bowl_seam_v3"
+                    ),
+                    "post_qwen_pixel_lock": (
+                        "lower_muzzle_qwen_fusion_seed_pixel_lock_v1"
                     ),
                     "image_roles": {
                         "image1": (
@@ -1884,7 +1887,8 @@ def health() -> dict[str, Any]:
                         "image2": "approved_canonical_identity_corroboration",
                         "image3": "white_maquette_eating_contact_geometry_only",
                     },
-                    "body_bowl_paws_tail_locked_outside_mask": True,
+                    "upper_head_body_bowl_paws_tail_locked_after_qwen": True,
+                    "bowl_and_lower_body_byte_preserved": True,
                     "contact_gate_unchanged": True,
                     "downstream_scail_prop_mask_thresholds_unchanged": True,
                     "attempt_budget_unchanged": True,

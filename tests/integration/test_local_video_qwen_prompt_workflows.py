@@ -2194,6 +2194,8 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             self.assertIn("approximately 4-pixel seed gap", prompt)
             self.assertIn("never lift the head back", prompt)
             self.assertIn("Image 3 is the neutral Main_case white-maquette", prompt)
+            self.assertIn("small masked lower-muzzle seam", prompt)
+            self.assertIn("restores every pixel outside the lower-muzzle mask", prompt)
             self.assertIn("final measured vertical gap is 0 to 8", prompt)
             self.assertEqual(
                 workflow["14"]["inputs"]["denoise"],
@@ -2211,7 +2213,8 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
                     :, :, 3
                 ]
             self.assertEqual(int(mask_alpha[0, 0]), 255)
-            self.assertEqual(int(mask_alpha[330, 224]), 0)
+            self.assertEqual(int(mask_alpha[200, 224]), 255)
+            self.assertLessEqual(int(mask_alpha[330, 224]), 32)
             self.assertEqual(int(mask_alpha[400, 205]), 255)
 
     def test_eating_attempt5_reuses_the_closer_attempt4_contact_candidate(

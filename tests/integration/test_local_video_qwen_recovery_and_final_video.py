@@ -618,9 +618,45 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
                 repaired_rgb[360, 200].tolist(),
                 [230, 220, 190],
             )
-            self.assertEqual(int(mask_alpha[200, 229]), 0)
+            self.assertEqual(int(mask_alpha[200, 229]), 255)
+            self.assertEqual(int(mask_alpha[330, 229]), 0)
             self.assertLessEqual(int(mask_alpha[350, 200]), 32)
             self.assertEqual(int(mask_alpha[430, 200]), 255)
+
+            generated = root / "generated.png"
+            composite = root / "composite.png"
+            Image.new("RGB", (1024, 1024), (250, 20, 30)).save(generated)
+            composite_audit = (
+                pipeline.composite_canonical_eating_contact_repair_output(
+                    generated,
+                    repair,
+                    noise_mask,
+                    composite,
+                    bowl_top=346,
+                )
+            )
+            with Image.open(composite) as loaded:
+                composite_rgb = np.asarray(
+                    loaded.convert("RGB"),
+                    dtype=np.uint8,
+                )
+            self.assertEqual(
+                composite_rgb[200, 229].tolist(),
+                repaired_rgb[200, 229].tolist(),
+            )
+            self.assertEqual(composite_rgb[330, 229].tolist(), [250, 20, 30])
+            self.assertEqual(
+                composite_rgb[360, 200].tolist(),
+                repaired_rgb[360, 200].tolist(),
+            )
+            self.assertTrue(composite_audit["outside_mask_byte_preserved"])
+            self.assertTrue(
+                composite_audit["bowl_and_lower_body_byte_preserved"]
+            )
+            self.assertGreater(
+                composite_audit["pixels_changed_from_identity_safe_seed"],
+                1024,
+            )
 
             for source_gap, expected_shift, expected_seed_gap in (
                 (64, 32, 32),

@@ -4314,6 +4314,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 grooming_advisory_identity_refine_noise_mask_path: Path | None = None
                 eating_identity_refine_audit: dict[str, Any] | None = None
                 eating_contact_repair_audit: dict[str, Any] | None = None
+                eating_contact_repair_canvas_path: Path | None = None
                 eating_contact_repair_noise_mask_path: Path | None = None
                 pose_transfer_seed_path: Path | None = None
                 grooming_advisory_action_transfer_attempt: (
@@ -5240,7 +5241,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "Canonical eating contact repair lacks its white-model "
                             "action guide."
                         )
-                    repair_canvas_path = (
+                    eating_contact_repair_canvas_path = (
                         comfy_input_dir
                         / (
                             "eating_contact_repair_source_attempt_"
@@ -5257,7 +5258,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     repair_canvas_audit = (
                         prepare_canonical_eating_contact_repair_canvas(
                             repair_source_path,
-                            repair_canvas_path,
+                            eating_contact_repair_canvas_path,
                             eating_contact_repair_noise_mask_path,
                             contact_quality=(
                                 eating_contact_repair_source["contact_quality"]
@@ -5265,7 +5266,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         )
                     )
                     attempt_primary_input_name = (
-                        comfy_relative_dir / repair_canvas_path.name
+                        comfy_relative_dir
+                        / eating_contact_repair_canvas_path.name
                     ).as_posix()
                     attempt_secondary_input_name = qwen_input_name
                     attempt_tertiary_input_name = contact_geometry_input_name
@@ -5330,11 +5332,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 "noise_mask_target_sha256"
                             ],
                             "policy": (
-                                "whole_head_neck_to_fixed_bowl_corridor_v2"
+                                "lower_muzzle_to_fixed_bowl_seam_v3"
                             ),
                         },
                         "full_frame_sampling": False,
-                        "body_bowl_paws_tail_lock_required": True,
+                        "post_qwen_pixel_lock_required": True,
+                        "upper_head_body_bowl_paws_tail_lock_required": True,
                         "identity_gate_unchanged": True,
                         "eating_contact_gate_unchanged": True,
                         "downstream_scail_prop_mask_thresholds_unchanged": True,
@@ -5735,13 +5738,59 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     timeout=7200,
                     job_id=job_id,
                 )
-                source_output = first_output(
+                raw_qwen_source_output = first_output(
                     entry,
                     {".png", ".jpg", ".jpeg", ".webp"},
                     "Qwen keyframe",
                 )
+                raw_qwen_source_sha256 = file_sha256(raw_qwen_source_output)
+                source_output = raw_qwen_source_output
                 source_output_sha256 = file_sha256(source_output)
                 raw_qwen_byte_preserved = False
+                if canonical_eating_contact_repair_active:
+                    if (
+                        eating_contact_repair_canvas_path is None
+                        or eating_contact_repair_noise_mask_path is None
+                        or eating_contact_repair_audit is None
+                    ):
+                        raise RuntimeError(
+                            "Canonical eating contact repair lost its pixel-lock "
+                            "inputs."
+                        )
+                    locked_output = (
+                        job_dir
+                        / (
+                            f"pose_{index:02d}_eating_contact_locked_"
+                            f"attempt_{attempt:02d}.png"
+                        )
+                    )
+                    repair_canvas_audit = eating_contact_repair_audit[
+                        "repair_canvas"
+                    ]
+                    source_bowl_bbox = repair_canvas_audit.get(
+                        "source_bowl_bbox"
+                    )
+                    if (
+                        not isinstance(source_bowl_bbox, list)
+                        or len(source_bowl_bbox) != 4
+                    ):
+                        raise RuntimeError(
+                            "Canonical eating contact repair lost its bowl boundary."
+                        )
+                    pixel_lock_audit = (
+                        composite_canonical_eating_contact_repair_output(
+                            raw_qwen_source_output,
+                            eating_contact_repair_canvas_path,
+                            eating_contact_repair_noise_mask_path,
+                            locked_output,
+                            bowl_top=int(source_bowl_bbox[1]),
+                        )
+                    )
+                    eating_contact_repair_audit[
+                        "post_qwen_pixel_lock"
+                    ] = pixel_lock_audit
+                    source_output = locked_output
+                    source_output_sha256 = pixel_lock_audit["target_sha256"]
                 attempt_keyframe = (
                     job_dir / f"pose_{index:02d}_keyframe_attempt_{attempt:02d}.png"
                 )
@@ -6886,9 +6935,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "grooming_full_pose_recovery": (grooming_full_pose_recovery_audit),
                     "eating_identity_refine": eating_identity_refine_audit,
                     "eating_contact_repair": eating_contact_repair_audit,
-                    "raw_qwen_source_path": str(source_output),
-                    "raw_qwen_source_sha256": source_output_sha256,
+                    "raw_qwen_source_path": str(raw_qwen_source_output),
+                    "raw_qwen_source_sha256": raw_qwen_source_sha256,
                     "raw_qwen_byte_preserved": raw_qwen_byte_preserved,
+                    "candidate_source_path": str(source_output),
+                    "candidate_source_sha256": source_output_sha256,
                     "keyframe": attempt_keyframe.name,
                     "keyframe_sha256": file_sha256(attempt_keyframe),
                     "cutout": attempt_cutout.name

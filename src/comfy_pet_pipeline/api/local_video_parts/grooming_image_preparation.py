@@ -2451,7 +2451,7 @@ def prepare_canonical_eating_contact_repair_canvas(
         raise ValueError(
             "Eating contact repair source already satisfies the mouth-contact gate."
         )
-    muzzle_left, muzzle_top, muzzle_right, _muzzle_bottom = muzzle_bbox
+    muzzle_left, muzzle_top, muzzle_right, muzzle_bottom = muzzle_bbox
     subject_width = subject_right - subject_left
     subject_height = subject_bottom - subject_top
     bowl_width = bowl_right - bowl_left
@@ -2573,10 +2573,49 @@ def prepare_canonical_eating_contact_repair_canvas(
             "Eating contact repair pre-alignment changed during persistence."
         )
 
+    shifted_muzzle_top = min(
+        bowl_top - 1,
+        muzzle_top + prealignment_shift_px,
+    )
+    shifted_muzzle_bottom = min(
+        bowl_top,
+        muzzle_bottom + prealignment_shift_px,
+    )
+    fusion_half_width = max(
+        int(EATING_CONTACT_REPAIR_FUSION_HALF_WIDTH_MIN_PX),
+        int(
+            round(
+                bowl_width
+                * EATING_CONTACT_REPAIR_FUSION_HALF_WIDTH_BOWL_RATIO
+            )
+        ),
+        int(
+            round(
+                (muzzle_right - muzzle_left)
+                * EATING_CONTACT_REPAIR_FUSION_HALF_WIDTH_MUZZLE_RATIO
+            )
+        ),
+    )
+    fusion_left = max(
+        repair_left,
+        int(round(muzzle_center_x)) - fusion_half_width,
+    )
+    fusion_right = min(
+        repair_right,
+        int(round(muzzle_center_x)) + fusion_half_width + 1,
+    )
+    fusion_top = max(
+        repair_top,
+        shifted_muzzle_top - int(EATING_CONTACT_REPAIR_FUSION_TOP_MARGIN_PX),
+    )
+    fusion_bottom = repair_bottom
+    if fusion_right - fusion_left < 48 or fusion_bottom - fusion_top < 24:
+        raise RuntimeError("Eating contact repair fusion corridor is too small.")
+
     edit_support = np.zeros((512, 512), dtype=np.float32)
     edit_support[
-        repair_top:repair_bottom,
-        repair_left:repair_right,
+        fusion_top:fusion_bottom,
+        fusion_left:fusion_right,
     ] = 1.0
     feather_sigma = float(EATING_CONTACT_REPAIR_MASK_FEATHER_SIGMA_PX)
     edit_strength = cv2.GaussianBlur(
@@ -2589,7 +2628,7 @@ def prepare_canonical_eating_contact_repair_canvas(
     edit_strength[edit_strength > 0.99] = 1.0
     editable_pixels = int(np.count_nonzero(edit_strength > 0.0))
     full_strength_pixels = int(np.count_nonzero(edit_strength >= 1.0))
-    if editable_pixels < 4096 or full_strength_pixels < 2048:
+    if editable_pixels < 2048 or full_strength_pixels < 1024:
         raise RuntimeError("Eating contact repair mask lacks a usable edit core.")
 
     noise_mask_alpha = np.rint((1.0 - edit_strength) * 255.0).astype(np.uint8)
@@ -2637,22 +2676,137 @@ def prepare_canonical_eating_contact_repair_canvas(
         "prealignment_bowl_and_lower_body_byte_preserved": True,
         "source_bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
         "source_muzzle_component": selected_component,
+        "prealigned_muzzle_bbox": [
+            muzzle_left,
+            shifted_muzzle_top,
+            muzzle_right,
+            shifted_muzzle_bottom,
+        ],
         "repair_bbox": [
-            repair_left,
-            repair_top,
-            repair_right,
-            repair_bottom,
+            fusion_left,
+            fusion_top,
+            fusion_right,
+            fusion_bottom,
         ],
         "repair_scope": (
-            "gap_measured_head_neck_prealignment_then_local_fusion_only"
+            "gap_measured_head_neck_prealignment_then_lower_muzzle_fusion"
         ),
-        "bowl_body_paws_tail_outside_mask_locked": True,
+        "upper_head_body_paws_tail_outside_mask_locked": True,
+        "bowl_and_lower_body_post_qwen_pixel_lock_required": True,
         "mask_feather_sigma_px": feather_sigma,
         "editable_pixels": editable_pixels,
         "full_strength_pixels": full_strength_pixels,
         "noise_mask_loadimage_contract": "mask_equals_one_minus_alpha",
         "noise_mask_target_path": str(noise_mask_target),
         "noise_mask_target_sha256": file_sha256(noise_mask_target),
+        "target_sha256": file_sha256(target),
+    }
+
+
+def composite_canonical_eating_contact_repair_output(
+    generated: Path,
+    repair_canvas: Path,
+    noise_mask: Path,
+    target: Path,
+    *,
+    bowl_top: int,
+) -> dict[str, Any]:
+    """Keep the pre-aligned identity seed outside the lower-muzzle fusion band."""
+    _sync_local_video_runtime(
+        globals(),
+        {"composite_canonical_eating_contact_repair_output"},
+    )
+
+    if not generated.is_file() or not repair_canvas.is_file():
+        raise FileNotFoundError(
+            "Eating contact repair output or pre-aligned canvas is missing."
+        )
+    if not noise_mask.is_file():
+        raise FileNotFoundError("Eating contact repair noise mask is missing.")
+    with Image.open(repair_canvas) as loaded:
+        locked_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    with Image.open(generated) as loaded:
+        generated_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    with Image.open(noise_mask) as loaded:
+        mask_alpha = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)[:, :, 3]
+    if locked_rgb.shape != (512, 512, 3) or mask_alpha.shape != (512, 512):
+        raise ValueError(
+            "Eating contact repair pixel lock requires a 512x512 canvas and mask."
+        )
+    if not 0 < int(bowl_top) < 512:
+        raise ValueError("Eating contact repair bowl boundary is invalid.")
+
+    generated_size = [
+        int(generated_rgb.shape[1]),
+        int(generated_rgb.shape[0]),
+    ]
+    if generated_rgb.shape[:2] != locked_rgb.shape[:2]:
+        generated_rgb = cv2.resize(
+            generated_rgb,
+            (512, 512),
+            interpolation=cv2.INTER_LANCZOS4,
+        )
+    edit_strength = (
+        1.0 - mask_alpha.astype(np.float32) / 255.0
+    ).clip(0.0, 1.0)
+    # The fixed bowl and every lower-body pixel remain authoritative even though
+    # the sampler mask overlaps a few bowl-top pixels to avoid a latent seam.
+    edit_strength[int(bowl_top) :, :] = 0.0
+    locked_support = edit_strength <= 0.0
+    composite_rgb = np.rint(
+        generated_rgb.astype(np.float32) * edit_strength[:, :, None]
+        + locked_rgb.astype(np.float32) * (1.0 - edit_strength[:, :, None])
+    ).astype(np.uint8)
+    if not np.array_equal(
+        composite_rgb[locked_support],
+        locked_rgb[locked_support],
+    ):
+        raise RuntimeError(
+            "Eating contact repair changed pixels outside the fusion mask."
+        )
+    if not np.array_equal(
+        composite_rgb[int(bowl_top) :, :, :],
+        locked_rgb[int(bowl_top) :, :, :],
+    ):
+        raise RuntimeError(
+            "Eating contact repair changed the locked bowl or lower body."
+        )
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(composite_rgb, mode="RGB").save(
+        target,
+        format="PNG",
+        optimize=True,
+    )
+    with Image.open(target) as loaded:
+        persisted_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    if not np.array_equal(persisted_rgb, composite_rgb):
+        raise RuntimeError(
+            "Eating contact repair composite changed during persistence."
+        )
+    return {
+        "policy": "lower_muzzle_qwen_fusion_seed_pixel_lock_v1",
+        "generated_path": str(generated),
+        "generated_sha256": file_sha256(generated),
+        "generated_size": generated_size,
+        "generated_resized_to": [512, 512],
+        "repair_canvas_path": str(repair_canvas),
+        "repair_canvas_sha256": file_sha256(repair_canvas),
+        "noise_mask_path": str(noise_mask),
+        "noise_mask_sha256": file_sha256(noise_mask),
+        "bowl_top": int(bowl_top),
+        "editable_pixels_above_bowl": int(
+            np.count_nonzero(edit_strength > 0.0)
+        ),
+        "full_strength_pixels_above_bowl": int(
+            np.count_nonzero(edit_strength >= 1.0)
+        ),
+        "pixels_changed_from_identity_safe_seed": int(
+            np.count_nonzero(np.any(composite_rgb != locked_rgb, axis=2))
+        ),
+        "outside_mask_byte_preserved": True,
+        "bowl_and_lower_body_byte_preserved": True,
+        "target_path": str(target),
         "target_sha256": file_sha256(target),
     }
 

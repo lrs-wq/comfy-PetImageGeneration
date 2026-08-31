@@ -756,9 +756,16 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         )
         self.assertEqual(
             contact_repair["sampler_noise_mask"],
-            "whole_head_neck_to_fixed_bowl_corridor_v2",
+            "lower_muzzle_to_fixed_bowl_seam_v3",
         )
-        self.assertTrue(contact_repair["body_bowl_paws_tail_locked_outside_mask"])
+        self.assertEqual(
+            contact_repair["post_qwen_pixel_lock"],
+            "lower_muzzle_qwen_fusion_seed_pixel_lock_v1",
+        )
+        self.assertTrue(
+            contact_repair["upper_head_body_bowl_paws_tail_locked_after_qwen"]
+        )
+        self.assertTrue(contact_repair["bowl_and_lower_body_byte_preserved"])
         self.assertTrue(contact_repair["contact_gate_unchanged"])
         self.assertTrue(
             contact_repair[

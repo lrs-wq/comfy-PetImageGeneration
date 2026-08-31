@@ -952,6 +952,13 @@ def prepare_uploaded_subject_qwen_references(
             EATING_CONTACT_REPAIR_PREALIGN_SHIFT_MAX_PX
         ),
         eating_contact_repair_local_noise_mask=True,
+        eating_contact_repair_noise_mask_policy=(
+            "lower_muzzle_to_fixed_bowl_seam_v3"
+        ),
+        eating_contact_repair_post_qwen_pixel_lock=True,
+        eating_contact_repair_post_qwen_pixel_lock_policy=(
+            "lower_muzzle_qwen_fusion_seed_pixel_lock_v1"
+        ),
         eating_contact_repair_white_model_geometry_loaded=True,
         eating_contact_repair_downstream_mask_thresholds_unchanged=True,
         grooming_pose_lora_policy=(

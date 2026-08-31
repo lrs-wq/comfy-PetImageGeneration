@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.47"
+API_VERSION = "2.26.48"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -295,7 +295,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.51"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.52"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
     "strict_quality_gate_then_fixed_best_of_five_selection_v3"
 )
@@ -315,6 +315,7 @@ QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
         "1.40.48",
         "1.40.49",
         "1.40.50",
+        "1.40.51",
         QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
     }
 )
@@ -662,11 +663,11 @@ EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES = frozenset(
     {"invented_stripe_pattern"}
 )
 EATING_CONTACT_REPAIR_POLICY = (
-    "gap_measured_head_neck_prealigned_contact_repair_v2"
+    "gap_measured_head_neck_prealigned_muzzle_fusion_pixel_lock_v3"
 )
 EATING_CONTACT_REPAIR_ATTEMPT = 4
 EATING_CONTACT_REPAIR_STEPS = 12
-EATING_CONTACT_REPAIR_DENOISE = 0.50
+EATING_CONTACT_REPAIR_DENOISE = 0.35
 EATING_CONTACT_REPAIR_SOURCE_ISSUES = frozenset(
     {"eating_muzzle_not_at_bowl"}
 )
@@ -677,7 +678,11 @@ EATING_CONTACT_REPAIR_PREALIGN_HEAD_HALF_WIDTH_BOWL_RATIO = 0.85
 EATING_CONTACT_REPAIR_PREALIGN_HEAD_HALF_WIDTH_SUBJECT_RATIO = 0.28
 EATING_CONTACT_REPAIR_PREALIGN_HEAD_HEIGHT_SUBJECT_RATIO = 0.68
 EATING_CONTACT_REPAIR_PREALIGN_HORIZONTAL_CORE_RATIO = 0.68
-EATING_CONTACT_REPAIR_MASK_FEATHER_SIGMA_PX = 6.0
+EATING_CONTACT_REPAIR_FUSION_HALF_WIDTH_BOWL_RATIO = 0.32
+EATING_CONTACT_REPAIR_FUSION_HALF_WIDTH_MUZZLE_RATIO = 1.75
+EATING_CONTACT_REPAIR_FUSION_HALF_WIDTH_MIN_PX = 36
+EATING_CONTACT_REPAIR_FUSION_TOP_MARGIN_PX = 4
+EATING_CONTACT_REPAIR_MASK_FEATHER_SIGMA_PX = 3.0
 EATING_CONTACT_REPAIR_MASK_BOWL_OVERLAP_PX = 12
 IDENTITY_STRIPE_AMPLIFICATION_REFINE_POLICY = (
     "source_present_stripe_amplification_identity_refine_v1"
@@ -5858,6 +5863,11 @@ prepare_canonical_eating_identity_refine_canvas = (
 
 prepare_canonical_eating_contact_repair_canvas = (
     _local_video_grooming_image_preparation.prepare_canonical_eating_contact_repair_canvas
+)
+
+
+composite_canonical_eating_contact_repair_output = (
+    _local_video_grooming_image_preparation.composite_canonical_eating_contact_repair_output
 )
 
 
