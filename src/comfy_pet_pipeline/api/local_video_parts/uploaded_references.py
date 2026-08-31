@@ -896,6 +896,10 @@ def prepare_uploaded_subject_qwen_references(
         eating_identity_refine_active=False,
         eating_identity_refine_policy=(EATING_CANONICAL_IDENTITY_REFINE_POLICY),
         eating_identity_refine_attempt=(EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT),
+        eating_identity_refine_source_capture_through_attempt=(
+            QWEN_ACTION_CANDIDATE_ATTEMPTS - 1
+        ),
+        eating_identity_refine_attempt5_can_refine_attempt4=True,
         eating_identity_refine_steps=EATING_CANONICAL_IDENTITY_REFINE_STEPS,
         eating_identity_refine_denoise=(EATING_CANONICAL_IDENTITY_REFINE_DENOISE),
         eating_identity_refine_style_lora=None,

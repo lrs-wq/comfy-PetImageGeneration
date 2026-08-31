@@ -106,7 +106,7 @@
       "type": "business_rule",
       "name": "五轮候选身份问题感知重试",
       "status": "active",
-      "tags": ["identity", "five-attempts", "stripe-amplification", "fail-closed"],
+      "tags": ["identity", "five-attempts", "stripe-amplification", "attempt4-to-attempt5-refine", "fail-closed"],
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
     {

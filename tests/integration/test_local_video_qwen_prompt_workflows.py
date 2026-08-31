@@ -2178,6 +2178,39 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             pipeline.EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
         )
 
+    def test_eating_attempt5_can_repair_attempt4_contact_safe_identity_drift(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="eating",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=5,
+                identity_palette_guard=True,
+                canonical_action_stripe_amplification_attempts={4},
+                action_chroma_acceptable_attempts={4},
+            )
+
+        load_images = {
+            node_id: node["inputs"]["image"]
+            for node_id, node in workflow.items()
+            if node.get("class_type") == "LoadImage"
+        }
+        self.assertEqual(
+            load_images["1"],
+            "local_video_api/capture-eating/eating_identity_refine_source.png",
+        )
+        self.assertIn(uploaded_input, load_images.values())
+        self.assertNotIn(pose_input, load_images.values())
+        prompt = workflow["6"]["inputs"]["prompt"]
+        self.assertIn("normalized eating candidate from attempt 4", prompt)
+        self.assertIn("lower-muzzle-to-kibble overlap", prompt)
+        self.assertEqual(
+            workflow["14"]["inputs"]["denoise"],
+            pipeline.EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
+        )
+
     def test_five_identity_failures_record_unpublished_terminal_state(self) -> None:
         terminal_job: dict[str, object] = {}
         with tempfile.TemporaryDirectory() as temporary:

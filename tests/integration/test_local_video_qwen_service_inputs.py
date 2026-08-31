@@ -691,6 +691,11 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             eating_refine["starts_at_attempt"],
             pipeline.EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT,
         )
+        self.assertEqual(
+            eating_refine["source_capture_through_attempt"],
+            pipeline.QWEN_ACTION_CANDIDATE_ATTEMPTS - 1,
+        )
+        self.assertTrue(eating_refine["attempt5_can_refine_attempt4"])
         self.assertTrue(eating_refine["persists_for_remaining_attempts"])
         self.assertTrue(eating_refine["generic_full_redraw_forbidden_after_source"])
         self.assertNotIn(

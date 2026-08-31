@@ -6220,7 +6220,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 if (
                     canonical_action_reference
                     and action_key(pose) == "eating"
-                    and attempt < EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
+                    # Attempt 4 can be the first candidate with strict mouth-to-food
+                    # contact. Preserve it as geometry so attempt 5 can repair a
+                    # conditionally safe identity drift instead of returning to a
+                    # fresh full-frame pose sample.
+                    and attempt < QWEN_ACTION_CANDIDATE_ATTEMPTS
                     and chroma_metrics.get("acceptable")
                     and attempt_cutout.is_file()
                     and eating_refine_pose_safe

@@ -1779,6 +1779,10 @@ def health() -> dict[str, Any]:
                     "policy": EATING_CANONICAL_IDENTITY_REFINE_POLICY,
                     "attempt": EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT,
                     "starts_at_attempt": EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT,
+                    "source_capture_through_attempt": (
+                        QWEN_ACTION_CANDIDATE_ATTEMPTS - 1
+                    ),
+                    "attempt5_can_refine_attempt4": True,
                     "persists_for_remaining_attempts": True,
                     "generic_full_redraw_forbidden_after_source": True,
                     "source": ("best_prior_pose_and_bowl_safe_palette_drift_candidate"),

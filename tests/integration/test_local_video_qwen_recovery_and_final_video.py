@@ -2262,6 +2262,13 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
             pipeline.EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT,
         )
         self.assertEqual(
+            final_job["eating_identity_refine_source_capture_through_attempt"],
+            pipeline.QWEN_ACTION_CANDIDATE_ATTEMPTS - 1,
+        )
+        self.assertTrue(
+            final_job["eating_identity_refine_attempt5_can_refine_attempt4"]
+        )
+        self.assertEqual(
             final_job["eating_identity_refine_denoise"],
             pipeline.EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
         )
