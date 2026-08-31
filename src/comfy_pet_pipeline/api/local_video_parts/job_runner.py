@@ -3684,6 +3684,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             grooming_full_pose_refine_source: dict[str, Any] | None = None
             grooming_advisory_identity_refine_source: dict[str, Any] | None = None
             eating_identity_refine_source: dict[str, Any] | None = None
+            previous_pose_identity_palette_quality: dict[str, Any] | None = None
             previous_advisory_grooming_minimum_issues: list[str] = []
             canonical_grooming_completion_capable = bool(
                 canonical_action_reference and action_key(pose) == "grooming"
@@ -4221,6 +4222,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     attempt_prompt += "\n\n" + identity_palette_prompt(
                         pose_identity_palette_prompt_signature,
                         retry=attempt > 1,
+                        previous_quality=previous_pose_identity_palette_quality,
                     )
                 main_case_geometry_first = (
                     effective_pose_identity_input_policy
@@ -4506,6 +4508,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         attempt_prompt += "\n\n" + identity_palette_prompt(
                             pose_identity_palette_prompt_signature,
                             retry=True,
+                            previous_quality=(
+                                previous_pose_identity_palette_quality
+                            ),
                         )
                     grooming_advisory_identity_refine_audit = {
                         "policy": GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,
@@ -4738,6 +4743,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         attempt_prompt += "\n\n" + identity_palette_prompt(
                             pose_identity_palette_prompt_signature,
                             retry=True,
+                            previous_quality=(
+                                previous_pose_identity_palette_quality
+                            ),
                         )
                     grooming_foreleg_repair_audit = {
                         "policy": active_repair_policy,
@@ -5097,6 +5105,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         attempt_prompt += "\n\n" + identity_palette_prompt(
                             pose_identity_palette_prompt_signature,
                             retry=True,
+                            previous_quality=(
+                                previous_pose_identity_palette_quality
+                            ),
                         )
                     grooming_full_pose_recovery_audit = {
                         "policy": recovery_policy,
@@ -5233,6 +5244,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         attempt_prompt += "\n\n" + identity_palette_prompt(
                             pose_identity_palette_prompt_signature,
                             retry=True,
+                            previous_quality=eating_identity_refine_source.get(
+                                "identity_palette_quality"
+                            ),
                         )
                     eating_identity_refine_audit = {
                         "policy": EATING_CANONICAL_IDENTITY_REFINE_POLICY,
@@ -5245,6 +5259,17 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         ),
                         "source_identity_palette": (
                             eating_identity_refine_source["identity_palette_quality"]
+                        ),
+                        "source_stripe_amplification_refine_eligibility": (
+                            eating_identity_refine_source.get(
+                                "stripe_amplification_refine_eligibility"
+                            )
+                        ),
+                        "source_conditionally_repairable_palette_issues": (
+                            eating_identity_refine_source.get(
+                                "conditionally_repairable_palette_issues",
+                                [],
+                            )
                         ),
                         "refine_canvas": eating_refine_canvas_audit,
                         "image1_role": (
@@ -5483,6 +5508,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     attempt_prompt += "\n\n" + identity_palette_prompt(
                         pose_identity_palette_prompt_signature,
                         retry=attempt > 1,
+                        previous_quality=previous_pose_identity_palette_quality,
                     )
                 workflow = qwen_workflow(
                     attempt_primary_input_name,
@@ -6008,6 +6034,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     palette_quality = canonical_action_identity_palette_quality(
                         palette_quality
                     )
+                previous_pose_identity_palette_quality = (
+                    json.loads(json.dumps(palette_quality))
+                    if isinstance(palette_quality, dict)
+                    else None
+                )
                 pre_surface_pose_quality: dict[str, Any] | None = None
                 if (
                     canonical_action_reference
@@ -6164,9 +6195,27 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     if isinstance(palette_quality, dict)
                     else set()
                 )
+                eating_refine_stripe_amplification_eligibility = (
+                    identity_palette_stripe_amplification_refine_eligibility(
+                        palette_quality
+                    )
+                )
+                eating_refine_unrepairable_conditional_issues = sorted(
+                    (
+                        eating_refine_palette_issues
+                        & EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES
+                    )
+                    if not eating_refine_stripe_amplification_eligibility.get(
+                        "eligible"
+                    )
+                    else set()
+                )
                 eating_refine_unsafe_palette_issues = sorted(
-                    eating_refine_palette_issues
-                    & EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES
+                    (
+                        eating_refine_palette_issues
+                        & EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES
+                    )
+                    | set(eating_refine_unrepairable_conditional_issues)
                 )
                 if (
                     canonical_action_reference
@@ -6201,6 +6250,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 eating_refine_pose_issues
                             ),
                             "unsafe_palette_issues": [],
+                            "stripe_amplification_refine_eligibility": (
+                                eating_refine_stripe_amplification_eligibility
+                            ),
+                            "conditionally_repairable_palette_issues": sorted(
+                                eating_refine_palette_issues
+                                & EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES
+                            ),
                             "identity_palette_quality": palette_quality,
                             "selection_key": list(eating_refine_selection_key),
                             "source_role": (
@@ -7871,6 +7927,176 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 raise RuntimeError(
                     "Action candidate generation did not complete all five attempts."
                 )
+            if strict_first_frame_required:
+                first_frame_states = dict(
+                    get_job(job_id).get("qwen_first_frame_states") or {}
+                )
+                action_state = dict(first_frame_states.get(action_key(pose)) or {})
+                action_state.update(
+                    status="selecting_best_of_five",
+                    current_attempt=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                    attempts_completed=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                    attempt_budget=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                    attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                )
+                first_frame_states[action_key(pose)] = action_state
+                update_job(
+                    job_id,
+                    qwen_first_frame_states=first_frame_states,
+                    qwen_first_frame_current_action=action_key(pose),
+                    qwen_first_frame_current_attempt=(
+                        QWEN_ACTION_CANDIDATE_ATTEMPTS
+                    ),
+                )
+
+            def fail_identity_budget_exhausted(
+                additional_palette: dict[str, Any] | None = None,
+            ) -> None:
+                issue_counts: dict[str, int] = {}
+                palette_records = [
+                    item.get("identity_palette")
+                    for item in attempts
+                    if isinstance(item, dict)
+                ]
+                if isinstance(additional_palette, dict) and not any(
+                    additional_palette == palette_record
+                    for palette_record in palette_records
+                    if isinstance(palette_record, dict)
+                ):
+                    palette_records.append(additional_palette)
+                for palette_record in palette_records:
+                    if not isinstance(palette_record, dict):
+                        issue_counts["identity_palette_signature_unavailable"] = (
+                            issue_counts.get(
+                                "identity_palette_signature_unavailable",
+                                0,
+                            )
+                            + 1
+                        )
+                        continue
+                    for issue in palette_record.get("issues", []):
+                        issue_name = str(issue).strip()
+                        if issue_name:
+                            issue_counts[issue_name] = (
+                                issue_counts.get(issue_name, 0) + 1
+                            )
+                ranked_issues = sorted(
+                    issue_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+                first_frame_states = dict(
+                    get_job(job_id).get("qwen_first_frame_states") or {}
+                )
+                failed_state = dict(
+                    first_frame_states.get(action_key(pose)) or {}
+                )
+                failed_state.update(
+                    status="failed_identity_budget_exhausted",
+                    completed=True,
+                    quality_passed=False,
+                    published=False,
+                    current_attempt=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                    attempts_completed=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                    attempt_budget=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                    attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                    selected_attempt=None,
+                    best_effort=False,
+                    best_effort_issues=[],
+                    identity_issue_counts=dict(ranked_issues),
+                    original_upload_fallback_published=False,
+                    action_removed=False,
+                )
+                first_frame_states[action_key(pose)] = failed_state
+                action_selection_records = get_job(job_id).get(
+                    "action_candidate_selection_by_action"
+                )
+                action_selection_records = (
+                    json.loads(json.dumps(action_selection_records))
+                    if isinstance(action_selection_records, dict)
+                    else {}
+                )
+                failure_record = {
+                    "policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
+                    "source_kind": "qwen_generated_action_candidates",
+                    "result": "failed_identity_budget_exhausted",
+                    "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                    "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                    "selected_attempt": None,
+                    "identity_palette_acceptable": False,
+                    "identity_issue_counts": dict(ranked_issues),
+                    "original_upload_used": False,
+                    "approved_canonical_used_as_output": False,
+                }
+                action_selection_records[action_key(pose)] = failure_record
+                write_json_atomic(
+                    job_dir
+                    / "workflows"
+                    / f"qwen_pose_{index:02d}_identity_budget_failure.json",
+                    failure_record,
+                )
+                update_job(
+                    job_id,
+                    qwen_first_frame_states=first_frame_states,
+                    qwen_first_frame_best_effort_selected=False,
+                    qwen_first_frame_best_effort_action=None,
+                    qwen_first_frame_best_effort_attempt=None,
+                    qwen_first_frame_best_effort_issues=[],
+                    action_candidate_gate_status=(
+                        "failed_identity_budget_exhausted"
+                    ),
+                    action_candidate_gate_action=action_key(pose),
+                    action_candidate_gate_attempt_budget=(
+                        QWEN_ACTION_CANDIDATE_ATTEMPTS
+                    ),
+                    action_candidate_gate_attempts_completed=(
+                        QWEN_ACTION_CANDIDATE_ATTEMPTS
+                    ),
+                    action_candidate_gate_selected_attempt=None,
+                    action_candidate_gate_returns_original_upload=False,
+                    action_candidate_gate_returns_approved_canonical=False,
+                    action_candidate_selection_by_action=(
+                        action_selection_records
+                    ),
+                )
+                append_recovery_event(
+                    job_id,
+                    {
+                        "stage": "cartoon_keyframe",
+                        "pose_index": index,
+                        "reason": "five_candidate_identity_budget_exhausted",
+                        "strategy": (
+                            "fail_closed_without_original_or_canonical_output"
+                        ),
+                        "result": "rejected_identity_budget_exhausted",
+                        "action": action_key(pose),
+                        "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        "identity_issue_counts": dict(ranked_issues),
+                        "original_upload_fallback_published": False,
+                        "approved_canonical_published": False,
+                        "action_removed": False,
+                    },
+                )
+                issue_summary = ", ".join(
+                    f"{name}={count}" for name, count in ranked_issues
+                ) or "identity_palette_signature_unavailable"
+                raise RuntimeError(
+                    "Best-of-five selection found no identity-safe generated "
+                    f"candidate: {issue_summary}."
+                )
+
+            identity_safe_attempt_exists = any(
+                isinstance(item.get("identity_palette"), dict)
+                and item["identity_palette"].get("acceptable") is True
+                for item in attempts
+                if isinstance(item, dict)
+            )
+            if (
+                strict_first_frame_required
+                and not identity_safe_attempt_exists
+                and best_semantic_source is None
+            ):
+                fail_identity_budget_exhausted()
             if (
                 advisory_grooming_minimum_gate_required
                 and best_attempt is not None
@@ -8013,6 +8239,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 best_attempt is None
                 and strict_first_frame_required
                 and best_strict_first_frame_attempt is not None
+                and isinstance(
+                    best_strict_first_frame_attempt.get("identity_palette"),
+                    dict,
+                )
+                and best_strict_first_frame_attempt["identity_palette"].get(
+                    "acceptable"
+                )
+                is True
             ):
                 best_attempt = best_strict_first_frame_attempt
                 strict_best_effort_issues = strict_first_frame_record_issues(
@@ -9182,6 +9416,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         advisory_action_candidate_gate_required
                     ),
                 )
+                semantic_identity_safe = bool(
+                    isinstance(semantic_palette_quality, dict)
+                    and semantic_palette_quality.get("acceptable") is True
+                )
                 semantic_best_effort_issues: list[str] = []
                 if semantic_rejection_reason is not None:
                     append_recovery_event(
@@ -9196,6 +9434,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "result": (
                                 "accepted_best_effort"
                                 if strict_first_frame_required
+                                and semantic_identity_safe
                                 else "rejected"
                             ),
                             "chroma": chroma_metrics,
@@ -9291,7 +9530,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "transparent": True,
                     "background_removal_failed": False,
                 }
-                if semantic_best_effort_issues:
+                if semantic_best_effort_issues and semantic_identity_safe:
                     best_attempt["strict_first_frame_best_effort_selected"] = True
                     best_attempt["strict_first_frame_best_effort_issues"] = (
                         semantic_best_effort_issues
@@ -9308,7 +9547,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "reason": "qwen_chroma_retries_exhausted",
                         "strategy": "rembg_u2net_fallback",
                         "profile": "rembg_u2net_fallback",
-                        "result": "accepted",
+                        "result": (
+                            "accepted"
+                            if semantic_identity_safe
+                            else "rejected_identity_unsafe"
+                        ),
                         "chroma": chroma_metrics,
                         "quality": quality,
                         "similarity": similarity,
@@ -9328,9 +9571,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 not isinstance(selected_palette, dict)
                 or selected_palette.get("acceptable") is not True
             ):
-                raise RuntimeError(
-                    "Best-of-five selection found no identity-safe generated "
-                    "candidate."
+                fail_identity_budget_exhausted(
+                    selected_palette
+                    if isinstance(selected_palette, dict)
+                    else None
                 )
             selected_keyframe_source = job_dir / str(best_attempt["keyframe"])
             selected_cutout_source = job_dir / str(best_attempt["cutout"])

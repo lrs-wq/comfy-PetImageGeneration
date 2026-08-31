@@ -669,11 +669,23 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         )
         self.assertTrue(eating_refine["persists_for_remaining_attempts"])
         self.assertTrue(eating_refine["generic_full_redraw_forbidden_after_source"])
-        self.assertIn(
+        self.assertNotIn(
             "invented_stripe_pattern",
             eating_refine["unsafe_source_palette_issues"],
         )
-        self.assertFalse(eating_refine["invented_stripe_candidate_can_seed_refine"])
+        self.assertIn(
+            "invented_stripe_pattern",
+            eating_refine["conditionally_repairable_source_palette_issues"],
+        )
+        self.assertTrue(eating_refine["invented_stripe_candidate_can_seed_refine"])
+        self.assertTrue(
+            eating_refine["invented_stripe_candidate_requires_source_markings"]
+        )
+        self.assertEqual(
+            eating_refine["stripe_amplification_refine_policy"],
+            pipeline.IDENTITY_STRIPE_AMPLIFICATION_REFINE_POLICY,
+        )
+        self.assertTrue(eating_refine["previous_identity_issue_prompt_conditioning"])
         self.assertTrue(eating_refine["qwen_lightning_only"])
         self.assertIsNone(eating_refine["style_lora"])
         self.assertIsNone(eating_refine["sampler_noise_mask"])

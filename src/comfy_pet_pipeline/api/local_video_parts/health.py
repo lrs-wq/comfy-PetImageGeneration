@@ -1752,7 +1752,21 @@ def health() -> dict[str, Any]:
                     "unsafe_source_palette_issues": sorted(
                         EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES
                     ),
-                    "invented_stripe_candidate_can_seed_refine": False,
+                    "conditionally_repairable_source_palette_issues": sorted(
+                        EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES
+                    ),
+                    "invented_stripe_candidate_can_seed_refine": True,
+                    "invented_stripe_candidate_requires_source_markings": True,
+                    "stripe_amplification_refine_policy": (
+                        IDENTITY_STRIPE_AMPLIFICATION_REFINE_POLICY
+                    ),
+                    "stripe_amplification_source_component_min": (
+                        IDENTITY_STRIPE_AMPLIFICATION_SOURCE_COMPONENT_MIN
+                    ),
+                    "stripe_amplification_source_area_min": (
+                        IDENTITY_STRIPE_AMPLIFICATION_SOURCE_AREA_MIN
+                    ),
+                    "previous_identity_issue_prompt_conditioning": True,
                     "steps": EATING_CANONICAL_IDENTITY_REFINE_STEPS,
                     "denoise": EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
                     "qwen_lightning_only": True,
@@ -1773,6 +1787,7 @@ def health() -> dict[str, Any]:
                     "eating_pose_gate_unchanged": True,
                     "fur_surface_gate_unchanged": True,
                     "global_thresholds_changed": False,
+                    "identity_gate_unchanged_for_refined_output": True,
                     "fallback_when_no_pose_safe_palette_drift_source": (
                         "existing_seed_retry"
                     ),

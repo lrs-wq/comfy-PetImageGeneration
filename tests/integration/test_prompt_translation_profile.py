@@ -797,6 +797,83 @@ class IdentityPaletteGuardTests(unittest.TestCase):
             quality["marking_spatial_quality"]["invented_stripe_pattern"]
         )
 
+    def test_source_present_stripe_amplification_can_seed_identity_refine(
+        self,
+    ) -> None:
+        quality = {
+            "available": True,
+            "acceptable": False,
+            "issues": ["invented_stripe_pattern"],
+            "marking_spatial_quality": {
+                "available": True,
+                "source_stripe_component_count": 3,
+                "candidate_stripe_component_count": 10,
+                "source_stripe_area_fraction": 0.010596,
+                "candidate_stripe_area_fraction": 0.054266,
+                "source_dark_contrast_fraction": 0.025895,
+                "candidate_dark_contrast_fraction": 0.092396,
+            },
+        }
+
+        eligibility = (
+            pipeline.identity_palette_stripe_amplification_refine_eligibility(
+                quality
+            )
+        )
+        prompt = pipeline.identity_palette_prompt(
+            self.golden_task_palette(candidate=False),
+            retry=True,
+            previous_quality=quality,
+        )
+
+        self.assertTrue(eligibility["eligible"], eligibility)
+        self.assertEqual(
+            eligibility["policy"],
+            pipeline.IDENTITY_STRIPE_AMPLIFICATION_REFINE_POLICY,
+        )
+        self.assertIn("real but subtle stripe pattern", prompt)
+        self.assertIn("reduce dark-band count, occupied area, and contrast", prompt)
+        self.assertIn("10 components", prompt)
+        self.assertIn("add no flank rings", prompt)
+
+    def test_unstriped_source_cannot_seed_stripe_identity_refine(self) -> None:
+        quality = {
+            "available": True,
+            "acceptable": False,
+            "issues": ["invented_stripe_pattern"],
+            "marking_spatial_quality": {
+                "available": True,
+                "source_stripe_component_count": 0,
+                "candidate_stripe_component_count": 7,
+                "source_stripe_area_fraction": 0.0,
+                "candidate_stripe_area_fraction": 0.04,
+                "source_dark_contrast_fraction": 0.0,
+                "candidate_dark_contrast_fraction": 0.08,
+            },
+        }
+
+        eligibility = (
+            pipeline.identity_palette_stripe_amplification_refine_eligibility(
+                quality
+            )
+        )
+        guidance = pipeline.identity_palette_retry_guidance(quality)
+
+        self.assertFalse(eligibility["eligible"], eligibility)
+        self.assertIn("invented dark stripes", guidance)
+        self.assertIn("Remove those new bands completely", guidance)
+
+    def test_successful_previous_palette_does_not_emit_false_recolor_retry(
+        self,
+    ) -> None:
+        prompt = pipeline.identity_palette_prompt(
+            self.golden_task_palette(candidate=False),
+            retry=True,
+            previous_quality={"available": True, "acceptable": True, "issues": []},
+        )
+
+        self.assertNotIn("Previous output recolored the pet", prompt)
+
     def test_all_rejected_canonical_retries_require_uploaded_identity_fallback(
         self,
     ) -> None:

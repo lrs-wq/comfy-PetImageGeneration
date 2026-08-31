@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.41"
+API_VERSION = "2.26.42"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -295,7 +295,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.45"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.46"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
     "strict_quality_gate_then_fixed_best_of_five_selection_v3"
 )
@@ -309,6 +309,7 @@ QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
         "1.40.42",
         "1.40.43",
         "1.40.44",
+        "1.40.45",
         QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
     }
 )
@@ -632,7 +633,7 @@ GROOMING_WHITE_MAQUETTE_DEPTH_LUMA_HALF_RANGE = 18.0
 GROOMING_WHITE_MAQUETTE_FRAME0_POSE_LUMA_HALF_RANGE = 32.0
 GROOMING_WHITE_MAQUETTE_DEPTH_DISTANCE_BLEND = 0.18
 EATING_CANONICAL_IDENTITY_REFINE_POLICY = (
-    "canonical_eating_pose_uploaded_front_identity_refine_v3"
+    "canonical_eating_pose_uploaded_front_identity_refine_v4"
 )
 EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT = 4
 EATING_CANONICAL_IDENTITY_REFINE_STEPS = 12
@@ -642,12 +643,19 @@ EATING_CANONICAL_IDENTITY_REFINE_POSE_SAFE_ISSUES = frozenset(
 )
 EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES = frozenset(
     {
-        "invented_stripe_pattern",
         "achromatic_coat_value_balance_lost",
         "canonical_action_achromatic_value_balance_drift",
         "canonical_action_light_identity_dark_feature_expansion",
     }
 )
+EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES = frozenset(
+    {"invented_stripe_pattern"}
+)
+IDENTITY_STRIPE_AMPLIFICATION_REFINE_POLICY = (
+    "source_present_stripe_amplification_identity_refine_v1"
+)
+IDENTITY_STRIPE_AMPLIFICATION_SOURCE_COMPONENT_MIN = 1
+IDENTITY_STRIPE_AMPLIFICATION_SOURCE_AREA_MIN = 0.003
 GROOMING_QWEN_FORELEG_REPAIR_MASK_DILATION_PX = 18
 GROOMING_QWEN_FORELEG_REPAIR_SEED_LOWPASS_SIGMA_PX = 2.5
 GROOMING_QWEN_FORELEG_REPAIR_SEED_IDENTITY_MEDIAN_BLEND = 0.12
@@ -5883,6 +5891,16 @@ identity_palette_is_achromatic = _local_video_identity_quality.identity_palette_
 
 
 identity_palette_prompt = _local_video_identity_quality.identity_palette_prompt
+
+
+identity_palette_retry_guidance = (
+    _local_video_identity_quality.identity_palette_retry_guidance
+)
+
+
+identity_palette_stripe_amplification_refine_eligibility = (
+    _local_video_identity_quality.identity_palette_stripe_amplification_refine_eligibility
+)
 
 
 identity_palette_negative_prompt = (

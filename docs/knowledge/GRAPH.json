@@ -102,6 +102,14 @@
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
     },
     {
+      "id": "comfy.quality.identity_issue_aware_retry",
+      "type": "business_rule",
+      "name": "五轮候选身份问题感知重试",
+      "status": "active",
+      "tags": ["identity", "five-attempts", "stripe-amplification", "fail-closed"],
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
       "id": "comfy.module.transparent_animation",
       "type": "module",
       "name": "透明动画生成",
@@ -223,6 +231,12 @@
       "relation": "checked_by",
       "to": "comfy.quality.canonical_matte_integrity",
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "governed_by",
+      "to": "comfy.quality.identity_issue_aware_retry",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {
       "from": "comfy.module.pipeline",

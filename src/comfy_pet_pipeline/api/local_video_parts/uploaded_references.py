@@ -902,6 +902,19 @@ def prepare_uploaded_subject_qwen_references(
         eating_identity_refine_unsafe_palette_issues=sorted(
             EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES
         ),
+        eating_identity_refine_conditional_palette_issues=sorted(
+            EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES
+        ),
+        eating_identity_refine_stripe_amplification_policy=(
+            IDENTITY_STRIPE_AMPLIFICATION_REFINE_POLICY
+        ),
+        eating_identity_refine_stripe_source_component_min=(
+            IDENTITY_STRIPE_AMPLIFICATION_SOURCE_COMPONENT_MIN
+        ),
+        eating_identity_refine_stripe_source_area_min=(
+            IDENTITY_STRIPE_AMPLIFICATION_SOURCE_AREA_MIN
+        ),
+        eating_identity_retry_uses_previous_palette_issues=True,
         eating_identity_refine_global_thresholds_changed=False,
         grooming_pose_lora_policy=(
             "canonical_identity_open_channel_seed_bound_pose_safe_refine_v11"

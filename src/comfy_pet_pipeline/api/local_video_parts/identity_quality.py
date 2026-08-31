@@ -1153,17 +1153,189 @@ def identity_palette_is_achromatic(signature: dict[str, Any]) -> bool:
     return bool(achromatic >= 0.72 and (warm <= 0.12 or low_saturation_lighting))
 
 
+def identity_palette_stripe_amplification_refine_eligibility(
+    quality: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Allow repainting amplified stripes only when the upload contains them.
+
+    ``invented_stripe_pattern`` also covers a real, low-contrast source pattern
+    that a generated candidate made much darker or denser.  Such a candidate is
+    safe as an eating *geometry* sampler when the source contains measurable
+    stripe evidence; a genuinely unstriped upload must continue to fail closed.
+    """
+    _sync_local_video_runtime(
+        globals(),
+        {"identity_palette_stripe_amplification_refine_eligibility"},
+    )
+
+    palette = quality if isinstance(quality, dict) else {}
+    issues = {
+        str(issue)
+        for issue in palette.get("issues", [])
+        if str(issue).strip()
+    }
+    spatial = palette.get("marking_spatial_quality")
+    spatial = spatial if isinstance(spatial, dict) else {}
+    source_component_count = int(
+        spatial.get("source_stripe_component_count", 0) or 0
+    )
+    source_area_fraction = float(
+        spatial.get("source_stripe_area_fraction", 0.0) or 0.0
+    )
+    checks = {
+        "quality_available": palette.get("available") is True,
+        "invented_stripe_issue_present": "invented_stripe_pattern" in issues,
+        "marking_spatial_available": spatial.get("available") is True,
+        "source_component_count_min": (
+            source_component_count
+            >= IDENTITY_STRIPE_AMPLIFICATION_SOURCE_COMPONENT_MIN
+        ),
+        "source_area_fraction_min": (
+            source_area_fraction >= IDENTITY_STRIPE_AMPLIFICATION_SOURCE_AREA_MIN
+        ),
+    }
+    eligible = all(checks.values())
+    return {
+        "policy": IDENTITY_STRIPE_AMPLIFICATION_REFINE_POLICY,
+        "eligible": eligible,
+        "reason": (
+            "source_present_stripes_were_amplified"
+            if eligible
+            else "source_stripe_evidence_insufficient_for_geometry_sampler"
+        ),
+        "issue": "invented_stripe_pattern",
+        "source_stripe_component_count": source_component_count,
+        "source_stripe_area_fraction": round(source_area_fraction, 6),
+        "candidate_stripe_component_count": int(
+            spatial.get("candidate_stripe_component_count", 0) or 0
+        ),
+        "candidate_stripe_area_fraction": round(
+            float(spatial.get("candidate_stripe_area_fraction", 0.0) or 0.0),
+            6,
+        ),
+        "source_dark_contrast_fraction": round(
+            float(spatial.get("source_dark_contrast_fraction", 0.0) or 0.0),
+            6,
+        ),
+        "candidate_dark_contrast_fraction": round(
+            float(spatial.get("candidate_dark_contrast_fraction", 0.0) or 0.0),
+            6,
+        ),
+        "thresholds": {
+            "source_component_count_min": (
+                IDENTITY_STRIPE_AMPLIFICATION_SOURCE_COMPONENT_MIN
+            ),
+            "source_area_fraction_min": (
+                IDENTITY_STRIPE_AMPLIFICATION_SOURCE_AREA_MIN
+            ),
+        },
+        "checks": checks,
+        "identity_gate_unchanged": True,
+    }
+
+
+def identity_palette_retry_guidance(
+    previous_quality: dict[str, Any] | None,
+) -> str:
+    """Translate the previous palette verdict into bounded correction guidance."""
+    _sync_local_video_runtime(globals(), {"identity_palette_retry_guidance"})
+
+    if (
+        not isinstance(previous_quality, dict)
+        or previous_quality.get("acceptable") is True
+    ):
+        return ""
+    issues = {
+        str(issue)
+        for issue in previous_quality.get("issues", [])
+        if str(issue).strip()
+    }
+    guidance = [
+        "Previous output recolored the pet and was rejected; restore the source "
+        "palette exactly before changing pose or rendering."
+    ]
+    if "invented_stripe_pattern" in issues:
+        eligibility = identity_palette_stripe_amplification_refine_eligibility(
+            previous_quality
+        )
+        if eligibility["eligible"]:
+            guidance.append(
+                "The upload has a real but subtle stripe pattern, while the previous "
+                "candidate amplified it. Preserve only the upload's faint localized "
+                "bands; reduce dark-band count, occupied area, and contrast toward "
+                f"the source evidence (about {eligibility['source_stripe_component_count']} "
+                "components, "
+                f"{eligibility['source_stripe_area_fraction'] * 100.0:.1f}% area, "
+                f"{eligibility['source_dark_contrast_fraction'] * 100.0:.1f}% dark "
+                "contrast). Do not copy the previous candidate's stronger pattern "
+                f"({eligibility['candidate_stripe_component_count']} components, "
+                f"{eligibility['candidate_stripe_area_fraction'] * 100.0:.1f}% area, "
+                f"{eligibility['candidate_dark_contrast_fraction'] * 100.0:.1f}% dark "
+                "contrast), and add no flank rings, torso bars, or head bands absent "
+                "from the upload."
+            )
+        else:
+            guidance.append(
+                "The previous candidate invented dark stripes without sufficient "
+                "source evidence. Remove those new bands completely and keep the "
+                "affected coat regions in the upload's nearest visible base color."
+            )
+    if issues & {
+        "new_gray_or_dark_markings_expanded",
+        "achromatic_coat_value_balance_lost",
+        "canonical_action_achromatic_value_balance_drift",
+        "canonical_action_light_identity_dark_feature_expansion",
+    }:
+        guidance.append(
+            "Shrink any enlarged dark muzzle, mask, ear, patch, or body marking back "
+            "to the upload's placement and approximate area; pose shadows must remain "
+            "soft lighting, not new coat markings."
+        )
+    if issues & {
+        "achromatic_source_recolored_with_warm_fur",
+        "canonical_action_warm_expansion_drift",
+    } or any(issue.startswith("new_dominant_") for issue in issues):
+        guidance.append(
+            "Remove every new dominant hue and lighting cast; the bowl or action "
+            "reference may not transfer its color into the pet."
+        )
+    if issues & {
+        "warm_source_recolored_achromatic",
+        "source_chromatic_identity_accents_lost",
+    }:
+        guidance.append(
+            "Restore the source's genuine warm coat and localized chromatic accents "
+            "instead of flattening them into gray or white."
+        )
+    return " " + " ".join(guidance)
+
+
 def identity_palette_prompt(
     signature: dict[str, Any],
     *,
     retry: bool = False,
+    previous_quality: dict[str, Any] | None = None,
 ) -> str:
     _sync_local_video_runtime(globals(), {"identity_palette_prompt"})
+    retry_guidance = identity_palette_retry_guidance(previous_quality)
+    retry_without_measured_palette = bool(
+        retry
+        and not (
+            isinstance(previous_quality, dict)
+            and previous_quality.get("acceptable") is True
+        )
+    )
+    retry_rule = retry_guidance or (
+        " Previous output recolored the pet and was rejected; restore the source "
+        "palette exactly before changing pose or rendering."
+        if retry_without_measured_palette
+        else ""
+    )
     if not signature.get("available"):
         return (
             "SOURCE COAT COLOR LOCK: copy every visible fur color and marking region "
             "from the uploaded pet. Never recolor the coat or borrow a palette from "
-            "a LoRA training example."
+            f"a LoRA training example.{retry_rule}"
         )
     fractions = signature["fractions"]
     dominant = list(signature.get("dominant") or [])
@@ -1225,12 +1397,6 @@ def identity_palette_prompt(
             + ", ".join(absent_chromatic)
             + "."
         )
-    retry_rule = (
-        " Previous output recolored the pet and was rejected; restore the source "
-        "palette exactly before changing pose or rendering."
-        if retry
-        else ""
-    )
     return (
         "SOURCE COAT PALETTE LOCK - higher priority than style and LoRA: "
         f"{rule} Preserve the exact spatial placement and proportion of every source "

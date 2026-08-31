@@ -713,6 +713,7 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
         advisory_grooming_minimum_issues: list[str] | None = None,
         identity_palette_guard: bool = False,
         canonical_action_palette_drift_attempts: set[int] | None = None,
+        canonical_action_stripe_amplification_attempts: set[int] | None = None,
         action_chroma_acceptable_attempts: set[int] | None = None,
         eating_pose_contact_unreliable: bool = False,
         pose_safe_grooming_attempt4: bool = False,
@@ -722,6 +723,8 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
         persist_identity_digest: bool = True,
         persist_identity_source_digest: bool = True,
         visual_audits_blocking: bool = True,
+        run_to_identity_budget_failure: bool = False,
+        terminal_job_capture: dict[str, object] | None = None,
     ) -> tuple[dict[str, object], str, str]:
         if pose_attempt not in set(
             range(1, pipeline.QWEN_ACTION_CANDIDATE_ATTEMPTS + 1)
@@ -1155,6 +1158,29 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
             nonlocal canonical_action_palette_calls
             canonical_action_palette_calls += 1
             if (
+                canonical_action_stripe_amplification_attempts
+                and canonical_action_palette_calls
+                in canonical_action_stripe_amplification_attempts
+            ):
+                return {
+                    "available": True,
+                    "acceptable": False,
+                    "warning": True,
+                    "issues": ["invented_stripe_pattern"],
+                    "warnings": [],
+                    "penalty": 100.0,
+                    "marking_spatial_quality": {
+                        "available": True,
+                        "invented_stripe_pattern": True,
+                        "source_stripe_component_count": 3,
+                        "candidate_stripe_component_count": 10,
+                        "source_stripe_area_fraction": 0.010596,
+                        "candidate_stripe_area_fraction": 0.054266,
+                        "source_dark_contrast_fraction": 0.025895,
+                        "candidate_dark_contrast_fraction": 0.092396,
+                    },
+                }
+            if (
                 canonical_action_palette_drift_attempts
                 and canonical_action_palette_calls
                 in canonical_action_palette_drift_attempts
@@ -1183,6 +1209,9 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
                 queue_calls if main_case_raw_identity_chain else queue_calls - 1
             )
             if not main_case_raw_identity_chain and queue_calls == 1:
+                return {}
+            if run_to_identity_budget_failure:
+                captured["workflow"] = workflow
                 return {}
             if pose_queue_call == pose_attempt:
                 captured["workflow"] = workflow
@@ -1566,16 +1595,28 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
                 side_effect=fake_advisory_grooming_minimum_gate,
             ),
         ):
-            try:
-                with self.assertRaises(_PoseWorkflowCaptured):
+            if run_to_identity_budget_failure:
+                if terminal_job_capture is None:
+                    raise ValueError(
+                        "terminal_job_capture is required for a terminal failure run"
+                    )
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Best-of-five selection found no identity-safe generated candidate",
+                ):
                     pipeline.run_job(job_id, force_qwen_reference=True)
-            except RuntimeError:
-                self.assertEqual(
-                    queue_calls,
-                    0,
-                    "geometry-first policy errors must fail before any Qwen queue",
-                )
-                raise
+                terminal_job_capture.update(json.loads(json.dumps(jobs[job_id])))
+            else:
+                try:
+                    with self.assertRaises(_PoseWorkflowCaptured):
+                        pipeline.run_job(job_id, force_qwen_reference=True)
+                except RuntimeError:
+                    self.assertEqual(
+                        queue_calls,
+                        0,
+                        "geometry-first policy errors must fail before any Qwen queue",
+                    )
+                    raise
 
         copied_uploaded_input = comfy_input / relative_dir / "input.png"
         self.assertTrue(copied_uploaded_input.is_file())

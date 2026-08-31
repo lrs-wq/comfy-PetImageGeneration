@@ -2142,6 +2142,98 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertEqual(loaded_loras, {pipeline.QWEN_LORA: 1.0})
         self.assertNotIn(self.TEST_QWEN_STYLE_LORA, loaded_loras)
 
+    def test_eating_attempt4_repairs_source_present_amplified_stripes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="eating",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=4,
+                identity_palette_guard=True,
+                canonical_action_stripe_amplification_attempts={3},
+                action_chroma_acceptable_attempts={3},
+            )
+
+        load_images = {
+            node_id: node["inputs"]["image"]
+            for node_id, node in workflow.items()
+            if node.get("class_type") == "LoadImage"
+        }
+        refine_input = (
+            "local_video_api/capture-eating/eating_identity_refine_source.png"
+        )
+        self.assertEqual(load_images["1"], refine_input)
+        self.assertIn(uploaded_input, load_images.values())
+        self.assertNotIn(pose_input, load_images.values())
+        prompt = workflow["6"]["inputs"]["prompt"]
+        self.assertIn("CRITICAL EATING IDENTITY REFINE", prompt)
+        self.assertIn("stronger pattern", prompt)
+        self.assertIn("real but subtle stripe pattern", prompt)
+        self.assertIn("reduce dark-band count, occupied area, and contrast", prompt)
+        self.assertIn("10 components", prompt)
+        self.assertEqual(
+            workflow["14"]["inputs"]["denoise"],
+            pipeline.EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
+        )
+
+    def test_five_identity_failures_record_unpublished_terminal_state(self) -> None:
+        terminal_job: dict[str, object] = {}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._capture_action_workflow(
+                root,
+                action="eating",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                identity_palette_guard=True,
+                canonical_action_stripe_amplification_attempts={1, 2, 3, 4, 5},
+                action_chroma_acceptable_attempts={1, 2, 3, 4, 5},
+                visual_audits_blocking=False,
+                run_to_identity_budget_failure=True,
+                terminal_job_capture=terminal_job,
+            )
+            failure_audit = (
+                root
+                / "outputs"
+                / "capture-eating"
+                / "workflows"
+                / "qwen_pose_01_identity_budget_failure.json"
+            )
+            self.assertTrue(failure_audit.is_file())
+
+        action_state = terminal_job["qwen_first_frame_states"]["eating"]
+        self.assertEqual(action_state["status"], "failed_identity_budget_exhausted")
+        self.assertTrue(action_state["completed"])
+        self.assertEqual(action_state["attempts_completed"], 5)
+        self.assertFalse(action_state["quality_passed"])
+        self.assertFalse(action_state["published"])
+        self.assertIsNone(action_state["selected_attempt"])
+        self.assertEqual(
+            action_state["identity_issue_counts"],
+            {"invented_stripe_pattern": 5},
+        )
+        self.assertFalse(terminal_job["qwen_first_frame_best_effort_selected"])
+        self.assertEqual(
+            terminal_job["action_candidate_gate_status"],
+            "failed_identity_budget_exhausted",
+        )
+        selection = terminal_job["action_candidate_selection_by_action"]["eating"]
+        self.assertEqual(selection["attempts_completed"], 5)
+        self.assertFalse(selection["identity_palette_acceptable"])
+        self.assertFalse(selection["original_upload_used"])
+        self.assertFalse(selection["approved_canonical_used_as_output"])
+        terminal_events = [
+            event
+            for event in terminal_job["recovery_history"]
+            if event.get("result") == "rejected_identity_budget_exhausted"
+        ]
+        self.assertEqual(len(terminal_events), 1)
+        self.assertNotIn(
+            "accepted_best_effort",
+            [event.get("result") for event in terminal_job["recovery_history"]],
+        )
+
     def test_advisory_eating_palette_drift_retries_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workflow, _uploaded_input, _pose_input = self._capture_action_workflow(
