@@ -2013,6 +2013,89 @@ class CanonicalChromaIntegrityTests(unittest.TestCase):
         )
         self.assertGreater(hole_quality["largest_void_area_fraction"], 0.004)
 
+    def test_canonical_cutout_accepts_side_concavity_grazing_medial_corridor(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "side-concavity.png"
+            image = Image.new("RGBA", (240, 320), (0, 0, 0, 0))
+            ImageDraw.Draw(image).polygon(
+                [
+                    (34, 22),
+                    (206, 22),
+                    (206, 74),
+                    (145, 108),
+                    (135, 198),
+                    (210, 276),
+                    (186, 300),
+                    (54, 300),
+                    (30, 276),
+                    (92, 198),
+                    (82, 108),
+                    (34, 74),
+                ],
+                fill=(120, 120, 120, 255),
+            )
+            image.save(path)
+
+            quality = pipeline.canonical_cutout_interior_quality(path)
+
+        self.assertTrue(quality["acceptable"], quality)
+        self.assertEqual(quality["issues"], [])
+        self.assertGreater(quality["ignored_side_concavity_count"], 0)
+        self.assertGreater(quality["largest_ignored_side_concavity_area"], 96)
+        self.assertLess(
+            quality[
+                "largest_ignored_side_concavity_medial_overlap_fraction"
+            ],
+            quality["medial_overlap_fraction_min"],
+        )
+
+    def test_semantic_canonical_recovery_rejects_interior_failure_before_acceptance(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source.png"
+            Image.new("RGB", (128, 128), (220, 220, 220)).save(source)
+            recovered = Image.new("RGBA", (128, 128), (0, 0, 0, 0))
+            ImageDraw.Draw(recovered).rectangle(
+                (24, 12, 104, 116),
+                fill=(120, 120, 120, 255),
+            )
+            failed_metrics = {
+                "acceptable": False,
+                "issues": ["canonical_subject_interior_chroma_hole"],
+            }
+
+            with (
+                patch("rembg.remove", return_value=recovered),
+                patch.object(pipeline, "get_rembg_session"),
+                patch.object(pipeline, "prepare_landscape_keyframe"),
+                patch.object(
+                    pipeline,
+                    "evaluate_chroma_cutout",
+                    return_value=failed_metrics,
+                ) as evaluate,
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "canonical_subject_interior_chroma_hole",
+                ),
+            ):
+                pipeline.semantic_background_recovery(
+                    source,
+                    root / "green.png",
+                    root / "cutout.png",
+                    root / "semantic.png",
+                    validate_canonical_interior=True,
+                )
+
+        evaluate.assert_called_once_with(
+            root / "green.png",
+            root / "cutout.png",
+            validate_canonical_interior=True,
+        )
+
     def test_chroma_despill_preserves_green_eye_inside_subject(self) -> None:
         rgb = np.zeros((96, 96, 3), dtype=np.uint8)
         rgb[:, :] = (0, 255, 0)

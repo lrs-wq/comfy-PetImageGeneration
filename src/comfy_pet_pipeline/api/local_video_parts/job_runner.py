@@ -2335,61 +2335,130 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             fallback_green = job_dir / "cartoon_reference_semantic_green.png"
             fallback_cutout = job_dir / "cartoon_reference_semantic_cutout_final.png"
             fallback_semantic = job_dir / "cartoon_reference_semantic_cutout_raw.png"
+            generated_semantic_fallback_error: str | None = None
             try:
                 chroma_metrics = semantic_background_recovery(
                     fallback_source,
                     fallback_green,
                     fallback_cutout,
                     fallback_semantic,
+                    validate_canonical_interior=True,
                 )
             except Exception as exc:  # noqa: BLE001 - image mode must preserve a usable raw result
                 if not image_request:
-                    raise
-                best_identity_record = fallback_record
-                best_identity_source = job_dir / best_identity_record["keyframe"]
-                with Image.open(best_identity_source) as raw_image:
-                    cartoon_size = raw_image.size
-                background_removal_error = (
-                    "Background removal could not preserve a complete subject; "
-                    "the original generated image was returned."
-                )
-                selected_cartoon = {
-                    **best_identity_record,
-                    "profile": f"{best_identity_record['profile']}_raw_image",
-                    "keyframe": best_identity_source.name,
-                    "cutout": None,
-                    "raw_path": best_identity_source,
-                    "cutout_path": None,
-                    "workflow": cartoon_workflows[
-                        int(best_identity_record["attempt"]) - 1
-                    ],
-                    "size": cartoon_size,
-                    "profile_index": int(best_identity_record["attempt"]) - 1,
-                    "transparent": False,
-                    "background_removal_failed": True,
-                    "background_removal_error": background_removal_error,
-                }
-                append_background_removal_failure(
-                    job_id,
-                    {
-                        "stage": "cartoon_reference_semantic_recovery",
-                        "attempt": best_identity_record["attempt"],
-                        "reason": "semantic_background_recovery_failed",
-                        "strategy": "return_best_identity_raw_image",
-                        "profile": best_identity_record["profile"],
-                        "result": "returned_opaque_original",
-                        "identity_palette": best_identity_record.get(
-                            "identity_palette"
-                        ),
-                        "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
-                    },
-                )
-                LOGGER.warning(
-                    "%s cartoon reference semantic recovery failed; returning "
-                    "the best identity-preserving raw image for image mode",
-                    job_id,
-                )
-            else:
+                    if fallback_uses_uploaded_identity:
+                        raise
+                    generated_semantic_fallback_error = (
+                        f"{type(exc).__name__}: {str(exc)[:1000]}"
+                    )
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_reference_semantic_recovery",
+                            "attempt": fallback_record["attempt"],
+                            "reason": "canonical_generated_semantic_matte_invalid",
+                            "strategy": "use_uploaded_identity_after_safe_matte",
+                            "profile": fallback_record["profile"],
+                            "source": fallback_source.name,
+                            "result": "rejected",
+                            "error": generated_semantic_fallback_error,
+                        },
+                    )
+                    fallback_uses_uploaded_identity = True
+                    fallback_source = Path(identity_source_path)
+                    fallback_green = (
+                        job_dir
+                        / "cartoon_reference_uploaded_identity_matte_green.png"
+                    )
+                    fallback_cutout = (
+                        job_dir
+                        / "cartoon_reference_uploaded_identity_matte_cutout.png"
+                    )
+                    fallback_semantic = (
+                        job_dir
+                        / "cartoon_reference_uploaded_identity_matte_semantic.png"
+                    )
+                    try:
+                        chroma_metrics = semantic_background_recovery(
+                            fallback_source,
+                            fallback_green,
+                            fallback_cutout,
+                            fallback_semantic,
+                            validate_canonical_interior=True,
+                        )
+                    except Exception as uploaded_exc:
+                        uploaded_error = (
+                            f"{type(uploaded_exc).__name__}: "
+                            f"{str(uploaded_exc)[:1000]}"
+                        )
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "cartoon_reference_semantic_recovery",
+                                "attempt": len(cartoon_attempts) + 1,
+                                "reason": (
+                                    "canonical_uploaded_identity_matte_invalid"
+                                ),
+                                "strategy": (
+                                    "use_uploaded_identity_after_safe_matte"
+                                ),
+                                "source": fallback_source.name,
+                                "result": "rejected",
+                                "error": uploaded_error,
+                            },
+                        )
+                        raise RuntimeError(
+                            "Generated canonical semantic matte failed and the "
+                            "uploaded identity safe-matte recovery also failed: "
+                            f"generated={generated_semantic_fallback_error}; "
+                            f"uploaded={uploaded_error}"
+                        ) from uploaded_exc
+                else:
+                    best_identity_record = fallback_record
+                    best_identity_source = job_dir / best_identity_record["keyframe"]
+                    with Image.open(best_identity_source) as raw_image:
+                        cartoon_size = raw_image.size
+                    background_removal_error = (
+                        "Background removal could not preserve a complete subject; "
+                        "the original generated image was returned."
+                    )
+                    selected_cartoon = {
+                        **best_identity_record,
+                        "profile": f"{best_identity_record['profile']}_raw_image",
+                        "keyframe": best_identity_source.name,
+                        "cutout": None,
+                        "raw_path": best_identity_source,
+                        "cutout_path": None,
+                        "workflow": cartoon_workflows[
+                            int(best_identity_record["attempt"]) - 1
+                        ],
+                        "size": cartoon_size,
+                        "profile_index": int(best_identity_record["attempt"]) - 1,
+                        "transparent": False,
+                        "background_removal_failed": True,
+                        "background_removal_error": background_removal_error,
+                    }
+                    append_background_removal_failure(
+                        job_id,
+                        {
+                            "stage": "cartoon_reference_semantic_recovery",
+                            "attempt": best_identity_record["attempt"],
+                            "reason": "semantic_background_recovery_failed",
+                            "strategy": "return_best_identity_raw_image",
+                            "profile": best_identity_record["profile"],
+                            "result": "returned_opaque_original",
+                            "identity_palette": best_identity_record.get(
+                                "identity_palette"
+                            ),
+                            "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                        },
+                    )
+                    LOGGER.warning(
+                        "%s cartoon reference semantic recovery failed; returning "
+                        "the best identity-preserving raw image for image mode",
+                        job_id,
+                    )
+            if selected_cartoon is None:
                 fallback_cleanup = (
                     neutralize_uploaded_identity_chroma_spill(
                         fallback_cutout,
@@ -2460,14 +2529,22 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     else "rembg_u2net_fallback"
                 )
                 fallback_recovery_reason = (
-                    "canonical_identity_palette_drift_exhausted"
-                    if fallback_uses_uploaded_identity
-                    else "qwen_chroma_retries_exhausted"
+                    "canonical_generated_semantic_matte_invalid"
+                    if generated_semantic_fallback_error is not None
+                    else (
+                        "canonical_identity_palette_drift_exhausted"
+                        if fallback_uses_uploaded_identity
+                        else "qwen_chroma_retries_exhausted"
+                    )
                 )
                 fallback_recovery_strategy = (
-                    "use_original_uploaded_identity_after_safe_matte"
-                    if fallback_uses_uploaded_identity
-                    else "rembg_u2net_fallback"
+                    "use_uploaded_identity_after_generated_matte_failure"
+                    if generated_semantic_fallback_error is not None
+                    else (
+                        "use_original_uploaded_identity_after_safe_matte"
+                        if fallback_uses_uploaded_identity
+                        else "rembg_u2net_fallback"
+                    )
                 )
                 fallback_raw_candidate_identity_palette = (
                     source_identity_palette
@@ -2482,18 +2559,31 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                 )
                 if fallback_uses_uploaded_identity:
-                    update_job(
-                        job_id,
-                        canonical_uploaded_identity_fallback_used=True,
-                        canonical_generated_palette_failure={
+                    uploaded_identity_fallback_update: dict[str, Any] = {
+                        "canonical_uploaded_identity_fallback_used": True,
+                        "canonical_uploaded_identity_fallback_source": str(
+                            fallback_source
+                        ),
+                    }
+                    if generated_semantic_fallback_error is not None:
+                        uploaded_identity_fallback_update[
+                            "canonical_generated_matte_failure"
+                        ] = {
+                            "source": fallback_record["keyframe"],
+                            "error": generated_semantic_fallback_error,
+                        }
+                    else:
+                        uploaded_identity_fallback_update[
+                            "canonical_generated_palette_failure"
+                        ] = {
                             "attempts": [
                                 record.get("identity_palette")
                                 for record in cartoon_attempts
                             ],
-                        },
-                        canonical_uploaded_identity_fallback_source=(
-                            str(fallback_source)
-                        ),
+                        }
+                    update_job(
+                        job_id,
+                        **uploaded_identity_fallback_update,
                     )
                 if (
                     canonical_identity_palette_gate_required
@@ -2540,6 +2630,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 uploaded_fallback_green,
                                 uploaded_fallback_cutout,
                                 uploaded_fallback_semantic,
+                                validate_canonical_interior=True,
                             )
                             uploaded_cleanup = (
                                 neutralize_uploaded_identity_chroma_spill(

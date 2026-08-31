@@ -627,6 +627,21 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertTrue(guard["canonical_chroma_spill_preserves_paired_eye_accents"])
         self.assertTrue(guard["canonical_interior_hole_gate"])
         self.assertEqual(
+            guard["canonical_interior_hole_gate_policy"],
+            pipeline.CANONICAL_INTERIOR_HOLE_GATE_POLICY,
+        )
+        self.assertEqual(
+            guard["canonical_interior_hole_medial_overlap_fraction_min"],
+            pipeline.CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN,
+        )
+        self.assertTrue(guard["canonical_side_silhouette_concavity_allowed"])
+        self.assertTrue(
+            guard["canonical_semantic_fallback_preacceptance_validation"]
+        )
+        self.assertTrue(
+            guard["canonical_generated_matte_uploaded_identity_recovery"]
+        )
+        self.assertEqual(
             guard["upload_pose_photography_lora_policy"],
             "disabled_after_canonical_identity_style_lock_v1",
         )

@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.40"
+API_VERSION = "2.26.41"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -295,7 +295,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.44"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.45"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
     "strict_quality_gate_then_fixed_best_of_five_selection_v3"
 )
@@ -308,6 +308,7 @@ QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
         "1.40.41",
         "1.40.42",
         "1.40.43",
+        "1.40.44",
         QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
     }
 )
@@ -2435,6 +2436,15 @@ def configure_uploaded_subject_validation(
         "canonical_chroma_spill_policy": (UPLOADED_IDENTITY_CHROMA_SPILL_POLICY),
         "canonical_chroma_spill_preserves_paired_eye_accents": True,
         "canonical_interior_hole_gate": True,
+        "canonical_interior_hole_gate_policy": (
+            CANONICAL_INTERIOR_HOLE_GATE_POLICY
+        ),
+        "canonical_interior_hole_medial_overlap_fraction_min": (
+            CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN
+        ),
+        "canonical_side_silhouette_concavity_allowed": True,
+        "canonical_semantic_fallback_preacceptance_validation": True,
+        "canonical_generated_matte_uploaded_identity_recovery": True,
         "generation_audit_policy": GENERATION_AUDIT_POLICY,
         "visual_content_audit_mode": (
             "blocking" if GENERATION_VISUAL_AUDITS_BLOCKING else "advisory"
@@ -5807,6 +5817,14 @@ run_ffmpeg = _local_video_identity_quality.run_ffmpeg
 
 convert_chroma_image_to_transparent_png = (
     _local_video_identity_quality.convert_chroma_image_to_transparent_png
+)
+
+
+CANONICAL_INTERIOR_HOLE_GATE_POLICY = (
+    _local_video_identity_quality.CANONICAL_INTERIOR_HOLE_GATE_POLICY
+)
+CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN = (
+    _local_video_identity_quality.CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN
 )
 
 

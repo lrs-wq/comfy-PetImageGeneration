@@ -8,6 +8,12 @@ from __future__ import annotations
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
+CANONICAL_INTERIOR_HOLE_GATE_POLICY = (
+    "central_medial_overlap_component_v2"
+)
+CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN = 0.12
+
+
 def require_ffmpeg() -> None:
     _sync_local_video_runtime(globals(), {"require_ffmpeg"})
     if not Path(FFMPEG_BIN).is_file():
@@ -44,7 +50,13 @@ def convert_chroma_image_to_transparent_png(
 
 
 def canonical_cutout_interior_quality(path: Path) -> dict[str, Any]:
-    """Reject a large chroma-carved void through a canonical pet's head/neck."""
+    """Reject a large chroma-carved void through a canonical pet's head/neck.
+
+    A normal shoulder, waist, or haunch concavity can sit inside the convex hull
+    and graze the broad medial corridor by a few pixels.  Treat a void as an
+    interior defect only when a meaningful share of that same component crosses
+    the corridor; side-only silhouette concavities must remain valid.
+    """
     _sync_local_video_runtime(globals(), {"canonical_cutout_interior_quality"})
 
     with Image.open(path) as loaded:
@@ -103,6 +115,10 @@ def canonical_cutout_interior_quality(path: Path) -> dict[str, Any]:
     largest_void_width = 0
     largest_void_height = 0
     largest_void_medial_overlap = 0
+    largest_void_medial_overlap_fraction = 0.0
+    ignored_side_concavity_count = 0
+    largest_ignored_side_concavity_area = 0
+    largest_ignored_side_concavity_medial_overlap_fraction = 0.0
     medial_x0 = x0 + int(round(width * 0.36))
     medial_x1 = x0 + int(round(width * 0.64))
     if void_count > 1:
@@ -118,12 +134,25 @@ def canonical_cutout_interior_quality(path: Path) -> dict[str, Any]:
             if not medial_overlap:
                 continue
             void_area = int(void_stats[void_label, cv2.CC_STAT_AREA])
+            medial_overlap_fraction = medial_overlap / float(max(1, void_area))
+            if (
+                medial_overlap_fraction
+                < CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN
+            ):
+                ignored_side_concavity_count += 1
+                if void_area > largest_ignored_side_concavity_area:
+                    largest_ignored_side_concavity_area = void_area
+                    largest_ignored_side_concavity_medial_overlap_fraction = (
+                        medial_overlap_fraction
+                    )
+                continue
             if void_area <= largest_void_area:
                 continue
             largest_void_area = void_area
             largest_void_width = int(void_stats[void_label, cv2.CC_STAT_WIDTH])
             largest_void_height = int(void_stats[void_label, cv2.CC_STAT_HEIGHT])
             largest_void_medial_overlap = medial_overlap
+            largest_void_medial_overlap_fraction = medial_overlap_fraction
     area_fraction = largest_void_area / float(max(1, foreground_pixels))
     width_ratio = largest_void_width / float(max(1, width))
     height_ratio = largest_void_height / float(max(1, height))
@@ -133,6 +162,7 @@ def canonical_cutout_interior_quality(path: Path) -> dict[str, Any]:
         and height_ratio >= 0.015
     )
     return {
+        "policy": CANONICAL_INTERIOR_HOLE_GATE_POLICY,
         "acceptable": not invalid_void,
         "issues": ["canonical_subject_interior_chroma_hole"] if invalid_void else [],
         "foreground_pixels": foreground_pixels,
@@ -140,6 +170,21 @@ def canonical_cutout_interior_quality(path: Path) -> dict[str, Any]:
         "medial_box": [medial_x0, focus_y0, medial_x1, focus_y1],
         "largest_void_area": largest_void_area,
         "largest_void_medial_overlap": largest_void_medial_overlap,
+        "largest_void_medial_overlap_fraction": round(
+            largest_void_medial_overlap_fraction,
+            6,
+        ),
+        "medial_overlap_fraction_min": (
+            CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN
+        ),
+        "ignored_side_concavity_count": ignored_side_concavity_count,
+        "largest_ignored_side_concavity_area": (
+            largest_ignored_side_concavity_area
+        ),
+        "largest_ignored_side_concavity_medial_overlap_fraction": round(
+            largest_ignored_side_concavity_medial_overlap_fraction,
+            6,
+        ),
         "largest_void_area_fraction": round(area_fraction, 6),
         "largest_void_width_ratio": round(width_ratio, 6),
         "largest_void_height_ratio": round(height_ratio, 6),
@@ -3596,6 +3641,8 @@ def semantic_background_recovery(
     cutout_target: Path,
     semantic_target: Path,
     pose: str = "",
+    *,
+    validate_canonical_interior: bool = False,
 ) -> dict[str, Any]:
     _sync_local_video_runtime(globals(), {"semantic_background_recovery"})
     from rembg import remove
@@ -3659,7 +3706,11 @@ def semantic_background_recovery(
         source_size,
         background_rgb=(0, 255, 0),
     )
-    metrics = evaluate_chroma_cutout(chroma_target, cutout_target)
+    metrics = evaluate_chroma_cutout(
+        chroma_target,
+        cutout_target,
+        validate_canonical_interior=validate_canonical_interior,
+    )
     metrics.update(
         {
             "method": "rembg_u2net_fallback",
@@ -3668,10 +3719,12 @@ def semantic_background_recovery(
             "semantic_foreground_fraction": semantic_foreground_fraction,
             "semantic_cutout": semantic_target.name,
             "semantic_quality": semantic_quality,
+            "canonical_interior_validation": validate_canonical_interior,
         }
     )
     if not metrics["acceptable"]:
         raise RuntimeError(
-            "Semantic background recovery could not create a clean green canvas."
+            "Semantic background recovery could not create a clean green canvas: "
+            + ", ".join(str(issue) for issue in metrics.get("issues", []))
         )
     return metrics

@@ -94,6 +94,14 @@
       "evidence": "src/comfy_pet_pipeline/quality/final_video_fur.py"
     },
     {
+      "id": "comfy.quality.canonical_matte_integrity",
+      "type": "business_rule",
+      "name": "Canonical 透明遮罩中线穿孔门禁",
+      "status": "active",
+      "tags": ["canonical", "alpha", "chroma", "side-concavity-safe"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
+    },
+    {
       "id": "comfy.module.transparent_animation",
       "type": "module",
       "name": "透明动画生成",
@@ -209,6 +217,12 @@
       "relation": "checked_by",
       "to": "comfy.module.quality",
       "evidence": "docs/architecture/PET_TWO_ACTION_PIPELINE.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "checked_by",
+      "to": "comfy.quality.canonical_matte_integrity",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
     },
     {
       "from": "comfy.module.pipeline",

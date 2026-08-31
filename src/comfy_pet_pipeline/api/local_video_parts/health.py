@@ -162,7 +162,16 @@ def health() -> dict[str, Any]:
         ),
         "canonical_chroma_spill_policy": (UPLOADED_IDENTITY_CHROMA_SPILL_POLICY),
         "canonical_chroma_spill_preserves_paired_eye_accents": True,
-        "canonical_interior_hole_gate": GENERATION_VISUAL_AUDITS_BLOCKING,
+        "canonical_interior_hole_gate": True,
+        "canonical_interior_hole_gate_policy": (
+            CANONICAL_INTERIOR_HOLE_GATE_POLICY
+        ),
+        "canonical_interior_hole_medial_overlap_fraction_min": (
+            CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN
+        ),
+        "canonical_side_silhouette_concavity_allowed": True,
+        "canonical_semantic_fallback_preacceptance_validation": True,
+        "canonical_generated_matte_uploaded_identity_recovery": True,
         "surface_texture_gate_required_before_scail": (
             GENERATION_VISUAL_AUDITS_BLOCKING
         ),
@@ -1132,6 +1141,15 @@ def health() -> dict[str, Any]:
                 ),
                 "canonical_chroma_spill_preserves_paired_eye_accents": True,
                 "canonical_interior_hole_gate": True,
+                "canonical_interior_hole_gate_policy": (
+                    CANONICAL_INTERIOR_HOLE_GATE_POLICY
+                ),
+                "canonical_interior_hole_medial_overlap_fraction_min": (
+                    CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN
+                ),
+                "canonical_side_silhouette_concavity_allowed": True,
+                "canonical_semantic_fallback_preacceptance_validation": True,
+                "canonical_generated_matte_uploaded_identity_recovery": True,
                 "profile_pixels_used_as_identity_or_scail_reference": False,
                 "profile_pixels_used_as_validation_baseline": False,
                 "uploaded_identity_absolute_surface_gate_used": True,
