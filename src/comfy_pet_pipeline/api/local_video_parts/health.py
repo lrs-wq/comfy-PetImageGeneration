@@ -1866,11 +1866,21 @@ def health() -> dict[str, Any]:
                     "selection": "nearest_identity_safe_prior_candidate",
                     "steps": EATING_CONTACT_REPAIR_STEPS,
                     "denoise": EATING_CONTACT_REPAIR_DENOISE,
+                    "measured_gap_head_neck_prealignment": True,
+                    "prealignment_target_gap_px": (
+                        EATING_CONTACT_REPAIR_PREALIGN_TARGET_GAP_PX
+                    ),
+                    "prealignment_shift_px_max": (
+                        EATING_CONTACT_REPAIR_PREALIGN_SHIFT_MAX_PX
+                    ),
+                    "prealignment_fixed_region": "bowl_and_lower_body",
                     "sampler_noise_mask": (
-                        "head_neck_muzzle_to_bowl_corridor_only_v1"
+                        "whole_head_neck_to_fixed_bowl_corridor_v2"
                     ),
                     "image_roles": {
-                        "image1": "identity_safe_nearest_eating_candidate",
+                        "image1": (
+                            "gap_measured_head_neck_prealigned_candidate"
+                        ),
                         "image2": "approved_canonical_identity_corroboration",
                         "image3": "white_maquette_eating_contact_geometry_only",
                     },

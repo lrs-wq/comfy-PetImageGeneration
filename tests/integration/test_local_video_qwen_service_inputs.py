@@ -743,6 +743,21 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             pipeline.EATING_CONTACT_REPAIR_SOURCE_GAP_MAX_PX,
         )
         self.assertTrue(contact_repair["source_requires_identity_palette_pass"])
+        self.assertTrue(
+            contact_repair["measured_gap_head_neck_prealignment"]
+        )
+        self.assertEqual(
+            contact_repair["prealignment_target_gap_px"],
+            pipeline.EATING_CONTACT_REPAIR_PREALIGN_TARGET_GAP_PX,
+        )
+        self.assertEqual(
+            contact_repair["prealignment_shift_px_max"],
+            pipeline.EATING_CONTACT_REPAIR_PREALIGN_SHIFT_MAX_PX,
+        )
+        self.assertEqual(
+            contact_repair["sampler_noise_mask"],
+            "whole_head_neck_to_fixed_bowl_corridor_v2",
+        )
         self.assertTrue(contact_repair["body_bowl_paws_tail_locked_outside_mask"])
         self.assertTrue(contact_repair["contact_gate_unchanged"])
         self.assertTrue(

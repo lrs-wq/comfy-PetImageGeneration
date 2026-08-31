@@ -2346,7 +2346,7 @@ def prepare_canonical_eating_contact_repair_canvas(
     *,
     contact_quality: dict[str, Any],
 ) -> dict[str, Any]:
-    """Expose only the head-to-bowl corridor of an identity-safe candidate."""
+    """Pre-align and expose the head-to-bowl corridor of a safe candidate."""
     _sync_local_video_runtime(
         globals(),
         {"prepare_canonical_eating_contact_repair_canvas"},
@@ -2363,14 +2363,23 @@ def prepare_canonical_eating_contact_repair_canvas(
 
     foreground_bbox = contact_quality.get("foreground_bbox")
     bowl_bbox = contact_quality.get("bowl_bbox")
-    component_candidates = contact_quality.get("component_candidates")
     if (
         not isinstance(foreground_bbox, list)
         or len(foreground_bbox) != 4
         or not isinstance(bowl_bbox, list)
         or len(bowl_bbox) != 4
-        or not isinstance(component_candidates, list)
     ):
+        raise ValueError(
+            "Eating contact repair lacks foreground, bowl, or muzzle evidence."
+        )
+    reported_candidates = contact_quality.get("component_candidates")
+    component_candidates = (
+        list(reported_candidates) if isinstance(reported_candidates, list) else []
+    )
+    reported_selected_component = contact_quality.get("selected_component")
+    if isinstance(reported_selected_component, dict):
+        component_candidates.append(reported_selected_component)
+    if not component_candidates:
         raise ValueError(
             "Eating contact repair lacks foreground, bowl, or muzzle evidence."
         )
@@ -2414,6 +2423,13 @@ def prepare_canonical_eating_contact_repair_canvas(
             continue
         if not 0 <= gap_px <= EATING_CONTACT_REPAIR_SOURCE_GAP_MAX_PX:
             continue
+        rejection_reasons = {
+            str(reason)
+            for reason in candidate.get("rejection_reasons", [])
+            if str(reason).strip()
+        }
+        if rejection_reasons - {"gap_outside_contact_range"}:
+            continue
         usable_components.append(
             (
                 gap_px,
@@ -2436,15 +2452,22 @@ def prepare_canonical_eating_contact_repair_canvas(
             "Eating contact repair source already satisfies the mouth-contact gate."
         )
     muzzle_left, muzzle_top, muzzle_right, _muzzle_bottom = muzzle_bbox
+    subject_width = subject_right - subject_left
     subject_height = subject_bottom - subject_top
     bowl_width = bowl_right - bowl_left
     muzzle_center_x = (muzzle_left + muzzle_right) / 2.0
     half_width = max(
-        28,
+        64,
         int(
             round(
-                (muzzle_right - muzzle_left) / 2.0
-                + bowl_width * EATING_CONTACT_REPAIR_MASK_SIDE_MARGIN_BOWL_RATIO
+                bowl_width
+                * EATING_CONTACT_REPAIR_PREALIGN_HEAD_HALF_WIDTH_BOWL_RATIO
+            )
+        ),
+        int(
+            round(
+                subject_width
+                * EATING_CONTACT_REPAIR_PREALIGN_HEAD_HALF_WIDTH_SUBJECT_RATIO
             )
         ),
     )
@@ -2454,11 +2477,11 @@ def prepare_canonical_eating_contact_repair_canvas(
         int(round(muzzle_center_x)) + half_width + 1,
     )
     head_height = max(
-        36,
+        72,
         int(
             round(
                 subject_height
-                * EATING_CONTACT_REPAIR_MASK_HEAD_HEIGHT_SUBJECT_RATIO
+                * EATING_CONTACT_REPAIR_PREALIGN_HEAD_HEIGHT_SUBJECT_RATIO
             )
         ),
     )
@@ -2469,6 +2492,86 @@ def prepare_canonical_eating_contact_repair_canvas(
     )
     if repair_right - repair_left < 48 or repair_bottom - repair_top < 64:
         raise RuntimeError("Eating contact repair mask corridor is too small.")
+
+    prealignment_target_gap_px = int(
+        EATING_CONTACT_REPAIR_PREALIGN_TARGET_GAP_PX
+    )
+    prealignment_shift_px = min(
+        int(EATING_CONTACT_REPAIR_PREALIGN_SHIFT_MAX_PX),
+        max(0, gap_px - prealignment_target_gap_px),
+    )
+    if prealignment_shift_px <= 0:
+        raise RuntimeError("Eating contact repair pre-alignment has no work to do.")
+
+    with Image.open(target) as loaded:
+        source_canvas_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+    coordinate_y, coordinate_x = np.mgrid[0:512, 0:512].astype(np.float32)
+    normalized_horizontal_distance = np.abs(
+        coordinate_x - float(muzzle_center_x)
+    ) / max(float(half_width), 1.0)
+    horizontal_core_ratio = float(
+        EATING_CONTACT_REPAIR_PREALIGN_HORIZONTAL_CORE_RATIO
+    )
+    horizontal_taper = (
+        normalized_horizontal_distance - horizontal_core_ratio
+    ) / max(1.0 - horizontal_core_ratio, 1e-6)
+    horizontal_weight = np.where(
+        normalized_horizontal_distance <= horizontal_core_ratio,
+        1.0,
+        np.where(
+            normalized_horizontal_distance >= 1.0,
+            0.0,
+            0.5 * (1.0 + np.cos(np.pi * horizontal_taper)),
+        ),
+    ).astype(np.float32)
+    horizontal_weight *= (
+        (coordinate_x >= float(repair_left))
+        & (coordinate_x < float(repair_right))
+    ).astype(np.float32)
+    vertical_support = (
+        (coordinate_y >= float(repair_top))
+        & (coordinate_y < float(bowl_top))
+    ).astype(np.float32)
+    displacement_y = (
+        float(prealignment_shift_px) * horizontal_weight * vertical_support
+    ).astype(np.float32)
+    prealignment_support = displacement_y > 0.001
+    remap_y = coordinate_y - displacement_y
+    prealigned_rgb = cv2.remap(
+        source_canvas_rgb,
+        coordinate_x,
+        remap_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 255, 0),
+    )
+    prealigned_rgb[~prealignment_support] = source_canvas_rgb[
+        ~prealignment_support
+    ]
+    pixels_changed = int(
+        np.count_nonzero(np.any(prealigned_rgb != source_canvas_rgb, axis=2))
+    )
+    if not np.array_equal(
+        prealigned_rgb[bowl_top:, :, :],
+        source_canvas_rgb[bowl_top:, :, :],
+    ):
+        raise RuntimeError(
+            "Eating contact repair pre-alignment changed the locked bowl/lower body."
+        )
+    Image.fromarray(prealigned_rgb, mode="RGB").save(
+        target,
+        format="PNG",
+        optimize=True,
+    )
+    with Image.open(target) as loaded:
+        persisted_prealigned_rgb = np.asarray(
+            loaded.convert("RGB"),
+            dtype=np.uint8,
+        )
+    if not np.array_equal(persisted_prealigned_rgb, prealigned_rgb):
+        raise RuntimeError(
+            "Eating contact repair pre-alignment changed during persistence."
+        )
 
     edit_support = np.zeros((512, 512), dtype=np.float32)
     edit_support[
@@ -2504,6 +2607,34 @@ def prepare_canonical_eating_contact_repair_canvas(
         or contact_quality.get("method"),
         "source_contact_issues": list(contact_quality.get("issues") or []),
         "source_gap_px": gap_px,
+        "prealignment_enabled": True,
+        "prealignment_policy": (
+            "measured_gap_head_neck_vertical_field_to_fixed_bowl_v1"
+        ),
+        "prealignment_target_gap_px": prealignment_target_gap_px,
+        "prealignment_shift_px": prealignment_shift_px,
+        "prealignment_expected_seed_gap_px": max(
+            0,
+            gap_px - prealignment_shift_px,
+        ),
+        "prealignment_shift_max_px": int(
+            EATING_CONTACT_REPAIR_PREALIGN_SHIFT_MAX_PX
+        ),
+        "prealignment_horizontal_core_ratio": horizontal_core_ratio,
+        "prealignment_pixels_changed": pixels_changed,
+        "prealignment_support_pixels": int(
+            np.count_nonzero(prealignment_support)
+        ),
+        "prealignment_displacement_sha256": hashlib.sha256(
+            displacement_y.tobytes()
+        ).hexdigest(),
+        "prealignment_bbox": [
+            repair_left,
+            repair_top,
+            repair_right,
+            bowl_top,
+        ],
+        "prealignment_bowl_and_lower_body_byte_preserved": True,
         "source_bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
         "source_muzzle_component": selected_component,
         "repair_bbox": [
@@ -2512,7 +2643,9 @@ def prepare_canonical_eating_contact_repair_canvas(
             repair_right,
             repair_bottom,
         ],
-        "repair_scope": "head_neck_muzzle_to_bowl_corridor_only",
+        "repair_scope": (
+            "gap_measured_head_neck_prealignment_then_local_fusion_only"
+        ),
         "bowl_body_paws_tail_outside_mask_locked": True,
         "mask_feather_sigma_px": feather_sigma,
         "editable_pixels": editable_pixels,
@@ -2520,6 +2653,7 @@ def prepare_canonical_eating_contact_repair_canvas(
         "noise_mask_loadimage_contract": "mask_equals_one_minus_alpha",
         "noise_mask_target_path": str(noise_mask_target),
         "noise_mask_target_sha256": file_sha256(noise_mask_target),
+        "target_sha256": file_sha256(target),
     }
 
 

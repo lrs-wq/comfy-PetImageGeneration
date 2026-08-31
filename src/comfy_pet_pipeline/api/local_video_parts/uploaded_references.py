@@ -944,6 +944,13 @@ def prepare_uploaded_subject_qwen_references(
         ),
         eating_contact_repair_steps=EATING_CONTACT_REPAIR_STEPS,
         eating_contact_repair_denoise=EATING_CONTACT_REPAIR_DENOISE,
+        eating_contact_repair_head_neck_prealignment=True,
+        eating_contact_repair_prealignment_target_gap_px=(
+            EATING_CONTACT_REPAIR_PREALIGN_TARGET_GAP_PX
+        ),
+        eating_contact_repair_prealignment_shift_max_px=(
+            EATING_CONTACT_REPAIR_PREALIGN_SHIFT_MAX_PX
+        ),
         eating_contact_repair_local_noise_mask=True,
         eating_contact_repair_white_model_geometry_loaded=True,
         eating_contact_repair_downstream_mask_thresholds_unchanged=True,

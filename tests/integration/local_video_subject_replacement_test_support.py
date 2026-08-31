@@ -1547,6 +1547,16 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
                     "bowl_bbox": [101, bowl_top, 310, 425],
                     "component_candidates": [
                         {
+                            "label": 99,
+                            "bbox": [220, bowl_top - 6, 222, bowl_top - 1],
+                            "area": 4,
+                            "gap_px": 1,
+                            "rejection_reasons": [
+                                "area_below_minimum",
+                                "gap_outside_contact_range",
+                            ],
+                        },
+                        {
                             "label": 1,
                             "bbox": [
                                 202,

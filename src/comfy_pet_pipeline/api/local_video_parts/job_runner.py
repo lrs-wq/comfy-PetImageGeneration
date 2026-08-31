@@ -5284,6 +5284,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         source_gap_px=int(
                             eating_contact_repair_source["gap_px"]
                         ),
+                        prealignment_shift_px=int(
+                            repair_canvas_audit["prealignment_shift_px"]
+                        ),
+                        prealignment_expected_seed_gap_px=int(
+                            repair_canvas_audit[
+                                "prealignment_expected_seed_gap_px"
+                            ]
+                        ),
                         profile_fur_lock=profile_fur_lock,
                     )
                     eating_contact_repair_audit = {
@@ -5305,7 +5313,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         ),
                         "repair_canvas": repair_canvas_audit,
                         "image1_role": (
-                            "identity_safe_eating_candidate_local_sampler"
+                            "gap_measured_head_neck_prealigned_local_sampler"
                         ),
                         "image2_role": (
                             "approved_canonical_identity_appearance_corroboration"
@@ -5322,7 +5330,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 "noise_mask_target_sha256"
                             ],
                             "policy": (
-                                "head_neck_muzzle_to_bowl_corridor_only_v1"
+                                "whole_head_neck_to_fixed_bowl_corridor_v2"
                             ),
                         },
                         "full_frame_sampling": False,
@@ -5343,6 +5351,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         ),
                         eating_contact_repair_source_gap_px=int(
                             eating_contact_repair_source["gap_px"]
+                        ),
+                        eating_contact_repair_prealignment_shift_px=int(
+                            repair_canvas_audit["prealignment_shift_px"]
+                        ),
+                        eating_contact_repair_expected_seed_gap_px=int(
+                            repair_canvas_audit[
+                                "prealignment_expected_seed_gap_px"
+                            ]
                         ),
                         eating_contact_repair_source_sha256=(
                             expected_repair_source_sha256
@@ -7538,18 +7554,41 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     for issue in quality.get("issues", [])
                     if str(issue).strip()
                 }
+                eating_contact_components = (
+                    list(eating_contact_quality.get("component_candidates", []))
+                    if isinstance(eating_contact_quality, dict)
+                    and isinstance(
+                        eating_contact_quality.get("component_candidates"),
+                        list,
+                    )
+                    else []
+                )
+                if isinstance(eating_contact_quality, dict) and isinstance(
+                    eating_contact_quality.get("selected_component"),
+                    dict,
+                ):
+                    eating_contact_components.append(
+                        eating_contact_quality["selected_component"]
+                    )
                 eating_contact_component_gaps = [
                     int(component["gap_px"])
-                    for component in (
-                        eating_contact_quality.get("component_candidates", [])
-                        if isinstance(eating_contact_quality, dict)
-                        else []
-                    )
+                    for component in eating_contact_components
                     if isinstance(component, dict)
                     and isinstance(component.get("gap_px"), (int, float))
                     and 0
                     <= int(component["gap_px"])
                     <= EATING_CONTACT_REPAIR_SOURCE_GAP_MAX_PX
+                    and not (
+                        {
+                            str(reason)
+                            for reason in component.get(
+                                "rejection_reasons",
+                                [],
+                            )
+                            if str(reason).strip()
+                        }
+                        - {"gap_outside_contact_range"}
+                    )
                 ]
                 eating_contact_gap_px = (
                     min(eating_contact_component_gaps)

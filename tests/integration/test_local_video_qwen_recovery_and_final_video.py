@@ -551,6 +551,120 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
         self.assertEqual(loaded_loras, {pipeline.QWEN_LORA: 1.0})
         self.assertNotIn(self.TEST_QWEN_STYLE_LORA, loaded_loras)
 
+    def test_eating_contact_repair_prealigns_whole_head_to_fixed_bowl(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate.png"
+            repair = root / "repair.png"
+            noise_mask = root / "noise-mask.png"
+
+            source = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(source)
+            draw.ellipse((54, 83, 456, 430), fill=(180, 150, 120, 255))
+            draw.rectangle((150, 130, 310, 327), fill=(120, 100, 80, 255))
+            draw.rectangle((225, 296, 233, 304), fill=(20, 40, 220, 255))
+            draw.rectangle((164, 346, 309, 418), fill=(230, 220, 190, 255))
+            source.save(candidate)
+
+            audit = pipeline.prepare_canonical_eating_contact_repair_canvas(
+                candidate,
+                repair,
+                noise_mask,
+                contact_quality={
+                    "available": True,
+                    "acceptable": False,
+                    "issues": ["eating_muzzle_not_at_bowl"],
+                    "method": pipeline.EATING_MOUTH_BOWL_CONTACT_POLICY,
+                    "evidence_policy": (
+                        pipeline.EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY
+                    ),
+                    "foreground_bbox": [54, 83, 456, 430],
+                    "bowl_bbox": [164, 346, 309, 418],
+                    "selected_component": {
+                        "label": 1,
+                        "bbox": [216, 296, 242, 327],
+                        "area": 267,
+                        "gap_px": 19,
+                        "rejection_reasons": ["gap_outside_contact_range"],
+                    },
+                },
+            )
+
+            with Image.open(repair) as loaded:
+                repaired_rgb = np.asarray(loaded.convert("RGB"), dtype=np.uint8)
+            with Image.open(noise_mask) as loaded:
+                mask_alpha = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)[
+                    :, :, 3
+                ]
+
+            self.assertEqual(audit["prealignment_shift_px"], 15)
+            self.assertEqual(audit["prealignment_target_gap_px"], 4)
+            self.assertEqual(audit["prealignment_expected_seed_gap_px"], 4)
+            self.assertTrue(
+                audit["prealignment_bowl_and_lower_body_byte_preserved"]
+            )
+            self.assertGreater(audit["prealignment_pixels_changed"], 256)
+            self.assertEqual(
+                repaired_rgb[319, 229].tolist(),
+                [20, 40, 220],
+            )
+            self.assertNotEqual(
+                repaired_rgb[300, 229].tolist(),
+                [20, 40, 220],
+            )
+            self.assertEqual(
+                repaired_rgb[360, 200].tolist(),
+                [230, 220, 190],
+            )
+            self.assertEqual(int(mask_alpha[200, 229]), 0)
+            self.assertLessEqual(int(mask_alpha[350, 200]), 32)
+            self.assertEqual(int(mask_alpha[430, 200]), 255)
+
+            for source_gap, expected_shift, expected_seed_gap in (
+                (64, 32, 32),
+                (32, 28, 4),
+            ):
+                with self.subTest(source_gap=source_gap):
+                    muzzle_bottom = 346 - source_gap
+                    bounded_audit = (
+                        pipeline.prepare_canonical_eating_contact_repair_canvas(
+                            candidate,
+                            root / f"repair-{source_gap}.png",
+                            root / f"noise-mask-{source_gap}.png",
+                            contact_quality={
+                                "available": True,
+                                "acceptable": False,
+                                "issues": ["eating_muzzle_not_at_bowl"],
+                                "foreground_bbox": [54, 83, 456, 430],
+                                "bowl_bbox": [164, 346, 309, 418],
+                                "selected_component": {
+                                    "label": 1,
+                                    "bbox": [
+                                        216,
+                                        muzzle_bottom - 14,
+                                        242,
+                                        muzzle_bottom,
+                                    ],
+                                    "area": 267,
+                                    "gap_px": source_gap,
+                                    "rejection_reasons": [
+                                        "gap_outside_contact_range"
+                                    ],
+                                },
+                            },
+                        )
+                    )
+                    self.assertEqual(
+                        bounded_audit["prealignment_shift_px"],
+                        expected_shift,
+                    )
+                    self.assertEqual(
+                        bounded_audit["prealignment_expected_seed_gap_px"],
+                        expected_seed_gap,
+                    )
+
     def test_grooming_repair_inputs_seed_canonical_foreleg_and_bind_anatomy(
         self,
     ) -> None:

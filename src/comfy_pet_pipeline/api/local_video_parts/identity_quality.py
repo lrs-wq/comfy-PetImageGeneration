@@ -2671,10 +2671,6 @@ def evaluate_advisory_grooming_minimum_gate(
         ),
         "identity_reference_path": str(identity_reference_path),
         "identity_reference_sha256": file_sha256(identity_reference_path),
-        "identity_palette_reference_path": str(identity_palette_reference_path),
-        "identity_palette_reference_sha256": file_sha256(
-            identity_palette_reference_path
-        ),
         "geometry_guide_path": str(geometry_guide),
         "geometry_guide_sha256": file_sha256(geometry_guide),
         "geometry_metadata_path": str(geometry_metadata),

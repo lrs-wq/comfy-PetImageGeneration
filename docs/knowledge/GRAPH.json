@@ -128,9 +128,9 @@
     {
       "id": "comfy.recovery.eating_local_contact_repair",
       "type": "business_rule",
-      "name": "五轮内吃饭头颈局部接触修复",
+      "name": "五轮内吃饭实测间隙头颈预对齐与局部接触修复",
       "status": "active",
-      "tags": ["eating", "contact", "localized-repair", "identity-safe", "white-model", "five-attempts"],
+      "tags": ["eating", "contact", "localized-repair", "head-neck-prealignment", "measured-gap", "fixed-bowl", "identity-safe", "white-model", "five-attempts"],
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {

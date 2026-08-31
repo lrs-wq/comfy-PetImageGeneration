@@ -2189,7 +2189,10 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             )
             prompt = workflow["6"]["inputs"]["prompt"]
             self.assertIn("CRITICAL LOCAL EATING-CONTACT REPAIR", prompt)
-            self.assertIn("measured 19-pixel vertical air gap", prompt)
+            self.assertIn("measured 19-pixel source gap", prompt)
+            self.assertIn("pre-aligned downward by 15 pixels", prompt)
+            self.assertIn("approximately 4-pixel seed gap", prompt)
+            self.assertIn("never lift the head back", prompt)
             self.assertIn("Image 3 is the neutral Main_case white-maquette", prompt)
             self.assertIn("final measured vertical gap is 0 to 8", prompt)
             self.assertEqual(
@@ -2241,7 +2244,8 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertNotIn(uploaded_input, load_images.values())
         prompt = workflow["6"]["inputs"]["prompt"]
         self.assertIn("identity-safe normalized eating candidate from attempt 4", prompt)
-        self.assertIn("measured 12-pixel vertical air gap", prompt)
+        self.assertIn("measured 12-pixel source gap", prompt)
+        self.assertIn("pre-aligned downward by 8 pixels", prompt)
 
     def test_eating_attempt4_repairs_source_present_amplified_stripes(
         self,

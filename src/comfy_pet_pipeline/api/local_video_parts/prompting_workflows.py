@@ -883,6 +883,8 @@ def build_canonical_eating_contact_repair_prompt(
     *,
     source_attempt: int,
     source_gap_px: int,
+    prealignment_shift_px: int,
+    prealignment_expected_seed_gap_px: int,
     profile_fur_lock: str = "",
 ) -> str:
     """Close a measured muzzle-to-kibble gap without redrawing the body."""
@@ -896,12 +898,14 @@ def build_canonical_eating_contact_repair_prompt(
         "direction, genuine tufts, and source-bounded silhouette."
     )
     measured_gap = max(0, int(source_gap_px))
+    prealigned_shift = max(0, int(prealignment_shift_px))
+    expected_seed_gap = max(0, int(prealignment_expected_seed_gap_px))
     return f"""CRITICAL LOCAL EATING-CONTACT REPAIR - close the measured air gap and change nothing else:
-Image 1 is the identity-safe normalized eating candidate from attempt {source_attempt} and is the sampler canvas. Its complete body, both planted front paws, attached rear legs, tail, single bowl, kibble, scale, framing, camera, pure-green negative space, coat palette, markings, and rendering are already approved and must remain pixel-stable outside the supplied local noise mask. The only rejected defect is a measured {measured_gap}-pixel vertical air gap between the lower muzzle and the kibble.
+Image 1 is the identity-safe normalized eating candidate from attempt {source_attempt} and is the sampler canvas. Its head and neck have already been deterministically pre-aligned downward by {prealigned_shift} pixels from the measured {measured_gap}-pixel source gap, targeting an approximately {expected_seed_gap}-pixel seed gap while the bowl and lower body remained byte-stable. This pre-aligned head height is authoritative: preserve it, fuse its local seams, and never lift the head back toward the rejected source position. Its complete body, both planted front paws, attached rear legs, tail, single bowl, kibble, scale, framing, camera, pure-green negative space, coat palette, markings, and rendering are already approved and must remain pixel-stable outside the supplied local noise mask.
 Image 2 is the approved Qwen full-body canonical generated from the uploaded identity views. It only corroborates the exact pet identity, face, coat, markings, fur category, material, and lighting while the masked head and neck are repaired.
 Image 3 is the neutral Main_case white-maquette eating geometry. It has no identity, face, eye, coat, color, texture, material, lighting, or style authority. Use it only to confirm that the whole head and neck lower coherently until the mouth reaches the fixed food surface.
 
-LOCAL EDIT CONTRACT: edit only inside the supplied feathered head, lower-muzzle, neck, and mouth-to-bowl corridor mask. Lower and slightly extend the whole anatomical head-and-neck pose as one rigidly coherent structure; do not stretch only the lips, mouth, chin, nose, cheeks, eyes, or fur. The lower muzzle must touch or enter the brown kibble so the final measured vertical gap is 0 to 8 output pixels, preferably about 4 pixels. A small near-rim or kibble occlusion over the nose or lower muzzle is required evidence of eating. Fill the former head location with pure #00FF00 where needed and join the repaired neck seamlessly to the unchanged torso.
+LOCAL EDIT CONTRACT: edit only inside the supplied feathered whole-head, neck, lower-muzzle, and mouth-to-bowl corridor mask. Retain the pre-aligned whole anatomical head-and-neck placement as one rigidly coherent structure; repair interpolation or neck seams without stretching only the lips, mouth, chin, nose, cheeks, eyes, ears, or fur. The lower muzzle must touch or enter the brown kibble so the final measured vertical gap is 0 to 8 output pixels, preferably about 4 pixels. A small near-rim or kibble occlusion over the nose or lower muzzle is required evidence of eating. Keep the former head location pure #00FF00 where exposed and join the repaired neck seamlessly to the unchanged torso.
 
 PIXEL LOCK CONTRACT: never move, resize, repaint, recolor, replace, duplicate, or erase the bowl, kibble, either planted front paw, rear legs, torso, back, tail, ears outside the edit mask, canvas boundary, or camera. Do not lift the bowl toward the face, slide it sideways, enlarge it, add a second bowl, hide a paw, or turn eating into sniffing. Keep exactly one pet and one small shallow light-beige bowl. Preserve Image 1's identity-safe coat and Image 2's canonical facial identity with no new stripe, patch, hue, accessory, floor, shadow, reflection, text, logo, or watermark. {fur_lock}
 
