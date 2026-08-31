@@ -1195,7 +1195,7 @@ def prepare_uploaded_subject_qwen_references(
                         "provenance is incomplete or changed."
                     )
                 best_effort_action_references[normalized_action] = {
-                    "policy": "generated_candidate_identity_action_best_of_ten_v1",
+                    "policy": "generated_candidate_identity_action_best_of_five_v2",
                     "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
                     "selected_attempt": quality_record.get("selected_attempt"),
                     "selected_profile": quality_record.get("selected_profile"),

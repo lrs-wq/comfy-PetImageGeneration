@@ -1958,7 +1958,7 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                 action="standing",
                 approved_canonical_available=True,
             ),
-            "upload_anchored_canonical",
+            "reject",
         )
         for action in (
             "eating",
@@ -1974,7 +1974,7 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                         action=action,
                         approved_canonical_available=True,
                     ),
-                    "upload_anchored_canonical",
+                    "reject",
                 )
 
     def test_eating_transparent_output_starts_at_validated_contact_phase(
@@ -2077,6 +2077,20 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertTrue(grooming_final["short_circuit_due"])
         self.assertTrue(grooming_final["blocks_scail_on_exhaustion"])
 
+        grooming_with_five_round_budget = (
+            pipeline.resolve_fur_surface_retry_decision(
+                action="grooming",
+                rejection_streak=3,
+                attempt=3,
+                active_profiles=eating_profiles,
+            )
+        )
+        self.assertTrue(grooming_with_five_round_budget["threshold_reached"])
+        self.assertFalse(
+            grooming_with_five_round_budget["full_attempt_budget_completed"]
+        )
+        self.assertFalse(grooming_with_five_round_budget["short_circuit_due"])
+
         grooming_before_threshold = pipeline.resolve_fur_surface_retry_decision(
             action="grooming",
             rejection_streak=2,
@@ -2093,7 +2107,8 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             active_profiles=[*eating_profiles[:3], {"name": "generic_retry"}],
         )
         self.assertFalse(generic_eating_retry["pending_eating_bowl_recovery"])
-        self.assertTrue(generic_eating_retry["short_circuit_due"])
+        self.assertFalse(generic_eating_retry["full_attempt_budget_completed"])
+        self.assertFalse(generic_eating_retry["short_circuit_due"])
 
         non_adjacent_bowl_retry = pipeline.resolve_fur_surface_retry_decision(
             action="eating",
@@ -2107,7 +2122,10 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         )
         self.assertEqual(non_adjacent_bowl_retry["next_profile"], "generic_retry")
         self.assertFalse(non_adjacent_bowl_retry["pending_eating_bowl_recovery"])
-        self.assertTrue(non_adjacent_bowl_retry["short_circuit_due"])
+        self.assertFalse(
+            non_adjacent_bowl_retry["full_attempt_budget_completed"]
+        )
+        self.assertFalse(non_adjacent_bowl_retry["short_circuit_due"])
 
     def test_uploaded_surface_candidate_uses_absolute_identity_contract(
         self,

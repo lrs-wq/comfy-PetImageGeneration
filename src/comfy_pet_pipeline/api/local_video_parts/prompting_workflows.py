@@ -1190,6 +1190,38 @@ def pose_generation_profiles(
     return selected
 
 
+def action_candidate_generation_profiles(
+    pose: str,
+    profiles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Normalize every action to the fixed five-candidate selection budget."""
+    _sync_local_video_runtime(globals(), {"action_candidate_generation_profiles"})
+    selected = [
+        {
+            **profile,
+            "user_loras": [dict(item) for item in profile.get("user_loras", [])],
+        }
+        for profile in profiles[:QWEN_ACTION_CANDIDATE_ATTEMPTS]
+    ]
+    if not selected:
+        raise RuntimeError("Action candidate generation requires at least one profile.")
+    retry_source = selected[-1]
+    action = action_key(pose) or "action"
+    while len(selected) < QWEN_ACTION_CANDIDATE_ATTEMPTS:
+        repeated = {
+            **retry_source,
+            "user_loras": [
+                dict(item) for item in retry_source.get("user_loras", [])
+            ],
+        }
+        next_attempt = len(selected) + 1
+        repeated["name"] = f"{action}_best_of_five_seed_retry_{next_attempt}"
+        repeated["quality_retry"] = next_attempt
+        repeated["steps"] = max(10, int(repeated.get("steps", 10)))
+        selected.append(repeated)
+    return selected
+
+
 def canonical_grooming_generation_profiles(
     pose: str,
     profiles: list[dict[str, Any]],
@@ -1208,10 +1240,17 @@ def canonical_grooming_generation_profiles(
     ]
     if not enabled or action_key(pose) != "grooming" or not selected:
         return selected
-    if len(selected) != GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT:
-        raise RuntimeError(
-            "Canonical grooming recovery requires exactly three standard attempts."
-        )
+    selected = selected[:GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT]
+    while len(selected) < GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT:
+        repeated = {
+            **selected[-1],
+            "user_loras": [
+                dict(item) for item in selected[-1].get("user_loras", [])
+            ],
+        }
+        repeated["name"] = f"canonical_grooming_seed_retry_{len(selected) + 1}"
+        repeated["quality_retry"] = len(selected) + 1
+        selected.append(repeated)
     retry_source = selected[-1]
     for attempt, name in (
         (
@@ -1331,6 +1370,7 @@ def resolve_fur_surface_retry_decision(
     rejection_threshold_reached = bool(
         rejection_streak >= FUR_SURFACE_GATE_MAX_REJECTIONS
     )
+    full_attempt_budget_completed = bool(attempt >= len(active_profiles))
     return {
         "policy": FUR_SURFACE_GATE_RETRY_POLICY,
         "action": action,
@@ -1344,8 +1384,11 @@ def resolve_fur_surface_retry_decision(
             remaining_profile_names[0] if remaining_profile_names else None
         ),
         "pending_eating_bowl_recovery": pending_eating_bowl_recovery,
+        "full_attempt_budget_completed": full_attempt_budget_completed,
         "short_circuit_due": bool(
-            rejection_threshold_reached and not pending_eating_bowl_recovery
+            rejection_threshold_reached
+            and full_attempt_budget_completed
+            and not pending_eating_bowl_recovery
         ),
         "blocks_scail_on_exhaustion": True,
     }

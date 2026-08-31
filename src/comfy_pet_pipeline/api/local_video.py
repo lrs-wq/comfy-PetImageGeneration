@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.39"
+API_VERSION = "2.26.40"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -185,6 +185,7 @@ MAX_UPLOAD_BYTES = int(
 QWEN_POSE_MAX_ATTEMPTS = max(
     1, min(3, int(os.environ.get("QWEN_POSE_MAX_ATTEMPTS", "3")))
 )
+QWEN_ACTION_CANDIDATE_ATTEMPTS = 5
 GENERATION_AUDIT_POLICY = "runtime_integrity_required_visual_content_advisory_v1"
 GENERATION_VISUAL_AUDIT_MODE = os.environ.get(
     "LOCAL_VIDEO_VISUAL_AUDIT_MODE",
@@ -210,7 +211,7 @@ GENERATION_ACTION_CANDIDATE_GATES_ENABLED = os.environ.get(
     "disabled",
 }
 GENERATION_ACTION_CANDIDATE_GATE_POLICY = (
-    "retry_strict_candidates_then_upload_anchored_canonical_fallback_v3"
+    "generate_five_then_select_best_identity_safe_candidate_v1"
 )
 FUR_SURFACE_GATE_MAX_REJECTIONS = 3
 FUR_SURFACE_GATE_RETRY_POLICY = "preserve_configured_eating_bowl_surface_recovery_v1"
@@ -294,9 +295,9 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.43"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.44"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
-    "strict_quality_gate_then_bounded_best_of_ten_selection_v2"
+    "strict_quality_gate_then_fixed_best_of_five_selection_v3"
 )
 QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION = "validated_qwen_first_frame_v2"
 QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
@@ -306,16 +307,11 @@ QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
         "1.40.40",
         "1.40.41",
         "1.40.42",
+        "1.40.43",
         QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
     }
 )
-QWEN_FIRST_FRAME_MAX_ATTEMPTS = max(
-    1,
-    min(
-        10,
-        int(os.environ.get("QWEN_FIRST_FRAME_MAX_ATTEMPTS", "10")),
-    ),
-)
+QWEN_FIRST_FRAME_MAX_ATTEMPTS = QWEN_ACTION_CANDIDATE_ATTEMPTS
 QWEN_FIRST_FRAME_SEED_WAVE_STRIDE = max(
     10_000,
     int(os.environ.get("QWEN_FIRST_FRAME_SEED_WAVE_STRIDE", "104729")),
@@ -4876,6 +4872,11 @@ qwen_pose_profiles = _local_video_prompting_workflows.qwen_pose_profiles
 
 
 pose_generation_profiles = _local_video_prompting_workflows.pose_generation_profiles
+
+
+action_candidate_generation_profiles = (
+    _local_video_prompting_workflows.action_candidate_generation_profiles
+)
 
 
 canonical_grooming_generation_profiles = (

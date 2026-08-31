@@ -1,0 +1,7 @@
+{"date":"2026-08-27","type":"fix","summary":"恢复动态饮水与如厕透明遮罩行为。","areas":["transparent-animation","dog-actions"],"source_commit":"b429a81"}
+{"date":"2026-08-27","type":"fix","summary":"强化犬类饮水驱动动作执行。","areas":["dog-drinking","motion-driver"],"source_commit":"ed88d46"}
+{"date":"2026-08-27","type":"fix","summary":"避免透明循环动画产生残影。","areas":["transparent-animation"],"source_commit":"befa58f"}
+{"date":"2026-08-28","type":"fix","summary":"保留完整饮水驱动几何。","areas":["dog-drinking","motion-geometry"],"source_commit":"aa21da3"}
+{"date":"2026-08-28","type":"fix","summary":"透明输出保留饮水碗。","areas":["transparent-animation","dog-drinking"],"source_commit":"4cfa603"}
+{"date":"2026-08-31","type":"decision","summary":"确认失败策略为固定完整生成五轮并从身份合格候选中取最优，不降级输出原始上传图；同时记录旧异常恢复路径的实现偏差。","areas":["generation-policy","candidate-selection","identity","implementation-drift"],"source":"owner-confirmation"}
+{"date":"2026-08-31","type":"fix","summary":"在 v2.26.39 生产基线上将所有动作统一为固定完成五轮后选择身份合格的最低罚分生成候选；禁用候选缓存捷径，移除 canonical 第六轮和原始上传图终端降级，并将下游恢复限制为已选生成候选。","areas":["generation-policy","candidate-selection","identity","recovery","documentation","deployment"],"source":"owner-confirmation-and-v2.26.40-implementation"}

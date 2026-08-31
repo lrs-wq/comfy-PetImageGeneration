@@ -50,7 +50,7 @@ def resolve_transparent_output_phase_start_index(
     return selected_frame_index
 
 
-RECOVERABLE_OUTPUT_FALLBACK_POLICY = "identity_anchored_breathing_gif_v2"
+RECOVERABLE_OUTPUT_FALLBACK_POLICY = "best_generated_candidate_breathing_gif_v1"
 
 TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY = (
     "reference_aligned_static_subject_and_tray_mask_with_"
@@ -1007,25 +1007,40 @@ def scail_workflow_with_retry_controls(
     )
 
 
-def _recoverable_candidate_path(job_dir: Path, value: Any) -> Path | None:
-    selected = str(value or "").strip()
-    if not selected:
-        return None
-    path = Path(selected)
-    return path if path.is_absolute() else job_dir / path
-
-
 def _recoverable_reference_candidates(
     job_dir: Path,
     job: dict[str, Any],
     action: str,
     index: int,
 ) -> list[tuple[Path, str]]:
+    selection_records = job.get("action_candidate_selection_by_action")
+    selection = (
+        selection_records.get(action)
+        if isinstance(selection_records, dict)
+        else None
+    )
+    if (
+        not isinstance(selection, dict)
+        or selection.get("source_kind") != "qwen_generated_action_candidate"
+        or int(selection.get("attempt_budget") or 0) != 5
+        or int(selection.get("attempts_completed") or 0) != 5
+        or not 1 <= int(selection.get("selected_attempt") or 0) <= 5
+        or selection.get("identity_palette_acceptable") is not True
+        or selection.get("original_upload_used") is not False
+        or selection.get("approved_canonical_used_as_output") is not False
+    ):
+        return []
+    selected_digests = {
+        str(selection.get(field) or "").strip().lower()
+        for field in (
+            "selected_keyframe_sha256",
+            "selected_cutout_sha256",
+        )
+        if str(selection.get(field) or "").strip()
+    }
+    if not selected_digests:
+        return []
     candidates: list[tuple[Path, str]] = [
-        # Terminal recovery for an uploaded subject must remain anchored to the
-        # submitted identity even when action/canonical generation failed early.
-        (job_dir / "input_identity_source.png", "original_upload"),
-        (job_dir / "input.png", "normalized_upload"),
         (
             job_dir / f"pose_{index:02d}_qwen_reference_semantic_final.png",
             "action_semantic_reference",
@@ -1035,27 +1050,13 @@ def _recoverable_reference_candidates(
             job_dir / f"pose_{index:02d}_keyframe_transparent.png",
             "action_transparent_keyframe",
         ),
-        (job_dir / "cartoon_reference_transparent.png", "canonical_transparent"),
+        (job_dir / f"pose_{index:02d}_keyframe.png", "action_qwen_keyframe"),
     ]
-    reference_paths = job.get("subject_reference_paths")
-    if isinstance(reference_paths, dict):
-        selected = _recoverable_candidate_path(job_dir, reference_paths.get(action))
-        if selected is not None:
-            candidates.append((selected, "persisted_action_reference"))
-    effective = job.get("effective_subject_config")
-    if isinstance(effective, dict):
-        action_config = effective.get("actions", {}).get(action)
-        if isinstance(action_config, dict):
-            for field, role in (
-                ("reference", "effective_action_reference"),
-                ("geometry_reference", "effective_geometry_reference"),
-            ):
-                selected = _recoverable_candidate_path(job_dir, action_config.get(field))
-                if selected is not None:
-                    candidates.append((selected, role))
     unique: list[tuple[Path, str]] = []
     seen: set[str] = set()
     for path, role in candidates:
+        if not path.is_file() or file_sha256(path).lower() not in selected_digests:
+            continue
         key = str(path)
         if key not in seen:
             unique.append((path, role))
@@ -1085,7 +1086,7 @@ def _load_recoverable_reference(
         except Exception as exc:  # noqa: BLE001 - try the next audited source
             failures.append(f"{path}: {type(exc).__name__}: {str(exc)[:200]}")
     raise RuntimeError(
-        "No readable source is available for degraded output fallback: "
+        "No readable generated action candidate is available for output recovery: "
         + "; ".join(failures[-5:])
     )
 
@@ -1342,7 +1343,7 @@ def recover_subject_replacement_action_with_fallback(
     pose_index: int,
     error: BaseException,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Create one explicit degraded action result and keep sibling actions running."""
+    """Recover one action only from its selected generated candidate."""
 
     _sync_local_video_runtime(
         globals(),
@@ -1352,6 +1353,9 @@ def recover_subject_replacement_action_with_fallback(
     source_path, source_role, source_image = _load_recoverable_reference(
         _recoverable_reference_candidates(job_dir, job, action, pose_index)
     )
+    if source_role in {"original_upload", "normalized_upload"}:
+        source_image.close()
+        raise RuntimeError("Original uploads are forbidden as recovered outputs.")
     try:
         fallback_reference = (
             job_dir / f"{action}_degraded_fallback_reference.png"
@@ -1459,8 +1463,9 @@ def recover_subject_replacement_action_with_fallback(
         job_id,
         code=f"degraded_output_fallback_{action}",
         message=(
-            f"{action_label}动作生成未通过质量门禁，已仅对该动作生成身份锚定的"
-            "降级循环；其他动作继续独立生成。"
+            f"{action_label}动作的下游处理失败，已仅使用五轮候选中选定的"
+            "生成图制作降级循环；没有使用原始上传图，"
+            "其他动作继续独立生成。"
         ),
         stage="completed_with_degraded_output",
         details={
@@ -1479,7 +1484,7 @@ def recover_subject_replacement_job_with_fallback(
     job_id: str,
     error: BaseException,
 ) -> bool:
-    """Return audited GIFs for every action after an otherwise fatal job error."""
+    """Recover only actions that already have a generated candidate."""
 
     _sync_local_video_runtime(
         globals(),
@@ -1567,6 +1572,9 @@ def recover_subject_replacement_job_with_fallback(
         source_path, source_role, source_image = _load_recoverable_reference(
             _recoverable_reference_candidates(job_dir, job, action, index)
         )
+        if source_role in {"original_upload", "normalized_upload"}:
+            source_image.close()
+            raise RuntimeError("Original uploads are forbidden as recovered outputs.")
         try:
             fallback_reference = job_dir / f"{action}_degraded_fallback_reference.png"
             normalization = _normalize_recoverable_reference(
@@ -1687,7 +1695,7 @@ def recover_subject_replacement_job_with_fallback(
     missing_actions = [action for action in actions if action not in produced_actions]
     if missing_actions:
         raise RuntimeError(
-            "Degraded output fallback did not produce every requested action: "
+            "Generated-candidate recovery did not produce every requested action: "
             + ", ".join(missing_actions)
         )
     append_recovery_event(
@@ -1705,20 +1713,11 @@ def recover_subject_replacement_job_with_fallback(
         action: str(source.get("role") or "")
         for action, source in recovery_sources.items()
     }
-    upload_anchor_roles = {"original_upload", "normalized_upload"}
-    upload_identity_fallback = bool(fallback_source_roles) and all(
-        role in upload_anchor_roles for role in fallback_source_roles.values()
-    )
     original_error = f"{type(error).__name__}: {str(error)[:1000]}"
     public_error_summary = " ".join(original_error.split())[:320]
     recovery_message = (
-        f"主生成链路发生异常（{public_error_summary}）。系统已使用原始上传图"
-        "生成身份锚定的降级循环 GIF；动作幅度可能受限，请按需重试高质量生成。"
-        if upload_identity_fallback
-        else (
-            f"主生成链路发生异常（{public_error_summary}）。系统已使用当前可用身份参考"
-            "生成降级循环 GIF；动作幅度或身份一致性可能受限，请按需重试。"
-        )
+        f"主生成链路发生异常（{public_error_summary}）。系统仅使用五轮候选中"
+        "已选定的身份合格生成图制作降级循环 GIF；没有使用原始上传图。"
     )
     record_nonblocking_job_anomaly(
         job_id,
@@ -1732,7 +1731,8 @@ def recover_subject_replacement_job_with_fallback(
             "actions": actions,
             "recovered_actions": recovered_actions,
             "fallback_source_roles": fallback_source_roles,
-            "upload_identity_fallback": upload_identity_fallback,
+            "generated_candidate_only": True,
+            "original_upload_used": False,
         },
         expose_as_public_stage=True,
     )
@@ -1756,7 +1756,9 @@ def recover_subject_replacement_job_with_fallback(
         degraded_output_fallback=True,
         degraded_output_fallback_policy=RECOVERABLE_OUTPUT_FALLBACK_POLICY,
         degraded_output_fallback_source_roles=fallback_source_roles,
-        degraded_output_upload_identity_anchored=upload_identity_fallback,
+        degraded_output_upload_identity_anchored=False,
+        degraded_output_generated_candidate_only=True,
+        degraded_output_original_upload_used=False,
         transparent_outputs_complete=True,
         transparent_outputs_quality_passed=False,
         degraded_output_actions=actions,
@@ -2347,7 +2349,7 @@ def revalidate_uploaded_qwen_references_before_scail(
             ).strip().lower()
             if (
                 stored_best_effort.get("policy")
-                != "generated_candidate_identity_action_best_of_ten_v1"
+                != "generated_candidate_identity_action_best_of_five_v2"
                 or stored_best_effort.get("attempt_limit")
                 != QWEN_FIRST_FRAME_MAX_ATTEMPTS
                 or stored_best_effort.get("published_reference_path")

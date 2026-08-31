@@ -223,7 +223,8 @@ def exhausted_action_candidate_recovery_policy(
     action: str,
     approved_canonical_available: bool,
 ) -> str:
-    """Choose a successful retry recovery without re-admitting identity drift."""
+    """Select only a generated candidate that passed the identity floor."""
+    del action, approved_canonical_available
     palette = record.get("identity_palette")
     if isinstance(palette, dict) and palette.get("acceptable") is True:
         quality = record.get("quality")
@@ -247,15 +248,6 @@ def exhausted_action_candidate_recovery_policy(
         if quality_issues & hard_action_issues:
             return "identity_safe_generated_candidate_requires_final_action_gate"
         return "identity_safe_generated_candidate"
-    if action in {
-        "standing",
-        "eating",
-        "drinking",
-        "running",
-        "sleeping",
-        "toileting",
-    } and approved_canonical_available:
-        return "upload_anchored_canonical"
     return "reject"
 
 
@@ -3447,16 +3439,6 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         active_pose_profiles,
                         enabled=True,
                     )
-                elif species == "dog" and action_key(pose) == "standing":
-                    # Standing keyframes must be retried when the pre-normalization
-                    # alpha reaches an edge (most commonly a generated floor
-                    # reflection).  Later matte normalization would otherwise hide
-                    # the edge contact and pass that artifact into SCAIL.
-                    active_pose_profiles = active_pose_profiles[
-                        :QWEN_POSE_MAX_ATTEMPTS
-                    ]
-                elif not advisory_action_candidate_gate_required:
-                    active_pose_profiles = active_pose_profiles[:1]
             negative_prompt += (
                 ", "
                 + (DOG_CARTOON_NEGATIVE if species == "dog" else CARTOON_NEGATIVE)
@@ -3551,10 +3533,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
                 else None
             )
-            pose_identity_palette_gate_required = bool(
-                identity_palette_guard
-                or advisory_action_candidate_gate_required
-            )
+            # Every generated action candidate must prove its identity palette;
+            # visual-audit mode may change additional gates, never this floor.
+            pose_identity_palette_gate_required = True
             pose_palette_negative = (
                 identity_palette_negative_prompt(
                     pose_identity_palette_prompt_signature
@@ -3624,11 +3605,23 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     and canonical_grooming_completion_capable
                 ),
             )
-            if strict_first_frame_required:
-                active_pose_profiles = bounded_strict_first_frame_profiles(
-                    active_pose_profiles,
-                    max_attempts=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+            active_pose_profiles = action_candidate_generation_profiles(
+                pose,
+                active_pose_profiles,
+            )
+            if len(active_pose_profiles) != QWEN_ACTION_CANDIDATE_ATTEMPTS:
+                raise RuntimeError(
+                    "Action candidate profile budget is not exactly five."
                 )
+            update_job(
+                job_id,
+                action_candidate_selection_policy=(
+                    GENERATION_ACTION_CANDIDATE_GATE_POLICY
+                ),
+                action_candidate_attempt_budget=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                action_candidate_selection_requires_identity=True,
+                action_candidate_original_upload_fallback=False,
+            )
             grooming_geometry_canonical_reference = bool(
                 effective_pose_identity_input_policy
                 == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
@@ -3796,7 +3789,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                     pose_candidate_matte_policy=(QWEN_ACTION_CANDIDATE_MATTE_POLICY),
                 )
-            if strict_first_frame_required and first_frame_retry_wave == 0:
+            if (
+                strict_first_frame_required
+                and first_frame_retry_wave == 0
+                and GENERATION_ACTION_CANDIDATE_GATE_POLICY
+                != "generate_five_then_select_best_identity_safe_candidate_v1"
+            ):
                 cached_attempt = load_validated_first_frame_cache(
                     job_id,
                     get_job(job_id),
@@ -4048,15 +4046,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             elif strict_first_frame_required:
                 update_job(
                     job_id,
-                    qwen_first_frame_cache_status="bypassed_after_retry_wave",
+                    qwen_first_frame_cache_status=(
+                        "disabled_for_fixed_five_candidate_budget"
+                    ),
                     qwen_first_frame_cache_bypassed_action=action_key(pose),
                     qwen_first_frame_cache_bypassed_retry_wave=(
                         first_frame_retry_wave
                     ),
                 )
-            generation_pose_profiles = (
-                [] if best_attempt is not None else active_pose_profiles
-            )
+            generation_pose_profiles = active_pose_profiles
             if strict_first_frame_required and generation_pose_profiles:
                 first_frame_states = dict(
                     get_job(job_id).get("qwen_first_frame_states") or {}
@@ -4080,17 +4078,6 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     qwen_first_frame_cache_status="miss",
                 )
             for attempt, profile in enumerate(generation_pose_profiles, start=1):
-                if (
-                    advisory_grooming_action_transfer_active
-                    and attempt
-                    > GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
-                    and not isinstance(
-                        grooming_advisory_identity_refine_source,
-                        dict,
-                    )
-                    and not strict_first_frame_required
-                ):
-                    break
                 raise_if_cancelled(job_id)
                 if strict_first_frame_required:
                     first_frame_states = dict(
@@ -7082,12 +7069,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     elif semantic_recovery_candidate_eligible(
                         record
                     ) and semantic_recovery_not_attempted:
-                        # The first subject-replacement seed is the profile's
-                        # empirically validated action seed. Preserve it as the
-                        # primary semantic fallback; later seeds remain available
-                        # as diagnostics instead of replacing it based on a raw
-                        # background-contaminated similarity score.
-                        if best_semantic_source is None:
+                        if (
+                            best_semantic_source is None
+                            or record["combined_penalty"]
+                            < best_semantic_source["combined_penalty"]
+                        ):
                             best_semantic_source = record
                     if (
                         image_request
@@ -7466,40 +7452,50 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             },
                         )
                 if (
-                    (
-                        advisory_action_candidate_gate_required
-                        and action_candidate_gate_acceptable
-                    )
-                    or (
-                        not advisory_action_candidate_gate_required
-                        and (
-                            (
-                                not GENERATION_VISUAL_AUDITS_BLOCKING
-                                and advisory_minimum_acceptable
-                            )
-                            or (
-                                GENERATION_VISUAL_AUDITS_BLOCKING
-                                and (
-                                    palette_quality is None
-                                    or palette_quality["acceptable"]
+                    isinstance(palette_quality, dict)
+                    and palette_quality.get("acceptable") is True
+                    and (
+                        (
+                            advisory_action_candidate_gate_required
+                            and action_candidate_gate_acceptable
+                        )
+                        or (
+                            not advisory_action_candidate_gate_required
+                            and (
+                                (
+                                    not GENERATION_VISUAL_AUDITS_BLOCKING
+                                    and advisory_minimum_acceptable
                                 )
-                                and (
-                                    fur_silhouette_quality is None
-                                    or fur_silhouette_quality["acceptable"]
-                                )
-                                and (
-                                    not fur_surface_gate_required
-                                    or (
-                                        isinstance(fur_surface_gate_metrics, dict)
-                                        and fur_surface_gate_metrics.get("acceptable")
-                                        is True
+                                or (
+                                    GENERATION_VISUAL_AUDITS_BLOCKING
+                                    and (
+                                        fur_silhouette_quality is None
+                                        or fur_silhouette_quality["acceptable"]
                                     )
-                                )
-                                and (
-                                    not grooming_pose_gate_required
-                                    or (
-                                        isinstance(grooming_pose_gate_metrics, dict)
-                                        and grooming_pose_gate_metrics.get("acceptable")
+                                    and (
+                                        not fur_surface_gate_required
+                                        or (
+                                            isinstance(
+                                                fur_surface_gate_metrics,
+                                                dict,
+                                            )
+                                            and fur_surface_gate_metrics.get(
+                                                "acceptable"
+                                            )
+                                            is True
+                                        )
+                                    )
+                                    and (
+                                        not grooming_pose_gate_required
+                                        or (
+                                            isinstance(
+                                                grooming_pose_gate_metrics,
+                                                dict,
+                                            )
+                                            and grooming_pose_gate_metrics.get(
+                                                "acceptable"
+                                            )
+                                        )
                                     )
                                 )
                             )
@@ -7513,6 +7509,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     best_attempt = record
                 advisory_identity_refine_source_eligible = bool(
                     advisory_grooming_minimum_gate_required
+                    and GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS > 0
                     and not advisory_grooming_identity_refine_active
                     and attempt
                     <= GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
@@ -7528,21 +7525,25 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                 )
                 candidate_acceptable = bool(
-                    (
-                        advisory_action_candidate_gate_required
-                        and action_candidate_gate_acceptable
-                    )
-                    or (
-                        not advisory_action_candidate_gate_required
-                        and not GENERATION_VISUAL_AUDITS_BLOCKING
-                        and (
-                            advisory_minimum_acceptable
-                            or advisory_identity_refine_source_eligible
+                    isinstance(palette_quality, dict)
+                    and palette_quality.get("acceptable") is True
+                    and (
+                        (
+                            advisory_action_candidate_gate_required
+                            and action_candidate_gate_acceptable
                         )
-                    )
-                    or (
-                        GENERATION_VISUAL_AUDITS_BLOCKING
-                        and action_candidate_gate_acceptable
+                        or (
+                            not advisory_action_candidate_gate_required
+                            and not GENERATION_VISUAL_AUDITS_BLOCKING
+                            and (
+                                advisory_minimum_acceptable
+                                or advisory_identity_refine_source_eligible
+                            )
+                        )
+                        or (
+                            GENERATION_VISUAL_AUDITS_BLOCKING
+                            and action_candidate_gate_acceptable
+                        )
                     )
                 )
                 if candidate_acceptable:
@@ -7578,7 +7579,6 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 "conditional_canonical_face_repair"
                             ),
                         }
-                        best_attempt = record
                         update_job(
                             job_id,
                             stage="restoring_grooming_identity",
@@ -7615,16 +7615,21 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             },
                         )
                         continue
-                    best_attempt = record
                     if advisory_action_candidate_gate_required:
                         update_job(
                             job_id,
                             action_candidate_gate_policy=(
                                 GENERATION_ACTION_CANDIDATE_GATE_POLICY
                             ),
-                            action_candidate_gate_status="passed",
+                            action_candidate_gate_status=(
+                                "eligible_candidate_found"
+                            ),
                             action_candidate_gate_action=action_key(pose),
-                            action_candidate_gate_selected_attempt=attempt,
+                            action_candidate_gate_current_best_attempt=(
+                                best_attempt["attempt"]
+                                if best_attempt is not None
+                                else attempt
+                            ),
                             action_candidate_gate_degraded_fallback_used=False,
                         )
                     if advisory_grooming_identity_refine_active:
@@ -7645,10 +7650,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 "stage": "cartoon_keyframe",
                                 "pose_index": index,
                                 "attempt": attempt,
-                                "reason": "earlier_keyframe_attempt_rejected",
-                                "strategy": "pose_prompt_and_lora_retry",
+                                "reason": (
+                                    "candidate_added_to_best_of_five_pool"
+                                ),
+                                "strategy": "generate_five_then_select_best",
                                 "profile": profile["name"],
-                                "result": "accepted",
+                                "result": "eligible",
                                 "chroma": chroma_metrics,
                                 "quality": quality,
                                 "similarity": similarity,
@@ -7661,7 +7668,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 ),
                             },
                         )
-                    break
+                    continue
                 if (
                     advisory_grooming_minimum_gate_required
                     and not advisory_minimum_acceptable
@@ -7768,9 +7775,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                     if not identity_refine_fallback_eligible:
                         best_attempt = None
-                    if not strict_first_frame_required:
-                        break
                     continue
+            if len(attempts) != QWEN_ACTION_CANDIDATE_ATTEMPTS:
+                raise RuntimeError(
+                    "Action candidate generation did not complete all five attempts."
+                )
             if (
                 advisory_grooming_minimum_gate_required
                 and best_attempt is not None
@@ -7928,7 +7937,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     degraded_fallback_accepted=True,
                     degraded_reason="bounded_first_frame_attempt_budget_exhausted",
                     degraded_selection_policy=(
-                        "generated_candidate_identity_action_best_of_ten_v1"
+                        "generated_candidate_identity_action_best_of_five_v2"
                     ),
                     degraded_selection_key=list(
                         best_attempt[
@@ -7951,7 +7960,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "pose_index": index,
                         "attempt": best_attempt["attempt"],
                         "reason": "bounded_first_frame_attempt_budget_exhausted",
-                        "strategy": "select_generated_identity_action_best_of_ten",
+                        "strategy": "select_generated_identity_action_best_of_five",
                         "profile": best_attempt["profile"],
                         "result": "accepted_best_effort",
                         "issues": strict_best_effort_issues,
@@ -9005,7 +9014,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             effective_subject_config=(pose_effective_subject_config),
                         )
                     )
-                    semantic_attempt = len(attempts) + 1
+                    semantic_attempt = int(fallback_record["attempt"])
                     fur_surface_gate_attempt_audits.append(
                         {
                             "pose_index": index,
@@ -9089,7 +9098,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         {
                             "stage": "cartoon_keyframe",
                             "pose_index": index,
-                            "attempt": len(attempts) + 1,
+                            "attempt": int(fallback_record["attempt"]),
                             "reason": semantic_rejection_reason,
                             "strategy": "rembg_u2net_fallback",
                             "profile": "rembg_u2net_fallback",
@@ -9142,7 +9151,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         field: fallback_record.get(field)
                         for field in POSE_ATTEMPT_PROVENANCE_FIELDS
                     },
-                    "attempt": len(attempts) + 1,
+                    "attempt": int(fallback_record["attempt"]),
                     "profile": "rembg_u2net_fallback",
                     "seed": fallback_record["seed"],
                     "keyframe": fallback_green.name,
@@ -9199,13 +9208,6 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     best_attempt["strict_first_frame_best_effort_semantic_recovery"] = (
                         True
                     )
-                attempts.append(
-                    {
-                        key: value
-                        for key, value in best_attempt.items()
-                        if key != "workflow"
-                    }
-                )
                 append_recovery_event(
                     job_id,
                     {
@@ -9225,6 +9227,84 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "color_recovery": semantic_color_recovery,
                     },
                 )
+            selected_attempt_number = int(best_attempt.get("attempt") or 0)
+            if not 1 <= selected_attempt_number <= QWEN_ACTION_CANDIDATE_ATTEMPTS:
+                raise RuntimeError(
+                    "Selected action candidate is outside the five-attempt budget."
+                )
+            selected_palette = best_attempt.get("identity_palette")
+            if (
+                not isinstance(selected_palette, dict)
+                or selected_palette.get("acceptable") is not True
+            ):
+                raise RuntimeError(
+                    "Best-of-five selection found no identity-safe generated "
+                    "candidate."
+                )
+            selected_keyframe_source = job_dir / str(best_attempt["keyframe"])
+            selected_cutout_source = job_dir / str(best_attempt["cutout"])
+            action_selection_records = get_job(job_id).get(
+                "action_candidate_selection_by_action"
+            )
+            if isinstance(action_selection_records, dict):
+                action_selection_records = json.loads(
+                    json.dumps(action_selection_records)
+                )
+            else:
+                action_selection_records = {}
+            action_selection_records[action_key(pose)] = {
+                "policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
+                "source_kind": "qwen_generated_action_candidate",
+                "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                "selected_attempt": selected_attempt_number,
+                "selected_penalty": best_attempt.get("combined_penalty"),
+                "identity_palette_acceptable": True,
+                "selected_keyframe_sha256": file_sha256(
+                    selected_keyframe_source
+                ),
+                "selected_cutout_sha256": file_sha256(selected_cutout_source),
+                "original_upload_used": False,
+                "approved_canonical_used_as_output": False,
+            }
+            update_job(
+                job_id,
+                action_candidate_gate_policy=(
+                    GENERATION_ACTION_CANDIDATE_GATE_POLICY
+                ),
+                action_candidate_gate_status="best_of_five_selected",
+                action_candidate_gate_action=action_key(pose),
+                action_candidate_gate_attempt_budget=(
+                    QWEN_ACTION_CANDIDATE_ATTEMPTS
+                ),
+                action_candidate_gate_attempts_completed=(
+                    QWEN_ACTION_CANDIDATE_ATTEMPTS
+                ),
+                action_candidate_gate_selected_attempt=selected_attempt_number,
+                action_candidate_gate_selected_penalty=(
+                    best_attempt.get("combined_penalty")
+                ),
+                action_candidate_gate_returns_original_upload=False,
+                action_candidate_gate_returns_approved_canonical=False,
+                action_candidate_selection_by_action=action_selection_records,
+            )
+            append_recovery_event(
+                job_id,
+                {
+                    "stage": "cartoon_keyframe",
+                    "pose_index": index,
+                    "attempt": selected_attempt_number,
+                    "reason": "five_candidate_budget_completed",
+                    "strategy": (
+                        "select_lowest_penalty_identity_safe_generated_candidate"
+                    ),
+                    "profile": best_attempt["profile"],
+                    "result": "selected_best_of_five",
+                    "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                    "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                    "combined_penalty": best_attempt.get("combined_penalty"),
+                },
+            )
             shutil.copy2(job_dir / best_attempt["keyframe"], keyframe)
             keyframe_is_transparent = bool(best_attempt.get("transparent", True))
             if keyframe_is_transparent:
@@ -9866,7 +9946,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "selected_attempt": best_attempt["attempt"],
                     "selected_profile": best_attempt["profile"],
                     "selection_policy": (
-                        "generated_candidate_identity_action_best_of_ten_v1"
+                        "generated_candidate_identity_action_best_of_five_v2"
                         if best_effort_selected
                         else "strict_quality_gate_first_pass_v1"
                     ),

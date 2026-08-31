@@ -46,6 +46,33 @@ def _accepted_job(job_id: str, actions: list[str], *, status: str) -> dict[str, 
     }
 
 
+def _mark_generated_candidates_selected(
+    job_dir: Path,
+    job: dict[str, object],
+    actions: list[str],
+) -> None:
+    job["action_candidate_selection_by_action"] = {
+        action: {
+            "policy": pipeline.GENERATION_ACTION_CANDIDATE_GATE_POLICY,
+            "source_kind": "qwen_generated_action_candidate",
+            "attempt_budget": 5,
+            "attempts_completed": 5,
+            "selected_attempt": 1,
+            "selected_penalty": 0.0,
+            "identity_palette_acceptable": True,
+            "selected_keyframe_sha256": pipeline.file_sha256(
+                job_dir / f"pose_{index:02d}_qwen_cutout.png"
+            ),
+            "selected_cutout_sha256": pipeline.file_sha256(
+                job_dir / f"pose_{index:02d}_qwen_cutout.png"
+            ),
+            "original_upload_used": False,
+            "approved_canonical_used_as_output": False,
+        }
+        for index, action in enumerate(actions, start=1)
+    }
+
+
 def _fallback_patches(
     output_root: Path,
     jobs: dict[str, dict[str, object]],
@@ -196,6 +223,7 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             job_dir = output_root / job_id
             job_dir.mkdir()
             _write_transparent_identity(job_dir / "input.png")
+            _write_transparent_identity(job_dir / "pose_01_qwen_cutout.png")
             jobs = {
                 job_id: _accepted_job(
                     job_id,
@@ -203,6 +231,11 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
                     status="running",
                 )
             }
+            _mark_generated_candidates_selected(
+                job_dir,
+                jobs[job_id],
+                ["standing"],
+            )
 
             with patch.multiple(
                 pipeline,
@@ -231,10 +264,38 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
                     duration_ms += int(animation.info.get("duration") or 0)
                 self.assertEqual(duration_ms, 5000)
             result = jobs[job_id]["subject_replacement_results"][0]
+            self.assertEqual(result["fallback_source_role"], "action_qwen_cutout")
             self.assertIn(
                 result["transparent_metrics"]["encoding"],
                 {"ffmpeg_palette", "pillow_multiframe"},
             )
+
+    def test_persisted_original_upload_path_is_not_a_recovery_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary)
+            job_id = "legacy-original-reference-is-forbidden"
+            job_dir = output_root / job_id
+            job_dir.mkdir()
+            _write_transparent_identity(job_dir / "input.png")
+            job = _accepted_job(job_id, ["standing"], status="running")
+            job["subject_reference_paths"] = {"standing": "input.png"}
+            jobs = {job_id: job}
+
+            with (
+                patch.multiple(
+                    pipeline,
+                    OUTPUT_ROOT=output_root,
+                    JOBS=jobs,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "No readable generated action candidate",
+                ),
+            ):
+                pipeline.recover_subject_replacement_job_with_fallback(
+                    job_id,
+                    RuntimeError("forced legacy recovery"),
+                )
 
     def test_action_fallback_does_not_complete_or_replace_sibling_actions(
         self,
@@ -245,6 +306,7 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             job_dir = output_root / job_id
             job_dir.mkdir()
             _write_transparent_identity(job_dir / "input_identity_source.png")
+            _write_transparent_identity(job_dir / "pose_01_qwen_cutout.png")
             job = _accepted_job(
                 job_id,
                 ["toileting", "standing", "eating"],
@@ -258,6 +320,7 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
                     for action in ("toileting", "standing", "eating")
                 },
             }
+            _mark_generated_candidates_selected(job_dir, job, ["toileting"])
             jobs = {job_id: job}
 
             with patch.multiple(
@@ -289,6 +352,7 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             self.assertTrue(result["degraded"])
             self.assertFalse(result["generation_succeeded"])
             self.assertFalse(result["quality_passed"])
+            self.assertEqual(result["fallback_source_role"], "action_qwen_cutout")
             gif_actions = {
                 output["action"]
                 for output in jobs[job_id]["outputs"]
@@ -298,7 +362,9 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             self.assertNotIn("standing", gif_actions)
             self.assertNotIn("eating", gif_actions)
 
-    def test_worker_exception_returns_every_dog_action_gif(self) -> None:
+    def test_worker_exception_recovers_each_action_from_generated_candidates(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output_root = Path(temporary)
             job_id = "dog-worker-terminal-recovery"
@@ -306,6 +372,8 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             job_dir.mkdir()
             _write_transparent_identity(job_dir / "input.png")
             _write_transparent_identity(job_dir / "input_identity_source.png")
+            _write_transparent_identity(job_dir / "pose_01_qwen_cutout.png")
+            _write_transparent_identity(job_dir / "pose_02_qwen_cutout.png")
             profile_reference = output_root / "small-dog-profile-reference.png"
             Image.new("RGBA", (96, 96), (245, 245, 245, 255)).save(
                 profile_reference
@@ -317,6 +385,11 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
                     status="running",
                 )
             }
+            _mark_generated_candidates_selected(
+                job_dir,
+                jobs[job_id],
+                ["eating", "standing"],
+            )
             jobs[job_id]["effective_subject_config"] = {
                 "frames": 81,
                 "fps": 16,
@@ -368,7 +441,7 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             self.assertEqual(set(gif_outputs), {"eating", "standing"})
             for action, output in gif_outputs.items():
                 self.assertTrue(output["degraded"])
-                self.assertEqual(output["fallback_source_role"], "original_upload")
+                self.assertEqual(output["fallback_source_role"], "action_qwen_cutout")
                 self.assert_gif_contract(
                     job_dir / str(output["filename"]),
                     expected_duration_ms=4000 if action == "eating" else 2000,
@@ -385,12 +458,59 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
                 final_job["result_anomalies"][-1]["code"],
                 "degraded_output_fallback",
             )
-            self.assertTrue(final_job["degraded_output_upload_identity_anchored"])
+            self.assertFalse(final_job["degraded_output_upload_identity_anchored"])
+            self.assertTrue(final_job["degraded_output_generated_candidate_only"])
+            self.assertFalse(final_job["degraded_output_original_upload_used"])
             self.assertEqual(
                 final_job["degraded_output_fallback_source_roles"],
-                {"eating": "original_upload", "standing": "original_upload"},
+                {
+                    "eating": "action_qwen_cutout",
+                    "standing": "action_qwen_cutout",
+                },
             )
             self.assertIn("KeyError", final_job["error"])
+
+    def test_worker_exception_before_candidate_generation_fails_job(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary)
+            job_id = "worker-fails-before-generated-candidate"
+            job_dir = output_root / job_id
+            job_dir.mkdir()
+            _write_transparent_identity(job_dir / "input.png")
+            _write_transparent_identity(job_dir / "input_identity_source.png")
+            jobs = {
+                job_id: _accepted_job(
+                    job_id,
+                    ["eating"],
+                    status="running",
+                )
+            }
+            job_queue: queue.Queue[str] = queue.Queue(maxsize=8)
+            job_queue.put_nowait(job_id)
+            stop_event = Mock()
+            stop_event.is_set.side_effect = [False, True]
+
+            with (
+                patch.multiple(
+                    pipeline,
+                    **_fallback_patches(output_root, jobs, job_queue),
+                    STOP_EVENT=stop_event,
+                ),
+                patch.object(
+                    pipeline,
+                    "run_job",
+                    side_effect=RuntimeError("failed before candidate generation"),
+                ),
+                patch.object(pipeline, "wait_comfy_idle"),
+                patch.object(pipeline, "free_comfy_models"),
+            ):
+                pipeline.worker_loop()
+
+            final_job = jobs[job_id]
+            self.assertEqual(final_job["status"], "failed")
+            self.assertEqual(final_job["stage"], "failed")
+            self.assertEqual(final_job["outputs"], [])
+            self.assertNotIn("degraded_output_fallback", final_job)
 
     def test_running_job_is_recovered_after_service_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -413,16 +533,12 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             ):
                 pipeline.restore_jobs()
 
-            self.assertEqual(jobs[job_id]["status"], "completed")
-            self.assertEqual(job_queue.qsize(), 0)
-            output = next(
-                item
-                for item in jobs[job_id]["outputs"]
-                if item["type"] == "transparent_gif"
-            )
-            self.assert_gif_contract(job_dir / str(output["filename"]))
+            self.assertEqual(jobs[job_id]["status"], "queued")
+            self.assertEqual(jobs[job_id]["stage"], "queued_after_service_restart")
+            self.assertEqual(job_queue.qsize(), 1)
+            self.assertEqual(jobs[job_id]["outputs"], [])
 
-    def test_restored_queue_overflow_returns_a_gif_instead_of_failed(self) -> None:
+    def test_restored_queue_overflow_without_generated_candidate_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output_root = Path(temporary)
             job_id = "queue-overflow-terminal-recovery"
@@ -448,14 +564,9 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             ):
                 pipeline.restore_jobs()
 
-            self.assertEqual(jobs[job_id]["status"], "completed")
-            self.assertNotEqual(jobs[job_id]["stage"], "failed")
-            output = next(
-                item
-                for item in jobs[job_id]["outputs"]
-                if item["type"] == "transparent_gif"
-            )
-            self.assert_gif_contract(job_dir / str(output["filename"]))
+            self.assertEqual(jobs[job_id]["status"], "failed")
+            self.assertEqual(jobs[job_id]["stage"], "failed")
+            self.assertEqual(jobs[job_id]["outputs"], [])
 
 
 if __name__ == "__main__":

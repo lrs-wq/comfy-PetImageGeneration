@@ -1961,7 +1961,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             pipeline.EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
         )
 
-    def test_strict_dog_eating_generation_reaches_tenth_distinct_candidate(
+    def test_strict_dog_eating_generation_reaches_fifth_distinct_candidate(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1969,12 +1969,12 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
                 Path(temporary),
                 action="eating",
                 action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
-                pose_attempt=10,
+                pose_attempt=5,
                 identity_palette_guard=True,
                 species="dog",
             )
 
-        expected_seed = 123 + pipeline.pose_seed_offset("eating", 1) + 9 * 1009
+        expected_seed = 123 + pipeline.pose_seed_offset("eating", 1) + 4 * 1009
         self.assertEqual(workflow["14"]["inputs"]["seed"], expected_seed)
         self.assertIn(
             "SOURCE COAT PALETTE LOCK",

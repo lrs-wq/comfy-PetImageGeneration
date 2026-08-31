@@ -219,7 +219,7 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
         self.assertEqual(workflow["17"]["inputs"]["model"], ["13", 0])
         self.assertEqual(workflow["14"]["inputs"]["model"], ["17", 0])
 
-    def test_grooming_repair_fails_closed_without_identity_palette_verdict(
+    def test_grooming_repair_enforces_identity_palette_when_flag_is_disabled(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -239,19 +239,17 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
             for node_id, node in workflow.items()
             if node.get("class_type") == "LoadImage"
         }
-        self.assertEqual(load_images["1"], pose_input)
-        self.assertFalse(
-            any(
-                str(value).endswith("grooming_foreleg_repair_source.png")
-                for value in load_images.values()
-            )
+        repair_input = (
+            "local_video_api/capture-grooming/grooming_foreleg_repair_source.png"
         )
-        self.assertNotIn(
+        self.assertEqual(load_images["1"], repair_input)
+        self.assertNotIn(pose_input, load_images.values())
+        self.assertIn(
             "CRITICAL GROOMING FORELEG COMPLETION",
             workflow["6"]["inputs"]["prompt"],
         )
         self.assertNotIn(uploaded_input, load_images.values())
-        self.assertFalse(
+        self.assertTrue(
             any(
                 node.get("class_type") == "SetLatentNoiseMask"
                 for node in workflow.values()

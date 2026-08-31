@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "id": "comfy-pet-pipeline",
+  "display_name": "Comfy Pet Pipeline",
+  "description": "猫狗身份保持、动作生成和透明 GIF/视频生产服务。",
+  "status": "active",
+  "domains": ["pet-generation", "image-to-video", "comfyui", "quality-gates"],
+  "entrypoints": [
+    {
+      "path": "simple_pet_gif_api.py",
+      "purpose": "简化 GIF API 兼容入口"
+    },
+    {
+      "path": "local_video_api.py",
+      "purpose": "本地视频 API 兼容入口"
+    },
+    {
+      "path": "src/comfy_pet_pipeline/api/gif_api.py",
+      "purpose": "简化 GIF API 主实现"
+    },
+    {
+      "path": "src/comfy_pet_pipeline/api/local_video.py",
+      "purpose": "本地视频生成主实现"
+    },
+    {
+      "path": "src/comfy_pet_pipeline/api/platform.py",
+      "purpose": "宠物生成测试平台后端"
+    }
+  ],
+  "verification": [
+    ".venv/bin/python -m pytest -q",
+    ".venv/bin/python ops/scripts/verify_pipeline.py",
+    "bash ops/scripts/smoke-test.sh"
+  ],
+  "source_docs": [
+    "README.md",
+    "docs/api/SIMPLE_PET_GIF_API.md",
+    "docs/api/LOCAL_VIDEO_API.md",
+    "docs/architecture/PET_TWO_ACTION_PIPELINE.md",
+    "docs/operations/PROJECT_LAYOUT.md",
+    "docs/operations/SERVER_DEPLOYMENT.md"
+  ],
+  "watch_rules": [
+    {
+      "paths": [
+        "src/comfy_pet_pipeline/api/**",
+        "simple_pet_gif_api.py",
+        "local_video_api.py",
+        "docs/api/**"
+      ],
+      "knowledge": ["api", "service", "interface"]
+    },
+    {
+      "paths": [
+        "src/comfy_pet_pipeline/pipeline/**",
+        "src/comfy_pet_pipeline/identity/**",
+        "src/comfy_pet_pipeline/quality/**",
+        "src/comfy_pet_pipeline/media/**",
+        "profiles/**"
+      ],
+      "knowledge": ["pipeline", "identity", "quality", "asset"]
+    },
+    {
+      "paths": ["ops/**", "docs/operations/**"],
+      "knowledge": ["deployment", "operations"]
+    },
+    {
+      "paths": ["pyproject.toml", "requirements.txt", "requirements/**"],
+      "knowledge": ["dependency", "verification"]
+    }
+  ],
+  "excluded_content": [
+    ".env values",
+    "raw uploads",
+    "generated media",
+    "model weights",
+    "/data contents",
+    "production logs"
+  ]
+}

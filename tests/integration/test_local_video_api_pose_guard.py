@@ -445,7 +445,7 @@ class ValidatedFirstFrameCacheTests(unittest.TestCase):
             if field != "candidate_path":
                 self.assertEqual(evaluator.call_args.kwargs[field], path)
 
-    def test_strict_first_frame_profiles_are_bounded_to_ten_candidates(self) -> None:
+    def test_strict_first_frame_profiles_are_bounded_to_five_candidates(self) -> None:
         profiles = [
             {
                 "name": "initial",
@@ -461,18 +461,18 @@ class ValidatedFirstFrameCacheTests(unittest.TestCase):
 
         selected = pipeline.bounded_strict_first_frame_profiles(
             profiles,
-            max_attempts=10,
+            max_attempts=5,
         )
 
-        self.assertEqual(pipeline.QWEN_FIRST_FRAME_MAX_ATTEMPTS, 10)
-        self.assertEqual(len(selected), 10)
+        self.assertEqual(pipeline.QWEN_FIRST_FRAME_MAX_ATTEMPTS, 5)
+        self.assertEqual(len(selected), 5)
         self.assertEqual(selected[0]["name"], "initial")
-        self.assertEqual(selected[-1]["quality_retry"], 10)
-        self.assertEqual(len({item["name"] for item in selected}), 10)
+        self.assertEqual(selected[-1]["quality_retry"], 5)
+        self.assertEqual(len({item["name"] for item in selected}), 5)
         selected[0]["user_loras"].append({"model_name": "mutated"})
         self.assertEqual(len(profiles[0]["user_loras"]), 1)
 
-    def test_best_of_ten_prefers_identity_safe_eating_candidate(self) -> None:
+    def test_best_of_five_prefers_identity_safe_eating_candidate(self) -> None:
         def candidate(
             *,
             attempt: int,
@@ -506,12 +506,12 @@ class ValidatedFirstFrameCacheTests(unittest.TestCase):
             }
 
         identity_safe = candidate(
-            attempt=7,
+            attempt=4,
             palette_acceptable=True,
             action_acceptable=False,
         )
         identity_collapsed = candidate(
-            attempt=8,
+            attempt=5,
             palette_acceptable=False,
             action_acceptable=True,
         )
@@ -765,6 +765,35 @@ class PoseProfileTests(unittest.TestCase):
 
         self.assertEqual(len(eating), 2)
         self.assertEqual(eating[-1]["quality_retry"], 4)
+
+    def test_every_action_profile_is_normalized_to_five_candidates(self) -> None:
+        profiles = pipeline.qwen_pose_profiles(
+            user_lora=None,
+            user_lora_strength=1.0,
+            user_lora_mode="replace",
+            steps=6,
+            cfg=1.0,
+            denoise=1.0,
+            user_loras=[_lora("style-a", 0.5)],
+        )
+
+        for action in ("standing", "running", "eating", "grooming"):
+            with self.subTest(action=action):
+                selected = pipeline.action_candidate_generation_profiles(
+                    action,
+                    pipeline.pose_generation_profiles(action, profiles),
+                )
+                self.assertEqual(
+                    len(selected),
+                    pipeline.QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                )
+                self.assertEqual(
+                    [profile["quality_retry"] for profile in selected],
+                    [1, 2, 3, 4, 5],
+                )
+                self.assertEqual(len({profile["name"] for profile in selected}), 5)
+
+        self.assertEqual(len(profiles), 3)
 
 
 class PosePromptTests(unittest.TestCase):

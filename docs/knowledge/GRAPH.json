@@ -1,0 +1,274 @@
+{
+  "schema_version": 1,
+  "project": "comfy-pet-pipeline",
+  "nodes": [
+    {
+      "id": "comfy.project",
+      "type": "project",
+      "name": "Comfy Pet Pipeline",
+      "status": "active",
+      "tags": ["宠物生成", "GIF", "视频"],
+      "evidence": "README.md"
+    },
+    {
+      "id": "comfy.package.production",
+      "type": "module",
+      "name": "生产 Python 包",
+      "path": "src/comfy_pet_pipeline",
+      "tags": ["production", "python"],
+      "evidence": "src/comfy_pet_pipeline/__init__.py"
+    },
+    {
+      "id": "comfy.service.simple_gif_api",
+      "type": "service",
+      "name": "简化 GIF API 服务",
+      "port": 8051,
+      "status": "active",
+      "tags": ["upload", "query", "GIF"],
+      "evidence": "src/comfy_pet_pipeline/api/gif_api.py"
+    },
+    {
+      "id": "comfy.api.simple_gif",
+      "type": "api",
+      "name": "POST /api 上传与查询协议",
+      "endpoint": "/api",
+      "tags": ["type=upload", "type=query"],
+      "evidence": "docs/api/SIMPLE_PET_GIF_API.md"
+    },
+    {
+      "id": "comfy.service.local_video_api",
+      "type": "service",
+      "name": "本地视频 API 服务",
+      "port": 8770,
+      "status": "active",
+      "tags": ["local-video", "generation"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video.py"
+    },
+    {
+      "id": "comfy.api.local_video",
+      "type": "api",
+      "name": "本地视频生成接口",
+      "endpoint": "/api/local-video",
+      "tags": ["video", "local"],
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "id": "comfy.service.test_platform",
+      "type": "service",
+      "name": "宠物生成测试平台",
+      "status": "active",
+      "tags": ["web", "test-platform", "dog-size"],
+      "evidence": "src/comfy_pet_pipeline/api/platform.py"
+    },
+    {
+      "id": "comfy.service.comfyui",
+      "type": "service",
+      "name": "ComfyUI 推理运行时",
+      "port": 8188,
+      "status": "active",
+      "tags": ["ComfyUI", "workflow", "GPU"],
+      "evidence": "docs/operations/SERVER_DEPLOYMENT.md"
+    },
+    {
+      "id": "comfy.module.identity",
+      "type": "module",
+      "name": "物种分类与上传身份锚定",
+      "path": "src/comfy_pet_pipeline/identity",
+      "tags": ["cat", "dog", "identity"],
+      "evidence": "src/comfy_pet_pipeline/identity/uploaded_identity.py"
+    },
+    {
+      "id": "comfy.module.pipeline",
+      "type": "module",
+      "name": "宠物动作生成流水线",
+      "path": "src/comfy_pet_pipeline/pipeline",
+      "tags": ["subject-replacement", "actions", "pipeline"],
+      "evidence": "docs/architecture/PET_TWO_ACTION_PIPELINE.md"
+    },
+    {
+      "id": "comfy.module.quality",
+      "type": "module",
+      "name": "毛发、轮廓与姿态质量门",
+      "path": "src/comfy_pet_pipeline/quality",
+      "tags": ["quality", "audit", "advisory"],
+      "evidence": "src/comfy_pet_pipeline/quality/final_video_fur.py"
+    },
+    {
+      "id": "comfy.module.transparent_animation",
+      "type": "module",
+      "name": "透明动画生成",
+      "path": "src/comfy_pet_pipeline/media/transparent_animation.py",
+      "tags": ["transparent", "GIF", "matte"],
+      "evidence": "src/comfy_pet_pipeline/media/transparent_animation.py"
+    },
+    {
+      "id": "comfy.asset.profiles",
+      "type": "asset",
+      "name": "受版本控制的主体配置与清单",
+      "path": "profiles",
+      "tags": ["profile", "manifest", "identity"],
+      "evidence": "docs/operations/PROJECT_LAYOUT.md"
+    },
+    {
+      "id": "comfy.runtime.data",
+      "type": "runtime",
+      "name": "生产模型、任务产物与验证归档",
+      "path": "/data/comfy-pet-pipeline",
+      "tags": ["runtime-data", "not-in-git"],
+      "evidence": "docs/operations/PROJECT_LAYOUT.md"
+    },
+    {
+      "id": "comfy.action.cat_default",
+      "type": "business_rule",
+      "name": "猫默认动作：eating 与 grooming",
+      "tags": ["猫", "eating", "grooming"],
+      "evidence": "README.md"
+    },
+    {
+      "id": "comfy.action.dog_default",
+      "type": "business_rule",
+      "name": "狗默认动作：eating 与 standing",
+      "tags": ["狗", "eating", "standing", "grooming兼容"],
+      "evidence": "README.md"
+    },
+    {
+      "id": "comfy.action.dog_small_test",
+      "type": "business_rule",
+      "name": "测试平台小型犬六动作集合",
+      "tags": ["小型犬", "drinking", "running", "sleeping", "toileting"],
+      "evidence": "README.md"
+    },
+    {
+      "id": "comfy.deployment.systemd",
+      "type": "deployment",
+      "name": "systemd 与 Nginx 服务部署",
+      "path": "ops",
+      "tags": ["systemd", "nginx", "production"],
+      "evidence": "docs/operations/SERVER_DEPLOYMENT.md"
+    },
+    {
+      "id": "comfy.decision.generated_candidate_selection",
+      "type": "decision",
+      "name": "固定生成五轮并选择身份合格的最优候选",
+      "status": "accepted",
+      "tags": ["generation", "five-attempts", "best-candidate", "no-cache-shortcut", "no-original-fallback"],
+      "evidence": "docs/knowledge/DECISIONS/0001-generated-candidate-selection.md"
+    }
+  ],
+  "edges": [
+    {
+      "from": "comfy.project",
+      "relation": "contains",
+      "to": "comfy.package.production",
+      "evidence": "README.md"
+    },
+    {
+      "from": "comfy.project",
+      "relation": "contains",
+      "to": "comfy.service.simple_gif_api",
+      "evidence": "README.md"
+    },
+    {
+      "from": "comfy.project",
+      "relation": "contains",
+      "to": "comfy.service.local_video_api",
+      "evidence": "README.md"
+    },
+    {
+      "from": "comfy.service.simple_gif_api",
+      "relation": "exposes",
+      "to": "comfy.api.simple_gif",
+      "evidence": "docs/api/SIMPLE_PET_GIF_API.md"
+    },
+    {
+      "from": "comfy.service.local_video_api",
+      "relation": "exposes",
+      "to": "comfy.api.local_video",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.service.simple_gif_api",
+      "relation": "uses",
+      "to": "comfy.module.pipeline",
+      "evidence": "src/comfy_pet_pipeline/api/gif_api.py"
+    },
+    {
+      "from": "comfy.service.local_video_api",
+      "relation": "uses",
+      "to": "comfy.module.pipeline",
+      "evidence": "src/comfy_pet_pipeline/api/local_video.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "uses",
+      "to": "comfy.module.identity",
+      "evidence": "docs/architecture/PET_TWO_ACTION_PIPELINE.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "checked_by",
+      "to": "comfy.module.quality",
+      "evidence": "docs/architecture/PET_TWO_ACTION_PIPELINE.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "produces",
+      "to": "comfy.module.transparent_animation",
+      "evidence": "src/comfy_pet_pipeline/media/transparent_animation.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "reads",
+      "to": "comfy.asset.profiles",
+      "evidence": "docs/operations/PROJECT_LAYOUT.md"
+    },
+    {
+      "from": "comfy.service.comfyui",
+      "relation": "supports",
+      "to": "comfy.module.pipeline",
+      "evidence": "docs/operations/SERVER_DEPLOYMENT.md"
+    },
+    {
+      "from": "comfy.deployment.systemd",
+      "relation": "deploys",
+      "to": "comfy.service.simple_gif_api",
+      "evidence": "ops/systemd/pet-gif-api.service"
+    },
+    {
+      "from": "comfy.deployment.systemd",
+      "relation": "deploys",
+      "to": "comfy.service.local_video_api",
+      "evidence": "ops/systemd/local-video-api.service"
+    },
+    {
+      "from": "comfy.project",
+      "relation": "supports",
+      "to": "comfy.action.cat_default",
+      "evidence": "README.md"
+    },
+    {
+      "from": "comfy.project",
+      "relation": "supports",
+      "to": "comfy.action.dog_default",
+      "evidence": "README.md"
+    },
+    {
+      "from": "comfy.service.test_platform",
+      "relation": "supports",
+      "to": "comfy.action.dog_small_test",
+      "evidence": "README.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "governed_by",
+      "to": "comfy.decision.generated_candidate_selection",
+      "evidence": "docs/knowledge/DECISIONS/0001-generated-candidate-selection.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "writes",
+      "to": "comfy.runtime.data",
+      "evidence": "docs/operations/PROJECT_LAYOUT.md"
+    }
+  ]
+}
