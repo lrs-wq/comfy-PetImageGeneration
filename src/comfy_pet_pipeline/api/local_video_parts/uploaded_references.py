@@ -915,7 +915,16 @@ def prepare_uploaded_subject_qwen_references(
             IDENTITY_STRIPE_AMPLIFICATION_SOURCE_AREA_MIN
         ),
         eating_identity_retry_uses_previous_palette_issues=True,
-        eating_identity_refine_global_thresholds_changed=False,
+        eating_identity_refine_global_thresholds_changed=True,
+        eating_identity_spatial_marking_policy=IDENTITY_MARKING_SPATIAL_POLICY,
+        eating_identity_source_absent_stripe_gate_unchanged=True,
+        eating_identity_source_present_stripe_amplification_thresholds={
+            "component_delta_min": IDENTITY_AMPLIFIED_STRIPE_COMPONENT_DELTA_MIN,
+            "area_delta_min": IDENTITY_AMPLIFIED_STRIPE_AREA_DELTA_MIN,
+            "dark_contrast_delta_min": (
+                IDENTITY_AMPLIFIED_STRIPE_DARK_CONTRAST_DELTA_MIN
+            ),
+        },
         grooming_pose_lora_policy=(
             "canonical_identity_open_channel_seed_bound_pose_safe_refine_v11"
         ),

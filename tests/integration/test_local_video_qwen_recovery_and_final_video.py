@@ -2274,7 +2274,20 @@ class SubjectReplacementQwenRecoveryAndFinalVideoTests(SubjectReplacementQwenRef
             pipeline.CANONICAL_ACTION_DARK_FEATURE_EXPANSION_MAX,
         )
         self.assertIsNone(final_job["eating_identity_refine_style_lora"])
-        self.assertFalse(final_job["eating_identity_refine_global_thresholds_changed"])
+        self.assertTrue(final_job["eating_identity_refine_global_thresholds_changed"])
+        self.assertTrue(
+            final_job["eating_identity_source_absent_stripe_gate_unchanged"]
+        )
+        self.assertEqual(
+            final_job["eating_identity_spatial_marking_policy"],
+            pipeline.IDENTITY_MARKING_SPATIAL_POLICY,
+        )
+        self.assertEqual(
+            final_job[
+                "eating_identity_source_present_stripe_amplification_thresholds"
+            ]["area_delta_min"],
+            pipeline.IDENTITY_AMPLIFIED_STRIPE_AREA_DELTA_MIN,
+        )
         self.assertEqual(
             final_job["pose_reference_source_paths"],
             {

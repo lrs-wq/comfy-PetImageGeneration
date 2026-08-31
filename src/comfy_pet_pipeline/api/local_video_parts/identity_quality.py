@@ -1668,13 +1668,32 @@ def identity_palette_quality(
     stripe_component_delta = candidate_stripe_count - source_stripe_count
     stripe_area_delta = candidate_stripe_area - source_stripe_area
     dark_contrast_delta = candidate_dark_contrast - source_dark_contrast
+    source_stripe_evidence_present = bool(
+        source_stripe_count >= IDENTITY_SOURCE_PRESENT_STRIPE_COMPONENT_MIN
+        and source_stripe_area >= IDENTITY_SOURCE_PRESENT_STRIPE_AREA_MIN
+    )
+    if source_stripe_evidence_present:
+        stripe_gate_mode = "source_present_amplification"
+        stripe_component_delta_min = (
+            IDENTITY_AMPLIFIED_STRIPE_COMPONENT_DELTA_MIN
+        )
+        stripe_area_delta_min = IDENTITY_AMPLIFIED_STRIPE_AREA_DELTA_MIN
+        stripe_dark_contrast_delta_min = (
+            IDENTITY_AMPLIFIED_STRIPE_DARK_CONTRAST_DELTA_MIN
+        )
+    else:
+        stripe_gate_mode = "source_absent_invention"
+        stripe_component_delta_min = IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN
+        stripe_area_delta_min = IDENTITY_NEW_STRIPE_AREA_DELTA_MIN
+        stripe_dark_contrast_delta_min = (
+            IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN
+        )
     invented_stripe_pattern = bool(
         marking_spatial_available
         and source_stripe_area <= IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX
-        and stripe_component_delta >= IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN
-        and stripe_area_delta >= IDENTITY_NEW_STRIPE_AREA_DELTA_MIN
-        and dark_contrast_delta
-        >= IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN
+        and stripe_component_delta >= stripe_component_delta_min
+        and stripe_area_delta >= stripe_area_delta_min
+        and dark_contrast_delta >= stripe_dark_contrast_delta_min
     )
     if invented_stripe_pattern:
         issues.append("invented_stripe_pattern")
@@ -1683,6 +1702,17 @@ def identity_palette_quality(
         "policy": IDENTITY_MARKING_SPATIAL_POLICY,
         "acceptable": not invented_stripe_pattern,
         "invented_stripe_pattern": invented_stripe_pattern,
+        "classification": (
+            (
+                "amplified_source_present_stripe_pattern"
+                if source_stripe_evidence_present
+                else "invented_source_absent_stripe_pattern"
+            )
+            if invented_stripe_pattern
+            else None
+        ),
+        "stripe_gate_mode": stripe_gate_mode,
+        "source_stripe_evidence_present": source_stripe_evidence_present,
         "source_stripe_component_count": source_stripe_count,
         "candidate_stripe_component_count": candidate_stripe_count,
         "stripe_component_delta": stripe_component_delta,
@@ -1694,13 +1724,33 @@ def identity_palette_quality(
         "dark_contrast_delta": round(dark_contrast_delta, 6),
         "thresholds": {
             "source_stripe_area_max": IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX,
-            "stripe_component_delta_min": (
-                IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN
+            "source_present_component_min": (
+                IDENTITY_SOURCE_PRESENT_STRIPE_COMPONENT_MIN
             ),
-            "stripe_area_delta_min": IDENTITY_NEW_STRIPE_AREA_DELTA_MIN,
-            "dark_contrast_delta_min": (
-                IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN
-            ),
+            "source_present_area_min": IDENTITY_SOURCE_PRESENT_STRIPE_AREA_MIN,
+            "stripe_component_delta_min": stripe_component_delta_min,
+            "stripe_area_delta_min": stripe_area_delta_min,
+            "dark_contrast_delta_min": stripe_dark_contrast_delta_min,
+            "source_absent": {
+                "stripe_component_delta_min": (
+                    IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN
+                ),
+                "stripe_area_delta_min": IDENTITY_NEW_STRIPE_AREA_DELTA_MIN,
+                "dark_contrast_delta_min": (
+                    IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN
+                ),
+            },
+            "source_present_amplification": {
+                "stripe_component_delta_min": (
+                    IDENTITY_AMPLIFIED_STRIPE_COMPONENT_DELTA_MIN
+                ),
+                "stripe_area_delta_min": (
+                    IDENTITY_AMPLIFIED_STRIPE_AREA_DELTA_MIN
+                ),
+                "dark_contrast_delta_min": (
+                    IDENTITY_AMPLIFIED_STRIPE_DARK_CONTRAST_DELTA_MIN
+                ),
+            },
         },
     }
     chromatic_accents_lost = bool(
@@ -3169,13 +3219,131 @@ def bowl_aware_identity_palette_quality(
         }
     if primary_quality.get("acceptable"):
         return primary_quality
+    primary_issues = set(primary_quality.get("issues") or [])
+    primary_spatial = primary_quality.get("marking_spatial_quality")
+    upper_spatial = upper_body_quality.get("marking_spatial_quality")
+    if (
+        primary_issues == {"invented_stripe_pattern"}
+        and upper_body_quality.get("available") is True
+        and upper_body_quality.get("acceptable") is True
+        and isinstance(primary_spatial, dict)
+        and primary_spatial.get("available") is True
+        and isinstance(upper_spatial, dict)
+        and upper_spatial.get("available") is True
+    ):
+        upper_source_component_count = int(
+            upper_spatial.get("source_stripe_component_count", 0) or 0
+        )
+        upper_source_area = float(
+            upper_spatial.get("source_stripe_area_fraction", 0.0) or 0.0
+        )
+        upper_source_dark_contrast = float(
+            upper_spatial.get("source_dark_contrast_fraction", 0.0) or 0.0
+        )
+        upper_source_evidence_present = bool(
+            upper_source_component_count
+            >= IDENTITY_SOURCE_PRESENT_STRIPE_COMPONENT_MIN
+            and upper_source_area >= IDENTITY_SOURCE_PRESENT_STRIPE_AREA_MIN
+        )
+        cross_crop_component_delta = int(
+            primary_spatial.get("candidate_stripe_component_count", 0) or 0
+        ) - upper_source_component_count
+        cross_crop_area_delta = float(
+            primary_spatial.get("candidate_stripe_area_fraction", 0.0) or 0.0
+        ) - upper_source_area
+        cross_crop_dark_contrast_delta = float(
+            primary_spatial.get("candidate_dark_contrast_fraction", 0.0) or 0.0
+        ) - upper_source_dark_contrast
+        cross_crop_severe_amplification = bool(
+            upper_source_evidence_present
+            and cross_crop_component_delta
+            >= IDENTITY_AMPLIFIED_STRIPE_COMPONENT_DELTA_MIN
+            and cross_crop_area_delta >= IDENTITY_AMPLIFIED_STRIPE_AREA_DELTA_MIN
+            and cross_crop_dark_contrast_delta
+            >= IDENTITY_AMPLIFIED_STRIPE_DARK_CONTRAST_DELTA_MIN
+        )
+        cross_crop_confirmation = {
+            "policy": "bowl_upper_body_source_stripe_confirmation_v1",
+            "upper_source_evidence_present": upper_source_evidence_present,
+            "upper_source_stripe_component_count": upper_source_component_count,
+            "upper_source_stripe_area_fraction": round(upper_source_area, 6),
+            "upper_source_dark_contrast_fraction": round(
+                upper_source_dark_contrast,
+                6,
+            ),
+            "primary_candidate_stripe_component_count": int(
+                primary_spatial.get("candidate_stripe_component_count", 0) or 0
+            ),
+            "primary_candidate_stripe_area_fraction": round(
+                float(
+                    primary_spatial.get("candidate_stripe_area_fraction", 0.0)
+                    or 0.0
+                ),
+                6,
+            ),
+            "primary_candidate_dark_contrast_fraction": round(
+                float(
+                    primary_spatial.get(
+                        "candidate_dark_contrast_fraction",
+                        0.0,
+                    )
+                    or 0.0
+                ),
+                6,
+            ),
+            "cross_crop_component_delta": cross_crop_component_delta,
+            "cross_crop_area_delta": round(cross_crop_area_delta, 6),
+            "cross_crop_dark_contrast_delta": round(
+                cross_crop_dark_contrast_delta,
+                6,
+            ),
+            "severe_amplification": cross_crop_severe_amplification,
+            "thresholds": {
+                "stripe_component_delta_min": (
+                    IDENTITY_AMPLIFIED_STRIPE_COMPONENT_DELTA_MIN
+                ),
+                "stripe_area_delta_min": (
+                    IDENTITY_AMPLIFIED_STRIPE_AREA_DELTA_MIN
+                ),
+                "dark_contrast_delta_min": (
+                    IDENTITY_AMPLIFIED_STRIPE_DARK_CONTRAST_DELTA_MIN
+                ),
+            },
+        }
+        if upper_source_evidence_present and not cross_crop_severe_amplification:
+            warnings = list(upper_body_quality.get("warnings") or [])
+            warnings.append(
+                "primary_crop_missing_source_stripe_evidence_ignored"
+            )
+            return {
+                **upper_body_quality,
+                "acceptable": True,
+                "warning": True,
+                "issues": [],
+                "warnings": list(dict.fromkeys(warnings)),
+                "penalty": round(
+                    float(upper_body_quality.get("penalty", 0.0)) + 25.0,
+                    6,
+                ),
+                "method": "bowl_upper_body_source_stripe_confirmation_v1",
+                "primary_quality": primary_quality,
+                "upper_body_quality": upper_body_quality,
+                "cross_crop_stripe_confirmation": cross_crop_confirmation,
+            }
+        if upper_source_evidence_present and cross_crop_severe_amplification:
+            return {
+                **primary_quality,
+                "method": "bowl_upper_body_source_stripe_confirmation_v1",
+                "primary_quality": primary_quality,
+                "upper_body_quality": upper_body_quality,
+                "cross_crop_stripe_confirmation": cross_crop_confirmation,
+            }
     bowl_contamination_issues = {
         "achromatic_source_recolored_with_warm_fur",
         "new_dominant_warm_brown_or_orange",
         "new_dominant_yellow_or_gold",
         "new_dominant_red_or_pink",
     }
-    primary_issues = set(primary_quality.get("issues") or [])
     if not primary_issues or not primary_issues.issubset(bowl_contamination_issues):
         return primary_quality
     if not upper_body_quality.get("available"):

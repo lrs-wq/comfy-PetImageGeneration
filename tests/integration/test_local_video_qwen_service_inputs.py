@@ -616,6 +616,30 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             canonical_palette_gate["terminal_recovery"],
             "original_uploaded_identity_safe_matte",
         )
+        spatial_marking_gate = canonical_palette_gate["spatial_marking_gate"]
+        self.assertEqual(
+            spatial_marking_gate["policy"],
+            pipeline.IDENTITY_MARKING_SPATIAL_POLICY,
+        )
+        self.assertEqual(
+            spatial_marking_gate["source_stripe_evidence"]["area_min"],
+            pipeline.IDENTITY_SOURCE_PRESENT_STRIPE_AREA_MIN,
+        )
+        self.assertEqual(
+            spatial_marking_gate["source_present_amplification"][
+                "stripe_area_delta_min"
+            ],
+            pipeline.IDENTITY_AMPLIFIED_STRIPE_AREA_DELTA_MIN,
+        )
+        self.assertEqual(
+            spatial_marking_gate["bowl_primary_upper_cross_crop_policy"],
+            "bowl_upper_body_source_stripe_confirmation_v1",
+        )
+        self.assertTrue(
+            spatial_marking_gate[
+                "bowl_cross_crop_blocks_severe_primary_amplification"
+            ]
+        )
         self.assertEqual(
             guard["canonical_chroma_despill"],
             "alpha_boundary_plus_source_palette_guarded_interior_v1",
@@ -689,7 +713,11 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertTrue(eating_refine["qwen_lightning_only"])
         self.assertIsNone(eating_refine["style_lora"])
         self.assertIsNone(eating_refine["sampler_noise_mask"])
-        self.assertFalse(eating_refine["global_thresholds_changed"])
+        self.assertTrue(eating_refine["global_thresholds_changed"])
+        self.assertTrue(eating_refine["source_absent_stripe_gate_unchanged"])
+        self.assertTrue(
+            eating_refine["source_present_stripe_amplification_tier_added"]
+        )
         self.assertEqual(
             guard["upload_pose_candidate_normalization_policy"],
             pipeline.QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY,

@@ -110,6 +110,14 @@
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
     {
+      "id": "comfy.quality.source_evidence_stripe_gate",
+      "type": "business_rule",
+      "name": "源图条纹证据分层身份门",
+      "status": "active",
+      "tags": ["identity", "stripe", "source-evidence", "source-absent-strict", "amplification"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
+    },
+    {
       "id": "comfy.module.transparent_animation",
       "type": "module",
       "name": "透明动画生成",
@@ -237,6 +245,12 @@
       "relation": "governed_by",
       "to": "comfy.quality.identity_issue_aware_retry",
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "checked_by",
+      "to": "comfy.quality.source_evidence_stripe_gate",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
     },
     {
       "from": "comfy.module.pipeline",

@@ -797,6 +797,172 @@ class IdentityPaletteGuardTests(unittest.TestCase):
             quality["marking_spatial_quality"]["invented_stripe_pattern"]
         )
 
+    def test_source_present_moderate_tabby_stylization_is_not_invented(
+        self,
+    ) -> None:
+        source = self.golden_task_palette(candidate=False)
+        source["marking_spatial_signature"] = {
+            "available": True,
+            "stripe_component_count": 3,
+            "stripe_area_fraction": 0.010596,
+            "dark_contrast_fraction": 0.025895,
+        }
+        candidate = {
+            **source,
+            "fractions": dict(source["fractions"]),
+            "marking_spatial_signature": {
+                "available": True,
+                "stripe_component_count": 10,
+                "stripe_area_fraction": 0.044440,
+                "dark_contrast_fraction": 0.063643,
+            },
+        }
+
+        quality = pipeline.identity_palette_quality(source, candidate)
+
+        self.assertTrue(quality["acceptable"], quality)
+        spatial = quality["marking_spatial_quality"]
+        self.assertTrue(spatial["source_stripe_evidence_present"])
+        self.assertEqual(
+            spatial["stripe_gate_mode"],
+            "source_present_amplification",
+        )
+        self.assertFalse(spatial["invented_stripe_pattern"])
+
+    def test_source_present_severe_stripe_amplification_still_fails_closed(
+        self,
+    ) -> None:
+        source = self.golden_task_palette(candidate=False)
+        source["marking_spatial_signature"] = {
+            "available": True,
+            "stripe_component_count": 3,
+            "stripe_area_fraction": 0.010596,
+            "dark_contrast_fraction": 0.025895,
+        }
+        candidate = {
+            **source,
+            "fractions": dict(source["fractions"]),
+            "marking_spatial_signature": {
+                "available": True,
+                "stripe_component_count": 11,
+                "stripe_area_fraction": 0.073668,
+                "dark_contrast_fraction": 0.113582,
+            },
+        }
+
+        quality = pipeline.identity_palette_quality(source, candidate)
+
+        self.assertFalse(quality["acceptable"], quality)
+        self.assertIn("invented_stripe_pattern", quality["issues"])
+        spatial = quality["marking_spatial_quality"]
+        self.assertEqual(
+            spatial["classification"],
+            "amplified_source_present_stripe_pattern",
+        )
+        self.assertEqual(
+            spatial["thresholds"]["stripe_area_delta_min"],
+            pipeline.IDENTITY_AMPLIFIED_STRIPE_AREA_DELTA_MIN,
+        )
+
+    def test_bowl_crop_uses_upper_body_source_stripe_confirmation(self) -> None:
+        primary_quality = {
+            "available": True,
+            "acceptable": False,
+            "warning": True,
+            "issues": ["invented_stripe_pattern"],
+            "warnings": [],
+            "penalty": 106.5,
+            "marking_spatial_quality": {
+                "available": True,
+                "source_stripe_component_count": 0,
+                "source_stripe_area_fraction": 0.0,
+                "source_dark_contrast_fraction": 0.015667,
+                "candidate_stripe_component_count": 15,
+                "candidate_stripe_area_fraction": 0.050969,
+                "candidate_dark_contrast_fraction": 0.090529,
+            },
+        }
+        upper_quality = {
+            "available": True,
+            "acceptable": True,
+            "warning": False,
+            "issues": [],
+            "warnings": [],
+            "penalty": 5.2,
+            "marking_spatial_quality": {
+                "available": True,
+                "source_stripe_component_count": 3,
+                "source_stripe_area_fraction": 0.010596,
+                "source_dark_contrast_fraction": 0.025895,
+                "candidate_stripe_component_count": 10,
+                "candidate_stripe_area_fraction": 0.044440,
+                "candidate_dark_contrast_fraction": 0.063643,
+            },
+        }
+
+        quality = pipeline.bowl_aware_identity_palette_quality(
+            primary_quality,
+            upper_quality,
+        )
+
+        self.assertTrue(quality["acceptable"], quality)
+        self.assertEqual(
+            quality["method"],
+            "bowl_upper_body_source_stripe_confirmation_v1",
+        )
+        self.assertFalse(
+            quality["cross_crop_stripe_confirmation"]["severe_amplification"]
+        )
+
+    def test_bowl_crop_still_blocks_severe_lower_body_stripe_amplification(
+        self,
+    ) -> None:
+        primary_quality = {
+            "available": True,
+            "acceptable": False,
+            "warning": True,
+            "issues": ["invented_stripe_pattern"],
+            "warnings": [],
+            "penalty": 120.0,
+            "marking_spatial_quality": {
+                "available": True,
+                "source_stripe_component_count": 0,
+                "source_stripe_area_fraction": 0.0,
+                "source_dark_contrast_fraction": 0.015667,
+                "candidate_stripe_component_count": 15,
+                "candidate_stripe_area_fraction": 0.090000,
+                "candidate_dark_contrast_fraction": 0.130000,
+            },
+        }
+        upper_quality = {
+            "available": True,
+            "acceptable": True,
+            "warning": False,
+            "issues": [],
+            "warnings": [],
+            "penalty": 5.2,
+            "marking_spatial_quality": {
+                "available": True,
+                "source_stripe_component_count": 3,
+                "source_stripe_area_fraction": 0.010596,
+                "source_dark_contrast_fraction": 0.025895,
+                "candidate_stripe_component_count": 10,
+                "candidate_stripe_area_fraction": 0.044440,
+                "candidate_dark_contrast_fraction": 0.063643,
+            },
+        }
+
+        quality = pipeline.bowl_aware_identity_palette_quality(
+            primary_quality,
+            upper_quality,
+        )
+
+        self.assertFalse(quality["acceptable"], quality)
+        self.assertIn("invented_stripe_pattern", quality["issues"])
+        self.assertTrue(
+            quality["cross_crop_stripe_confirmation"]["severe_amplification"]
+        )
+
     def test_source_present_stripe_amplification_can_seed_identity_refine(
         self,
     ) -> None:

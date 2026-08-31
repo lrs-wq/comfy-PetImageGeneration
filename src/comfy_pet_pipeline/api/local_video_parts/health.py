@@ -1122,6 +1122,12 @@ def health() -> dict[str, Any]:
                         "source_stripe_area_max": (
                             IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX
                         ),
+                        "source_stripe_evidence": {
+                            "component_min": (
+                                IDENTITY_SOURCE_PRESENT_STRIPE_COMPONENT_MIN
+                            ),
+                            "area_min": IDENTITY_SOURCE_PRESENT_STRIPE_AREA_MIN,
+                        },
                         "stripe_component_delta_min": (
                             IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN
                         ),
@@ -1131,6 +1137,33 @@ def health() -> dict[str, Any]:
                         "dark_contrast_delta_min": (
                             IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN
                         ),
+                        "source_absent_invention": {
+                            "stripe_component_delta_min": (
+                                IDENTITY_NEW_STRIPE_COMPONENT_DELTA_MIN
+                            ),
+                            "stripe_area_delta_min": (
+                                IDENTITY_NEW_STRIPE_AREA_DELTA_MIN
+                            ),
+                            "dark_contrast_delta_min": (
+                                IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN
+                            ),
+                        },
+                        "source_present_amplification": {
+                            "stripe_component_delta_min": (
+                                IDENTITY_AMPLIFIED_STRIPE_COMPONENT_DELTA_MIN
+                            ),
+                            "stripe_area_delta_min": (
+                                IDENTITY_AMPLIFIED_STRIPE_AREA_DELTA_MIN
+                            ),
+                            "dark_contrast_delta_min": (
+                                IDENTITY_AMPLIFIED_STRIPE_DARK_CONTRAST_DELTA_MIN
+                            ),
+                        },
+                        "bowl_primary_upper_cross_crop_policy": (
+                            "bowl_upper_body_source_stripe_confirmation_v1"
+                        ),
+                        "bowl_cross_crop_requires_upper_source_evidence": True,
+                        "bowl_cross_crop_blocks_severe_primary_amplification": True,
                     },
                 },
                 "canonical_chroma_despill": (
@@ -1786,7 +1819,9 @@ def health() -> dict[str, Any]:
                     "identity_gate_unchanged": True,
                     "eating_pose_gate_unchanged": True,
                     "fur_surface_gate_unchanged": True,
-                    "global_thresholds_changed": False,
+                    "global_thresholds_changed": True,
+                    "source_absent_stripe_gate_unchanged": True,
+                    "source_present_stripe_amplification_tier_added": True,
                     "identity_gate_unchanged_for_refined_output": True,
                     "fallback_when_no_pose_safe_palette_drift_source": (
                         "existing_seed_retry"
