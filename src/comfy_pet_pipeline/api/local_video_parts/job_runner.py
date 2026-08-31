@@ -3684,6 +3684,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             grooming_full_pose_refine_source: dict[str, Any] | None = None
             grooming_advisory_identity_refine_source: dict[str, Any] | None = None
             eating_identity_refine_source: dict[str, Any] | None = None
+            eating_contact_repair_source: dict[str, Any] | None = None
             previous_pose_identity_palette_quality: dict[str, Any] | None = None
             previous_advisory_grooming_minimum_issues: list[str] = []
             canonical_grooming_completion_capable = bool(
@@ -4276,6 +4277,25 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     and attempt >= EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
                     and isinstance(eating_identity_refine_source, dict)
                 )
+                prior_strict_eating_candidate_exists = bool(
+                    action_key(pose) == "eating"
+                    and any(
+                        not strict_first_frame_record_issues(
+                            item,
+                            action="eating",
+                        )
+                        for item in attempts
+                        if isinstance(item, dict)
+                    )
+                )
+                canonical_eating_contact_repair_active = bool(
+                    canonical_action_reference
+                    and action_key(pose) == "eating"
+                    and attempt >= EATING_CONTACT_REPAIR_ATTEMPT
+                    and isinstance(eating_contact_repair_source, dict)
+                    and not canonical_eating_identity_refine_active
+                    and not prior_strict_eating_candidate_exists
+                )
                 grooming_foreleg_repair_active = bool(
                     legacy_grooming_foreleg_repair_active
                     or canonical_grooming_completion_active
@@ -4293,6 +4313,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 ) = None
                 grooming_advisory_identity_refine_noise_mask_path: Path | None = None
                 eating_identity_refine_audit: dict[str, Any] | None = None
+                eating_contact_repair_audit: dict[str, Any] | None = None
+                eating_contact_repair_noise_mask_path: Path | None = None
                 pose_transfer_seed_path: Path | None = None
                 grooming_advisory_action_transfer_attempt: (
                     dict[str, Any] | None
@@ -5192,7 +5214,144 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             else None
                         ),
                     )
-                if canonical_eating_identity_refine_active:
+                if canonical_eating_contact_repair_active:
+                    assert isinstance(eating_contact_repair_source, dict)
+                    repair_source_attempt = int(
+                        eating_contact_repair_source["attempt"]
+                    )
+                    repair_source_path = Path(
+                        str(eating_contact_repair_source["cutout_path"])
+                    )
+                    expected_repair_source_sha256 = str(
+                        eating_contact_repair_source["cutout_sha256"]
+                    )
+                    if (
+                        not repair_source_path.is_file()
+                        or file_sha256(repair_source_path)
+                        != expected_repair_source_sha256
+                    ):
+                        raise RuntimeError(
+                            "Canonical eating contact-repair source disappeared "
+                            "or changed."
+                        )
+                    contact_geometry_input_name = attempt_secondary_input_name
+                    if not contact_geometry_input_name:
+                        raise RuntimeError(
+                            "Canonical eating contact repair lacks its white-model "
+                            "action guide."
+                        )
+                    repair_canvas_path = (
+                        comfy_input_dir
+                        / (
+                            "eating_contact_repair_source_attempt_"
+                            f"{repair_source_attempt:02d}.png"
+                        )
+                    )
+                    eating_contact_repair_noise_mask_path = (
+                        comfy_input_dir
+                        / (
+                            "eating_contact_repair_noise_mask_attempt_"
+                            f"{repair_source_attempt:02d}.png"
+                        )
+                    )
+                    repair_canvas_audit = (
+                        prepare_canonical_eating_contact_repair_canvas(
+                            repair_source_path,
+                            repair_canvas_path,
+                            eating_contact_repair_noise_mask_path,
+                            contact_quality=(
+                                eating_contact_repair_source["contact_quality"]
+                            ),
+                        )
+                    )
+                    attempt_primary_input_name = (
+                        comfy_relative_dir / repair_canvas_path.name
+                    ).as_posix()
+                    attempt_secondary_input_name = qwen_input_name
+                    attempt_tertiary_input_name = contact_geometry_input_name
+                    attempt_additional_reference_input_names = [
+                        attempt_secondary_input_name,
+                        attempt_tertiary_input_name,
+                    ]
+                    attempt_noise_mask_input_name = (
+                        comfy_relative_dir
+                        / eating_contact_repair_noise_mask_path.name
+                    ).as_posix()
+                    attempt_geometry_input_name = attempt_tertiary_input_name
+                    attempt_prompt = build_canonical_eating_contact_repair_prompt(
+                        pose,
+                        source_attempt=repair_source_attempt,
+                        source_gap_px=int(
+                            eating_contact_repair_source["gap_px"]
+                        ),
+                        profile_fur_lock=profile_fur_lock,
+                    )
+                    eating_contact_repair_audit = {
+                        "policy": EATING_CONTACT_REPAIR_POLICY,
+                        "attempt": attempt,
+                        "source_attempt": repair_source_attempt,
+                        "source_path": str(repair_source_path),
+                        "source_sha256": expected_repair_source_sha256,
+                        "source_gap_px": int(
+                            eating_contact_repair_source["gap_px"]
+                        ),
+                        "source_contact_quality": (
+                            eating_contact_repair_source["contact_quality"]
+                        ),
+                        "source_identity_palette": (
+                            eating_contact_repair_source[
+                                "identity_palette_quality"
+                            ]
+                        ),
+                        "repair_canvas": repair_canvas_audit,
+                        "image1_role": (
+                            "identity_safe_eating_candidate_local_sampler"
+                        ),
+                        "image2_role": (
+                            "approved_canonical_identity_appearance_corroboration"
+                        ),
+                        "image3_role": (
+                            "white_maquette_eating_contact_geometry_only"
+                        ),
+                        "sampler_noise_mask": {
+                            "input_name": attempt_noise_mask_input_name,
+                            "path": str(
+                                eating_contact_repair_noise_mask_path
+                            ),
+                            "sha256": repair_canvas_audit[
+                                "noise_mask_target_sha256"
+                            ],
+                            "policy": (
+                                "head_neck_muzzle_to_bowl_corridor_only_v1"
+                            ),
+                        },
+                        "full_frame_sampling": False,
+                        "body_bowl_paws_tail_lock_required": True,
+                        "identity_gate_unchanged": True,
+                        "eating_contact_gate_unchanged": True,
+                        "downstream_scail_prop_mask_thresholds_unchanged": True,
+                    }
+                    update_job(
+                        job_id,
+                        eating_contact_repair_active=True,
+                        eating_contact_repair_policy=(
+                            EATING_CONTACT_REPAIR_POLICY
+                        ),
+                        eating_contact_repair_attempt=attempt,
+                        eating_contact_repair_source_attempt=(
+                            repair_source_attempt
+                        ),
+                        eating_contact_repair_source_gap_px=int(
+                            eating_contact_repair_source["gap_px"]
+                        ),
+                        eating_contact_repair_source_sha256=(
+                            expected_repair_source_sha256
+                        ),
+                        eating_contact_repair_noise_mask_sha256=(
+                            repair_canvas_audit["noise_mask_target_sha256"]
+                        ),
+                    )
+                elif canonical_eating_identity_refine_active:
                     assert isinstance(eating_identity_refine_source, dict)
                     refine_source_path = Path(
                         str(eating_identity_refine_source["cutout_path"])
@@ -5406,6 +5565,8 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         == "pose_safe_identity_refine"
                         else GROOMING_CANONICAL_FULL_POSE_RESCUE_DENOISE
                     )
+                elif canonical_eating_contact_repair_active:
+                    effective_pose_denoise = EATING_CONTACT_REPAIR_DENOISE
                 elif canonical_eating_identity_refine_active:
                     effective_pose_denoise = EATING_CANONICAL_IDENTITY_REFINE_DENOISE
                 effective_pose_user_lora = (
@@ -5474,6 +5635,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 if canonical_eating_identity_refine_active:
                     effective_pose_steps = max(
                         EATING_CANONICAL_IDENTITY_REFINE_STEPS,
+                        effective_pose_steps,
+                    )
+                if canonical_eating_contact_repair_active:
+                    effective_pose_steps = max(
+                        EATING_CONTACT_REPAIR_STEPS,
                         effective_pose_steps,
                     )
                 effective_suppress_builtin_style = (
@@ -6671,7 +6837,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "identity_input_name": pose_identity_input_name,
                     "geometry_input_name": (
                         attempt_tertiary_input_name
-                        if canonical_eating_identity_refine_active
+                        if (
+                            canonical_eating_identity_refine_active
+                            or canonical_eating_contact_repair_active
+                        )
                         else (
                             (attempt_tertiary_input_name or attempt_primary_input_name)
                             if canonical_grooming_full_pose_recovery_active
@@ -6700,6 +6869,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "grooming_foreleg_repair": (grooming_foreleg_repair_audit),
                     "grooming_full_pose_recovery": (grooming_full_pose_recovery_audit),
                     "eating_identity_refine": eating_identity_refine_audit,
+                    "eating_contact_repair": eating_contact_repair_audit,
                     "raw_qwen_source_path": str(source_output),
                     "raw_qwen_source_sha256": source_output_sha256,
                     "raw_qwen_byte_preserved": raw_qwen_byte_preserved,
@@ -7358,6 +7528,89 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     6,
                 )
                 record["transparent"] = True
+                eating_contact_quality = (
+                    quality.get("eating_mouth_bowl_contact")
+                    if isinstance(quality, dict)
+                    else None
+                )
+                eating_contact_issues = {
+                    str(issue)
+                    for issue in quality.get("issues", [])
+                    if str(issue).strip()
+                }
+                eating_contact_component_gaps = [
+                    int(component["gap_px"])
+                    for component in (
+                        eating_contact_quality.get("component_candidates", [])
+                        if isinstance(eating_contact_quality, dict)
+                        else []
+                    )
+                    if isinstance(component, dict)
+                    and isinstance(component.get("gap_px"), (int, float))
+                    and 0
+                    <= int(component["gap_px"])
+                    <= EATING_CONTACT_REPAIR_SOURCE_GAP_MAX_PX
+                ]
+                eating_contact_gap_px = (
+                    min(eating_contact_component_gaps)
+                    if eating_contact_component_gaps
+                    else None
+                )
+                if (
+                    canonical_action_reference
+                    and action_key(pose) == "eating"
+                    and attempt < QWEN_ACTION_CANDIDATE_ATTEMPTS
+                    and chroma_metrics.get("acceptable") is True
+                    and attempt_cutout.is_file()
+                    and eating_contact_issues
+                    == EATING_CONTACT_REPAIR_SOURCE_ISSUES
+                    and isinstance(eating_contact_quality, dict)
+                    and eating_contact_quality.get("available") is True
+                    and eating_contact_gap_px is not None
+                    and eating_contact_gap_px > EATING_MUZZLE_BOWL_GAP_MAX_PX
+                    and isinstance(palette_quality, dict)
+                    and palette_quality.get("acceptable") is True
+                    and (
+                        fur_silhouette_quality is None
+                        or fur_silhouette_quality.get("acceptable") is True
+                    )
+                ):
+                    eating_contact_selection_key = (
+                        int(eating_contact_gap_px),
+                        float(record["combined_penalty"]),
+                        -attempt,
+                    )
+                    if (
+                        eating_contact_repair_source is None
+                        or eating_contact_selection_key
+                        < tuple(
+                            eating_contact_repair_source["selection_key"]
+                        )
+                    ):
+                        eating_contact_repair_source = {
+                            "attempt": attempt,
+                            "cutout_path": str(attempt_cutout),
+                            "cutout_sha256": file_sha256(attempt_cutout),
+                            "keyframe_path": str(attempt_keyframe),
+                            "keyframe_sha256": file_sha256(attempt_keyframe),
+                            "gap_px": int(eating_contact_gap_px),
+                            "contact_quality": eating_contact_quality,
+                            "identity_palette_quality": palette_quality,
+                            "fur_silhouette_quality": fur_silhouette_quality,
+                            "selection_key": list(
+                                eating_contact_selection_key
+                            ),
+                            "source_role": (
+                                "identity_safe_nearest_muzzle_to_bowl_candidate_"
+                                "for_local_contact_repair"
+                            ),
+                        }
+                        update_job(
+                            job_id,
+                            eating_contact_repair_candidate=(
+                                eating_contact_repair_source
+                            ),
+                        )
                 if (
                     image_request
                     and similarity["acceptable"]

@@ -2770,6 +2770,365 @@ def eating_neutral_muzzle_bowl_contact_quality(path: Path) -> dict[str, Any]:
     }
 
 
+def eating_nose_kibble_contact_quality(
+    path: Path,
+    *,
+    neutral_contact: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Measure nose-to-food contact when coat and kibble defeat prop splitting.
+
+    This probe is deliberately independent from the SCAIL identity/prop mask.
+    It reuses only the broad neutral bowl localization, then finds a centered
+    low nose seed and the warm food mound directly below that seed.  Measuring
+    in the narrow nose column avoids treating cheeks, paws, whiskers or the
+    bowl rim as mouth contact.
+    """
+    _sync_local_video_runtime(
+        globals(),
+        {"eating_nose_kibble_contact_quality"},
+    )
+
+    rgba = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if rgba is None or rgba.ndim != 3 or rgba.shape[2] < 4:
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["eating_nose_kibble_alpha_unavailable"],
+            "policy": EATING_NOSE_KIBBLE_CONTACT_FALLBACK_POLICY,
+        }
+    bowl_probe = (
+        neutral_contact
+        if isinstance(neutral_contact, dict)
+        else eating_neutral_muzzle_bowl_contact_quality(path)
+    )
+    bowl = bowl_probe.get("bowl") if isinstance(bowl_probe, dict) else None
+    bowl_bbox = (
+        bowl_probe.get("bowl_bbox")
+        if isinstance(bowl_probe, dict)
+        else None
+    )
+    if not (
+        isinstance(bowl_bbox, list)
+        and len(bowl_bbox) == 4
+    ) and isinstance(bowl, dict):
+        bowl_bbox = bowl.get("bbox")
+    foreground_bbox = (
+        bowl_probe.get("foreground_bbox")
+        if isinstance(bowl_probe, dict)
+        else None
+    )
+    if not (
+        isinstance(bowl_bbox, list)
+        and len(bowl_bbox) == 4
+        and isinstance(foreground_bbox, list)
+        and len(foreground_bbox) == 4
+    ):
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["eating_nose_kibble_bowl_unavailable"],
+            "policy": EATING_NOSE_KIBBLE_CONTACT_FALLBACK_POLICY,
+            "neutral_bowl_probe": bowl_probe,
+        }
+
+    bowl_left, bowl_top, bowl_right, bowl_bottom = (
+        int(value) for value in bowl_bbox
+    )
+    bowl_width = bowl_right - bowl_left
+    if bowl_width < 32:
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["eating_nose_kibble_bowl_too_small"],
+            "policy": EATING_NOSE_KIBBLE_CONTACT_FALLBACK_POLICY,
+            "foreground_bbox": foreground_bbox,
+            "bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
+        }
+
+    bgr = rgba[:, :, :3]
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    hue = hsv[:, :, 0]
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+    alpha = rgba[:, :, 3] >= 64
+    row_indices, column_indices = np.indices(alpha.shape)
+    bowl_center_x = (bowl_left + bowl_right) / 2.0
+
+    nose_search_top = max(0, bowl_top - int(round(bowl_width * 0.55)))
+    nose_search_left = max(0, bowl_left - int(round(bowl_width * 0.10)))
+    nose_search_right = min(
+        alpha.shape[1],
+        bowl_right + int(round(bowl_width * 0.10)),
+    )
+    red_nose = (
+        ((hue <= 8) | (hue >= 175))
+        & (saturation >= 150)
+        & (value >= 35)
+    )
+    nose_seed = (
+        alpha
+        & red_nose
+        & (row_indices >= nose_search_top)
+        & (row_indices < bowl_top)
+        & (column_indices >= nose_search_left)
+        & (column_indices < nose_search_right)
+    )
+    nose_count, nose_labels, nose_stats, nose_centroids = (
+        cv2.connectedComponentsWithStats(
+            nose_seed.astype(np.uint8),
+            connectivity=8,
+        )
+    )
+    minimum_nose_width = max(8, int(round(bowl_width * 0.07)))
+    maximum_nose_width = max(
+        minimum_nose_width,
+        int(round(bowl_width * 0.50)),
+    )
+    maximum_nose_height = max(8, int(round(bowl_width * 0.40)))
+    maximum_center_offset = bowl_width * 0.10
+    minimum_nose_top_clearance = max(24, int(round(bowl_width * 0.15)))
+    minimum_nose_bottom = bowl_top - int(round(bowl_width * 0.25))
+    minimum_food_local_row_pixels = max(
+        8,
+        int(round(bowl_width * 0.05)),
+    )
+    nose_candidates: list[tuple[int, int, float, int, dict[str, Any]]] = []
+    nose_candidate_audits: list[dict[str, Any]] = []
+    for label in range(1, nose_count):
+        component_left = int(nose_stats[label, cv2.CC_STAT_LEFT])
+        component_top = int(nose_stats[label, cv2.CC_STAT_TOP])
+        component_width = int(nose_stats[label, cv2.CC_STAT_WIDTH])
+        component_height = int(nose_stats[label, cv2.CC_STAT_HEIGHT])
+        component_area = int(nose_stats[label, cv2.CC_STAT_AREA])
+        component_bottom = component_top + component_height
+        center_x = float(nose_centroids[label][0])
+        rejection_reasons: list[str] = []
+        if component_area < EATING_MUZZLE_COMPONENT_AREA_MIN_PX:
+            rejection_reasons.append("area_below_minimum")
+        if not minimum_nose_width <= component_width <= maximum_nose_width:
+            rejection_reasons.append("width_outside_nose_range")
+        if not 4 <= component_height <= maximum_nose_height:
+            rejection_reasons.append("height_outside_nose_range")
+        if abs(center_x - bowl_center_x) > maximum_center_offset:
+            rejection_reasons.append("center_outside_nose_corridor")
+        if component_top > bowl_top - minimum_nose_top_clearance:
+            rejection_reasons.append("component_too_low_for_nose")
+        if not minimum_nose_bottom <= component_bottom <= bowl_top:
+            rejection_reasons.append("component_bottom_outside_face_band")
+        audit = {
+            "label": label,
+            "bbox": [
+                component_left,
+                component_top,
+                component_left + component_width,
+                component_bottom,
+            ],
+            "area": component_area,
+            "center_offset_bowl_ratio": round(
+                abs(center_x - bowl_center_x) / float(max(1, bowl_width)),
+                6,
+            ),
+            "rejection_reasons": rejection_reasons,
+        }
+        nose_candidate_audits.append(audit)
+        if not rejection_reasons:
+            nose_candidates.append(
+                (
+                    component_bottom,
+                    component_area,
+                    -abs(center_x - bowl_center_x),
+                    label,
+                    audit,
+                )
+            )
+    nose_candidate_audits.sort(
+        key=lambda item: (
+            len(item["rejection_reasons"]),
+            -int(item["bbox"][3]),
+            -int(item["area"]),
+        )
+    )
+    thresholds = {
+        "gap_px_min": 0,
+        "gap_px_max": EATING_MUZZLE_BOWL_GAP_MAX_PX,
+        "nose_hue_max": 8,
+        "nose_hue_wrap_min": 175,
+        "nose_saturation_min": 150,
+        "nose_value_min": 35,
+        "nose_width_bowl_ratio_min": 0.07,
+        "nose_width_bowl_ratio_max": 0.50,
+        "nose_height_bowl_ratio_max": 0.40,
+        "nose_center_offset_bowl_ratio_max": 0.10,
+        "nose_top_clearance_bowl_ratio_min": 0.15,
+        "nose_bottom_clearance_bowl_ratio_max": 0.25,
+        "food_hue_max": 18,
+        "food_hue_wrap_min": 172,
+        "food_saturation_min": 70,
+        "food_value_min": 12,
+        "food_local_row_pixels_min": minimum_food_local_row_pixels,
+    }
+    if not nose_candidates:
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["eating_nose_not_detected"],
+            "policy": EATING_NOSE_KIBBLE_CONTACT_FALLBACK_POLICY,
+            "foreground_bbox": foreground_bbox,
+            "bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
+            "nose_candidates": nose_candidate_audits[:12],
+            "thresholds": thresholds,
+        }
+
+    nose_bottom, _nose_area, _nose_center_rank, nose_label, selected_nose = max(
+        nose_candidates,
+        key=lambda item: item[:3],
+    )
+    nose_bottom_band_top = max(
+        int(selected_nose["bbox"][1]),
+        nose_bottom - max(3, int(round(bowl_width * 0.03))),
+    )
+    _anchor_rows, anchor_columns = np.where(
+        (nose_labels == nose_label)
+        & (row_indices >= nose_bottom_band_top)
+    )
+    nose_anchor_x = float(np.median(anchor_columns))
+
+    warm_food = (
+        alpha
+        & ((hue <= 18) | (hue >= 172))
+        & (saturation >= 70)
+        & (value >= 12)
+        & (row_indices >= nose_bottom)
+        & (row_indices < min(alpha.shape[0], bowl_top + 10))
+        & (column_indices >= bowl_left)
+        & (column_indices < bowl_right)
+    )
+    food_count, food_labels, food_stats, food_centroids = (
+        cv2.connectedComponentsWithStats(
+            warm_food.astype(np.uint8),
+            connectivity=8,
+        )
+    )
+    anchor_half_width = max(8, int(round(bowl_width * 0.08)))
+    anchor_left = max(0, int(round(nose_anchor_x)) - anchor_half_width)
+    anchor_right = min(
+        alpha.shape[1],
+        int(round(nose_anchor_x)) + anchor_half_width + 1,
+    )
+    minimum_food_width = max(8, int(round(bowl_width * 0.10)))
+    food_candidates: list[tuple[int, int, int, dict[str, Any]]] = []
+    food_candidate_audits: list[dict[str, Any]] = []
+    for label in range(1, food_count):
+        component_left = int(food_stats[label, cv2.CC_STAT_LEFT])
+        component_top = int(food_stats[label, cv2.CC_STAT_TOP])
+        component_width = int(food_stats[label, cv2.CC_STAT_WIDTH])
+        component_height = int(food_stats[label, cv2.CC_STAT_HEIGHT])
+        component_area = int(food_stats[label, cv2.CC_STAT_AREA])
+        component_bottom = component_top + component_height
+        center_x = float(food_centroids[label][0])
+        local_rows = [
+            row
+            for row in range(
+                max(nose_bottom, component_top),
+                min(bowl_top + 10, component_bottom),
+            )
+            if int(
+                np.count_nonzero(
+                    food_labels[row, anchor_left:anchor_right] == label
+                )
+            )
+            >= minimum_food_local_row_pixels
+        ]
+        rejection_reasons: list[str] = []
+        if component_area < 40:
+            rejection_reasons.append("area_below_food_minimum")
+        if component_width < minimum_food_width:
+            rejection_reasons.append("width_below_food_minimum")
+        if component_bottom < bowl_top - 2:
+            rejection_reasons.append("component_not_supported_by_bowl")
+        if abs(center_x - bowl_center_x) > bowl_width * 0.45:
+            rejection_reasons.append("food_center_outside_bowl")
+        if not local_rows:
+            rejection_reasons.append("food_missing_beneath_nose")
+        contact_y = min(local_rows) if local_rows else None
+        audit = {
+            "label": label,
+            "bbox": [
+                component_left,
+                component_top,
+                component_left + component_width,
+                component_bottom,
+            ],
+            "area": component_area,
+            "contact_y": contact_y,
+            "rejection_reasons": rejection_reasons,
+        }
+        food_candidate_audits.append(audit)
+        if not rejection_reasons and contact_y is not None:
+            food_candidates.append(
+                (
+                    contact_y,
+                    -component_area,
+                    label,
+                    audit,
+                )
+            )
+    food_candidate_audits.sort(
+        key=lambda item: (
+            len(item["rejection_reasons"]),
+            int(item["contact_y"] or 10000),
+            -int(item["area"]),
+        )
+    )
+    if not food_candidates:
+        return {
+            "available": False,
+            "acceptable": False,
+            "issues": ["eating_kibble_not_detected_beneath_nose"],
+            "policy": EATING_NOSE_KIBBLE_CONTACT_FALLBACK_POLICY,
+            "foreground_bbox": foreground_bbox,
+            "bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
+            "nose_anchor": [int(round(nose_anchor_x)), nose_bottom - 1],
+            "selected_nose": selected_nose,
+            "nose_candidates": nose_candidate_audits[:12],
+            "food_candidates": food_candidate_audits[:12],
+            "thresholds": thresholds,
+        }
+
+    contact_y, _food_area_rank, _food_label, selected_food = min(
+        food_candidates,
+        key=lambda item: item[:2],
+    )
+    nose_food_gap_px = int(contact_y - nose_bottom)
+    acceptable = 0 <= nose_food_gap_px <= EATING_MUZZLE_BOWL_GAP_MAX_PX
+    selected_component = {
+        **selected_nose,
+        "gap_px": nose_food_gap_px,
+        "rejection_reasons": (
+            [] if acceptable else ["gap_outside_contact_range"]
+        ),
+    }
+    return {
+        "available": True,
+        "acceptable": acceptable,
+        "issues": [] if acceptable else ["eating_muzzle_not_at_bowl"],
+        "penalty": 0.0 if acceptable else 125.0,
+        "method": EATING_MOUTH_BOWL_CONTACT_POLICY,
+        "evidence_policy": EATING_NOSE_KIBBLE_CONTACT_FALLBACK_POLICY,
+        "foreground_bbox": foreground_bbox,
+        "bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
+        "nose_food_gap_px": nose_food_gap_px,
+        "muzzle_bowl_gap_px": nose_food_gap_px,
+        "nose_anchor": [int(round(nose_anchor_x)), nose_bottom - 1],
+        "selected_component": selected_component,
+        "component_candidates": [selected_component],
+        "selected_food": selected_food,
+        "nose_candidates": nose_candidate_audits[:12],
+        "food_candidates": food_candidate_audits[:12],
+        "thresholds": thresholds,
+    }
+
+
 def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
     """Require a real face/muzzle anchor immediately above the detected food bowl.
 
@@ -2797,11 +3156,31 @@ def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - convert splitter failures to gate data
         error = f"{type(exc).__name__}: {str(exc)[:1000]}"
         neutral_contact = eating_neutral_muzzle_bowl_contact_quality(path)
+        if neutral_contact.get("acceptable") is True:
+            return {
+                **neutral_contact,
+                "strict_prop_split_error": error,
+                "strict_prop_split_fallback_used": True,
+                "downstream_prop_mask_thresholds_unchanged": True,
+            }
+        nose_kibble_contact = eating_nose_kibble_contact_quality(
+            path,
+            neutral_contact=neutral_contact,
+        )
+        if nose_kibble_contact.get("available") is True:
+            return {
+                **nose_kibble_contact,
+                "strict_prop_split_error": error,
+                "strict_prop_split_fallback_used": True,
+                "neutral_muzzle_fallback": neutral_contact,
+                "downstream_prop_mask_thresholds_unchanged": True,
+            }
         if neutral_contact.get("available") is True:
             return {
                 **neutral_contact,
                 "strict_prop_split_error": error,
                 "strict_prop_split_fallback_used": True,
+                "nose_kibble_fallback": nose_kibble_contact,
                 "downstream_prop_mask_thresholds_unchanged": True,
             }
         lowered = str(exc).lower()
@@ -2827,6 +3206,7 @@ def eating_mouth_bowl_contact_quality(path: Path) -> dict[str, Any]:
             "method": EATING_MOUTH_BOWL_CONTACT_POLICY,
             "error": error,
             "neutral_muzzle_fallback": neutral_contact,
+            "nose_kibble_fallback": nose_kibble_contact,
         }
 
     reference_rgba = np.asarray(reference, dtype=np.uint8)

@@ -1216,6 +1216,17 @@ def health() -> dict[str, Any]:
                     "neutral_muzzle_fallback_scope": (
                         "first_frame_contact_gate_only_after_strict_prop_split_failure"
                     ),
+                    "nose_kibble_fallback_policy": (
+                        EATING_NOSE_KIBBLE_CONTACT_FALLBACK_POLICY
+                    ),
+                    "nose_kibble_fallback_scope": (
+                        "first_frame_contact_gate_only_after_strict_prop_split_"
+                        "and_neutral_muzzle_failure"
+                    ),
+                    "nose_kibble_requires_neutral_bowl_localization": True,
+                    "nose_kibble_uses_narrow_nose_column": True,
+                    "nose_kibble_gap_px_min": 0,
+                    "nose_kibble_gap_px_max": EATING_MUZZLE_BOWL_GAP_MAX_PX,
                     "downstream_scail_prop_mask_thresholds_unchanged": True,
                     "thin_warm_rim_fallback_policy": (
                         EATING_BOWL_SPLIT_FALLBACK_POLICY
@@ -1837,6 +1848,36 @@ def health() -> dict[str, Any]:
                     "fallback_when_no_pose_safe_palette_drift_source": (
                         "existing_seed_retry"
                     ),
+                },
+                "eating_contact_repair": {
+                    "enabled": True,
+                    "policy": EATING_CONTACT_REPAIR_POLICY,
+                    "starts_at_attempt": EATING_CONTACT_REPAIR_ATTEMPT,
+                    "source_capture_through_attempt": (
+                        QWEN_ACTION_CANDIDATE_ATTEMPTS - 1
+                    ),
+                    "source_requires_identity_palette_pass": True,
+                    "source_allowed_issues": sorted(
+                        EATING_CONTACT_REPAIR_SOURCE_ISSUES
+                    ),
+                    "source_gap_px_max": (
+                        EATING_CONTACT_REPAIR_SOURCE_GAP_MAX_PX
+                    ),
+                    "selection": "nearest_identity_safe_prior_candidate",
+                    "steps": EATING_CONTACT_REPAIR_STEPS,
+                    "denoise": EATING_CONTACT_REPAIR_DENOISE,
+                    "sampler_noise_mask": (
+                        "head_neck_muzzle_to_bowl_corridor_only_v1"
+                    ),
+                    "image_roles": {
+                        "image1": "identity_safe_nearest_eating_candidate",
+                        "image2": "approved_canonical_identity_corroboration",
+                        "image3": "white_maquette_eating_contact_geometry_only",
+                    },
+                    "body_bowl_paws_tail_locked_outside_mask": True,
+                    "contact_gate_unchanged": True,
+                    "downstream_scail_prop_mask_thresholds_unchanged": True,
+                    "attempt_budget_unchanged": True,
                 },
                 "grooming_pose_lora_policy": (
                     "canonical_identity_open_channel_seed_bound_pose_safe_refine_v11"

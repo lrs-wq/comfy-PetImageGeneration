@@ -2142,6 +2142,107 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertEqual(loaded_loras, {pipeline.QWEN_LORA: 1.0})
         self.assertNotIn(self.TEST_QWEN_STYLE_LORA, loaded_loras)
 
+    def test_eating_attempt4_locally_repairs_nearest_identity_safe_contact_gap(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
+                root,
+                action="eating",
+                action_identity_policy=(
+                    pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL
+                ),
+                pose_attempt=4,
+                identity_palette_guard=True,
+                action_chroma_acceptable_attempts={1, 2, 3},
+                eating_contact_gap_attempts={1: 31, 2: 22, 3: 19},
+            )
+
+            repair_input = (
+                "local_video_api/capture-eating/"
+                "eating_contact_repair_source_attempt_03.png"
+            )
+            repair_mask = (
+                "local_video_api/capture-eating/"
+                "eating_contact_repair_noise_mask_attempt_03.png"
+            )
+            expected_canonical = (
+                "local_video_api/capture-eating/cartoon_reference.png"
+            )
+            load_images = {
+                node_id: node["inputs"]["image"]
+                for node_id, node in workflow.items()
+                if node.get("class_type") == "LoadImage"
+            }
+            self.assertEqual(load_images["1"], repair_input)
+            self.assertEqual(
+                set(load_images.values()),
+                {repair_input, repair_mask, expected_canonical, pose_input},
+            )
+            self.assertNotIn(uploaded_input, load_images.values())
+            self.assertTrue(
+                any(
+                    node.get("class_type") == "SetLatentNoiseMask"
+                    for node in workflow.values()
+                )
+            )
+            prompt = workflow["6"]["inputs"]["prompt"]
+            self.assertIn("CRITICAL LOCAL EATING-CONTACT REPAIR", prompt)
+            self.assertIn("measured 19-pixel vertical air gap", prompt)
+            self.assertIn("Image 3 is the neutral Main_case white-maquette", prompt)
+            self.assertIn("final measured vertical gap is 0 to 8", prompt)
+            self.assertEqual(
+                workflow["14"]["inputs"]["denoise"],
+                pipeline.EATING_CONTACT_REPAIR_DENOISE,
+            )
+            self.assertEqual(
+                workflow["14"]["inputs"]["steps"],
+                pipeline.EATING_CONTACT_REPAIR_STEPS,
+            )
+
+            mask_path = root / "comfy-input" / repair_mask
+            self.assertTrue(mask_path.is_file())
+            with Image.open(mask_path) as loaded:
+                mask_alpha = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)[
+                    :, :, 3
+                ]
+            self.assertEqual(int(mask_alpha[0, 0]), 255)
+            self.assertEqual(int(mask_alpha[330, 224]), 0)
+            self.assertEqual(int(mask_alpha[400, 205]), 255)
+
+    def test_eating_attempt5_reuses_the_closer_attempt4_contact_candidate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="eating",
+                action_identity_policy=(
+                    pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL
+                ),
+                pose_attempt=5,
+                identity_palette_guard=True,
+                action_chroma_acceptable_attempts={1, 2, 3, 4},
+                eating_contact_gap_attempts={1: 31, 2: 22, 3: 19, 4: 12},
+            )
+
+        load_images = {
+            node_id: node["inputs"]["image"]
+            for node_id, node in workflow.items()
+            if node.get("class_type") == "LoadImage"
+        }
+        self.assertEqual(
+            load_images["1"],
+            "local_video_api/capture-eating/"
+            "eating_contact_repair_source_attempt_04.png",
+        )
+        self.assertIn(pose_input, load_images.values())
+        self.assertNotIn(uploaded_input, load_images.values())
+        prompt = workflow["6"]["inputs"]["prompt"]
+        self.assertIn("identity-safe normalized eating candidate from attempt 4", prompt)
+        self.assertIn("measured 12-pixel vertical air gap", prompt)
+
     def test_eating_attempt4_repairs_source_present_amplified_stripes(
         self,
     ) -> None:

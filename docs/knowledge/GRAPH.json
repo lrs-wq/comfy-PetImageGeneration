@@ -120,10 +120,18 @@
     {
       "id": "comfy.quality.eating_contact_corroboration",
       "type": "business_rule",
-      "name": "吃饭中性食盆与口鼻接触独立佐证",
+      "name": "吃饭中性口鼻与鼻端食物接触独立佐证",
       "status": "active",
-      "tags": ["eating", "contact", "neutral-bowl", "neutral-muzzle", "scail-mask-unchanged"],
+      "tags": ["eating", "contact", "neutral-bowl", "neutral-muzzle", "nose-kibble", "narrow-corridor", "scail-mask-unchanged"],
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/generation_quality.py"
+    },
+    {
+      "id": "comfy.recovery.eating_local_contact_repair",
+      "type": "business_rule",
+      "name": "五轮内吃饭头颈局部接触修复",
+      "status": "active",
+      "tags": ["eating", "contact", "localized-repair", "identity-safe", "white-model", "five-attempts"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {
       "id": "comfy.module.transparent_animation",
@@ -265,6 +273,12 @@
       "relation": "checked_by",
       "to": "comfy.quality.eating_contact_corroboration",
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/generation_quality.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "recovers_with",
+      "to": "comfy.recovery.eating_local_contact_repair",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {
       "from": "comfy.module.pipeline",

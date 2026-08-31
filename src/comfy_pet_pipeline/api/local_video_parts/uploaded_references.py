@@ -929,6 +929,24 @@ def prepare_uploaded_subject_qwen_references(
                 IDENTITY_AMPLIFIED_STRIPE_DARK_CONTRAST_DELTA_MIN
             ),
         },
+        eating_contact_repair_enabled=True,
+        eating_contact_repair_active=False,
+        eating_contact_repair_policy=EATING_CONTACT_REPAIR_POLICY,
+        eating_contact_repair_attempt=EATING_CONTACT_REPAIR_ATTEMPT,
+        eating_contact_repair_source_capture_through_attempt=(
+            QWEN_ACTION_CANDIDATE_ATTEMPTS - 1
+        ),
+        eating_contact_repair_source_issues=sorted(
+            EATING_CONTACT_REPAIR_SOURCE_ISSUES
+        ),
+        eating_contact_repair_source_gap_max_px=(
+            EATING_CONTACT_REPAIR_SOURCE_GAP_MAX_PX
+        ),
+        eating_contact_repair_steps=EATING_CONTACT_REPAIR_STEPS,
+        eating_contact_repair_denoise=EATING_CONTACT_REPAIR_DENOISE,
+        eating_contact_repair_local_noise_mask=True,
+        eating_contact_repair_white_model_geometry_loaded=True,
+        eating_contact_repair_downstream_mask_thresholds_unchanged=True,
         grooming_pose_lora_policy=(
             "canonical_identity_open_channel_seed_bound_pose_safe_refine_v11"
         ),

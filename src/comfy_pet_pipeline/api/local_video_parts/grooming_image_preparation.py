@@ -2339,6 +2339,190 @@ def prepare_canonical_eating_identity_refine_canvas(
     )
 
 
+def prepare_canonical_eating_contact_repair_canvas(
+    source: Path,
+    target: Path,
+    noise_mask_target: Path,
+    *,
+    contact_quality: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose only the head-to-bowl corridor of an identity-safe candidate."""
+    _sync_local_video_runtime(
+        globals(),
+        {"prepare_canonical_eating_contact_repair_canvas"},
+    )
+
+    audit = prepare_canonical_action_identity_refine_canvas(
+        source,
+        target,
+        action="eating",
+        policy=EATING_CONTACT_REPAIR_POLICY,
+    )
+    if not isinstance(contact_quality, dict):
+        raise ValueError("Eating contact repair requires contact-quality evidence.")
+
+    foreground_bbox = contact_quality.get("foreground_bbox")
+    bowl_bbox = contact_quality.get("bowl_bbox")
+    component_candidates = contact_quality.get("component_candidates")
+    if (
+        not isinstance(foreground_bbox, list)
+        or len(foreground_bbox) != 4
+        or not isinstance(bowl_bbox, list)
+        or len(bowl_bbox) != 4
+        or not isinstance(component_candidates, list)
+    ):
+        raise ValueError(
+            "Eating contact repair lacks foreground, bowl, or muzzle evidence."
+        )
+
+    def normalized_bbox(value: list[Any], *, label: str) -> list[int]:
+        try:
+            result = [int(item) for item in value]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Eating contact repair {label} bbox is invalid."
+            ) from exc
+        left, top, right, bottom = result
+        if not (0 <= left < right <= 512 and 0 <= top < bottom <= 512):
+            raise ValueError(
+                f"Eating contact repair {label} bbox is outside the canvas."
+            )
+        return result
+
+    subject_left, subject_top, subject_right, subject_bottom = normalized_bbox(
+        foreground_bbox,
+        label="foreground",
+    )
+    bowl_left, bowl_top, bowl_right, bowl_bottom = normalized_bbox(
+        bowl_bbox,
+        label="bowl",
+    )
+    usable_components: list[tuple[int, int, dict[str, Any], list[int]]] = []
+    for candidate in component_candidates:
+        if not isinstance(candidate, dict) or not isinstance(
+            candidate.get("bbox"),
+            list,
+        ):
+            continue
+        try:
+            gap_px = int(candidate.get("gap_px"))
+            candidate_bbox = normalized_bbox(
+                candidate["bbox"],
+                label="muzzle",
+            )
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= gap_px <= EATING_CONTACT_REPAIR_SOURCE_GAP_MAX_PX:
+            continue
+        usable_components.append(
+            (
+                gap_px,
+                -int(candidate.get("area") or 0),
+                candidate,
+                candidate_bbox,
+            )
+        )
+    if not usable_components:
+        raise ValueError(
+            "Eating contact repair has no bounded muzzle-to-bowl gap evidence."
+        )
+
+    gap_px, _negative_area, selected_component, muzzle_bbox = min(
+        usable_components,
+        key=lambda item: item[:2],
+    )
+    if gap_px <= EATING_MUZZLE_BOWL_GAP_MAX_PX:
+        raise ValueError(
+            "Eating contact repair source already satisfies the mouth-contact gate."
+        )
+    muzzle_left, muzzle_top, muzzle_right, _muzzle_bottom = muzzle_bbox
+    subject_height = subject_bottom - subject_top
+    bowl_width = bowl_right - bowl_left
+    muzzle_center_x = (muzzle_left + muzzle_right) / 2.0
+    half_width = max(
+        28,
+        int(
+            round(
+                (muzzle_right - muzzle_left) / 2.0
+                + bowl_width * EATING_CONTACT_REPAIR_MASK_SIDE_MARGIN_BOWL_RATIO
+            )
+        ),
+    )
+    repair_left = max(subject_left, int(round(muzzle_center_x)) - half_width)
+    repair_right = min(
+        subject_right,
+        int(round(muzzle_center_x)) + half_width + 1,
+    )
+    head_height = max(
+        36,
+        int(
+            round(
+                subject_height
+                * EATING_CONTACT_REPAIR_MASK_HEAD_HEIGHT_SUBJECT_RATIO
+            )
+        ),
+    )
+    repair_top = max(subject_top, muzzle_top - head_height)
+    repair_bottom = min(
+        bowl_bottom,
+        bowl_top + EATING_CONTACT_REPAIR_MASK_BOWL_OVERLAP_PX,
+    )
+    if repair_right - repair_left < 48 or repair_bottom - repair_top < 64:
+        raise RuntimeError("Eating contact repair mask corridor is too small.")
+
+    edit_support = np.zeros((512, 512), dtype=np.float32)
+    edit_support[
+        repair_top:repair_bottom,
+        repair_left:repair_right,
+    ] = 1.0
+    feather_sigma = float(EATING_CONTACT_REPAIR_MASK_FEATHER_SIGMA_PX)
+    edit_strength = cv2.GaussianBlur(
+        edit_support,
+        (0, 0),
+        sigmaX=feather_sigma,
+        sigmaY=feather_sigma,
+    ).clip(0.0, 1.0)
+    edit_strength[edit_strength < 0.01] = 0.0
+    edit_strength[edit_strength > 0.99] = 1.0
+    editable_pixels = int(np.count_nonzero(edit_strength > 0.0))
+    full_strength_pixels = int(np.count_nonzero(edit_strength >= 1.0))
+    if editable_pixels < 4096 or full_strength_pixels < 2048:
+        raise RuntimeError("Eating contact repair mask lacks a usable edit core.")
+
+    noise_mask_alpha = np.rint((1.0 - edit_strength) * 255.0).astype(np.uint8)
+    noise_mask_rgba = np.zeros((512, 512, 4), dtype=np.uint8)
+    noise_mask_rgba[:, :, 3] = noise_mask_alpha
+    noise_mask_target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(noise_mask_rgba, mode="RGBA").save(
+        noise_mask_target,
+        format="PNG",
+        optimize=True,
+    )
+    return {
+        **audit,
+        "contact_quality_policy": contact_quality.get("evidence_policy")
+        or contact_quality.get("method"),
+        "source_contact_issues": list(contact_quality.get("issues") or []),
+        "source_gap_px": gap_px,
+        "source_bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
+        "source_muzzle_component": selected_component,
+        "repair_bbox": [
+            repair_left,
+            repair_top,
+            repair_right,
+            repair_bottom,
+        ],
+        "repair_scope": "head_neck_muzzle_to_bowl_corridor_only",
+        "bowl_body_paws_tail_outside_mask_locked": True,
+        "mask_feather_sigma_px": feather_sigma,
+        "editable_pixels": editable_pixels,
+        "full_strength_pixels": full_strength_pixels,
+        "noise_mask_loadimage_contract": "mask_equals_one_minus_alpha",
+        "noise_mask_target_path": str(noise_mask_target),
+        "noise_mask_target_sha256": file_sha256(noise_mask_target),
+    }
+
+
 def prepare_grooming_foreleg_repair_anatomy_guide(
     source: Path,
     target: Path,

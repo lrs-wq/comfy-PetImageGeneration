@@ -9,12 +9,12 @@ from unittest.mock import Mock, patch
 import numpy as np
 from PIL import Image, ImageDraw
 
-import fur_surface_gate as surface_gate
 import local_video_api as pipeline
 
 from tests.integration.local_video_subject_replacement_test_support import (
     SubjectReplacementQwenReferenceTestBase,
     _subject_profile_v2,
+    _write_chromatic_nose_kibble_contact_fixture,
     _write_eating_contact_fixture,
     _write_neutral_muzzle_bowl_contact_fixture,
     _write_thin_warm_rim_beige_bowl_fixture,
@@ -724,6 +724,33 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertTrue(
             eating_refine["source_present_stripe_amplification_tier_added"]
         )
+        contact_repair = guard["eating_contact_repair"]
+        self.assertTrue(contact_repair["enabled"])
+        self.assertEqual(
+            contact_repair["policy"],
+            pipeline.EATING_CONTACT_REPAIR_POLICY,
+        )
+        self.assertEqual(
+            contact_repair["starts_at_attempt"],
+            pipeline.EATING_CONTACT_REPAIR_ATTEMPT,
+        )
+        self.assertEqual(
+            contact_repair["source_allowed_issues"],
+            sorted(pipeline.EATING_CONTACT_REPAIR_SOURCE_ISSUES),
+        )
+        self.assertEqual(
+            contact_repair["source_gap_px_max"],
+            pipeline.EATING_CONTACT_REPAIR_SOURCE_GAP_MAX_PX,
+        )
+        self.assertTrue(contact_repair["source_requires_identity_palette_pass"])
+        self.assertTrue(contact_repair["body_bowl_paws_tail_locked_outside_mask"])
+        self.assertTrue(contact_repair["contact_gate_unchanged"])
+        self.assertTrue(
+            contact_repair[
+                "downstream_scail_prop_mask_thresholds_unchanged"
+            ]
+        )
+        self.assertTrue(contact_repair["attempt_budget_unchanged"])
         self.assertEqual(
             guard["upload_pose_candidate_normalization_policy"],
             pipeline.QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY,
@@ -749,6 +776,26 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                 "neutral_muzzle_fallback_policy"
             ],
             pipeline.EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY,
+        )
+        self.assertEqual(
+            guard["eating_mouth_contact_gate"][
+                "nose_kibble_fallback_policy"
+            ],
+            pipeline.EATING_NOSE_KIBBLE_CONTACT_FALLBACK_POLICY,
+        )
+        self.assertTrue(
+            guard["eating_mouth_contact_gate"][
+                "nose_kibble_requires_neutral_bowl_localization"
+            ]
+        )
+        self.assertTrue(
+            guard["eating_mouth_contact_gate"][
+                "nose_kibble_uses_narrow_nose_column"
+            ]
+        )
+        self.assertEqual(
+            guard["eating_mouth_contact_gate"]["nose_kibble_gap_px_max"],
+            8,
         )
         self.assertTrue(
             guard["eating_mouth_contact_gate"][
@@ -1842,6 +1889,136 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertIn(
             "gap_outside_contact_range",
             result["component_candidates"][0]["rejection_reasons"],
+        )
+
+    def test_eating_contact_gate_accepts_chromatic_nose_touching_kibble(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = _write_chromatic_nose_kibble_contact_fixture(
+                Path(temporary),
+                name="chromatic-nose-contact",
+                nose_food_gap_px=4,
+            )
+            with patch(
+                "scail2_subject_replacement_test.make_eating_reference_identity_mask",
+                side_effect=ValueError(
+                    "eating_reference_prop_split_unreliable: prop_fraction=0.0303"
+                ),
+            ):
+                result = pipeline.eating_mouth_bowl_contact_quality(candidate)
+
+        self.assertTrue(result["acceptable"], result)
+        self.assertLessEqual(result["nose_food_gap_px"], 4)
+        self.assertEqual(
+            result["evidence_policy"],
+            pipeline.EATING_NOSE_KIBBLE_CONTACT_FALLBACK_POLICY,
+        )
+        self.assertTrue(result["strict_prop_split_fallback_used"])
+        self.assertTrue(result["downstream_prop_mask_thresholds_unchanged"])
+
+    def test_eating_contact_gate_rejects_chromatic_nose_with_air_gap(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = _write_chromatic_nose_kibble_contact_fixture(
+                Path(temporary),
+                name="chromatic-nose-gap",
+                nose_food_gap_px=20,
+            )
+            with patch(
+                "scail2_subject_replacement_test.make_eating_reference_identity_mask",
+                side_effect=ValueError(
+                    "eating_reference_prop_split_unreliable: prop_fraction=0.0303"
+                ),
+            ):
+                result = pipeline.eating_mouth_bowl_contact_quality(candidate)
+
+        self.assertFalse(result["acceptable"], result)
+        self.assertEqual(result["issues"], ["eating_muzzle_not_at_bowl"])
+        self.assertGreater(result["nose_food_gap_px"], 8)
+        self.assertIn(
+            "gap_outside_contact_range",
+            result["selected_component"]["rejection_reasons"],
+        )
+
+    def test_eating_chromatic_nose_contact_keeps_eight_pixel_boundary(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            for gap_px, expected in ((8, True), (9, False)):
+                with self.subTest(gap_px=gap_px):
+                    candidate = _write_chromatic_nose_kibble_contact_fixture(
+                        Path(temporary),
+                        name=f"chromatic-nose-boundary-{gap_px}",
+                        nose_food_gap_px=gap_px,
+                    )
+                    with patch(
+                        "scail2_subject_replacement_test."
+                        "make_eating_reference_identity_mask",
+                        side_effect=ValueError(
+                            "eating_reference_prop_split_unreliable: "
+                            "prop_fraction=0.0303"
+                        ),
+                    ):
+                        result = pipeline.eating_mouth_bowl_contact_quality(
+                            candidate
+                        )
+
+                    self.assertEqual(result["acceptable"], expected, result)
+                    self.assertEqual(result["nose_food_gap_px"], gap_px)
+
+    def test_eating_kibble_mound_cannot_masquerade_as_nose(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = _write_chromatic_nose_kibble_contact_fixture(
+                Path(temporary),
+                name="kibble-without-nose",
+                nose_food_gap_px=4,
+                include_nose=False,
+            )
+            with patch(
+                "scail2_subject_replacement_test.make_eating_reference_identity_mask",
+                side_effect=ValueError(
+                    "eating_reference_prop_split_unreliable: prop_fraction=0.0303"
+                ),
+            ):
+                result = pipeline.eating_mouth_bowl_contact_quality(candidate)
+
+        self.assertFalse(result["acceptable"], result)
+        self.assertNotEqual(
+            result.get("evidence_policy"),
+            pipeline.EATING_NOSE_KIBBLE_CONTACT_FALLBACK_POLICY,
+        )
+        self.assertEqual(
+            result["nose_kibble_fallback"]["issues"],
+            ["eating_nose_not_detected"],
+        )
+
+    def test_eating_thin_warm_bridge_cannot_masquerade_as_food_contact(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            candidate = _write_chromatic_nose_kibble_contact_fixture(
+                Path(temporary),
+                name="thin-warm-bridge",
+                nose_food_gap_px=20,
+                warm_bridge_width_px=4,
+            )
+            with patch(
+                "scail2_subject_replacement_test.make_eating_reference_identity_mask",
+                side_effect=ValueError(
+                    "eating_reference_prop_split_unreliable: prop_fraction=0.0303"
+                ),
+            ):
+                result = pipeline.eating_mouth_bowl_contact_quality(candidate)
+
+        self.assertFalse(result["acceptable"], result)
+        self.assertEqual(result["nose_food_gap_px"], 20)
+        self.assertEqual(
+            result["thresholds"]["food_local_row_pixels_min"],
+            10,
         )
 
     def test_eating_prop_split_falls_back_from_thin_warm_rim_to_beige_bowl(

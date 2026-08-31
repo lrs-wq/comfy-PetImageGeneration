@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.45"
+API_VERSION = "2.26.46"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -295,7 +295,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.49"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.50"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
     "strict_quality_gate_then_fixed_best_of_five_selection_v3"
 )
@@ -313,6 +313,7 @@ QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
         "1.40.46",
         "1.40.47",
         "1.40.48",
+        "1.40.49",
         QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
     }
 )
@@ -659,6 +660,20 @@ EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES = frozenset(
 EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES = frozenset(
     {"invented_stripe_pattern"}
 )
+EATING_CONTACT_REPAIR_POLICY = (
+    "identity_safe_local_muzzle_to_kibble_contact_repair_v1"
+)
+EATING_CONTACT_REPAIR_ATTEMPT = 4
+EATING_CONTACT_REPAIR_STEPS = 12
+EATING_CONTACT_REPAIR_DENOISE = 0.75
+EATING_CONTACT_REPAIR_SOURCE_ISSUES = frozenset(
+    {"eating_muzzle_not_at_bowl"}
+)
+EATING_CONTACT_REPAIR_SOURCE_GAP_MAX_PX = 64
+EATING_CONTACT_REPAIR_MASK_FEATHER_SIGMA_PX = 6.0
+EATING_CONTACT_REPAIR_MASK_SIDE_MARGIN_BOWL_RATIO = 0.18
+EATING_CONTACT_REPAIR_MASK_HEAD_HEIGHT_SUBJECT_RATIO = 0.22
+EATING_CONTACT_REPAIR_MASK_BOWL_OVERLAP_PX = 12
 IDENTITY_STRIPE_AMPLIFICATION_REFINE_POLICY = (
     "source_present_stripe_amplification_identity_refine_v1"
 )
@@ -720,10 +735,13 @@ FINAL_VIDEO_VALIDATED_ACTION_REFERENCE_POLICIES = {
     "grooming": "qwen_action_specific_identity",
 }
 EATING_MOUTH_BOWL_CONTACT_POLICY = (
-    "warm_face_or_neutral_muzzle_above_detected_bowl_v5"
+    "warm_face_neutral_muzzle_or_nose_kibble_contact_v6"
 )
 EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY = (
     "neutral_muzzle_above_horizontal_neutral_bowl_v1"
+)
+EATING_NOSE_KIBBLE_CONTACT_FALLBACK_POLICY = (
+    "chromatic_nose_to_warm_kibble_contact_v1"
 )
 DRINKING_MOUTH_BOWL_CONTACT_POLICY = "detached_bowl_subject_proximity_v1"
 DRINKING_MOUTH_BOWL_GAP_MAX_PX = 12
@@ -4886,6 +4904,11 @@ build_canonical_eating_identity_refine_prompt = (
 )
 
 
+build_canonical_eating_contact_repair_prompt = (
+    _local_video_prompting_workflows.build_canonical_eating_contact_repair_prompt
+)
+
+
 build_wan_prompt = _local_video_prompting_workflows.build_wan_prompt
 
 
@@ -5828,6 +5851,11 @@ prepare_canonical_eating_identity_refine_canvas = (
 )
 
 
+prepare_canonical_eating_contact_repair_canvas = (
+    _local_video_grooming_image_preparation.prepare_canonical_eating_contact_repair_canvas
+)
+
+
 prepare_grooming_foreleg_repair_anatomy_guide = (
     _local_video_grooming_image_preparation.prepare_grooming_foreleg_repair_anatomy_guide
 )
@@ -6301,6 +6329,9 @@ eating_mouth_bowl_contact_quality = (
 )
 eating_neutral_muzzle_bowl_contact_quality = (
     _local_video_generation_quality.eating_neutral_muzzle_bowl_contact_quality
+)
+eating_nose_kibble_contact_quality = (
+    _local_video_generation_quality.eating_nose_kibble_contact_quality
 )
 
 

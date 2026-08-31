@@ -109,6 +109,67 @@ def _write_neutral_muzzle_bowl_contact_fixture(
     return candidate
 
 
+def _write_chromatic_nose_kibble_contact_fixture(
+    root: Path,
+    *,
+    name: str,
+    nose_food_gap_px: int,
+    include_nose: bool = True,
+    warm_bridge_width_px: int = 0,
+) -> Path:
+    """Create an orange face, red nose, warm kibble and neutral bowl."""
+
+    bowl_left, bowl_top, bowl_right, bowl_bottom = 101, 352, 310, 425
+    food_top = 340
+    nose_left, nose_right = 196, 224
+    nose_bottom = food_top - nose_food_gap_px
+    image = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((55, 75, 455, 308), fill=(224, 128, 52, 255))
+    draw.ellipse(
+        (145, 190, 275, nose_bottom - 7),
+        fill=(220, 116, 44, 255),
+    )
+    if include_nose:
+        draw.polygon(
+            (
+                (nose_left, nose_bottom - 18),
+                (nose_right, nose_bottom - 18),
+                ((nose_left + nose_right) // 2, nose_bottom - 1),
+            ),
+            fill=(145, 42, 24, 255),
+        )
+    if warm_bridge_width_px > 0:
+        bridge_center_x = (nose_left + nose_right) // 2
+        bridge_left = bridge_center_x - warm_bridge_width_px // 2
+        draw.rectangle(
+            (
+                bridge_left,
+                nose_bottom,
+                bridge_left + warm_bridge_width_px - 1,
+                food_top - 1,
+            ),
+            fill=(135, 95, 55, 255),
+        )
+    draw.rounded_rectangle(
+        (bowl_left, bowl_top, bowl_right, bowl_bottom),
+        radius=18,
+        fill=(214, 208, 196, 255),
+    )
+    draw.ellipse(
+        (146, food_top, 266, bowl_top + 7),
+        fill=(134, 65, 24, 255),
+    )
+    for center_x in range(156, 263, 18):
+        draw.ellipse(
+            (center_x - 6, food_top, center_x + 6, food_top + 8),
+            fill=(174, 82, 27, 255),
+        )
+    candidate = root / f"{name}.png"
+    image.save(candidate)
+    return candidate
+
+
 def _write_thin_warm_rim_beige_bowl_fixture(path: Path) -> None:
     """Create a beige bowl whose thin warm rim joins the warm kibble union."""
 
@@ -744,6 +805,7 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
         canonical_action_stripe_amplification_attempts: set[int] | None = None,
         action_chroma_acceptable_attempts: set[int] | None = None,
         eating_pose_contact_unreliable: bool = False,
+        eating_contact_gap_attempts: dict[int, int] | None = None,
         pose_safe_grooming_attempt4: bool = False,
         uploaded_white_maquette: bool = False,
         species: str = "cat",
@@ -1447,6 +1509,80 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
                 "gate": {"alpha_provenance": alpha_provenance},
             }
 
+        def fake_pose_cutout_quality(
+            candidate: Path,
+            *_args: object,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            attempt_number = next(
+                (
+                    value
+                    for value in range(
+                        1,
+                        pipeline.QWEN_ACTION_CANDIDATE_ATTEMPTS + 1,
+                    )
+                    if f"attempt_{value:02d}" in candidate.name
+                ),
+                0,
+            )
+            if (
+                action == "eating"
+                and eating_contact_gap_attempts
+                and candidate.name.startswith("pose_")
+                and attempt_number in eating_contact_gap_attempts
+            ):
+                gap_px = int(eating_contact_gap_attempts[attempt_number])
+                bowl_top = 352
+                muzzle_bottom = bowl_top - gap_px
+                contact = {
+                    "available": True,
+                    "acceptable": False,
+                    "issues": ["eating_muzzle_not_at_bowl"],
+                    "penalty": 125.0,
+                    "method": pipeline.EATING_MOUTH_BOWL_CONTACT_POLICY,
+                    "evidence_policy": (
+                        pipeline.EATING_NEUTRAL_MUZZLE_BOWL_CONTACT_FALLBACK_POLICY
+                    ),
+                    "foreground_bbox": [55, 83, 456, 425],
+                    "bowl_bbox": [101, bowl_top, 310, 425],
+                    "component_candidates": [
+                        {
+                            "label": 1,
+                            "bbox": [
+                                202,
+                                muzzle_bottom - 17,
+                                246,
+                                muzzle_bottom,
+                            ],
+                            "area": 267,
+                            "gap_px": gap_px,
+                            "rejection_reasons": [
+                                "gap_outside_contact_range"
+                            ],
+                        }
+                    ],
+                    "strict_prop_split_fallback_used": True,
+                }
+                return {
+                    "available": True,
+                    "acceptable": False,
+                    "issues": ["eating_muzzle_not_at_bowl"],
+                    "penalty": 25.0,
+                    "eating_mouth_bowl_contact": contact,
+                }
+            return {
+                "available": True,
+                "acceptable": (not eating_pose_contact_unreliable),
+                "issues": (
+                    ["eating_bowl_contact_unreliable"]
+                    if eating_pose_contact_unreliable
+                    else []
+                ),
+                "penalty": (
+                    24.0 if eating_pose_contact_unreliable else 0.0
+                ),
+            }
+
         def fake_advisory_grooming_minimum_gate(
             candidate: Path,
             *,
@@ -1509,12 +1645,6 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
                 "identity_reference_sha256": pipeline.file_sha256(
                     identity_reference_path
                 ),
-                "identity_palette_reference_path": str(
-                    identity_palette_reference_path
-                ),
-                "identity_palette_reference_sha256": pipeline.file_sha256(
-                    identity_palette_reference_path
-                ),
                 "identity_palette": identity_palette_quality,
             }
 
@@ -1532,6 +1662,14 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
                 QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH=style_strength,
                 MODEL_ROOT=model_root,
                 USER_LORA_DIR=user_lora_dir,
+                eating_fur_silhouette_quality=(
+                    lambda *_args, **_kwargs: {
+                        "available": True,
+                        "acceptable": True,
+                        "issues": [],
+                        "penalty": 0.0,
+                    }
+                ),
             ),
             patch.object(pipeline, "require_models"),
             patch.object(pipeline, "wait_comfy_idle"),
@@ -1554,16 +1692,7 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
             patch.object(
                 pipeline,
                 "pose_cutout_quality",
-                return_value={
-                    "available": True,
-                    "acceptable": (not eating_pose_contact_unreliable),
-                    "issues": (
-                        ["eating_bowl_contact_unreliable"]
-                        if eating_pose_contact_unreliable
-                        else []
-                    ),
-                    "penalty": (24.0 if eating_pose_contact_unreliable else 0.0),
-                },
+                side_effect=fake_pose_cutout_quality,
             ),
             patch.object(
                 pipeline,

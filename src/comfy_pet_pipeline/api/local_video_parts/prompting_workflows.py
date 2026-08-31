@@ -878,6 +878,39 @@ POSE CONTRACT: {qwen_first_frame_spec(pose)}
 OUTPUT CONTRACT: return exactly one clean static 512x512 first frame. Keep the complete pet and its single bowl within 72% of canvas width and height with at least 12% clear green margin on every edge. Every non-pet, non-bowl pixel must be flat pure #00FF00. No floor, floor line, shadow, reflection, scenery, text, logo, or watermark. Return only the identity-correct eating keyframe."""
 
 
+def build_canonical_eating_contact_repair_prompt(
+    pose: str,
+    *,
+    source_attempt: int,
+    source_gap_px: int,
+    profile_fur_lock: str = "",
+) -> str:
+    """Close a measured muzzle-to-kibble gap without redrawing the body."""
+    _sync_local_video_runtime(
+        globals(),
+        {"build_canonical_eating_contact_repair_prompt"},
+    )
+
+    fur_lock = profile_fur_lock.strip() or (
+        "Preserve Image 2's exact natural coat length, visible volume, strand "
+        "direction, genuine tufts, and source-bounded silhouette."
+    )
+    measured_gap = max(0, int(source_gap_px))
+    return f"""CRITICAL LOCAL EATING-CONTACT REPAIR - close the measured air gap and change nothing else:
+Image 1 is the identity-safe normalized eating candidate from attempt {source_attempt} and is the sampler canvas. Its complete body, both planted front paws, attached rear legs, tail, single bowl, kibble, scale, framing, camera, pure-green negative space, coat palette, markings, and rendering are already approved and must remain pixel-stable outside the supplied local noise mask. The only rejected defect is a measured {measured_gap}-pixel vertical air gap between the lower muzzle and the kibble.
+Image 2 is the approved Qwen full-body canonical generated from the uploaded identity views. It only corroborates the exact pet identity, face, coat, markings, fur category, material, and lighting while the masked head and neck are repaired.
+Image 3 is the neutral Main_case white-maquette eating geometry. It has no identity, face, eye, coat, color, texture, material, lighting, or style authority. Use it only to confirm that the whole head and neck lower coherently until the mouth reaches the fixed food surface.
+
+LOCAL EDIT CONTRACT: edit only inside the supplied feathered head, lower-muzzle, neck, and mouth-to-bowl corridor mask. Lower and slightly extend the whole anatomical head-and-neck pose as one rigidly coherent structure; do not stretch only the lips, mouth, chin, nose, cheeks, eyes, or fur. The lower muzzle must touch or enter the brown kibble so the final measured vertical gap is 0 to 8 output pixels, preferably about 4 pixels. A small near-rim or kibble occlusion over the nose or lower muzzle is required evidence of eating. Fill the former head location with pure #00FF00 where needed and join the repaired neck seamlessly to the unchanged torso.
+
+PIXEL LOCK CONTRACT: never move, resize, repaint, recolor, replace, duplicate, or erase the bowl, kibble, either planted front paw, rear legs, torso, back, tail, ears outside the edit mask, canvas boundary, or camera. Do not lift the bowl toward the face, slide it sideways, enlarge it, add a second bowl, hide a paw, or turn eating into sniffing. Keep exactly one pet and one small shallow light-beige bowl. Preserve Image 1's identity-safe coat and Image 2's canonical facial identity with no new stripe, patch, hue, accessory, floor, shadow, reflection, text, logo, or watermark. {fur_lock}
+
+POSE CONTRACT: {qwen_first_frame_spec(pose)}
+{action_first_frame_rules(pose)}
+
+OUTPUT CONTRACT: return exactly one clean static 512x512 first frame. Every non-pet, non-bowl pixel is flat pure #00FF00. Return only the locally repaired eating keyframe."""
+
+
 def build_wan_prompt(base_prompt: str, pose: str, transparent_gif: bool = False) -> str:
     _sync_local_video_runtime(globals(), {"build_wan_prompt"})
     background_prompt = (
