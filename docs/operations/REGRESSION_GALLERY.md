@@ -126,6 +126,8 @@ Git 只保存 [`tests/regression/historical_gallery.json`](../../tests/regressio
 
 2026-09-01 在提交 `a0cd7ce` 上运行默认 smoke，两组 canary 均完成（`2/2`）：重复三视图橘虎斑猫的 `grooming` 与户外金毛犬的 `standing` 都发布了可读取的 `512×512`、`100` 帧主 APNG。该快照只证明当次完成性合同通过，不建立任何画质结论；新的服务修改仍必须重新运行 smoke。
 
+同日提交 `89ddcb9` 部署后的最新默认 smoke 再次 `2/2`：猫任务 `20260901T081100Z-b0f4ee4801`、狗任务 `20260901T081913Z-33cde52c21` 均完成，报告位于 `/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260901T081055Z-89ddcb9392/`。针对完成优先策略的原失败输入复测 `20260901T083322Z-72165d7e84` 也为 `1/1`：复用源任务 `20260901T055619Z-d6d84380a1` 的三张输入和两个动作，canonical 使用完成优先回退，两个动作各生成固定五轮并以 best-effort 继续，最终两个 `512×512`、`100` 帧主 APNG 可读取；报告位于 `/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260901T083311Z-89ddcb9392/`。
+
 ## 更新图集
 
 1. 只选已完成且输入文件仍可确认来源的历史任务。
