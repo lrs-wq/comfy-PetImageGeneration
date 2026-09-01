@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.48"
+API_VERSION = "2.26.49"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -295,7 +295,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.52"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.53"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
     "strict_quality_gate_then_fixed_best_of_five_selection_v3"
 )
@@ -316,6 +316,7 @@ QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
         "1.40.49",
         "1.40.50",
         "1.40.51",
+        "1.40.52",
         QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
     }
 )
@@ -662,6 +663,22 @@ EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES = frozenset(
 EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES = frozenset(
     {"invented_stripe_pattern"}
 )
+EATING_LIGHT_ACHROMATIC_DARK_FEATURE_RECOVERY_POLICY = (
+    "eating_light_achromatic_pet_lab_l_identity_recovery_v1"
+)
+EATING_LIGHT_ACHROMATIC_RECOVERY_ALLOWED_ISSUES = frozenset(
+    {
+        "achromatic_coat_value_balance_lost",
+        "canonical_action_achromatic_value_balance_drift",
+        "canonical_action_light_identity_dark_feature_expansion",
+        "invented_stripe_pattern",
+    }
+)
+EATING_LIGHT_ACHROMATIC_RECOVERY_SOURCE_ACHROMATIC_MIN = 0.85
+EATING_LIGHT_ACHROMATIC_RECOVERY_SOURCE_BLACK_MAX = 0.06
+EATING_LIGHT_ACHROMATIC_RECOVERY_DARK_EXPANSION_MIN = 0.20
+EATING_LIGHT_ACHROMATIC_RECOVERY_LAB_AB_DISTANCE_MAX = 4.0
+EATING_LIGHT_ACHROMATIC_RECOVERY_LAB_AB_ROUNDTRIP_MAX = 4
 EATING_CONTACT_REPAIR_POLICY = (
     "gap_measured_head_neck_prealigned_muzzle_fusion_pixel_lock_v3"
 )
@@ -6037,6 +6054,16 @@ canonical_grooming_pose_safe_identity_refine_eligibility = (
 
 prepare_canonical_grooming_achromatic_palette_normalization = (
     _local_video_identity_quality.prepare_canonical_grooming_achromatic_palette_normalization
+)
+
+
+light_achromatic_eating_dark_feature_recovery_eligibility = (
+    _local_video_identity_quality.light_achromatic_eating_dark_feature_recovery_eligibility
+)
+
+
+prepare_light_achromatic_eating_dark_feature_recovery = (
+    _local_video_identity_quality.prepare_light_achromatic_eating_dark_feature_recovery
 )
 
 

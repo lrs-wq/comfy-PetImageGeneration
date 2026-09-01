@@ -134,6 +134,14 @@
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {
+      "id": "comfy.recovery.eating_light_achromatic_dark_feature",
+      "type": "business_rule",
+      "name": "浅色消色差宠物吃饭暗斑分区亮度恢复",
+      "status": "active",
+      "tags": ["eating", "identity", "achromatic", "dark-feature-expansion", "pet-only-lab-l", "bowl-pixel-lock", "identity-revalidation", "white-pomeranian", "five-attempts", "fail-closed"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
+    },
+    {
       "id": "comfy.module.transparent_animation",
       "type": "module",
       "name": "透明动画生成",
@@ -314,6 +322,18 @@
       "relation": "recovers_with",
       "to": "comfy.recovery.eating_local_contact_repair",
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "recovers_with",
+      "to": "comfy.recovery.eating_light_achromatic_dark_feature",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
+    },
+    {
+      "from": "comfy.recovery.eating_light_achromatic_dark_feature",
+      "relation": "revalidated_by",
+      "to": "comfy.quality.identity_issue_aware_retry",
+      "evidence": "tests/integration/test_local_video_qwen_quality_gates.py"
     },
     {
       "from": "comfy.module.pipeline",

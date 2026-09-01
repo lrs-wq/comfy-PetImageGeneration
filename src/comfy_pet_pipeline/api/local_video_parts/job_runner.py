@@ -6265,6 +6265,124 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     palette_quality = canonical_action_identity_palette_quality(
                         palette_quality
                     )
+                eating_dark_feature_recovery_eligibility = (
+                    light_achromatic_eating_dark_feature_recovery_eligibility(
+                        palette_quality
+                    )
+                )
+                eating_dark_feature_recovery_audit: dict[str, Any] = {
+                    "eligibility": eating_dark_feature_recovery_eligibility,
+                    "applied": False,
+                    "identity_palette_gate_bypassed": False,
+                    "fail_closed": True,
+                }
+                if (
+                    canonical_action_reference
+                    and action_key(pose) == "eating"
+                    and eating_dark_feature_recovery_eligibility.get("eligible")
+                    is True
+                    and chroma_metrics.get("acceptable") is True
+                    and attempt_cutout.is_file()
+                    and canonical_similarity_reference is not None
+                    and canonical_similarity_reference.is_file()
+                ):
+                    recovered_cutout = (
+                        job_dir
+                        / f"pose_{index:02d}_light_achromatic_identity_recovered_"
+                        f"attempt_{attempt:02d}.png"
+                    )
+                    try:
+                        before_recovery_pose_quality = pose_cutout_quality(
+                            attempt_cutout,
+                            pose,
+                            require_eating_mouth_contact=(
+                                require_eating_mouth_contact
+                            ),
+                        )
+                        recovery = (
+                            prepare_light_achromatic_eating_dark_feature_recovery(
+                                attempt_cutout,
+                                canonical_similarity_reference,
+                                recovered_cutout,
+                            )
+                        )
+                        recovered_palette = evaluate_pose_identity_palette(
+                            recovered_cutout,
+                            primary_reference=pose_reference_identity_palette,
+                            upper_body_reference=(
+                                pose_reference_upper_body_identity_palette
+                            ),
+                            bottom_exclusion=pose_palette_bottom_exclusion,
+                            bowl_action=True,
+                        )
+                        recovered_palette_quality = (
+                            canonical_action_identity_palette_quality(
+                                recovered_palette["quality"]
+                            )
+                        )
+                        after_recovery_pose_quality = pose_cutout_quality(
+                            recovered_cutout,
+                            pose,
+                            require_eating_mouth_contact=(
+                                require_eating_mouth_contact
+                            ),
+                        )
+                        pose_gate_non_regressed = bool(
+                            before_recovery_pose_quality.get("acceptable")
+                            is not True
+                            or after_recovery_pose_quality.get("acceptable")
+                            is True
+                        )
+                        revalidation_passed = bool(
+                            isinstance(recovered_palette_quality, dict)
+                            and recovered_palette_quality.get("acceptable") is True
+                            and pose_gate_non_regressed
+                        )
+                        eating_dark_feature_recovery_audit.update(
+                            recovery=recovery,
+                            before_identity_palette=palette_quality,
+                            after_identity_palette=recovered_palette_quality,
+                            before_pose_quality=before_recovery_pose_quality,
+                            after_pose_quality=after_recovery_pose_quality,
+                            pose_gate_non_regressed=pose_gate_non_regressed,
+                            identity_palette_revalidated=bool(
+                                isinstance(recovered_palette_quality, dict)
+                                and recovered_palette_quality.get("acceptable")
+                                is True
+                            ),
+                            revalidation_passed=revalidation_passed,
+                            applied=revalidation_passed,
+                        )
+                        if revalidation_passed:
+                            attempt_cutout = recovered_cutout
+                            candidate_identity_palette = recovered_palette[
+                                "candidate"
+                            ]
+                            candidate_upper_body_identity_palette = (
+                                recovered_palette["upper_body_candidate"]
+                            )
+                            palette_quality = recovered_palette_quality
+                            update_job(
+                                job_id,
+                                eating_light_achromatic_identity_recovery_status=(
+                                    "candidate_recovered"
+                                ),
+                                eating_light_achromatic_identity_recovery_attempt=(
+                                    attempt
+                                ),
+                                eating_light_achromatic_identity_recovery_policy=(
+                                    EATING_LIGHT_ACHROMATIC_DARK_FEATURE_RECOVERY_POLICY
+                                ),
+                            )
+                    except Exception as exc:  # noqa: BLE001 - retry fail closed
+                        eating_dark_feature_recovery_audit.update(
+                            error=f"{type(exc).__name__}: {str(exc)[:1000]}",
+                            revalidation_passed=False,
+                            applied=False,
+                        )
+                    chroma_metrics[
+                        "eating_light_achromatic_dark_feature_recovery"
+                    ] = eating_dark_feature_recovery_audit
                 previous_pose_identity_palette_quality = (
                     json.loads(json.dumps(palette_quality))
                     if isinstance(palette_quality, dict)

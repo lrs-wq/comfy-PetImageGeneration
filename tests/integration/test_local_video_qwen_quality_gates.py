@@ -398,6 +398,169 @@ class SubjectReplacementQwenQualityGateTests(SubjectReplacementQwenReferenceTest
             self.assertNotEqual(audit["source_sha256"], audit["target_sha256"])
             self.assertFalse(audit["canonical_spatial_pixels_copied"])
 
+    def test_light_achromatic_eating_dark_feature_recovery_is_narrow(self) -> None:
+        quality = {
+            "available": True,
+            "acceptable": False,
+            "issues": [
+                "achromatic_coat_value_balance_lost",
+                "canonical_action_achromatic_value_balance_drift",
+                "canonical_action_light_identity_dark_feature_expansion",
+            ],
+            "source_achromatic_fraction": 0.98,
+            "candidate_achromatic_fraction": 0.96,
+            "source_black_fraction": 0.04,
+            "candidate_black_fraction": 0.32,
+            "broad_warm_drift": False,
+            "saturated_warm_drift": False,
+        }
+
+        eligible = (
+            pipeline.light_achromatic_eating_dark_feature_recovery_eligibility(
+                quality
+            )
+        )
+        self.assertTrue(eligible["eligible"])
+        self.assertTrue(all(eligible["checks"].values()))
+        self.assertFalse(eligible["identity_palette_gate_bypassed"])
+        self.assertTrue(eligible["identity_palette_gate_must_be_revalidated"])
+
+        unsafe_cases = {
+            "unexpected_chroma_issue": {
+                **quality,
+                "issues": [*quality["issues"], "green_or_cyan_chroma_spill_on_body"],
+            },
+            "dark_source": {
+                **quality,
+                "source_black_fraction": 0.18,
+            },
+            "small_expansion": {
+                **quality,
+                "candidate_black_fraction": 0.18,
+            },
+            "warm_expansion": {
+                **quality,
+                "broad_warm_drift": True,
+            },
+        }
+        for case, candidate_quality in unsafe_cases.items():
+            with self.subTest(case=case):
+                result = (
+                    pipeline.light_achromatic_eating_dark_feature_recovery_eligibility(
+                        candidate_quality
+                    )
+                )
+                self.assertFalse(result["eligible"])
+                self.assertTrue(result["fail_closed"])
+
+    def test_light_achromatic_eating_recovery_locks_bowl_alpha_and_chroma(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate_path = root / "candidate.png"
+            canonical_path = root / "canonical.png"
+            target_path = root / "recovered.png"
+
+            yy, xx = np.mgrid[:512, :512]
+            subject = (
+                ((xx - 256.0) / 150.0) ** 2
+                + ((yy - 245.0) / 175.0) ** 2
+                <= 1.0
+            )
+            bowl = (
+                (xx >= 185)
+                & (xx < 327)
+                & (yy >= 382)
+                & (yy < 430)
+            )
+            dark_stripes = (
+                subject
+                & (yy >= 120)
+                & (yy < 370)
+                & (((xx + 2 * yy) // 22) % 3 != 0)
+            )
+            candidate_rgba = np.zeros((512, 512, 4), dtype=np.uint8)
+            candidate_rgba[subject, :3] = (220, 220, 220)
+            candidate_rgba[dark_stripes, :3] = (28, 28, 28)
+            candidate_rgba[subject, 3] = 255
+            candidate_rgba[bowl, :3] = (204, 173, 126)
+            candidate_rgba[bowl, 3] = 255
+
+            canonical_subject = (
+                ((xx - 252.0) / 165.0) ** 2
+                + ((yy - 250.0) / 180.0) ** 2
+                <= 1.0
+            )
+            canonical_rgba = np.zeros((512, 512, 4), dtype=np.uint8)
+            canonical_luma = np.clip(205 + (xx * 42 // 511), 0, 255).astype(
+                np.uint8
+            )
+            canonical_rgba[canonical_subject, :3] = np.repeat(
+                canonical_luma[:, :, None],
+                3,
+                axis=2,
+            )[canonical_subject]
+            canonical_rgba[canonical_subject, 3] = 255
+            canonical_eye = (
+                ((xx - 225.0) ** 2 + (yy - 180.0) ** 2 <= 36.0)
+                | ((xx - 279.0) ** 2 + (yy - 180.0) ** 2 <= 36.0)
+            )
+            canonical_rgba[canonical_eye & canonical_subject, :3] = (24, 24, 24)
+
+            colored_mask = np.zeros((512, 512, 3), dtype=np.uint8)
+            colored_mask[subject] = (0, 0, 255)
+            colored_mask[bowl] = (255, 0, 0)
+            Image.fromarray(candidate_rgba, mode="RGBA").save(candidate_path)
+            Image.fromarray(canonical_rgba, mode="RGBA").save(canonical_path)
+
+            with patch(
+                "src.comfy_pet_pipeline.pipeline.subject_replacement."
+                "make_eating_reference_identity_mask",
+                return_value=(
+                    Image.fromarray(colored_mask, mode="RGB"),
+                    Image.new("L", (512, 512), 0),
+                    {"bowl_bbox": [185, 382, 327, 430]},
+                ),
+            ):
+                audit = (
+                    pipeline.prepare_light_achromatic_eating_dark_feature_recovery(
+                        candidate_path,
+                        canonical_path,
+                        target_path,
+                    )
+                )
+
+            with Image.open(target_path) as loaded:
+                recovered_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+            self.assertTrue(
+                np.array_equal(recovered_rgba[:, :, 3], candidate_rgba[:, :, 3])
+            )
+            self.assertTrue(
+                np.array_equal(recovered_rgba[~subject], candidate_rgba[~subject])
+            )
+            self.assertTrue(np.array_equal(recovered_rgba[bowl], candidate_rgba[bowl]))
+            self.assertTrue(audit["source_prop_rgba_preserved_exactly"])
+            self.assertTrue(audit["source_non_pet_rgba_preserved_exactly"])
+            self.assertTrue(audit["source_chromatic_pet_rgba_preserved_exactly"])
+            self.assertLessEqual(
+                audit["maximum_ab_roundtrip_delta"],
+                pipeline.EATING_LIGHT_ACHROMATIC_RECOVERY_LAB_AB_ROUNDTRIP_MAX,
+            )
+            self.assertTrue(audit["luma_lut_monotonic"])
+            self.assertGreater(audit["source_luma_changed_pixels"], 0)
+            source_quantiles = np.asarray(audit["source_luma_p10_p50_p90"])
+            canonical_quantiles = np.asarray(
+                audit["canonical_luma_p10_p50_p90"]
+            )
+            output_quantiles = np.asarray(audit["output_luma_p10_p50_p90"])
+            self.assertLess(
+                float(np.abs(output_quantiles - canonical_quantiles).sum()),
+                float(np.abs(source_quantiles - canonical_quantiles).sum()),
+            )
+            self.assertFalse(audit["identity_palette_gate_bypassed"])
+            self.assertTrue(audit["identity_palette_gate_must_be_revalidated"])
+
     def test_canonical_direct_structural_evidence_fails_closed(
         self,
     ) -> None:

@@ -1849,6 +1849,47 @@ def health() -> dict[str, Any]:
                         "existing_seed_retry"
                     ),
                 },
+                "eating_light_achromatic_dark_feature_recovery": {
+                    "enabled": True,
+                    "policy": (
+                        EATING_LIGHT_ACHROMATIC_DARK_FEATURE_RECOVERY_POLICY
+                    ),
+                    "scope": "canonical_first_eating_candidates_only",
+                    "allowed_identity_issues": sorted(
+                        EATING_LIGHT_ACHROMATIC_RECOVERY_ALLOWED_ISSUES
+                    ),
+                    "source_achromatic_fraction_min": (
+                        EATING_LIGHT_ACHROMATIC_RECOVERY_SOURCE_ACHROMATIC_MIN
+                    ),
+                    "source_black_fraction_max": (
+                        EATING_LIGHT_ACHROMATIC_RECOVERY_SOURCE_BLACK_MAX
+                    ),
+                    "candidate_dark_expansion_min": (
+                        EATING_LIGHT_ACHROMATIC_RECOVERY_DARK_EXPANSION_MIN
+                    ),
+                    "operation": (
+                        "pet_only_audit_banded_lab_l_histogram_match_to_"
+                        "approved_canonical"
+                    ),
+                    "subject_prop_partition": (
+                        "downstream_eating_reference_identity_mask"
+                    ),
+                    "alpha_geometry_preserved_exactly": True,
+                    "bowl_and_non_pet_rgba_preserved_exactly": True,
+                    "chromatic_pet_rgba_preserved_exactly": True,
+                    "neutral_coat_lab_ab_distance_max": (
+                        EATING_LIGHT_ACHROMATIC_RECOVERY_LAB_AB_DISTANCE_MAX
+                    ),
+                    "lab_ab_chroma_preserved": True,
+                    "lab_ab_roundtrip_delta_max": (
+                        EATING_LIGHT_ACHROMATIC_RECOVERY_LAB_AB_ROUNDTRIP_MAX
+                    ),
+                    "identity_palette_gate_revalidated": True,
+                    "pose_gate_revalidated": True,
+                    "fur_surface_gate_runs_afterward": True,
+                    "identity_palette_gate_bypassed": False,
+                    "fail_closed": True,
+                },
                 "eating_contact_repair": {
                     "enabled": True,
                     "policy": EATING_CONTACT_REPAIR_POLICY,

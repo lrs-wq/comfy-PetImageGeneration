@@ -3171,6 +3171,404 @@ def prepare_canonical_grooming_achromatic_palette_normalization(
     }
 
 
+def light_achromatic_eating_dark_feature_recovery_eligibility(
+    quality: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Permit luma-only repair for a narrowly proven light-pet failure.
+
+    This recovery is not a palette-gate exception. It only identifies an eating
+    candidate whose otherwise achromatic pet acquired a large dark-area
+    expansion, and the caller must run the normal identity and pose gates again
+    after repair.
+    """
+    _sync_local_video_runtime(
+        globals(),
+        {"light_achromatic_eating_dark_feature_recovery_eligibility"},
+    )
+
+    palette = quality if isinstance(quality, dict) else {}
+    issues = {
+        str(issue)
+        for issue in palette.get("issues", [])
+        if str(issue).strip()
+    }
+    source_achromatic = float(
+        palette.get("source_achromatic_fraction", 0.0) or 0.0
+    )
+    candidate_achromatic = float(
+        palette.get("candidate_achromatic_fraction", 0.0) or 0.0
+    )
+    source_black = float(palette.get("source_black_fraction", 1.0) or 0.0)
+    candidate_black = float(
+        palette.get("candidate_black_fraction", 0.0) or 0.0
+    )
+    black_delta = candidate_black - source_black
+    checks = {
+        "quality_available": palette.get("available") is True,
+        "quality_failed": palette.get("acceptable") is not True,
+        "issues_present": bool(issues),
+        "issues_repairable_by_luma_only": bool(issues)
+        and not (issues - EATING_LIGHT_ACHROMATIC_RECOVERY_ALLOWED_ISSUES),
+        "dark_expansion_issue_present": bool(
+            issues
+            & {
+                "achromatic_coat_value_balance_lost",
+                "canonical_action_light_identity_dark_feature_expansion",
+            }
+        ),
+        "source_is_strongly_achromatic": (
+            source_achromatic
+            >= EATING_LIGHT_ACHROMATIC_RECOVERY_SOURCE_ACHROMATIC_MIN
+        ),
+        "candidate_remains_achromatic": candidate_achromatic >= 0.72,
+        "source_black_fraction_is_light": (
+            source_black <= EATING_LIGHT_ACHROMATIC_RECOVERY_SOURCE_BLACK_MAX
+        ),
+        "candidate_dark_expansion_is_large": (
+            black_delta >= EATING_LIGHT_ACHROMATIC_RECOVERY_DARK_EXPANSION_MIN
+        ),
+        "no_warm_expansion": not bool(
+            palette.get("broad_warm_drift")
+            or palette.get("saturated_warm_drift")
+            or palette.get("canonical_action_warm_expansion_drift")
+        ),
+    }
+    eligible = all(checks.values())
+    return {
+        "policy": EATING_LIGHT_ACHROMATIC_DARK_FEATURE_RECOVERY_POLICY,
+        "eligible": eligible,
+        "reason": (
+            "light_achromatic_pet_dark_features_expanded"
+            if eligible
+            else "candidate_not_safe_for_luma_only_identity_recovery"
+        ),
+        "issues": sorted(issues),
+        "allowed_issues": sorted(
+            EATING_LIGHT_ACHROMATIC_RECOVERY_ALLOWED_ISSUES
+        ),
+        "source_achromatic_fraction": round(source_achromatic, 6),
+        "candidate_achromatic_fraction": round(candidate_achromatic, 6),
+        "source_black_fraction": round(source_black, 6),
+        "candidate_black_fraction": round(candidate_black, 6),
+        "black_fraction_delta": round(black_delta, 6),
+        "thresholds": {
+            "source_achromatic_fraction_min": (
+                EATING_LIGHT_ACHROMATIC_RECOVERY_SOURCE_ACHROMATIC_MIN
+            ),
+            "source_black_fraction_max": (
+                EATING_LIGHT_ACHROMATIC_RECOVERY_SOURCE_BLACK_MAX
+            ),
+            "dark_expansion_min": (
+                EATING_LIGHT_ACHROMATIC_RECOVERY_DARK_EXPANSION_MIN
+            ),
+            "candidate_achromatic_fraction_min": 0.72,
+        },
+        "checks": checks,
+        "identity_palette_gate_bypassed": False,
+        "identity_palette_gate_must_be_revalidated": True,
+        "pose_gate_must_be_revalidated": True,
+        "fur_surface_gate_must_run_afterward": True,
+        "fail_closed": True,
+    }
+
+
+def prepare_light_achromatic_eating_dark_feature_recovery(
+    candidate: Path,
+    canonical_reference: Path,
+    target: Path,
+) -> dict[str, Any]:
+    """Restore a light eating pet's LAB-L distribution without touching its bowl.
+
+    The downstream eating splitter supplies the exact subject/prop partition.
+    Only subject luminance is histogram-matched to the approved canonical;
+    subject chroma, every non-subject RGBA pixel, and the complete alpha geometry
+    remain locked.
+    """
+    _sync_local_video_runtime(
+        globals(),
+        {"prepare_light_achromatic_eating_dark_feature_recovery"},
+    )
+
+    if not candidate.is_file() or not canonical_reference.is_file():
+        raise FileNotFoundError("Eating dark-feature recovery input is missing.")
+    with Image.open(candidate) as loaded:
+        candidate_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+    with Image.open(canonical_reference) as loaded:
+        canonical_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+        canonical_has_alpha = "A" in loaded.getbands()
+    if candidate_rgba.shape != (512, 512, 4) or canonical_rgba.shape != (
+        512,
+        512,
+        4,
+    ):
+        raise ValueError("Eating dark-feature recovery inputs must be 512x512.")
+
+    from ...pipeline.subject_replacement import (
+        make_eating_reference_identity_mask,
+    )
+
+    candidate_image = Image.fromarray(candidate_rgba, mode="RGBA")
+    colored_mask, _prop_exclusion, prop_metadata = (
+        make_eating_reference_identity_mask(
+            candidate_image,
+            allow_fallback=False,
+        )
+    )
+    colored = np.asarray(colored_mask.convert("RGB"), dtype=np.uint8)
+    candidate_alpha = candidate_rgba[:, :, 3]
+    candidate_foreground = candidate_alpha > 96
+    candidate_subject = (
+        np.all(colored == (0, 0, 255), axis=2) & candidate_foreground
+    )
+    candidate_prop = (
+        np.all(colored == (255, 0, 0), axis=2) & candidate_foreground
+    )
+    subject_pixels = int(np.count_nonzero(candidate_subject))
+    prop_pixels = int(np.count_nonzero(candidate_prop))
+    if subject_pixels < 4096 or prop_pixels < 100:
+        raise ValueError(
+            "Eating subject/prop partition is too small for safe recovery."
+        )
+
+    canonical_alpha = canonical_rgba[:, :, 3]
+    canonical_foreground = canonical_alpha > 96
+    if not canonical_has_alpha or np.all(canonical_alpha == 255):
+        canonical_rgb = canonical_rgba[:, :, :3]
+        red = canonical_rgb[:, :, 0].astype(np.int16)
+        green = canonical_rgb[:, :, 1].astype(np.int16)
+        blue = canonical_rgb[:, :, 2].astype(np.int16)
+        canonical_background = (
+            (green > 80)
+            & ((green - np.maximum(red, blue)) > 35)
+            & (green > red * 1.18)
+            & (green > blue * 1.18)
+        )
+        canonical_foreground = ~canonical_background
+    canonical_pixels = int(np.count_nonzero(canonical_foreground))
+    if not 4096 <= canonical_pixels <= int(512 * 512 * 0.90):
+        raise ValueError("Canonical palette foreground is invalid.")
+
+    candidate_lab = cv2.cvtColor(candidate_rgba[:, :, :3], cv2.COLOR_RGB2LAB)
+    canonical_lab = cv2.cvtColor(canonical_rgba[:, :, :3], cv2.COLOR_RGB2LAB)
+    candidate_ab_distance = np.sqrt(
+        (candidate_lab[:, :, 1].astype(np.float32) - 128.0) ** 2
+        + (candidate_lab[:, :, 2].astype(np.float32) - 128.0) ** 2
+    )
+    canonical_ab_distance = np.sqrt(
+        (canonical_lab[:, :, 1].astype(np.float32) - 128.0) ** 2
+        + (canonical_lab[:, :, 2].astype(np.float32) - 128.0) ** 2
+    )
+    candidate_recovery = candidate_subject & (
+        candidate_ab_distance
+        <= EATING_LIGHT_ACHROMATIC_RECOVERY_LAB_AB_DISTANCE_MAX
+    )
+    canonical_recovery = canonical_foreground & (
+        canonical_ab_distance
+        <= EATING_LIGHT_ACHROMATIC_RECOVERY_LAB_AB_DISTANCE_MAX
+    )
+    recovery_pixels = int(np.count_nonzero(candidate_recovery))
+    canonical_recovery_pixels = int(np.count_nonzero(canonical_recovery))
+    if recovery_pixels < 4096 or canonical_recovery_pixels < 4096:
+        raise ValueError(
+            "Eating dark-feature recovery has insufficient neutral coat pixels."
+        )
+    source_luma = candidate_lab[:, :, 0][candidate_recovery]
+    canonical_luma = canonical_lab[:, :, 0][canonical_recovery]
+    normalized_lab = candidate_lab.copy()
+    upper_body_end = int(
+        round(512 * (1.0 - BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION))
+    )
+    primary_body_end = int(
+        round(512 * (1.0 - BOWL_IDENTITY_PALETTE_BOTTOM_EXCLUSION))
+    )
+    luma_bands = (
+        ("upper_body", 0, upper_body_end),
+        ("primary_lower", upper_body_end, primary_body_end),
+        ("excluded_lower", primary_body_end, 512),
+    )
+    row_indices = np.indices(candidate_subject.shape)[0]
+    band_luma_audits: list[dict[str, Any]] = []
+    source_luma_changed_pixels = 0
+    for band_name, band_top, band_bottom in luma_bands:
+        candidate_band = (
+            candidate_recovery
+            & (row_indices >= band_top)
+            & (row_indices < band_bottom)
+        )
+        canonical_band = (
+            canonical_recovery
+            & (row_indices >= band_top)
+            & (row_indices < band_bottom)
+        )
+        band_source_luma = candidate_lab[:, :, 0][candidate_band]
+        band_canonical_luma = canonical_lab[:, :, 0][canonical_band]
+        if band_source_luma.size < 256:
+            continue
+        canonical_band_fallback = bool(band_canonical_luma.size < 256)
+        if canonical_band_fallback:
+            band_canonical_luma = canonical_luma
+        source_histogram = np.bincount(
+            band_source_luma,
+            minlength=256,
+        ).astype(np.float64)
+        canonical_histogram = np.bincount(
+            band_canonical_luma,
+            minlength=256,
+        ).astype(np.float64)
+        source_cdf = np.cumsum(source_histogram) / float(
+            source_histogram.sum()
+        )
+        canonical_cdf = np.cumsum(canonical_histogram) / float(
+            canonical_histogram.sum()
+        )
+        luma_lut = np.interp(
+            source_cdf,
+            canonical_cdf,
+            np.arange(256, dtype=np.float64),
+        )
+        luma_lut = np.rint(luma_lut).clip(0, 255).astype(np.uint8)
+        normalized_band_luma = luma_lut[band_source_luma]
+        normalized_lab[:, :, 0][candidate_band] = normalized_band_luma
+        changed_pixels = int(
+            np.count_nonzero(normalized_band_luma != band_source_luma)
+        )
+        source_luma_changed_pixels += changed_pixels
+        band_luma_audits.append(
+            {
+                "name": band_name,
+                "rows": [band_top, band_bottom],
+                "subject_pixels": int(band_source_luma.size),
+                "canonical_pixels": int(band_canonical_luma.size),
+                "canonical_full_foreground_fallback": canonical_band_fallback,
+                "luma_lut_monotonic": bool(
+                    np.all(np.diff(luma_lut.astype(int)) >= 0)
+                ),
+                "source_luma_changed_pixels": changed_pixels,
+                "source_luma_p10_p50_p90": [
+                    round(float(value), 6)
+                    for value in np.percentile(
+                        band_source_luma,
+                        [10, 50, 90],
+                    )
+                ],
+                "canonical_luma_p10_p50_p90": [
+                    round(float(value), 6)
+                    for value in np.percentile(
+                        band_canonical_luma,
+                        [10, 50, 90],
+                    )
+                ],
+            }
+        )
+    if not band_luma_audits:
+        raise ValueError("Eating dark-feature recovery found no auditable pet band.")
+    normalized_rgb = cv2.cvtColor(normalized_lab, cv2.COLOR_LAB2RGB)
+    output_rgba = candidate_rgba.copy()
+    output_rgba[:, :, :3][candidate_recovery] = normalized_rgb[
+        candidate_recovery
+    ]
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(output_rgba, mode="RGBA").save(target)
+    with Image.open(target) as loaded:
+        verified = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+    if not np.array_equal(verified[:, :, 3], candidate_alpha):
+        raise RuntimeError("Eating dark-feature recovery changed alpha geometry.")
+    if not np.array_equal(
+        verified[~candidate_subject],
+        candidate_rgba[~candidate_subject],
+    ):
+        raise RuntimeError("Eating dark-feature recovery changed a locked non-pet pixel.")
+    protected_chromatic_pet = candidate_subject & ~candidate_recovery
+    if not np.array_equal(
+        verified[protected_chromatic_pet],
+        candidate_rgba[protected_chromatic_pet],
+    ):
+        raise RuntimeError(
+            "Eating dark-feature recovery changed a protected chromatic pet pixel."
+        )
+    verified_lab = cv2.cvtColor(verified[:, :, :3], cv2.COLOR_RGB2LAB)
+    ab_delta = np.abs(
+        verified_lab[:, :, 1:].astype(np.int16)
+        - normalized_lab[:, :, 1:].astype(np.int16)
+    )[candidate_recovery]
+    maximum_ab_roundtrip_delta = int(np.max(ab_delta)) if ab_delta.size else 0
+    if (
+        maximum_ab_roundtrip_delta
+        > EATING_LIGHT_ACHROMATIC_RECOVERY_LAB_AB_ROUNDTRIP_MAX
+    ):
+        raise RuntimeError(
+            "Eating dark-feature recovery changed LAB chroma beyond the "
+            "roundtrip tolerance "
+            f"(maximum={maximum_ab_roundtrip_delta}, allowed="
+            f"{EATING_LIGHT_ACHROMATIC_RECOVERY_LAB_AB_ROUNDTRIP_MAX})."
+        )
+
+    prop_bbox = (
+        prop_metadata.get("bowl_bbox")
+        if isinstance(prop_metadata, dict)
+        else None
+    )
+    return {
+        "policy": EATING_LIGHT_ACHROMATIC_DARK_FEATURE_RECOVERY_POLICY,
+        "source_path": str(candidate),
+        "source_sha256": file_sha256(candidate),
+        "canonical_reference_path": str(canonical_reference),
+        "canonical_reference_sha256": file_sha256(canonical_reference),
+        "target_path": str(target),
+        "target_sha256": file_sha256(target),
+        "subject_pixels": subject_pixels,
+        "neutral_subject_recovery_pixels": recovery_pixels,
+        "protected_chromatic_subject_pixels": int(
+            np.count_nonzero(protected_chromatic_pet)
+        ),
+        "prop_pixels": prop_pixels,
+        "canonical_foreground_pixels": canonical_pixels,
+        "canonical_neutral_recovery_pixels": canonical_recovery_pixels,
+        "bowl_bbox": prop_bbox,
+        "source_alpha_geometry_preserved_exactly": True,
+        "source_non_pet_rgba_preserved_exactly": True,
+        "source_prop_rgba_preserved_exactly": True,
+        "source_chromatic_pet_rgba_preserved_exactly": True,
+        "neutral_coat_lab_ab_distance_max": (
+            EATING_LIGHT_ACHROMATIC_RECOVERY_LAB_AB_DISTANCE_MAX
+        ),
+        "source_ab_chroma_preserved_with_roundtrip_tolerance": True,
+        "maximum_ab_roundtrip_delta": maximum_ab_roundtrip_delta,
+        "maximum_ab_roundtrip_delta_allowed": (
+            EATING_LIGHT_ACHROMATIC_RECOVERY_LAB_AB_ROUNDTRIP_MAX
+        ),
+        "source_spatial_luma_rank_preserved_within_audit_bands": True,
+        "canonical_spatial_pixels_copied": False,
+        "canonical_luma_distribution_only": True,
+        "luma_lut_monotonic": bool(
+            all(item["luma_lut_monotonic"] for item in band_luma_audits)
+        ),
+        "luma_histogram_bands": band_luma_audits,
+        "source_luma_changed_pixels": source_luma_changed_pixels,
+        "source_luma_p10_p50_p90": [
+            round(float(value), 6)
+            for value in np.percentile(source_luma, [10, 50, 90])
+        ],
+        "canonical_luma_p10_p50_p90": [
+            round(float(value), 6)
+            for value in np.percentile(canonical_luma, [10, 50, 90])
+        ],
+        "output_luma_p10_p50_p90": [
+            round(float(value), 6)
+            for value in np.percentile(
+                verified_lab[:, :, 0][candidate_recovery],
+                [10, 50, 90],
+            )
+        ],
+        "identity_palette_gate_bypassed": False,
+        "identity_palette_gate_must_be_revalidated": True,
+        "pose_gate_must_be_revalidated": True,
+        "fur_surface_gate_must_run_afterward": True,
+        "fail_closed": True,
+    }
+
+
 def bowl_aware_identity_palette_quality(
     primary_quality: dict[str, Any],
     upper_body_quality: dict[str, Any] | None,
