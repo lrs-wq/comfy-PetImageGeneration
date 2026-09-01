@@ -24,8 +24,8 @@ import cv2
 import numpy as np
 
 
-POLICY = "main_case_grooming_raised_paw_cv_v3"
-GATE_VERSION = "3.0"
+POLICY = "main_case_grooming_raised_paw_cv_v4"
+GATE_VERSION = "4.0"
 
 
 @dataclass(frozen=True)
@@ -56,6 +56,11 @@ class GroomingPoseThresholds:
     lab_histogram_distance_max: float = 0.42
     texture_p90_ratio_min: float = 0.25
     texture_p90_ratio_max: float = 4.0
+    global_registration_size: int = 256
+    global_registration_margin: int = 12
+    global_bbox_log_aspect_delta_max: float = 0.55
+    global_silhouette_iou_min: float = 0.18
+    global_silhouette_iou_aspect_delta_min: float = 0.25
 
 
 DEFAULT_FORELEG_ROI = (0.10, 0.43, 0.48, 0.77)
@@ -158,6 +163,88 @@ def _normalized_crop(
         interpolation=cv2.INTER_NEAREST,
     ).astype(bool)
     return normalized_image, normalized_mask
+
+
+def _letterbox_component(
+    component: np.ndarray,
+    bbox: Sequence[int],
+    *,
+    size: int,
+    margin: int,
+) -> np.ndarray:
+    """Center one silhouette without changing its source aspect ratio."""
+
+    left, top, right, bottom = (int(value) for value in bbox)
+    cropped = component[top:bottom, left:right].astype(np.uint8)
+    if cropped.size == 0 or not np.any(cropped):
+        raise GroomingPoseInputError("global_pose_foreground_unavailable")
+    available = max(8, int(size) - 2 * max(0, int(margin)))
+    height, width = cropped.shape
+    scale = min(available / float(width), available / float(height))
+    resized_width = max(1, int(round(width * scale)))
+    resized_height = max(1, int(round(height * scale)))
+    resized = cv2.resize(
+        cropped,
+        (resized_width, resized_height),
+        interpolation=cv2.INTER_NEAREST,
+    ).astype(bool)
+    canvas = np.zeros((int(size), int(size)), dtype=bool)
+    x0 = (int(size) - resized_width) // 2
+    y0 = (int(size) - resized_height) // 2
+    canvas[y0 : y0 + resized_height, x0 : x0 + resized_width] = resized
+    return canvas
+
+
+def _global_pose_alignment(
+    candidate_mask: np.ndarray,
+    candidate_bbox: Sequence[int],
+    guide_mask: np.ndarray,
+    guide_bbox: Sequence[int],
+    thresholds: GroomingPoseThresholds,
+) -> dict[str, Any]:
+    """Compare the full silhouettes before ROI normalization can stretch them."""
+
+    candidate_width = max(1, int(candidate_bbox[2]) - int(candidate_bbox[0]))
+    candidate_height = max(1, int(candidate_bbox[3]) - int(candidate_bbox[1]))
+    guide_width = max(1, int(guide_bbox[2]) - int(guide_bbox[0]))
+    guide_height = max(1, int(guide_bbox[3]) - int(guide_bbox[1]))
+    candidate_aspect = candidate_width / float(candidate_height)
+    guide_aspect = guide_width / float(guide_height)
+    log_aspect_delta = abs(np.log(max(candidate_aspect, 1e-6) / max(guide_aspect, 1e-6)))
+    candidate_registered = _letterbox_component(
+        candidate_mask,
+        candidate_bbox,
+        size=thresholds.global_registration_size,
+        margin=thresholds.global_registration_margin,
+    )
+    guide_registered = _letterbox_component(
+        guide_mask,
+        guide_bbox,
+        size=thresholds.global_registration_size,
+        margin=thresholds.global_registration_margin,
+    )
+    intersection = int(np.count_nonzero(candidate_registered & guide_registered))
+    union = int(np.count_nonzero(candidate_registered | guide_registered))
+    silhouette_iou = intersection / float(max(1, union))
+    return {
+        "policy": "aspect_preserving_full_silhouette_registration_v1",
+        "candidate_bbox_aspect_ratio": round(candidate_aspect, 6),
+        "guide_bbox_aspect_ratio": round(guide_aspect, 6),
+        "bbox_log_aspect_delta": round(float(log_aspect_delta), 6),
+        "bbox_log_aspect_delta_maximum": (
+            thresholds.global_bbox_log_aspect_delta_max
+        ),
+        "silhouette_iou": round(float(silhouette_iou), 6),
+        "silhouette_iou_minimum": thresholds.global_silhouette_iou_min,
+        "silhouette_iou_aspect_delta_minimum": (
+            thresholds.global_silhouette_iou_aspect_delta_min
+        ),
+        "registration_size": [
+            thresholds.global_registration_size,
+            thresholds.global_registration_size,
+        ],
+        "registration_margin": thresholds.global_registration_margin,
+    }
 
 
 def _load_metadata(
@@ -634,6 +721,13 @@ def evaluate_grooming_pose(
             guide_bbox,
             active,
         )
+        global_alignment = _global_pose_alignment(
+            candidate_mask,
+            candidate_bbox,
+            guide_mask,
+            guide_bbox,
+            active,
+        )
     except GroomingPoseInputError as exc:
         return {
             **base,
@@ -747,6 +841,16 @@ def evaluate_grooming_pose(
     appearance["sampling"] = terminal_paw_sampling
 
     issues: list[str] = []
+    global_aspect_delta = float(global_alignment["bbox_log_aspect_delta"])
+    global_silhouette_iou = float(global_alignment["silhouette_iou"])
+    if global_aspect_delta > active.global_bbox_log_aspect_delta_max:
+        issues.append("gross_full_body_pose_aspect_mismatch")
+    if (
+        global_aspect_delta
+        > active.global_silhouette_iou_aspect_delta_min
+        and global_silhouette_iou < active.global_silhouette_iou_min
+    ):
+        issues.append("gross_full_body_pose_silhouette_mismatch")
     if candidate_roi_foreground < active.minimum_roi_foreground_pixels:
         issues.append("raised_foreleg_roi_foreground_too_small")
     if edge_density < active.edge_density_min:
@@ -790,6 +894,22 @@ def evaluate_grooming_pose(
             issues.append("raised_paw_texture_inconsistent_with_planted_paw")
 
     shortfalls = [
+        max(
+            0.0,
+            global_aspect_delta
+            / max(active.global_bbox_log_aspect_delta_max, 1e-6)
+            - 1.0,
+        ),
+        (
+            max(
+                0.0,
+                active.global_silhouette_iou_min - global_silhouette_iou,
+            )
+            / max(active.global_silhouette_iou_min, 1e-6)
+            if global_aspect_delta
+            > active.global_silhouette_iou_aspect_delta_min
+            else 0.0
+        ),
         max(0.0, active.edge_density_min - edge_density)
         / max(active.edge_density_min, 1e-6),
         max(
@@ -846,6 +966,7 @@ def evaluate_grooming_pose(
             "planted_paw_terminal_box_pixels": terminal_paw_sampling["planted"],
         },
         "metrics": {
+            "global_pose_alignment": global_alignment,
             "candidate_foreground_pixels": int(
                 np.count_nonzero(candidate_mask_normalized)
             ),

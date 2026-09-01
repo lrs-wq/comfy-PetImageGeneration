@@ -2684,12 +2684,13 @@ def evaluate_advisory_grooming_minimum_gate(
 
 def advisory_grooming_degraded_candidate_selection_key(
     record: dict[str, Any],
-) -> tuple[int, int, int, int, float, float, int]:
+) -> tuple[int, int, int, int, int, float, float, int]:
     """Rank a complete raw Qwen draft when the strict action gate is exhausted.
 
-    Identity replacement and obvious hard-object anatomy are kept ahead of the
-    action score.  Within equally safe candidates, prefer fewer issues, more
-    removal of the original planted-paw topology, then lower total penalty.
+    A gross full-body pose mismatch is ranked first because a horizontal
+    identity reference cannot condition the upright grooming driver reliably.
+    Identity replacement and obvious hard-object anatomy remain explicit debt
+    axes before the remaining action score.
     """
     _sync_local_video_runtime(globals(), {"advisory_grooming_degraded_candidate_selection_key"})
 
@@ -2708,6 +2709,13 @@ def advisory_grooming_degraded_candidate_selection_key(
         or (isinstance(face, dict) and face.get("acceptable") is not True)
     )
     hard_object = "raised_paw_hard_object_texture_signature" in issues
+    gross_pose_mismatch = bool(
+        {
+            "gross_full_body_pose_aspect_mismatch",
+            "gross_full_body_pose_silhouette_mismatch",
+        }
+        & issues
+    )
     evidence_missing = bool(
         gate.get("available") is not True
         or canonical_edit.get("available") is not True
@@ -2718,6 +2726,7 @@ def advisory_grooming_degraded_candidate_selection_key(
     action_change = float(metrics.get("action_corridor_mean_rgb_delta") or 0.0)
     combined_penalty = float(record.get("combined_penalty") or 1000.0)
     return (
+        int(gross_pose_mismatch),
         int(identity_unsafe),
         int(hard_object),
         int(evidence_missing),

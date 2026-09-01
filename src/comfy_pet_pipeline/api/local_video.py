@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.51"
+API_VERSION = "2.26.52"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -302,7 +302,7 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.55"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.56"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
     "strict_then_generated_completion_best_of_five_v4"
 )
@@ -327,6 +327,7 @@ QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
         "1.40.52",
         "1.40.53",
         "1.40.54",
+        "1.40.55",
         QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
     }
 )
@@ -343,7 +344,7 @@ QWEN_FIRST_FRAME_CACHE_HISTORY_SCAN_LIMIT = max(
     ),
 )
 GROOMING_QWEN_POSE_REFERENCE_POLICY = (
-    "canonical_only_prompted_grooming_full_canvas_action_redraw_raw_qwen_v40"
+    "canonical_identity_image1_plus_appearance_free_geometry_image2_v41"
 )
 GROOMING_QWEN_GEOMETRY_GUIDE_POLICY = "driving_grooming_geometry_image2_v8"
 GROOMING_PRIVATE_POSE_GATE_GUIDE_POLICY = "driving_grooming_geometry_image1_v3"
@@ -478,9 +479,8 @@ GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
     "canonical_palette_white_maquette_frame000_full_pose_transfer_seed_v9"
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
-    "canonical_image1_only_four_step_direct_action_prompt_"
-    "no_secondary_or_video_frame_reference_"
-    "raw_qwen_output_without_postprocess_v24"
+    "canonical_identity_image1_plus_single_tone_geometry_image2_"
+    "four_step_full_canvas_action_redraw_raw_qwen_v25"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 4
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT = (
@@ -577,6 +577,8 @@ GROOMING_ADVISORY_CANONICAL_EDGE_RETENTION_RELAXATION_BY_ATTEMPT = (
 )
 GROOMING_ADVISORY_BLOCKING_POSE_ISSUES = frozenset(
     {
+        "gross_full_body_pose_aspect_mismatch",
+        "gross_full_body_pose_silhouette_mismatch",
         "canonical_grooming_action_edit_evidence_unavailable",
         "canonical_grooming_action_edit_too_weak",
         "original_planted_forepaw_topology_retained",
@@ -590,6 +592,8 @@ GROOMING_ADVISORY_BLOCKING_POSE_ISSUES = frozenset(
 )
 GROOMING_ADVISORY_ACTION_RETRY_WARNINGS = frozenset(
     {
+        "gross_full_body_pose_aspect_mismatch",
+        "gross_full_body_pose_silhouette_mismatch",
         "canonical_grooming_action_edit_too_weak",
         "original_planted_forepaw_topology_retained",
         "raised_foreleg_structural_edge_density_too_low",
@@ -6995,6 +6999,15 @@ evaluate_eating_scail_video_motion = (
 eating_scail_best_effort_score = (
     _local_video_subject_replacement.eating_scail_best_effort_score
 )
+grooming_scail_video_identity_quality = (
+    _local_video_subject_replacement.grooming_scail_video_identity_quality
+)
+evaluate_grooming_scail_video_identity = (
+    _local_video_subject_replacement.evaluate_grooming_scail_video_identity
+)
+grooming_scail_best_effort_score = (
+    _local_video_subject_replacement.grooming_scail_best_effort_score
+)
 scail_action_attempt_status = (
     _local_video_subject_replacement.scail_action_attempt_status
 )
@@ -7063,6 +7076,18 @@ EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (
 )
 EATING_SCAIL_BEST_EFFORT_POLICY = (
     _local_video_subject_replacement.EATING_SCAIL_BEST_EFFORT_POLICY
+)
+GROOMING_SCAIL_IDENTITY_RETENTION_POLICY = (
+    _local_video_subject_replacement.GROOMING_SCAIL_IDENTITY_RETENTION_POLICY
+)
+GROOMING_SCAIL_BEST_EFFORT_POLICY = (
+    _local_video_subject_replacement.GROOMING_SCAIL_BEST_EFFORT_POLICY
+)
+GROOMING_SCAIL_MAX_ATTEMPTS = (
+    _local_video_subject_replacement.GROOMING_SCAIL_MAX_ATTEMPTS
+)
+GROOMING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (
+    _local_video_subject_replacement.GROOMING_SCAIL_POSE_STRENGTH_MULTIPLIERS
 )
 pose_attempt_provenance = _local_video_job_runner.pose_attempt_provenance
 strict_first_frame_identity_palette_evidence = (

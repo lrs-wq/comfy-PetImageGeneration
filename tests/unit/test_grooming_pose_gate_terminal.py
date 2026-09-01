@@ -47,8 +47,8 @@ class GroomingTerminalPawSamplingTests(unittest.TestCase):
         return image, mask, cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     def test_policy_uses_terminal_paw_bands_and_small_contact_tolerance(self) -> None:
-        self.assertEqual(gate.POLICY, "main_case_grooming_raised_paw_cv_v3")
-        self.assertEqual(gate.GATE_VERSION, "3.0")
+        self.assertEqual(gate.POLICY, "main_case_grooming_raised_paw_cv_v4")
+        self.assertEqual(gate.GATE_VERSION, "4.0")
         self.assertEqual(self.sampling["policy"], "terminal_paw_bands_v2")
         self.assertEqual(self.sampling["band_height_pixels"], 56)
         self.assertEqual(self.sampling["raised"], [40, 206, 160, 262])
@@ -56,6 +56,35 @@ class GroomingTerminalPawSamplingTests(unittest.TestCase):
         self.assertEqual(self.thresholds.paw_muzzle_gap_max, 0.040)
         self.assertEqual(self.thresholds.structural_blur_sigma, 4.0)
         self.assertEqual(self.thresholds.structural_edge_density_min, 0.015)
+
+    def test_global_pose_alignment_rejects_horizontal_subject(self) -> None:
+        guide = np.zeros((256, 256), dtype=bool)
+        cv2.ellipse(guide.view(np.uint8), (128, 132), (48, 104), 0, 0, 360, 1, -1)
+        horizontal = np.zeros((256, 256), dtype=bool)
+        cv2.ellipse(
+            horizontal.view(np.uint8),
+            (128, 132),
+            (106, 34),
+            0,
+            0,
+            360,
+            1,
+            -1,
+        )
+
+        alignment = gate._global_pose_alignment(
+            horizontal,
+            [22, 98, 235, 167],
+            guide,
+            [80, 28, 177, 237],
+            self.thresholds,
+        )
+
+        self.assertGreater(
+            alignment["bbox_log_aspect_delta"],
+            self.thresholds.global_bbox_log_aspect_delta_max,
+        )
+        self.assertGreater(alignment["silhouette_iou"], 0.0)
 
     def test_lowpass_structure_rejects_fur_texture_without_a_limb(self) -> None:
         gray = np.full(

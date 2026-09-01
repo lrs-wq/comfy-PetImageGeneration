@@ -3867,22 +3867,36 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     raise RuntimeError(
                         "Advisory grooming action transfer lacks its canonical Image 1."
                     )
+                if pose_reference_input_name is None:
+                    raise RuntimeError(
+                        "Advisory grooming action transfer lacks its appearance-free "
+                        "Image 2 geometry guide."
+                    )
                 update_job(
                     job_id,
                     grooming_action_first_frame_input_policy=(
                         GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY
                     ),
-                    grooming_action_first_frame_open_channel_loaded_by_qwen=False,
+                    grooming_action_first_frame_open_channel_loaded_by_qwen=True,
                     grooming_action_first_frame_soft_foreleg_depth_loaded_by_qwen=False,
                     grooming_action_first_frame_normalized_white_maquette_depth_loaded_by_qwen=False,
                     grooming_action_first_frame_identity_input=(qwen_input_name),
                     grooming_action_first_frame_identity_confirmation_input=None,
-                    grooming_action_first_frame_geometry_input=None,
-                    grooming_action_first_frame_action_reference_role=None,
-                    grooming_action_first_frame_action_reference_sha256=None,
+                    grooming_action_first_frame_geometry_input=(
+                        pose_reference_input_name
+                    ),
+                    grooming_action_first_frame_action_reference_role=(
+                        "appearance_free_single_tone_action_geometry_image2"
+                    ),
+                    grooming_action_first_frame_action_reference_sha256=(
+                        (job.get("pose_reference_input_sha256s") or {}).get(
+                            action_key(pose)
+                        )
+                    ),
                     grooming_action_first_frame_action_canvas=None,
                     grooming_action_first_frame_image_roles={
                         "image1": "approved_canonical_identity_sampler",
+                        "image2": "appearance_free_single_tone_action_geometry",
                     },
                     grooming_action_first_frame_negative_prompt_conditioning=False,
                     grooming_action_first_frame_sampling_schedule=(
@@ -3909,7 +3923,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         False
                     ),
                     grooming_action_first_frame_full_canvas_action_redraw=True,
-                    grooming_action_first_frame_prompt_only_action_geometry=True,
+                    grooming_action_first_frame_prompt_only_action_geometry=False,
                     grooming_action_first_frame_post_qwen_pixel_composite_enabled=(
                         False
                     ),
@@ -3922,7 +3936,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     grooming_action_first_frame_source_low_frequency_luma_loaded_by_qwen=(
                         False
                     ),
-                    grooming_action_first_frame_normalized_low_frequency_geometry_loaded_by_qwen=False,
+                    grooming_action_first_frame_normalized_low_frequency_geometry_loaded_by_qwen=True,
                     grooming_action_first_frame_identity_refine_required=False,
                     grooming_action_first_frame_identity_refine_mode=(
                         "conditional_only_for_detected_repairable_face_drift"
@@ -4513,16 +4527,20 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         )
                 if advisory_grooming_action_transfer_active:
                     attempt_primary_input_name = qwen_input_name
-                    attempt_secondary_input_name = None
+                    if pose_reference_input_name is None:
+                        raise RuntimeError(
+                            "Grooming action transfer lost its appearance-free "
+                            "geometry guide."
+                        )
+                    attempt_secondary_input_name = pose_reference_input_name
                     attempt_tertiary_input_name = None
                     attempt_additional_reference_input_names = None
-                    # The earlier local latent lock repeatedly reproduced the
-                    # canonical two-paws-down topology even at denoise=1.0.  Keep
-                    # the digest-bound canonical as Image 1/start latent, but let
-                    # Qwen redraw the full frame so it can actually relocate the
-                    # planted foreleg instead of adding a third paw around it.
+                    # Keep the digest-bound canonical as Image 1/start latent and
+                    # expose only the single-tone, appearance-free action guide as
+                    # Image 2. Full-canvas redraw lets Qwen handle canonical inputs
+                    # that are lying or otherwise far from the seated driver pose.
                     attempt_noise_mask_input_name = None
-                    attempt_geometry_input_name = None
+                    attempt_geometry_input_name = pose_reference_input_name
                     attempt_prompt = build_advisory_grooming_action_transfer_prompt(
                         pose,
                         profile_fur_lock=profile_fur_lock,
@@ -4530,17 +4548,19 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     grooming_advisory_action_transfer_attempt = {
                         "policy": GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY,
                         "image1_role": "approved_canonical_identity_sampler",
-                        "image2_role": None,
+                        "image2_role": (
+                            "appearance_free_single_tone_action_geometry"
+                        ),
                         "image3_role": None,
                         "uploaded_identity_views_consumed_via_canonical_only": True,
-                        "prompt_only_action_geometry": True,
+                        "prompt_only_action_geometry": False,
                         "video_first_frame_loaded_by_qwen": False,
                         "white_maquette_loaded_by_qwen": False,
                         "foreign_pose_image_loaded_by_qwen": False,
                         "raw_action_rgb_loaded_by_qwen": False,
                         "source_low_frequency_luma_loaded_by_qwen": False,
-                        "normalized_low_frequency_geometry_loaded_by_qwen": False,
-                        "public_open_channel_loaded_by_qwen": False,
+                        "normalized_low_frequency_geometry_loaded_by_qwen": True,
+                        "public_open_channel_loaded_by_qwen": True,
                         "soft_foreleg_depth_loaded_by_qwen": False,
                         "white_maquette_frame_index": None,
                         "white_maquette_head_identity_removed": False,
@@ -9358,7 +9378,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     selected_degraded_gate.get("acceptable") is True
                 )
                 selected_degraded_gate["degraded_selection_policy"] = (
-                    "identity_first_lowest_risk_complete_chain_v1"
+                    "gross_pose_then_identity_lowest_risk_complete_chain_v2"
                 )
                 selected_degraded_gate["degraded_selection_key"] = list(
                     advisory_grooming_degraded_candidate_selection_key(

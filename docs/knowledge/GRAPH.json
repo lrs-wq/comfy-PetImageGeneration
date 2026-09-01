@@ -150,6 +150,22 @@
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {
+      "id": "comfy.quality.grooming_global_pose",
+      "type": "business_rule",
+      "name": "舔毛保持宽高比的全身姿态审核",
+      "status": "active",
+      "tags": ["grooming", "first-frame", "aspect-preserving", "full-silhouette", "gross-pose", "retry", "advisory"],
+      "evidence": "src/comfy_pet_pipeline/quality/grooming_pose.py"
+    },
+    {
+      "id": "comfy.recovery.grooming_scail_identity_best_effort",
+      "type": "business_rule",
+      "name": "舔毛 SCAIL 身份保持三轮选优",
+      "status": "active",
+      "tags": ["grooming", "scail", "identity", "driver-takeover", "three-attempts", "decreasing-pose-strength", "best-effort", "completion-first"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"
+    },
+    {
       "id": "comfy.module.transparent_animation",
       "type": "module",
       "name": "透明动画生成",
@@ -279,6 +295,14 @@
       "status": "accepted",
       "tags": ["completion-first", "best-effort", "visual-quality-advisory", "runtime-integrity-fail-closed", "no-original-output"],
       "evidence": "docs/knowledge/DECISIONS/0003-generated-visual-completion-first.md"
+    },
+    {
+      "id": "comfy.decision.grooming_identity_geometry_separation",
+      "type": "decision",
+      "name": "舔毛身份与几何职责分离并保持完成优先",
+      "status": "accepted",
+      "tags": ["grooming", "canonical-identity", "appearance-free-geometry", "full-canvas-redraw", "global-pose", "scail-identity", "completion-first"],
+      "evidence": "docs/knowledge/DECISIONS/0004-grooming-identity-geometry-separation.md"
     }
   ],
   "edges": [
@@ -379,6 +403,18 @@
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {
+      "from": "comfy.module.pipeline",
+      "relation": "checked_by",
+      "to": "comfy.quality.grooming_global_pose",
+      "evidence": "src/comfy_pet_pipeline/quality/grooming_pose.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "recovers_with",
+      "to": "comfy.recovery.grooming_scail_identity_best_effort",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"
+    },
+    {
       "from": "comfy.recovery.eating_light_achromatic_dark_feature",
       "relation": "revalidated_by",
       "to": "comfy.quality.identity_issue_aware_retry",
@@ -455,6 +491,24 @@
       "relation": "governed_by",
       "to": "comfy.decision.generated_visual_completion_first",
       "evidence": "docs/knowledge/DECISIONS/0003-generated-visual-completion-first.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "governed_by",
+      "to": "comfy.decision.grooming_identity_geometry_separation",
+      "evidence": "docs/knowledge/DECISIONS/0004-grooming-identity-geometry-separation.md"
+    },
+    {
+      "from": "comfy.quality.grooming_global_pose",
+      "relation": "governed_by",
+      "to": "comfy.decision.grooming_identity_geometry_separation",
+      "evidence": "docs/knowledge/DECISIONS/0004-grooming-identity-geometry-separation.md"
+    },
+    {
+      "from": "comfy.recovery.grooming_scail_identity_best_effort",
+      "relation": "governed_by",
+      "to": "comfy.decision.grooming_identity_geometry_separation",
+      "evidence": "docs/knowledge/DECISIONS/0004-grooming-identity-geometry-separation.md"
     },
     {
       "from": "comfy.module.pipeline",

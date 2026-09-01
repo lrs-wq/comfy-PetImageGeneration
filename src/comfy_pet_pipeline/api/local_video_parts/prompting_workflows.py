@@ -654,30 +654,27 @@ def build_advisory_grooming_action_transfer_prompt(
     *,
     profile_fur_lock: str = "",
 ) -> str:
-    """Return the verified direct single-image grooming edit instruction.
-
-    The four-step distilled model followed this compact wording across four
-    independent seeds. Repeating full pose/profile contracts made the edit less
-    reliable, so Image 1 carries appearance context and the text states only the
-    required topology change.
-    """
+    """Return the canonical-identity plus appearance-free-geometry instruction."""
     _sync_local_video_runtime(globals(), {"build_advisory_grooming_action_transfer_prompt"})
 
     del pose, profile_fur_lock
     return (
-        "Edit Image 1. Replace the neutral two-front-paws-down sitting pose "
-        "with a natural cat grooming pose. Move the front leg visible on the "
-        "left side of the image from its current ground position up to the "
-        "mouth. That same leg stays attached at the shoulder, bends naturally "
-        "through the elbow and wrist, and ends in one rounded furry paw "
-        "touching a tiny pink tongue at the mouth. Remove its former ground "
-        "paw completely and fill the vacated outline with the same flat pure "
-        "#00FF00 green background. Keep the front paw on the right side of the "
-        "image planted. Exactly two front paws total: one at the mouth and one "
-        "on the ground. Preserve the cat's exact face, body, coat colors, "
-        "markings, fur, tail, camera, scale, framing, lighting, and flat "
-        "pure-green background. Keep the complete cat visible. No floor or "
-        "scenery."
+        "Image 1 is the only cat identity and appearance authority. Image 2 is "
+        "an appearance-free single-tone action-geometry guide, not a second cat. "
+        "Regardless of Image 1's current pose, orientation, or crop, redraw the "
+        "exact same cat into Image 2's complete upright seated grooming layout. "
+        "Copy only Image 2's joint placement, body pose, camera layout, subject "
+        "scale, and raised-paw-to-mouth contact. Treat every gray Image 2 pixel "
+        "as a coordinate with zero color, value, material, texture, lighting, "
+        "face, breed, body-proportion, or identity meaning. Never render the gray "
+        "guide surface or its internal green separator. Preserve Image 1's exact "
+        "face, eyes, ears, muzzle, body proportions, coat colors, markings, natural "
+        "fur, tail, and rendering style. Exactly two attached front legs remain: "
+        "one bends naturally from shoulder through elbow and wrist to one rounded "
+        "furry paw touching a tiny pink tongue at the mouth; the other paw stays "
+        "planted. Keep the complete cat visible on flat pure #00FF00 green with "
+        "generous edge clearance. No floor, shadow, scenery, prop, clothing, text, "
+        "watermark, extra limb, or extra subject."
     )
 
 

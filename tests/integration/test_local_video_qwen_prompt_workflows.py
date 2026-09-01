@@ -783,22 +783,17 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
         )
 
-        self.assertLess(len(prompt.split()), 180)
-        self.assertTrue(prompt.startswith("Edit Image 1."))
-        self.assertIn("Move the front leg visible on the left side", prompt)
-        self.assertIn("Remove its former ground paw completely", prompt)
-        self.assertIn("fill the vacated outline", prompt)
-        self.assertIn("Exactly two front paws total", prompt)
+        self.assertLess(len(prompt.split()), 190)
+        self.assertTrue(prompt.startswith("Image 1 is the only cat identity"))
+        self.assertIn("Image 2 is an appearance-free", prompt)
+        self.assertIn("Regardless of Image 1's current pose", prompt)
+        self.assertIn("complete upright seated grooming layout", prompt)
+        self.assertIn("zero color, value, material, texture", prompt)
+        self.assertIn("Exactly two attached front legs remain", prompt)
         self.assertIn("one rounded furry paw touching", prompt)
         self.assertIn("tiny pink tongue", prompt)
-        self.assertIn("Preserve the cat's exact face", prompt)
-        for forbidden_token in (
-            "Image 2",
-            "white maquette",
-            "pose silhouette",
-            "depth guide",
-            "video frame",
-        ):
+        self.assertIn("Preserve Image 1's exact face", prompt)
+        for forbidden_token in ("white maquette", "video frame"):
             self.assertNotIn(forbidden_token.lower(), prompt.lower())
 
         refine_prompt = pipeline.build_advisory_grooming_identity_refine_prompt(
@@ -1137,7 +1132,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertEqual(loaded_loras, {pipeline.QWEN_LORA: 1.0})
         self.assertNotIn(self.TEST_QWEN_STYLE_LORA, loaded_loras)
 
-    def test_advisory_grooming_uses_verified_single_image_four_step_edit(self) -> None:
+    def test_advisory_grooming_uses_identity_plus_geometry_four_step_edit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workflow, uploaded_input, pose_input = self._capture_action_workflow(
                 Path(temporary),
@@ -1156,15 +1151,14 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             if node.get("class_type") == "LoadImage"
         }
         expected_canonical = "local_video_api/capture-grooming/cartoon_reference.png"
-        self.assertEqual(load_images, {expected_canonical})
-        self.assertNotIn(pose_input, load_images)
+        self.assertEqual(load_images, {expected_canonical, pose_input})
         self.assertNotIn(uploaded_input, load_images)
-        self.assertTrue(action_prompt.startswith("Edit Image 1."))
-        self.assertIn("Remove its former ground paw completely", action_prompt)
-        self.assertIn("Exactly two front paws total", action_prompt)
-        self.assertLess(len(action_prompt.split()), 180)
-        self.assertNotIn("image2", workflow["6"]["inputs"])
-        self.assertNotIn("image2", workflow["7"]["inputs"])
+        self.assertTrue(action_prompt.startswith("Image 1 is the only cat identity"))
+        self.assertIn("Image 2 is an appearance-free", action_prompt)
+        self.assertIn("complete upright seated grooming layout", action_prompt)
+        self.assertLess(len(action_prompt.split()), 190)
+        self.assertIn("image2", workflow["6"]["inputs"])
+        self.assertIn("image2", workflow["7"]["inputs"])
         self.assertNotIn("image3", workflow["6"]["inputs"])
         self.assertNotIn("image3", workflow["7"]["inputs"])
         self.assertEqual(negative_prompt, "")
@@ -1289,10 +1283,10 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertFalse(grooming_health["post_qwen_pixel_composite_enabled"])
         self.assertTrue(grooming_health["raw_qwen_output_required"])
         self.assertTrue(grooming_health["raw_qwen_selection_byte_preserving"])
-        self.assertTrue(grooming_health["prompt_only_action_geometry"])
+        self.assertFalse(grooming_health["prompt_only_action_geometry"])
         self.assertFalse(grooming_health["video_first_frame_loaded_by_qwen"])
         self.assertFalse(grooming_health["white_maquette_loaded_by_qwen"])
-        self.assertFalse(grooming_health["appearance_free_pose_seed_loaded_by_qwen"])
+        self.assertTrue(grooming_health["public_open_channel_loaded_by_qwen"])
         self.assertFalse(
             grooming_health["same_canonical_face_identity_reference_loaded_by_qwen"]
         )
@@ -1301,7 +1295,10 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertEqual(grooming_health["steps"], 4)
         self.assertEqual(
             grooming_health["image_roles"],
-            {"image1": "approved_canonical_identity_sampler"},
+            {
+                "image1": "approved_canonical_identity_sampler",
+                "image2": "appearance_free_single_tone_action_geometry",
+            },
         )
         self.assertIn("canonical_local_action_edit_mask", grooming_health)
         minimum_contract = grooming_health["minimum_contract"]
@@ -1311,7 +1308,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         )
         self.assertEqual(
             minimum_contract["terminal_selection_policy"],
-            "identity_first_lowest_risk_complete_chain_v1",
+            "gross_pose_then_identity_lowest_risk_complete_chain_v2",
         )
         self.assertEqual(minimum_contract["advisory_only_pose_observations"], [])
         self.assertIn(
@@ -1319,7 +1316,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             minimum_contract["blocking_pose_issues"],
         )
 
-    def test_advisory_grooming_attempt3_stays_canonical_prompt_only(
+    def test_advisory_grooming_attempt3_keeps_canonical_and_geometry_roles(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1341,13 +1338,14 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             if node.get("class_type") == "LoadImage"
         }
         expected_prefix = "local_video_api/capture-grooming/"
-        self.assertEqual(load_images, {expected_prefix + "cartoon_reference.png"})
+        self.assertEqual(
+            load_images,
+            {expected_prefix + "cartoon_reference.png", pose_input},
+        )
         self.assertNotIn(uploaded_input, load_images)
-        self.assertNotIn(pose_input, load_images)
         prompt = workflow["6"]["inputs"]["prompt"]
-        self.assertTrue(prompt.startswith("Edit Image 1."))
-        self.assertIn("Move the front leg visible on the left side", prompt)
-        self.assertNotIn("Image 2", prompt)
+        self.assertTrue(prompt.startswith("Image 1 is the only cat identity"))
+        self.assertIn("Image 2 is an appearance-free", prompt)
         self.assertEqual(workflow["7"]["inputs"]["prompt"], "")
         self.assertEqual(workflow["14"]["inputs"]["steps"], 4)
         self.assertFalse(
@@ -1382,9 +1380,11 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             for node in workflow.values()
             if node.get("class_type") == "LoadImage"
         }
-        self.assertEqual(load_images, {expected_prefix + "cartoon_reference.png"})
+        self.assertEqual(
+            load_images,
+            {expected_prefix + "cartoon_reference.png", pose_input},
+        )
         self.assertNotIn(uploaded_input, load_images)
-        self.assertNotIn(pose_input, load_images)
         self.assertFalse(
             any(
                 node.get("class_type") == "SetLatentNoiseMask"
@@ -1392,9 +1392,9 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             )
         )
         prompt = workflow["6"]["inputs"]["prompt"]
-        self.assertTrue(prompt.startswith("Edit Image 1."))
+        self.assertTrue(prompt.startswith("Image 1 is the only cat identity"))
         self.assertNotIn("GROOMING RETRY CORRECTION", prompt)
-        self.assertLess(len(prompt.split()), 180)
+        self.assertLess(len(prompt.split()), 190)
         self.assertEqual(workflow["7"]["inputs"]["prompt"], "")
         self.assertEqual(workflow["14"]["inputs"]["steps"], 4)
 

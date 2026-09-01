@@ -846,6 +846,21 @@ def health() -> dict[str, Any]:
                     "required_before_transparent_extraction": True,
                 },
             },
+            "cat_grooming_scail_identity": {
+                "policy": GROOMING_SCAIL_IDENTITY_RETENTION_POLICY,
+                "samples": "first_middle_last_frames",
+                "uses_pose_identity_mask_video": True,
+                "compares_output_to_qwen_action_reference": True,
+                "detects_source_driver_appearance_takeover": True,
+                "max_attempts": GROOMING_SCAIL_MAX_ATTEMPTS,
+                "pose_strength_multipliers": list(
+                    GROOMING_SCAIL_POSE_STRENGTH_MULTIPLIERS
+                ),
+                "best_effort_policy": GROOMING_SCAIL_BEST_EFFORT_POLICY,
+                "selects_best_generated_attempt_on_exhaustion": True,
+                "visual_rejection_can_fail_task": False,
+                "required_before_transparent_extraction": True,
+            },
             "species_routes": {
                 "cat": {
                     "profile": CAT_SUBJECT_PROFILE,
@@ -1596,11 +1611,7 @@ def health() -> dict[str, Any]:
                 ),
                 "pose_identity_geometry_role": {
                     "eating": "image2_main_case_driver_geometry_guide",
-                    "grooming": (
-                        "image2_main_case_driver_geometry_guide"
-                        if GENERATION_VISUAL_AUDITS_BLOCKING
-                        else "prompt_only_local_action_no_pose_reference_image"
-                    ),
+                    "grooming": "image2_appearance_free_single_tone_geometry_guide",
                 },
                 "grooming_advisory_first_frame": {
                     "enabled": (not GENERATION_VISUAL_AUDITS_BLOCKING),
@@ -1612,8 +1623,9 @@ def health() -> dict[str, Any]:
                     ),
                     "image_roles": {
                         "image1": "approved_canonical_identity_sampler",
+                        "image2": "appearance_free_single_tone_action_geometry",
                     },
-                    "prompt_only_action_geometry": True,
+                    "prompt_only_action_geometry": False,
                     "video_first_frame_loaded_by_qwen": False,
                     "white_maquette_loaded_by_qwen": False,
                     "foreign_pose_image_loaded_by_qwen": False,
@@ -1624,7 +1636,7 @@ def health() -> dict[str, Any]:
                     "validated_action_chroma_loaded_by_qwen": False,
                     "validated_action_low_frequency_luma_loaded_by_qwen": False,
                     "validated_action_high_frequency_texture_loaded_by_qwen": False,
-                    "public_open_channel_loaded_by_qwen": False,
+                    "public_open_channel_loaded_by_qwen": True,
                     "soft_foreleg_depth_loaded_by_qwen": False,
                     "normalized_white_maquette_low_frequency_depth_loaded_by_qwen": (
                         False
@@ -1654,7 +1666,7 @@ def health() -> dict[str, Any]:
                     "same_canonical_face_identity_reference_loaded_by_qwen": False,
                     "uploaded_identity_pixels_consumed_via_canonical_only": True,
                     "uploaded_identity_palette_consumed_directly": True,
-                    "appearance_free_pose_seed_loaded_by_qwen": False,
+                    "appearance_free_pose_seed_loaded_by_qwen": True,
                     "identity_palette_prompt_conditioning": True,
                     "negative_prompt_conditioning": False,
                     "sampling_schedule": (
@@ -1749,7 +1761,7 @@ def health() -> dict[str, Any]:
                         "action_retry_guidance_never_blocks_final_attempt": True,
                         "final_attempt_fail_closed": False,
                         "terminal_selection_policy": (
-                            "identity_first_lowest_risk_complete_chain_v1"
+                            "gross_pose_then_identity_lowest_risk_complete_chain_v2"
                         ),
                         "strict_then_relaxed_threshold_scale_by_attempt": list(
                             GROOMING_ADVISORY_CANONICAL_ACTION_THRESHOLD_SCALE_BY_ATTEMPT
@@ -1965,8 +1977,8 @@ def health() -> dict[str, Any]:
                         "public_open_channel_generation_plus_private_cv_validation"
                         if GENERATION_VISUAL_AUDITS_BLOCKING
                         else (
-                            "canonical_prompt_full_canvas_action_redraw_plus_"
-                            "nonterminal_minimum_contract"
+                            "appearance_free_image2_full_canvas_action_redraw_plus_"
+                            "nonterminal_full_body_and_identity_contract"
                         )
                     ),
                     "fail_closed": GENERATION_VISUAL_AUDITS_BLOCKING,

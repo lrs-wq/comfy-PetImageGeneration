@@ -105,6 +105,23 @@ EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (
 EATING_SCAIL_ADJACENT_MAE_MIN = 0.55
 EATING_SCAIL_FIRST_FRAME_MAE_MAX_MIN = 3.0
 
+GROOMING_SCAIL_IDENTITY_RETENTION_POLICY = (
+    "grooming_reference_identity_vs_driver_appearance_gate_v1"
+)
+GROOMING_SCAIL_BEST_EFFORT_POLICY = (
+    "grooming_identity_retention_best_of_three_v1"
+)
+GROOMING_SCAIL_MAX_ATTEMPTS = 3
+GROOMING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (1.0, 0.90, 0.80)
+GROOMING_SCAIL_CHROMATIC_SOURCE_MIN = 0.12
+GROOMING_SCAIL_CHROMATIC_RETENTION_RATIO_MIN = 0.30
+GROOMING_SCAIL_DARK_SOURCE_MIN = 0.08
+GROOMING_SCAIL_DARK_RETENTION_RATIO_MIN = 0.40
+GROOMING_SCAIL_DRIVER_SEPARATION_MIN = 0.20
+GROOMING_SCAIL_DRIVER_TAKEOVER_MARGIN = 0.12
+GROOMING_SCAIL_TEXTURE_REFERENCE_DRIVER_RATIO_MIN = 1.20
+GROOMING_SCAIL_TEXTURE_RETENTION_RATIO_MIN = 0.55
+
 
 def select_transparent_guidance_policy(
     action: str,
@@ -766,6 +783,375 @@ def eating_scail_best_effort_score(
     }
 
 
+def _masked_grooming_appearance_signature(
+    image: np.ndarray,
+    mask: np.ndarray,
+) -> dict[str, float]:
+    """Summarize identity-bearing color, markings, and surface inside a mask."""
+
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("grooming identity frame must be RGB")
+    if mask.shape != image.shape[:2]:
+        mask = cv2.resize(
+            mask.astype(np.uint8),
+            (image.shape[1], image.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+    else:
+        mask = mask.astype(bool)
+    if int(np.count_nonzero(mask)) < 256:
+        raise ValueError("grooming identity mask is empty or too small")
+
+    rgb = image.astype(np.uint8)
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    saturation = hsv[:, :, 1].astype(np.float32) / 255.0
+    luminance = gray.astype(np.float32) / 255.0
+    gradient_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gradient_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    gradient = np.hypot(gradient_x, gradient_y)
+    interior = cv2.erode(
+        mask.astype(np.uint8),
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool)
+    if int(np.count_nonzero(interior)) < 128:
+        interior = mask
+    saturation_values = saturation[mask]
+    luminance_values = luminance[mask]
+    gradient_values = gradient[interior]
+    return {
+        "saturation_mean": float(np.mean(saturation_values)),
+        "chromatic_fraction": float(np.mean(saturation_values >= 0.15)),
+        "near_gray_fraction": float(np.mean(saturation_values <= 0.08)),
+        "dark_fraction": float(np.mean(luminance_values <= 0.35)),
+        "light_fraction": float(np.mean(luminance_values >= 0.75)),
+        "gradient_mean": float(np.mean(gradient_values)),
+        "gradient_p90": float(np.percentile(gradient_values, 90)),
+    }
+
+
+def _mean_grooming_appearance_signature(
+    signatures: list[dict[str, float]],
+) -> dict[str, float]:
+    if not signatures:
+        raise ValueError("grooming appearance signatures are empty")
+    return {
+        key: float(np.mean([signature[key] for signature in signatures]))
+        for key in signatures[0]
+    }
+
+
+def _grooming_appearance_distance(
+    first: dict[str, float],
+    second: dict[str, float],
+) -> float:
+    palette_distance = (
+        abs(first["saturation_mean"] - second["saturation_mean"])
+        + abs(first["chromatic_fraction"] - second["chromatic_fraction"])
+        + 0.50 * abs(first["near_gray_fraction"] - second["near_gray_fraction"])
+        + 0.75 * abs(first["dark_fraction"] - second["dark_fraction"])
+        + 0.50 * abs(first["light_fraction"] - second["light_fraction"])
+    )
+    texture_distance = 0.20 * abs(
+        np.log(
+            (first["gradient_p90"] + 1.0)
+            / (second["gradient_p90"] + 1.0)
+        )
+    )
+    return float(palette_distance + texture_distance)
+
+
+def grooming_scail_video_identity_quality(
+    reference_frame: np.ndarray,
+    reference_mask: np.ndarray,
+    output_frames: list[np.ndarray],
+    source_driver_frames: list[np.ndarray],
+    pose_identity_masks: list[np.ndarray],
+) -> dict[str, Any]:
+    """Detect obvious loss of the grooming reference into driver appearance."""
+
+    _sync_local_video_runtime(globals(), {"grooming_scail_video_identity_quality"})
+    sample_count = min(
+        len(output_frames),
+        len(source_driver_frames),
+        len(pose_identity_masks),
+    )
+    if sample_count < 1:
+        return {
+            "policy": GROOMING_SCAIL_IDENTITY_RETENTION_POLICY,
+            "available": False,
+            "acceptable": False,
+            "issues": ["grooming_scail_identity_samples_unavailable"],
+            "penalty": 1000.0,
+            "sample_count": sample_count,
+        }
+    try:
+        reference = _masked_grooming_appearance_signature(
+            reference_frame,
+            reference_mask,
+        )
+        output = _mean_grooming_appearance_signature(
+            [
+                _masked_grooming_appearance_signature(
+                    output_frames[index],
+                    pose_identity_masks[index],
+                )
+                for index in range(sample_count)
+            ]
+        )
+        driver = _mean_grooming_appearance_signature(
+            [
+                _masked_grooming_appearance_signature(
+                    source_driver_frames[index],
+                    pose_identity_masks[index],
+                )
+                for index in range(sample_count)
+            ]
+        )
+    except (TypeError, ValueError) as exc:
+        return {
+            "policy": GROOMING_SCAIL_IDENTITY_RETENTION_POLICY,
+            "available": False,
+            "acceptable": False,
+            "issues": ["grooming_scail_identity_signature_unavailable"],
+            "penalty": 1000.0,
+            "sample_count": sample_count,
+            "error": str(exc),
+        }
+
+    output_reference_distance = _grooming_appearance_distance(output, reference)
+    output_driver_distance = _grooming_appearance_distance(output, driver)
+    reference_driver_distance = _grooming_appearance_distance(reference, driver)
+    issues: list[str] = []
+    if (
+        reference["chromatic_fraction"] >= GROOMING_SCAIL_CHROMATIC_SOURCE_MIN
+        and output["chromatic_fraction"]
+        < reference["chromatic_fraction"]
+        * GROOMING_SCAIL_CHROMATIC_RETENTION_RATIO_MIN
+    ):
+        issues.append("grooming_scail_reference_chroma_collapsed")
+    if (
+        reference["dark_fraction"] >= GROOMING_SCAIL_DARK_SOURCE_MIN
+        and output["dark_fraction"]
+        < reference["dark_fraction"] * GROOMING_SCAIL_DARK_RETENTION_RATIO_MIN
+    ):
+        issues.append("grooming_scail_reference_dark_markings_collapsed")
+    if (
+        reference_driver_distance >= GROOMING_SCAIL_DRIVER_SEPARATION_MIN
+        and output_driver_distance + GROOMING_SCAIL_DRIVER_TAKEOVER_MARGIN
+        < output_reference_distance
+    ):
+        issues.append("grooming_scail_driver_appearance_takeover")
+    if (
+        reference["gradient_p90"]
+        >= driver["gradient_p90"]
+        * GROOMING_SCAIL_TEXTURE_REFERENCE_DRIVER_RATIO_MIN
+        and output["gradient_p90"]
+        < reference["gradient_p90"] * GROOMING_SCAIL_TEXTURE_RETENTION_RATIO_MIN
+    ):
+        issues.append("grooming_scail_reference_texture_collapsed")
+
+    driver_takeover_debt = max(
+        0.0,
+        output_reference_distance - output_driver_distance,
+    )
+    penalty = (
+        output_reference_distance
+        + 0.75 * driver_takeover_debt
+        + 0.50 * len(issues)
+    )
+    return {
+        "policy": GROOMING_SCAIL_IDENTITY_RETENTION_POLICY,
+        "available": True,
+        "acceptable": not issues,
+        "issues": issues,
+        "penalty": round(float(penalty), 6),
+        "sample_count": sample_count,
+        "reference_signature": {
+            key: round(value, 6) for key, value in reference.items()
+        },
+        "output_signature": {
+            key: round(value, 6) for key, value in output.items()
+        },
+        "source_driver_signature": {
+            key: round(value, 6) for key, value in driver.items()
+        },
+        "output_reference_distance": round(output_reference_distance, 6),
+        "output_source_driver_distance": round(output_driver_distance, 6),
+        "reference_source_driver_distance": round(reference_driver_distance, 6),
+        "thresholds": {
+            "chromatic_source_minimum": GROOMING_SCAIL_CHROMATIC_SOURCE_MIN,
+            "chromatic_retention_ratio_minimum": (
+                GROOMING_SCAIL_CHROMATIC_RETENTION_RATIO_MIN
+            ),
+            "dark_source_minimum": GROOMING_SCAIL_DARK_SOURCE_MIN,
+            "dark_retention_ratio_minimum": (
+                GROOMING_SCAIL_DARK_RETENTION_RATIO_MIN
+            ),
+            "driver_separation_minimum": GROOMING_SCAIL_DRIVER_SEPARATION_MIN,
+            "driver_takeover_margin": GROOMING_SCAIL_DRIVER_TAKEOVER_MARGIN,
+            "texture_reference_driver_ratio_minimum": (
+                GROOMING_SCAIL_TEXTURE_REFERENCE_DRIVER_RATIO_MIN
+            ),
+            "texture_retention_ratio_minimum": (
+                GROOMING_SCAIL_TEXTURE_RETENTION_RATIO_MIN
+            ),
+        },
+    }
+
+
+def grooming_scail_best_effort_score(
+    quality: dict[str, Any],
+) -> dict[str, Any]:
+    """Rank rejected grooming videos without converting visual debt to failure."""
+
+    _sync_local_video_runtime(globals(), {"grooming_scail_best_effort_score"})
+    raw_penalty = quality.get("penalty")
+    penalty = max(
+        0.0,
+        float(raw_penalty if raw_penalty is not None else 1000.0),
+    )
+    return {
+        "policy": GROOMING_SCAIL_BEST_EFFORT_POLICY,
+        "score": round(1.0 / (1.0 + penalty), 9),
+        "penalty": round(penalty, 6),
+        "issue_count": len(quality.get("issues") or []),
+    }
+
+
+def _read_video_rgb_samples(
+    path: Path,
+    indices: list[int],
+) -> list[np.ndarray]:
+    capture = cv2.VideoCapture(str(path))
+    frames: list[np.ndarray] = []
+    try:
+        if not capture.isOpened():
+            raise ValueError(f"video is unreadable: {path}")
+        for index in indices:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+            ok, bgr = capture.read()
+            if not ok:
+                raise ValueError(f"video frame {index} is unreadable: {path}")
+            frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    finally:
+        capture.release()
+    return frames
+
+
+def _blue_identity_mask(frame: np.ndarray) -> np.ndarray:
+    """Decode the prepared SCAIL blue identity-mask convention."""
+
+    blue = frame[:, :, 2].astype(np.int16)
+    green = frame[:, :, 1].astype(np.int16)
+    red = frame[:, :, 0].astype(np.int16)
+    return (blue >= 96) & ((blue - green) >= 40) & ((blue - red) >= 40)
+
+
+def evaluate_grooming_scail_video_identity(
+    video_path: Path,
+    *,
+    reference_path: Path,
+    reference_identity_mask_path: Path,
+    pose_identity_mask_video_path: Path,
+    source_driver_video_path: Path,
+) -> dict[str, Any]:
+    """Sample one SCAIL candidate and audit identity retention non-destructively."""
+
+    _sync_local_video_runtime(globals(), {"evaluate_grooming_scail_video_identity"})
+    paths = (
+        video_path,
+        reference_path,
+        reference_identity_mask_path,
+        pose_identity_mask_video_path,
+        source_driver_video_path,
+    )
+    try:
+        if any(not path.is_file() for path in paths):
+            raise ValueError("one or more grooming identity audit inputs are missing")
+        counts: list[int] = []
+        for path in (
+            video_path,
+            pose_identity_mask_video_path,
+            source_driver_video_path,
+        ):
+            capture = cv2.VideoCapture(str(path))
+            try:
+                if not capture.isOpened():
+                    raise ValueError(f"video is unreadable: {path}")
+                counts.append(int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
+            finally:
+                capture.release()
+        frame_count = min(counts)
+        if frame_count < 1:
+            raise ValueError("grooming identity audit video has no frames")
+        sample_indices = sorted({0, frame_count // 2, frame_count - 1})
+        output_frames = _read_video_rgb_samples(video_path, sample_indices)
+        driver_frames = _read_video_rgb_samples(
+            source_driver_video_path,
+            sample_indices,
+        )
+        mask_frames = _read_video_rgb_samples(
+            pose_identity_mask_video_path,
+            sample_indices,
+        )
+        pose_masks = [_blue_identity_mask(frame) for frame in mask_frames]
+
+        reference_bgr = cv2.imread(str(reference_path), cv2.IMREAD_UNCHANGED)
+        reference_mask_bgr = cv2.imread(
+            str(reference_identity_mask_path),
+            cv2.IMREAD_COLOR,
+        )
+        if reference_bgr is None or reference_mask_bgr is None:
+            raise ValueError("grooming reference image or identity mask is unreadable")
+        reference_rgb = cv2.cvtColor(
+            reference_bgr[:, :, :3],
+            cv2.COLOR_BGR2RGB,
+        )
+        reference_mask_rgb = cv2.cvtColor(
+            reference_mask_bgr,
+            cv2.COLOR_BGR2RGB,
+        )
+        reference_mask = _blue_identity_mask(reference_mask_rgb)
+        quality = grooming_scail_video_identity_quality(
+            reference_rgb,
+            reference_mask,
+            output_frames,
+            driver_frames,
+            pose_masks,
+        )
+        return {
+            **quality,
+            "video_path": str(video_path),
+            "video_sha256": file_sha256(video_path),
+            "reference_path": str(reference_path),
+            "reference_sha256": file_sha256(reference_path),
+            "reference_identity_mask_path": str(reference_identity_mask_path),
+            "reference_identity_mask_sha256": file_sha256(
+                reference_identity_mask_path
+            ),
+            "pose_identity_mask_video_path": str(pose_identity_mask_video_path),
+            "pose_identity_mask_video_sha256": file_sha256(
+                pose_identity_mask_video_path
+            ),
+            "source_driver_video_path": str(source_driver_video_path),
+            "source_driver_video_sha256": file_sha256(source_driver_video_path),
+            "frame_count": frame_count,
+            "sample_indices": sample_indices,
+        }
+    except Exception as exc:  # noqa: BLE001 - advisory audit must never abort output
+        return {
+            "policy": GROOMING_SCAIL_IDENTITY_RETENTION_POLICY,
+            "available": False,
+            "acceptable": False,
+            "issues": ["grooming_scail_identity_audit_unavailable"],
+            "penalty": 1000.0,
+            "video_path": str(video_path),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def scail_action_attempt_status(records: list[dict[str, Any]]) -> str:
     """Summarize whether an action selected a strict or best-effort attempt."""
 
@@ -950,6 +1336,8 @@ def scail_workflow_with_retry_controls(
         if normalized_action == "drinking"
         else EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS
         if normalized_action == "eating"
+        else GROOMING_SCAIL_POSE_STRENGTH_MULTIPLIERS
+        if normalized_action == "grooming"
         else (1.0,)
     )
     multiplier = float(multipliers[min(max(1, attempt), len(multipliers)) - 1])
@@ -3448,6 +3836,7 @@ def run_subject_replacement_job(job_id: str) -> None:
             action == "eating"
             and str(job.get("species") or "").strip().lower() == "dog"
         )
+        grooming_identity_gate = bool(action == "grooming")
         maximum_scail_attempts = (
             TOILETING_SCAIL_MAX_ATTEMPTS
             if dog_toileting_temporal_gate
@@ -3455,6 +3844,8 @@ def run_subject_replacement_job(job_id: str) -> None:
             if dog_drinking_motion_gate
             else EATING_SCAIL_MAX_ATTEMPTS
             if dog_eating_motion_gate
+            else GROOMING_SCAIL_MAX_ATTEMPTS
+            if grooming_identity_gate
             else 1
         )
         base_scail_seed = int(action_config["effective_seed"])
@@ -3493,7 +3884,11 @@ def run_subject_replacement_job(job_id: str) -> None:
                             "retention_too_low"
                         )
                         if dog_drinking_motion_gate
-                        else "eating_visible_motion_energy_too_low"
+                        else (
+                            "eating_visible_motion_energy_too_low"
+                            if dog_eating_motion_gate
+                            else "grooming_reference_identity_retention_too_low"
+                        )
                     ),
                 )
             write_workflow(
@@ -3542,6 +3937,16 @@ def run_subject_replacement_job(job_id: str) -> None:
                 temporal_identity_quality = (
                     evaluate_eating_scail_video_motion(attempt_target)
                 )
+            elif grooming_identity_gate:
+                temporal_identity_quality = (
+                    evaluate_grooming_scail_video_identity(
+                        attempt_target,
+                        reference_path=reference_path,
+                        reference_identity_mask_path=reference_identity_mask_path,
+                        pose_identity_mask_video_path=pose_identity_mask_video_path,
+                        source_driver_video_path=Path(manifest["source"]),
+                    )
+                )
             else:
                 temporal_identity_quality = {
                     "policy": "not_applicable",
@@ -3566,6 +3971,12 @@ def run_subject_replacement_job(job_id: str) -> None:
                         temporal_identity_quality,
                     )
                 )
+            elif grooming_identity_gate:
+                attempt_record["best_effort_score"] = (
+                    grooming_scail_best_effort_score(
+                        temporal_identity_quality,
+                    )
+                )
             scail_attempt_records.append(attempt_record)
             if temporal_identity_quality.get("acceptable") is True:
                 selected_scail_candidate = attempt_target
@@ -3584,7 +3995,7 @@ def run_subject_replacement_job(job_id: str) -> None:
         if (
             selected_scail_candidate is None
             and selected_scail_seed is None
-            and dog_eating_motion_gate
+            and (dog_eating_motion_gate or grooming_identity_gate)
             and scail_attempt_records
         ):
             best_attempt = max(
@@ -3603,6 +4014,8 @@ def run_subject_replacement_job(job_id: str) -> None:
                 best_attempt["selected_best_effort"] = True
                 best_attempt["best_effort_policy"] = (
                     EATING_SCAIL_BEST_EFFORT_POLICY
+                    if dog_eating_motion_gate
+                    else GROOMING_SCAIL_BEST_EFFORT_POLICY
                 )
                 update_job(
                     job_id,
@@ -3619,6 +4032,8 @@ def run_subject_replacement_job(job_id: str) -> None:
                     ),
                     scail_best_effort_policy=(
                         EATING_SCAIL_BEST_EFFORT_POLICY
+                        if dog_eating_motion_gate
+                        else GROOMING_SCAIL_BEST_EFFORT_POLICY
                     ),
                 )
 

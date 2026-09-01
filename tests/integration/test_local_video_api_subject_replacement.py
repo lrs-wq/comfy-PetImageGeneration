@@ -1986,6 +1986,82 @@ class ToiletingScailTemporalIdentityArtifactTests(unittest.TestCase):
             "best_effort",
         )
 
+    def test_grooming_identity_gate_rejects_driver_appearance_takeover(
+        self,
+    ) -> None:
+        mask = np.zeros((128, 128), dtype=bool)
+        mask[18:116, 28:104] = True
+        reference = np.zeros((128, 128, 3), dtype=np.uint8)
+        reference[mask] = (158, 96, 42)
+        for x in range(36, 100, 12):
+            reference[26:108, x : x + 4] = (45, 30, 22)
+        driver = np.zeros_like(reference)
+        driver[mask] = (185, 185, 185)
+        collapsed_output = np.zeros_like(reference)
+        collapsed_output[mask] = (182, 180, 179)
+
+        collapsed = pipeline.grooming_scail_video_identity_quality(
+            reference,
+            mask,
+            [collapsed_output.copy() for _ in range(3)],
+            [driver.copy() for _ in range(3)],
+            [mask.copy() for _ in range(3)],
+        )
+        retained = pipeline.grooming_scail_video_identity_quality(
+            reference,
+            mask,
+            [reference.copy() for _ in range(3)],
+            [driver.copy() for _ in range(3)],
+            [mask.copy() for _ in range(3)],
+        )
+
+        self.assertFalse(collapsed["acceptable"], collapsed)
+        self.assertIn(
+            "grooming_scail_reference_chroma_collapsed",
+            collapsed["issues"],
+        )
+        self.assertIn(
+            "grooming_scail_driver_appearance_takeover",
+            collapsed["issues"],
+        )
+        self.assertTrue(retained["acceptable"], retained)
+        self.assertGreater(
+            pipeline.grooming_scail_best_effort_score(retained)["score"],
+            pipeline.grooming_scail_best_effort_score(collapsed)["score"],
+        )
+
+    def test_grooming_retry_controls_reduce_pose_strength(self) -> None:
+        workflow = {
+            "17": {
+                "class_type": "WanSCAILToVideo",
+                "inputs": {"pose_strength": 1.15},
+            },
+            "20": {
+                "class_type": "SamplerCustom",
+                "inputs": {"noise_seed": 20260728},
+            },
+        }
+
+        second, _, second_controls = pipeline.scail_workflow_with_retry_controls(
+            workflow,
+            seed=20260729,
+            action="grooming",
+            attempt=2,
+        )
+        third, _, third_controls = pipeline.scail_workflow_with_retry_controls(
+            workflow,
+            seed=20260730,
+            action="grooming",
+            attempt=3,
+        )
+
+        self.assertAlmostEqual(second["17"]["inputs"]["pose_strength"], 1.035)
+        self.assertAlmostEqual(third["17"]["inputs"]["pose_strength"], 0.92)
+        self.assertEqual(second_controls["pose_strength_multiplier"], 0.90)
+        self.assertEqual(third_controls["pose_strength_multiplier"], 0.80)
+        self.assertEqual(pipeline.GROOMING_SCAIL_MAX_ATTEMPTS, 3)
+        self.assertEqual(workflow["17"]["inputs"]["pose_strength"], 1.15)
+
 
 class CanonicalChromaIntegrityTests(unittest.TestCase):
     def test_canonical_cutout_rejects_large_central_neck_hole(self) -> None:
