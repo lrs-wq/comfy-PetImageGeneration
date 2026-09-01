@@ -11,6 +11,7 @@
 | `apps/` | 独立应用 | 是 |
 | `tests/unit/` | 纯 CPU、快速单元测试 | 是 |
 | `tests/integration/` | API 与模块集成测试，不提交真实 GPU 任务 | 是 |
+| `tests/regression/` | 历史图集清单、SHA 与预期结论，不含媒体 | 是 |
 | `tests/e2e/` | 显式执行的长耗时链路脚本 | 是 |
 | `tools/` | 资产构建、诊断、审计、实验及旧版工具 | 是 |
 | `ops/` | systemd、Nginx、环境变量示例及运维脚本 | 是 |
@@ -18,6 +19,8 @@
 | `/opt/comfyui/current/` | ComfyUI 运行时代码 | 否 |
 | `/opt/comfyui/custom-nodes/` | 第三方 ComfyUI 节点 | 否 |
 | `/data/comfy-pet-pipeline/` | 模型、输入、输出、任务、Profile 媒体与归档 | 否 |
+| `/data/comfy-pet-pipeline/archive/regression-gallery/` | 从历史任务固化的回归媒体语料 | 否 |
+| `/data/comfy-pet-pipeline/outputs/regression_gallery/` | 快速输入图集与 live 完成性 canary 报告 | 否 |
 
 ## 兼容入口
 
@@ -49,3 +52,4 @@ flowchart LR
 2. 不在 import 时启动生成任务；端到端生成只能由 `tests/e2e/` 或显式 API 请求触发。
 3. 新的凭据只增加到 `/etc/comfy-pet-pipeline/`，并在 `ops/env/` 增加无值示例。
 4. 运行服务统一使用 `src.comfy_pet_pipeline...` 入口，避免兼容文件成为新的依赖。
+5. 每次仓库修改后运行 `bash ops/scripts/verify-change.sh`；历史语料只能按清单 SHA 从 `/data` 读取，不复制到源码树。影响运行链路的服务修改在重启后再运行 live smoke 图集。

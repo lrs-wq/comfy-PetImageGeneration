@@ -26,6 +26,8 @@
 
 ## Safety and verification
 
-- Run `.venv/bin/python -m pytest -q` for normal code changes; run targeted e2e tests explicitly because they can use GPU generation paths.
+- After every repository modification, run `bash ops/scripts/verify-change.sh`; it runs the default pytest suite, pipeline import verification, and the SHA-pinned historical input gallery. Quality differences in that gallery are diagnostic only. Do not report a change complete while the command is failing or has not been run.
+- Materialize the server-only historical corpus once with `.venv/bin/python ops/scripts/run-historical-regression-gallery.py --materialize-only`; never commit the copied media.
+- After safely restarting a service change that can affect prompts, workflows, model invocation, queue/status handling, output publication, or GPU generation, run `.venv/bin/python ops/scripts/run-live-stability-gallery.py --suite smoke`. It asserts only `completed` plus one readable output per requested action; it must not fail on visual-quality differences. Run additional manifest cases explicitly when their action-specific paths change, but do not promote a historical input to the mandatory smoke suite until the current code has completed it reliably.
 - Never add `.env` values, credentials, raw uploads, generated media, model weights, or `/data` contents to knowledge files.
 - Preserve compatibility entrypoints at the repository root unless the task explicitly removes them.

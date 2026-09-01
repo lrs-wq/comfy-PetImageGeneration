@@ -1,0 +1,686 @@
+{
+  "schema_version": 1,
+  "name": "comfy-pet-historical-regression-gallery-v1",
+  "description": "SHA-pinned historical inputs for completion-only live canaries, plus non-blocking quality diagnostics. Media remains under the server data root and is never committed to Git.",
+  "corpus_root": "archive/regression-gallery/v1",
+  "artifacts": [
+    {
+      "id": "canonical_side_concavity",
+      "source": "outputs/local_video_api/20260831T065748Z-dbd364199c/cartoon_reference_cutout_attempt_02.png",
+      "file": "gates/canonical-side-concavity.png",
+      "sha256": "1eb9d2e877bd6e7ec7c2e8cba18a540c9adb8e54d1e7d89fc82168d6a4263452"
+    },
+    {
+      "id": "canonical_central_hole",
+      "source": "outputs/local_video_api/20260831T065748Z-dbd364199c/cartoon_reference_cutout_attempt_03.png",
+      "file": "gates/canonical-central-hole.png",
+      "sha256": "c841bdb30f1fd9175dbe98c0d4f26b80b681c81d83ccdcbe75c02aca89a001d7"
+    },
+    {
+      "id": "canonical_semantic_fallback",
+      "source": "outputs/local_video_api/20260831T065748Z-dbd364199c/cartoon_reference_semantic_cutout_final.png",
+      "file": "gates/canonical-semantic-fallback.png",
+      "sha256": "e7c02dff90a55ceb28c1c82f61b1ee4e70ffa969aa78f151daebd11bb156c072"
+    },
+    {
+      "id": "orange_stripe_severe",
+      "source": "outputs/local_video_api/20260831T085515Z-692d43fa64/pose_01_semantic_cutout_attempt_01_reference_512.png",
+      "file": "gates/orange-stripe-severe.png",
+      "sha256": "4f350bde8677fab6e8acdd0da6941f62d3b8e84bb95908b9fcbd1fd15561c9c9"
+    },
+    {
+      "id": "orange_stripe_moderate",
+      "source": "outputs/local_video_api/20260831T085515Z-692d43fa64/pose_01_semantic_cutout_attempt_02_reference_512.png",
+      "file": "gates/orange-stripe-moderate.png",
+      "sha256": "acf60cfe3d7f2ada7cc0814608818fd0d3e3130064eb08d4eda7a9a4ab3dd5fa"
+    },
+    {
+      "id": "orange_stripe_boundary",
+      "source": "outputs/local_video_api/20260831T094915Z-5c93eda6e9/pose_01_semantic_cutout_attempt_04_reference_512.png",
+      "file": "gates/orange-stripe-boundary.png",
+      "sha256": "8c98da75f42381c815419fd13452bf2b7406871068f5d447a4b1220f15b6efcf"
+    },
+    {
+      "id": "contact_neutral_20_first",
+      "source": "outputs/local_video_api/20260831T102757Z-62bcf3c7cb/pose_01_semantic_cutout_attempt_01_reference_512.png",
+      "file": "gates/contact-neutral-20-first.png",
+      "sha256": "37104920b265c34176619e8117662108568be3dc83f165e3a7d3d883537e94fc"
+    },
+    {
+      "id": "contact_neutral_8",
+      "source": "outputs/local_video_api/20260831T102757Z-62bcf3c7cb/pose_01_semantic_cutout_attempt_02_reference_512.png",
+      "file": "gates/contact-neutral-8.png",
+      "sha256": "aa332b797fb19abb528e6774a089075585cdf219866ec48304fd71d0bf3b1b2c"
+    },
+    {
+      "id": "contact_neutral_22",
+      "source": "outputs/local_video_api/20260831T102757Z-62bcf3c7cb/pose_01_qwen_cutout_attempt_04_reference_512.png",
+      "file": "gates/contact-neutral-22.png",
+      "sha256": "be0b8276bf1618d6c33309dc07f547baf1f99130a3c7561ed9016495ec8ef0b3"
+    },
+    {
+      "id": "contact_neutral_20_late",
+      "source": "outputs/local_video_api/20260831T102757Z-62bcf3c7cb/pose_01_qwen_cutout_attempt_05_reference_512.png",
+      "file": "gates/contact-neutral-20-late.png",
+      "sha256": "2028368e1880760570045acf4107e37eebd855058f6ef7f9d93ee81a18608f9d"
+    },
+    {
+      "id": "contact_nose_28",
+      "source": "outputs/local_video_api/20260831T112111Z-5273177b76/pose_01_semantic_cutout_attempt_02_reference_512.png",
+      "file": "gates/contact-nose-28.png",
+      "sha256": "b0f0aee8c8330b587febe8e51ce510e775d929ac64e8b9977d44cc3670066080"
+    },
+    {
+      "id": "contact_nose_0_a",
+      "source": "outputs/local_video_api/20260831T112111Z-5273177b76/pose_01_semantic_cutout_attempt_03_reference_512.png",
+      "file": "gates/contact-nose-0-a.png",
+      "sha256": "fda4828dc9aa70fd756d74a554d2bb902e0fb3536de693d692091efded1d9109"
+    },
+    {
+      "id": "contact_nose_0_b",
+      "source": "outputs/local_video_api/20260831T112111Z-5273177b76/pose_01_semantic_cutout_attempt_04_reference_512.png",
+      "file": "gates/contact-nose-0-b.png",
+      "sha256": "e999e9003cfbd45754f6b3acaf4629449fec698588b971c072ded79f03d46524"
+    },
+    {
+      "id": "contact_repair_5",
+      "source": "outputs/local_video_api/manual_v3_exact_contact_replay/cutout_reference_512.png",
+      "file": "gates/contact-repair-5.png",
+      "sha256": "6cd8901848ee86ba6feee1532c5b78bdb0bcd7df2a4ac90fc68f594644f992d3"
+    },
+    {
+      "id": "pomeranian_identity_pass",
+      "source": "outputs/local_video_api/20260821T075838Z-0e6161264e/pose_01_semantic_cutout_attempt_03_reference_512.png",
+      "file": "gates/pomeranian-identity-pass.png",
+      "sha256": "d577e51ab0e4d8336e2d4877fbddb652247cfb0d05563628bd4bb3872f67a741"
+    },
+    {
+      "id": "pomeranian_warm_drift",
+      "source": "outputs/local_video_api/20260821T075838Z-0e6161264e/pose_01_semantic_cutout_attempt_04_reference_512.png",
+      "file": "gates/pomeranian-warm-drift.png",
+      "sha256": "b3d76283e03edcde4ff9346d04b40d43cc75eaa4b5e2fcd82e279f85e93da05d"
+    },
+    {
+      "id": "orange_tabby_front",
+      "source": "outputs/local_video_api/20260831T094915Z-5c93eda6e9/input_identity_source.png",
+      "file": "canaries/orange-tabby/front.png",
+      "sha256": "2f9c8206d7f8437054dbfaf73ce51317c085fc7f503567c4f1fbcc08d55fd4e7"
+    },
+    {
+      "id": "orange_tabby_left",
+      "source": "outputs/local_video_api/20260831T094915Z-5c93eda6e9/input_left_identity_source.png",
+      "file": "canaries/orange-tabby/left.png",
+      "sha256": "2f9c8206d7f8437054dbfaf73ce51317c085fc7f503567c4f1fbcc08d55fd4e7"
+    },
+    {
+      "id": "orange_tabby_right",
+      "source": "outputs/local_video_api/20260831T094915Z-5c93eda6e9/input_right_identity_source.png",
+      "file": "canaries/orange-tabby/right.png",
+      "sha256": "2f9c8206d7f8437054dbfaf73ce51317c085fc7f503567c4f1fbcc08d55fd4e7"
+    },
+    {
+      "id": "tabby_kitten_front",
+      "source": "outputs/local_video_api/20260831T015134Z-376a202e84/input_identity_source.png",
+      "file": "canaries/tabby-kitten/front.png",
+      "sha256": "219fb861fd1ceda1cff54bbd59efe3502c9bbd4658663964e8702ca51bcd07a9"
+    },
+    {
+      "id": "tabby_kitten_left",
+      "source": "outputs/local_video_api/20260831T015134Z-376a202e84/input_left_identity_source.png",
+      "file": "canaries/tabby-kitten/left.png",
+      "sha256": "219fb861fd1ceda1cff54bbd59efe3502c9bbd4658663964e8702ca51bcd07a9"
+    },
+    {
+      "id": "tabby_kitten_right",
+      "source": "outputs/local_video_api/20260831T015134Z-376a202e84/input_right_identity_source.png",
+      "file": "canaries/tabby-kitten/right.png",
+      "sha256": "219fb861fd1ceda1cff54bbd59efe3502c9bbd4658663964e8702ca51bcd07a9"
+    },
+    {
+      "id": "white_cat_front",
+      "source": "outputs/local_video_api/20260828T112414Z-38b93945ef/input_identity_source.png",
+      "file": "canaries/white-cat/front.png",
+      "sha256": "3a852def40c078cd670aba2499e885c225d18ced9ea16992adcd97779dbe4487"
+    },
+    {
+      "id": "white_cat_left",
+      "source": "outputs/local_video_api/20260828T112414Z-38b93945ef/input_left_identity_source.png",
+      "file": "canaries/white-cat/left.png",
+      "sha256": "00471dbd7e0e4ec0cbb3744b8f7d6099572562209db83fe5dcd6be32ecc3e830"
+    },
+    {
+      "id": "white_cat_right",
+      "source": "outputs/local_video_api/20260828T112414Z-38b93945ef/input_right_identity_source.png",
+      "file": "canaries/white-cat/right.png",
+      "sha256": "8ab6992e6e5477c3b03a1ef1bbd937bada6bef86967d0dc064316917b122db7a"
+    },
+    {
+      "id": "labrador_front",
+      "source": "outputs/local_video_api/20260827T100639Z-1d8b9ff966/input_identity_source.png",
+      "file": "canaries/labrador/front.png",
+      "sha256": "8eb2a63c3a6fbdf217a19c5551e7b5489a11c99f683ef358a47fc8fb9f27ff79"
+    },
+    {
+      "id": "labrador_left",
+      "source": "outputs/local_video_api/20260827T100639Z-1d8b9ff966/input_left_identity_source.png",
+      "file": "canaries/labrador/left.png",
+      "sha256": "85d91440b381e5393bea570848b0e9af7c74192545fafa0537e41af9871965e6"
+    },
+    {
+      "id": "labrador_right",
+      "source": "outputs/local_video_api/20260827T100639Z-1d8b9ff966/input_right_identity_source.png",
+      "file": "canaries/labrador/right.png",
+      "sha256": "632e6d48413d814e85ab7587e0c4cf4d0b4d3595d15c5be40afa4c47a11c7cbc"
+    },
+    {
+      "id": "pomeranian_front",
+      "source": "outputs/local_video_api/20260821T075838Z-0e6161264e/input_identity_source.png",
+      "file": "canaries/pomeranian/front.png",
+      "sha256": "bef8f27bc95fbcef9236289621ca5b8e894b5a80cb2df30cb774bcbd810e4c3f"
+    },
+    {
+      "id": "golden_retriever_front",
+      "source": "outputs/local_video_api/20260831T015110Z-d8182c974d/input_identity_source.png",
+      "file": "canaries/golden-retriever/front.png",
+      "sha256": "fc1ef1f57471d9c419e261b59cadceed19c8e7212fe91bc7fca546b3c3cdfdff"
+    },
+    {
+      "id": "golden_retriever_left",
+      "source": "outputs/local_video_api/20260831T015110Z-d8182c974d/input_left_identity_source.png",
+      "file": "canaries/golden-retriever/left.png",
+      "sha256": "9e428df584e2ff3b5c6ad2c16a349a3976fc5acd1a971310bcfc221c7439a861"
+    },
+    {
+      "id": "golden_retriever_right",
+      "source": "outputs/local_video_api/20260831T015110Z-d8182c974d/input_right_identity_source.png",
+      "file": "canaries/golden-retriever/right.png",
+      "sha256": "9e428df584e2ff3b5c6ad2c16a349a3976fc5acd1a971310bcfc221c7439a861"
+    }
+  ],
+  "gate_cases": [
+    {
+      "id": "canonical-side-concavity-pass",
+      "label": "Side concavity stays valid",
+      "category": "canonical matte",
+      "source_job_id": "20260831T065748Z-dbd364199c",
+      "artifact": "canonical_side_concavity",
+      "checks": [
+        {
+          "type": "canonical_interior",
+          "expected": {
+            "acceptable": true,
+            "issues": [],
+            "ignored_side_concavity_count_min": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "canonical-central-hole-reject",
+      "label": "Central body hole is blocked",
+      "category": "canonical matte",
+      "source_job_id": "20260831T065748Z-dbd364199c",
+      "artifact": "canonical_central_hole",
+      "checks": [
+        {
+          "type": "canonical_interior",
+          "expected": {
+            "acceptable": false,
+            "issues_contains": [
+              "canonical_subject_interior_chroma_hole"
+            ],
+            "largest_void_medial_overlap_fraction_min": 0.12
+          }
+        }
+      ]
+    },
+    {
+      "id": "canonical-semantic-fallback-pass",
+      "label": "Semantic fallback keeps body intact",
+      "category": "canonical matte",
+      "source_job_id": "20260831T065748Z-dbd364199c",
+      "artifact": "canonical_semantic_fallback",
+      "checks": [
+        {
+          "type": "canonical_interior",
+          "expected": {
+            "acceptable": true,
+            "issues": [],
+            "ignored_side_concavity_count_min": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "stripe-severe-amplification-reject",
+      "label": "Severe tabby amplification is blocked",
+      "category": "identity palette",
+      "source_job_id": "20260831T085515Z-692d43fa64",
+      "artifact": "orange_stripe_severe",
+      "checks": [
+        {
+          "type": "identity_palette",
+          "reference": "orange_tabby_front",
+          "bowl_action": true,
+          "expected": {
+            "available": true,
+            "acceptable": false,
+            "issues_contains": [
+              "invented_stripe_pattern"
+            ],
+            "stripe_gate_mode": "source_present_amplification"
+          }
+        }
+      ]
+    },
+    {
+      "id": "stripe-moderate-style-pass",
+      "label": "Moderate tabby styling stays valid",
+      "category": "identity palette",
+      "source_job_id": "20260831T085515Z-692d43fa64",
+      "artifact": "orange_stripe_moderate",
+      "checks": [
+        {
+          "type": "identity_palette",
+          "reference": "orange_tabby_front",
+          "bowl_action": true,
+          "expected": {
+            "available": true,
+            "acceptable": true,
+            "issues": [],
+            "stripe_gate_mode": "source_present_amplification"
+          }
+        }
+      ]
+    },
+    {
+      "id": "stripe-calibrated-boundary-pass",
+      "label": "Calibrated stripe boundary passes",
+      "category": "identity palette",
+      "source_job_id": "20260831T094915Z-5c93eda6e9",
+      "artifact": "orange_stripe_boundary",
+      "checks": [
+        {
+          "type": "identity_palette",
+          "reference": "orange_tabby_front",
+          "bowl_action": true,
+          "expected": {
+            "available": true,
+            "acceptable": true,
+            "issues": [],
+            "stripe_gate_mode": "source_present_amplification"
+          }
+        }
+      ]
+    },
+    {
+      "id": "neutral-contact-20px-reject",
+      "label": "20px muzzle gap is blocked",
+      "category": "eating contact",
+      "source_job_id": "20260831T102757Z-62bcf3c7cb",
+      "artifact": "contact_neutral_20_first",
+      "checks": [
+        {
+          "type": "eating_contact",
+          "expected": {
+            "acceptable": false,
+            "evidence": null,
+            "neutral": {
+              "available": true,
+              "acceptable": false,
+              "gap_px": 20
+            },
+            "nose": {
+              "available": false,
+              "acceptable": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "neutral-contact-8px-pass",
+      "label": "8px muzzle gap passes",
+      "category": "eating contact",
+      "source_job_id": "20260831T102757Z-62bcf3c7cb",
+      "artifact": "contact_neutral_8",
+      "checks": [
+        {
+          "type": "eating_contact",
+          "expected": {
+            "acceptable": true,
+            "evidence": "neutral_muzzle_bowl",
+            "neutral": {
+              "available": true,
+              "acceptable": true,
+              "gap_px": 8
+            },
+            "nose": {
+              "available": true,
+              "acceptable": true,
+              "gap_px": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "neutral-contact-22px-reject",
+      "label": "22px muzzle gap is blocked",
+      "category": "eating contact",
+      "source_job_id": "20260831T102757Z-62bcf3c7cb",
+      "artifact": "contact_neutral_22",
+      "checks": [
+        {
+          "type": "eating_contact",
+          "expected": {
+            "acceptable": false,
+            "evidence": null,
+            "neutral": {
+              "available": true,
+              "acceptable": false,
+              "gap_px": 22
+            },
+            "nose": {
+              "available": false,
+              "acceptable": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "neutral-contact-late-20px-reject",
+      "label": "Late 20px gap stays blocked",
+      "category": "eating contact",
+      "source_job_id": "20260831T102757Z-62bcf3c7cb",
+      "artifact": "contact_neutral_20_late",
+      "checks": [
+        {
+          "type": "eating_contact",
+          "expected": {
+            "acceptable": false,
+            "evidence": null,
+            "neutral": {
+              "available": true,
+              "acceptable": false,
+              "gap_px": 20
+            },
+            "nose": {
+              "available": false,
+              "acceptable": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "nose-kibble-28px-reject",
+      "label": "28px nose-food gap is blocked",
+      "category": "eating contact",
+      "source_job_id": "20260831T112111Z-5273177b76",
+      "artifact": "contact_nose_28",
+      "checks": [
+        {
+          "type": "eating_contact",
+          "expected": {
+            "acceptable": false,
+            "evidence": null,
+            "neutral": {
+              "available": true,
+              "acceptable": false,
+              "gap_px": 22
+            },
+            "nose": {
+              "available": true,
+              "acceptable": false,
+              "gap_px": 28
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "nose-kibble-touch-pass-a",
+      "label": "Nose touching kibble passes",
+      "category": "eating contact",
+      "source_job_id": "20260831T112111Z-5273177b76",
+      "artifact": "contact_nose_0_a",
+      "checks": [
+        {
+          "type": "eating_contact",
+          "expected": {
+            "acceptable": true,
+            "evidence": "nose_kibble",
+            "neutral": {
+              "available": true,
+              "acceptable": false,
+              "gap_px": 19
+            },
+            "nose": {
+              "available": true,
+              "acceptable": true,
+              "gap_px": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "nose-kibble-touch-pass-b",
+      "label": "Chromatic nose fallback passes",
+      "category": "eating contact",
+      "source_job_id": "20260831T112111Z-5273177b76",
+      "artifact": "contact_nose_0_b",
+      "checks": [
+        {
+          "type": "eating_contact",
+          "expected": {
+            "acceptable": true,
+            "evidence": "nose_kibble",
+            "neutral": {
+              "available": false,
+              "acceptable": false
+            },
+            "nose": {
+              "available": true,
+              "acceptable": true,
+              "gap_px": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "contact-repair-5px-pass",
+      "label": "Pixel-locked repair passes at 5px",
+      "category": "contact plus identity",
+      "source_job_id": "20260831T131458Z-870cdb302e",
+      "artifact": "contact_repair_5",
+      "checks": [
+        {
+          "type": "eating_contact",
+          "expected": {
+            "acceptable": true,
+            "evidence": "neutral_muzzle_bowl",
+            "neutral": {
+              "available": true,
+              "acceptable": true,
+              "gap_px": 5
+            }
+          }
+        },
+        {
+          "type": "identity_palette",
+          "reference": "orange_tabby_front",
+          "bowl_action": true,
+          "expected": {
+            "available": true,
+            "acceptable": true,
+            "issues": [],
+            "stripe_gate_mode": "source_present_amplification"
+          }
+        }
+      ]
+    },
+    {
+      "id": "pomeranian-achromatic-pass",
+      "label": "Achromatic Pomeranian stays valid",
+      "category": "identity palette",
+      "source_job_id": "20260821T075838Z-0e6161264e",
+      "artifact": "pomeranian_identity_pass",
+      "checks": [
+        {
+          "type": "identity_palette",
+          "reference": "pomeranian_front",
+          "bowl_action": true,
+          "expected": {
+            "available": true,
+            "acceptable": true,
+            "issues": [],
+            "stripe_gate_mode": "source_present_amplification"
+          }
+        }
+      ]
+    },
+    {
+      "id": "pomeranian-warm-drift-reject",
+      "label": "Warm recolor of white dog is blocked",
+      "category": "identity palette",
+      "source_job_id": "20260821T075838Z-0e6161264e",
+      "artifact": "pomeranian_warm_drift",
+      "checks": [
+        {
+          "type": "identity_palette",
+          "reference": "pomeranian_front",
+          "bowl_action": true,
+          "expected": {
+            "available": true,
+            "acceptable": false,
+            "issues_contains": [
+              "achromatic_source_recolored_with_warm_fur"
+            ],
+            "stripe_gate_mode": "source_present_amplification"
+          }
+        }
+      ]
+    }
+  ],
+  "canary_cases": [
+    {
+      "id": "orange-tabby-duplicate-three-view",
+      "label": "Orange tabby / duplicate 3-view",
+      "source_job_id": "20260831T094915Z-5c93eda6e9",
+      "species": "cat",
+      "subject_profile": "sleek_tabby_cat_v1",
+      "actions": [
+        "eating",
+        "grooming"
+      ],
+      "smoke_actions": [
+        "grooming"
+      ],
+      "views": {
+        "front": "orange_tabby_front",
+        "left": "orange_tabby_left",
+        "right": "orange_tabby_right"
+      },
+      "expected_view_count": 3,
+      "expected_unique_view_count": 1
+    },
+    {
+      "id": "tabby-kitten-colored-background",
+      "label": "Tabby kitten / colored background",
+      "source_job_id": "20260831T015134Z-376a202e84",
+      "species": "cat",
+      "subject_profile": "sleek_tabby_cat_v1",
+      "actions": [
+        "eating",
+        "grooming"
+      ],
+      "views": {
+        "front": "tabby_kitten_front",
+        "left": "tabby_kitten_left",
+        "right": "tabby_kitten_right"
+      },
+      "expected_view_count": 3,
+      "expected_unique_view_count": 1
+    },
+    {
+      "id": "white-cat-real-three-view",
+      "label": "White cat / real 3-view",
+      "source_job_id": "20260828T112414Z-38b93945ef",
+      "species": "cat",
+      "subject_profile": "sleek_tabby_cat_v1",
+      "actions": [
+        "eating",
+        "grooming"
+      ],
+      "views": {
+        "front": "white_cat_front",
+        "left": "white_cat_left",
+        "right": "white_cat_right"
+      },
+      "expected_view_count": 3,
+      "expected_unique_view_count": 3
+    },
+    {
+      "id": "labrador-six-actions",
+      "label": "Labrador / six-action dog",
+      "source_job_id": "20260827T100639Z-1d8b9ff966",
+      "species": "dog",
+      "subject_profile": "dog_small_white_model_test_v1",
+      "actions": [
+        "eating",
+        "drinking",
+        "running",
+        "sleeping",
+        "toileting",
+        "standing"
+      ],
+      "views": {
+        "front": "labrador_front",
+        "left": "labrador_left",
+        "right": "labrador_right"
+      },
+      "expected_view_count": 3,
+      "expected_unique_view_count": 3
+    },
+    {
+      "id": "pomeranian-single-view",
+      "label": "Pomeranian / single view",
+      "source_job_id": "20260821T075838Z-0e6161264e",
+      "species": "dog",
+      "subject_profile": "dog_white_model_v1",
+      "actions": [
+        "eating"
+      ],
+      "views": {
+        "front": "pomeranian_front"
+      },
+      "expected_view_count": 1,
+      "expected_unique_view_count": 1
+    },
+    {
+      "id": "golden-retriever-outdoor",
+      "label": "Golden retriever / outdoor 3-view",
+      "source_job_id": "20260831T015110Z-d8182c974d",
+      "species": "dog",
+      "subject_profile": "dog_white_model_v1",
+      "actions": [
+        "eating",
+        "standing"
+      ],
+      "smoke_actions": [
+        "standing"
+      ],
+      "views": {
+        "front": "golden_retriever_front",
+        "left": "golden_retriever_left",
+        "right": "golden_retriever_right"
+      },
+      "expected_view_count": 3,
+      "expected_unique_view_count": 2
+    }
+  ]
+}

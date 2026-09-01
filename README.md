@@ -35,10 +35,13 @@ docs/                     API、架构、运维及历史资料
 ```bash
 cd /root/comfy-pet-pipeline
 .venv/bin/python -m pip install -r requirements/dev.txt
-.venv/bin/python -m pytest -q
+.venv/bin/python ops/scripts/run-historical-regression-gallery.py --materialize-only
+bash ops/scripts/verify-change.sh
 ```
 
-端到端脚本不会进入默认 pytest 集合，必须显式运行 `tests/e2e/` 中的目标脚本。它们可能调用 GPU 和生成链路。
+历史稳定性图集从既有任务中按 SHA-256 固化 6 组生成 canary 输入；媒体只存放在 `/data/comfy-pet-pipeline/archive/regression-gallery/`，不进入 Git。`verify-change.sh` 是每次修改后的快速门禁，并由服务器仓库的 pre-commit hook 调用。16 个旧质量样例仍生成诊断图，但画面差异不会阻断。
+
+服务安全重启后，运行 `.venv/bin/python ops/scripts/run-live-stability-gallery.py --suite smoke` 提交猫、狗各一组已由现行代码实测完成的真实历史输入。它只要求任务 `completed`、每个动作有主产物且产物可读取，不评价画面质量。动作专属修改可用 `--case <id>` 显式扩展；历史输入只有在现行代码下完成性稳定后才进入必跑 smoke。覆盖范围、运行时机和报告说明见 [历史稳定性图集](docs/operations/REGRESSION_GALLERY.md)。其他专项端到端脚本仍需从 `tests/e2e/` 显式运行。
 
 ## 部署
 

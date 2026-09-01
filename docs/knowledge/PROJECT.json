@@ -28,9 +28,8 @@
     }
   ],
   "verification": [
-    ".venv/bin/python -m pytest -q",
-    ".venv/bin/python ops/scripts/verify_pipeline.py",
-    "bash ops/scripts/smoke-test.sh"
+    "bash ops/scripts/verify-change.sh",
+    ".venv/bin/python ops/scripts/run-live-stability-gallery.py --suite smoke"
   ],
   "source_docs": [
     "README.md",
@@ -38,7 +37,8 @@
     "docs/api/LOCAL_VIDEO_API.md",
     "docs/architecture/PET_TWO_ACTION_PIPELINE.md",
     "docs/operations/PROJECT_LAYOUT.md",
-    "docs/operations/SERVER_DEPLOYMENT.md"
+    "docs/operations/SERVER_DEPLOYMENT.md",
+    "docs/operations/REGRESSION_GALLERY.md"
   ],
   "watch_rules": [
     {
@@ -67,6 +67,17 @@
     {
       "paths": ["pyproject.toml", "requirements.txt", "requirements/**"],
       "knowledge": ["dependency", "verification"]
+    },
+    {
+      "paths": [
+        "tests/regression/**",
+        "src/comfy_pet_pipeline/regression/**",
+        "ops/scripts/verify-change.sh",
+        "ops/scripts/run-*-gallery.py",
+        ".githooks/**",
+        "AGENTS.md"
+      ],
+      "knowledge": ["verification", "regression", "operations"]
     }
   ],
   "excluded_content": [

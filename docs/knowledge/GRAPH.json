@@ -158,6 +158,15 @@
       "evidence": "docs/operations/PROJECT_LAYOUT.md"
     },
     {
+      "id": "comfy.verification.historical_stability_gallery",
+      "type": "verification",
+      "name": "历史输入与线上完成性稳定图集",
+      "path": "src/comfy_pet_pipeline/regression",
+      "status": "active",
+      "tags": ["historical-inputs", "completion-only", "live-canary", "quality-non-blocking"],
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
       "id": "comfy.action.cat_default",
       "type": "business_rule",
       "name": "猫默认动作：eating 与 grooming",
@@ -193,6 +202,14 @@
       "status": "accepted",
       "tags": ["generation", "five-attempts", "best-candidate", "no-cache-shortcut", "no-original-fallback"],
       "evidence": "docs/knowledge/DECISIONS/0001-generated-candidate-selection.md"
+    },
+    {
+      "id": "comfy.decision.completion_only_regression",
+      "type": "decision",
+      "name": "历史图集只阻断运行失败，不阻断画面差异",
+      "status": "accepted",
+      "tags": ["regression", "stability", "completion-only", "quality-diagnostic"],
+      "evidence": "docs/knowledge/DECISIONS/0002-historical-regression-gallery.md"
     }
   ],
   "edges": [
@@ -339,6 +356,30 @@
       "relation": "writes",
       "to": "comfy.runtime.data",
       "evidence": "docs/operations/PROJECT_LAYOUT.md"
+    },
+    {
+      "from": "comfy.project",
+      "relation": "verified_by",
+      "to": "comfy.verification.historical_stability_gallery",
+      "evidence": "ops/scripts/verify-change.sh"
+    },
+    {
+      "from": "comfy.verification.historical_stability_gallery",
+      "relation": "reads",
+      "to": "comfy.runtime.data",
+      "evidence": "tests/regression/historical_gallery.json"
+    },
+    {
+      "from": "comfy.verification.historical_stability_gallery",
+      "relation": "exercises",
+      "to": "comfy.api.local_video",
+      "evidence": "src/comfy_pet_pipeline/regression/live_stability_gallery.py"
+    },
+    {
+      "from": "comfy.verification.historical_stability_gallery",
+      "relation": "governed_by",
+      "to": "comfy.decision.completion_only_regression",
+      "evidence": "docs/knowledge/DECISIONS/0002-historical-regression-gallery.md"
     }
   ]
 }
