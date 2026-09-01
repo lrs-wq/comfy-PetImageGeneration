@@ -213,7 +213,7 @@
       "name": "历史输入与线上完成性稳定图集（6案例/16输入/15姿态）",
       "path": "src/comfy_pet_pipeline/regression",
       "status": "active",
-      "tags": ["historical-inputs", "6-canaries", "16-input-views", "15-pose-keyframes", "completion-only", "live-canary", "smoke-2-cases", "latest-commit-89ddcb9", "quality-non-blocking"],
+      "tags": ["historical-inputs", "6-canaries", "16-input-views", "15-pose-keyframes", "completion-only", "live-canary", "smoke-2-cases", "latest-commit-7e6bbfc", "quality-non-blocking"],
       "evidence": "docs/operations/REGRESSION_GALLERY.md"
     },
     {
@@ -241,6 +241,24 @@
       "path": "/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260901T083311Z-89ddcb9392/report.json",
       "status": "passed",
       "tags": ["commit-89ddcb9", "source-job-20260901T055619Z-d6d84380a1", "job-20260901T083322Z-72165d7e84", "three-view-cat", "canonical-completion-fallback", "eating", "grooming", "five-attempts-each", "best-effort", "completed", "two-apng-512x512-100f", "front-view-warning-non-blocking"],
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "id": "comfy.verification.grooming_pose_identity_default_smoke_7e6bbfc",
+      "type": "verification",
+      "name": "v2.26.52 舔毛姿态身份修复默认生产 smoke 2/2",
+      "path": "/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260901T095713Z-7e6bbfcb71/report.json",
+      "status": "passed",
+      "tags": ["commit-7e6bbfc", "job-20260901T095724Z-22d0da39ca", "job-20260901T100834Z-1b066e1d40", "grooming", "standing", "completion-only", "smoke-2-of-2", "completed", "apng-512x512-100f"],
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "id": "comfy.verification.original_grooming_replacement_rerun_7e6bbfc",
+      "type": "verification",
+      "name": "原异常舔毛输入姿态替换生产精确复跑",
+      "path": "/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260901T102758Z-7e6bbfcb71/report.json",
+      "status": "passed",
+      "tags": ["commit-7e6bbfc", "source-job-20260901T083322Z-72165d7e84", "job-20260901T102809Z-58d2285192", "sha-pinned-three-view", "grooming", "five-attempts", "upright-raised-paw", "scail-identity-passed", "completed", "apng-512x512-100f", "front-view-warning-non-blocking"],
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
     {
@@ -602,6 +620,42 @@
     },
     {
       "from": "comfy.verification.original_visual_gate_failure_rerun",
+      "relation": "exercises",
+      "to": "comfy.api.local_video",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.verification.grooming_pose_identity_default_smoke_7e6bbfc",
+      "relation": "verifies",
+      "to": "comfy.verification.historical_stability_gallery",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.verification.grooming_pose_identity_default_smoke_7e6bbfc",
+      "relation": "exercises",
+      "to": "comfy.api.local_video",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.verification.original_grooming_replacement_rerun_7e6bbfc",
+      "relation": "verifies",
+      "to": "comfy.quality.grooming_global_pose",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.verification.original_grooming_replacement_rerun_7e6bbfc",
+      "relation": "verifies",
+      "to": "comfy.recovery.grooming_scail_identity_best_effort",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.verification.original_grooming_replacement_rerun_7e6bbfc",
+      "relation": "governed_by",
+      "to": "comfy.decision.grooming_identity_geometry_separation",
+      "evidence": "docs/knowledge/DECISIONS/0004-grooming-identity-geometry-separation.md"
+    },
+    {
+      "from": "comfy.verification.original_grooming_replacement_rerun_7e6bbfc",
       "relation": "exercises",
       "to": "comfy.api.local_video",
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
