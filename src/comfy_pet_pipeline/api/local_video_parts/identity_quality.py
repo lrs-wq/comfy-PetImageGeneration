@@ -3912,7 +3912,7 @@ def skipped_visual_audit(name: str) -> dict[str, Any]:
 
 
 def canonical_fallback_score(record: dict[str, Any]) -> float:
-    """Rank canonical retries while making an identity failure prohibitively costly."""
+    """Rank usable generated canonicals, preferring identity-safe candidates."""
     _sync_local_video_runtime(globals(), {"canonical_fallback_score"})
     palette = record.get("identity_palette")
     palette_penalty = (
@@ -3953,6 +3953,7 @@ def select_canonical_fallback_attempt(
         GENERATION_VISUAL_AUDITS_BLOCKING
         and identity_palette_required
         and not identity_safe
+        and not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
     ):
         issues = list(
             dict.fromkeys(
@@ -3983,13 +3984,15 @@ def canonical_generated_attempts_require_uploaded_fallback(
     *,
     identity_palette_required: bool,
 ) -> bool:
-    """Return true only when every generated canonical failed identity checks."""
+    """Return whether legacy strict mode must replace generated output with upload."""
 
     _sync_local_video_runtime(
         globals(),
         {"canonical_generated_attempts_require_uploaded_fallback"},
     )
     if not identity_palette_required:
+        return False
+    if GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED:
         return False
     return not any(
         isinstance(record.get("identity_palette"), dict)
@@ -4371,6 +4374,7 @@ def semantic_background_recovery(
     pose: str = "",
     *,
     validate_canonical_interior: bool = False,
+    enforce_visual_quality: bool | None = None,
 ) -> dict[str, Any]:
     _sync_local_video_runtime(globals(), {"semantic_background_recovery"})
     from rembg import remove
@@ -4410,9 +4414,14 @@ def semantic_background_recovery(
         raise RuntimeError(
             "Semantic background recovery did not find a usable pet subject."
         )
+    visual_quality_blocking = (
+        GENERATION_VISUAL_AUDITS_BLOCKING
+        if enforce_visual_quality is None
+        else bool(enforce_visual_quality)
+    )
     semantic_quality = (
         pose_cutout_quality(semantic_target, pose)
-        if GENERATION_VISUAL_AUDITS_BLOCKING
+        if visual_quality_blocking
         else skipped_visual_audit("semantic_background_subject_quality")
     )
     # The raw rembg canvas can legitimately be tight even when the complete pet
@@ -4420,7 +4429,7 @@ def semantic_background_recovery(
     # framing-only issues are evaluated again on the normalized final cutout.
     blocking_semantic_issues = (
         semantic_quality_blocking_issues(semantic_quality)
-        if GENERATION_VISUAL_AUDITS_BLOCKING
+        if visual_quality_blocking
         else []
     )
     if blocking_semantic_issues:
@@ -4448,6 +4457,7 @@ def semantic_background_recovery(
             "semantic_cutout": semantic_target.name,
             "semantic_quality": semantic_quality,
             "canonical_interior_validation": validate_canonical_interior,
+            "visual_quality_enforced": visual_quality_blocking,
         }
     )
     if not metrics["acceptable"]:

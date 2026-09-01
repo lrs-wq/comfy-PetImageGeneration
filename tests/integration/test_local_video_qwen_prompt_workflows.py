@@ -2319,7 +2319,9 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             pipeline.EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
         )
 
-    def test_five_identity_failures_record_unpublished_terminal_state(self) -> None:
+    def test_five_identity_failures_publish_generated_completion_fallback(
+        self,
+    ) -> None:
         terminal_job: dict[str, object] = {}
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -2331,7 +2333,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
                 canonical_action_stripe_amplification_attempts={1, 2, 3, 4, 5},
                 action_chroma_acceptable_attempts={1, 2, 3, 4, 5},
                 visual_audits_blocking=False,
-                run_to_identity_budget_failure=True,
+                run_to_identity_budget_completion=True,
                 terminal_job_capture=terminal_job,
             )
             failure_audit = (
@@ -2341,39 +2343,41 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
                 / "workflows"
                 / "qwen_pose_01_identity_budget_failure.json"
             )
-            self.assertTrue(failure_audit.is_file())
+            self.assertFalse(failure_audit.exists())
 
         action_state = terminal_job["qwen_first_frame_states"]["eating"]
-        self.assertEqual(action_state["status"], "failed_identity_budget_exhausted")
+        self.assertEqual(action_state["status"], "best_effort_selected")
         self.assertTrue(action_state["completed"])
         self.assertEqual(action_state["attempts_completed"], 5)
         self.assertFalse(action_state["quality_passed"])
-        self.assertFalse(action_state["published"])
-        self.assertIsNone(action_state["selected_attempt"])
-        self.assertEqual(
-            action_state["identity_issue_counts"],
-            {"invented_stripe_pattern": 5},
+        self.assertTrue(action_state["published"])
+        self.assertIn(action_state["selected_attempt"], {1, 2, 3, 4, 5})
+        self.assertTrue(action_state["best_effort"])
+        self.assertIn(
+            "identity_palette_not_acceptable",
+            action_state["best_effort_issues"],
         )
-        self.assertFalse(terminal_job["qwen_first_frame_best_effort_selected"])
+        self.assertTrue(terminal_job["qwen_first_frame_best_effort_selected"])
         self.assertEqual(
             terminal_job["action_candidate_gate_status"],
-            "failed_identity_budget_exhausted",
+            "completion_first_best_of_five_selected",
         )
         selection = terminal_job["action_candidate_selection_by_action"]["eating"]
         self.assertEqual(selection["attempts_completed"], 5)
         self.assertFalse(selection["identity_palette_acceptable"])
+        self.assertEqual(
+            selection["result"],
+            "selected_generated_completion_fallback",
+        )
+        self.assertTrue(selection["visual_completion_fallback"])
         self.assertFalse(selection["original_upload_used"])
         self.assertFalse(selection["approved_canonical_used_as_output"])
-        terminal_events = [
+        completion_events = [
             event
             for event in terminal_job["recovery_history"]
-            if event.get("result") == "rejected_identity_budget_exhausted"
+            if event.get("result") == "selected_generated_completion_fallback"
         ]
-        self.assertEqual(len(terminal_events), 1)
-        self.assertNotIn(
-            "accepted_best_effort",
-            [event.get("result") for event in terminal_job["recovery_history"]],
-        )
+        self.assertEqual(len(completion_events), 1)
 
     def test_advisory_eating_palette_drift_retries_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.49"
+API_VERSION = "2.26.50"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -211,7 +211,14 @@ GENERATION_ACTION_CANDIDATE_GATES_ENABLED = os.environ.get(
     "disabled",
 }
 GENERATION_ACTION_CANDIDATE_GATE_POLICY = (
-    "generate_five_then_select_best_identity_safe_candidate_v1"
+    "generate_five_then_select_best_generated_completion_v2"
+)
+GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED = True
+GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY = (
+    "generated_artifact_completion_first_v1"
+)
+QWEN_GENERATED_COMPLETION_SELECTION_POLICY = (
+    "generated_candidate_visual_completion_best_of_five_v1"
 )
 FUR_SURFACE_GATE_MAX_REJECTIONS = 3
 FUR_SURFACE_GATE_RETRY_POLICY = "preserve_configured_eating_bowl_surface_recovery_v1"
@@ -295,11 +302,11 @@ PROFILE_STANDARD_DIRECT_GPU_REASON = (
 QWEN_FULL_BODY_FIRST_FRAME_PIPELINE = (
     "qwen_full_body_then_action_keyframes_then_scail_v1"
 )
-QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.53"
+QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION = "1.40.54"
 QWEN_VALIDATED_FIRST_FRAME_POLICY = (
-    "strict_quality_gate_then_fixed_best_of_five_selection_v3"
+    "strict_then_generated_completion_best_of_five_v4"
 )
-QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION = "validated_qwen_first_frame_v2"
+QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION = "validated_qwen_first_frame_v3"
 QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
     {
         "1.40.38",
@@ -317,6 +324,7 @@ QWEN_VALIDATED_FIRST_FRAME_COMPATIBLE_PIPELINE_VERSIONS = frozenset(
         "1.40.50",
         "1.40.51",
         "1.40.52",
+        "1.40.53",
         QWEN_FULL_BODY_FIRST_FRAME_PIPELINE_VERSION,
     }
 )
@@ -7786,6 +7794,14 @@ async def create_subject_replacement_api_job(
                 GENERATION_VISUAL_AUDITS_BLOCKING
             ),
             "runtime_integrity_checks_required": True,
+            "visual_completion_fallback_enabled": (
+                GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+            ),
+            "visual_completion_fallback_policy": (
+                GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+            ),
+            "visual_completion_fallback_used": False,
+            "canonical_completion_fallback_used": False,
             "expected_pose_policies": dict(expected_pose_policies),
             "expected_surface_gate_actions": (
                 list(actions)

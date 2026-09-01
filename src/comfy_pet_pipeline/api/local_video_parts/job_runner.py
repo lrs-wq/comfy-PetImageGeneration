@@ -223,7 +223,11 @@ def exhausted_action_candidate_recovery_policy(
     action: str,
     approved_canonical_available: bool,
 ) -> str:
-    """Select only a generated candidate that passed the identity floor."""
+    """Select the safest generated candidate after the fixed attempt budget."""
+    _sync_local_video_runtime(
+        globals(),
+        {"exhausted_action_candidate_recovery_policy"},
+    )
     del action, approved_canonical_available
     palette = record.get("identity_palette")
     if isinstance(palette, dict) and palette.get("acceptable") is True:
@@ -248,6 +252,8 @@ def exhausted_action_candidate_recovery_policy(
         if quality_issues & hard_action_issues:
             return "identity_safe_generated_candidate_requires_final_action_gate"
         return "identity_safe_generated_candidate"
+    if GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED:
+        return "generated_completion_candidate"
     return "reject"
 
 
@@ -2326,6 +2332,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             fallback_uses_uploaded_identity = bool(
                 canonical_identity_palette_gate_required
                 and not identity_safe_generated_attempts
+                and not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
             )
             fallback_source = (
                 Path(identity_source_path)
@@ -2336,6 +2343,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             fallback_cutout = job_dir / "cartoon_reference_semantic_cutout_final.png"
             fallback_semantic = job_dir / "cartoon_reference_semantic_cutout_raw.png"
             generated_semantic_fallback_error: str | None = None
+            completion_first_canonical_fallback = False
             try:
                 chroma_metrics = semantic_background_recovery(
                     fallback_source,
@@ -2346,73 +2354,131 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
             except Exception as exc:  # noqa: BLE001 - image mode must preserve a usable raw result
                 if not image_request:
-                    if fallback_uses_uploaded_identity:
-                        raise
-                    generated_semantic_fallback_error = (
-                        f"{type(exc).__name__}: {str(exc)[:1000]}"
-                    )
-                    append_recovery_event(
-                        job_id,
-                        {
-                            "stage": "cartoon_reference_semantic_recovery",
-                            "attempt": fallback_record["attempt"],
-                            "reason": "canonical_generated_semantic_matte_invalid",
-                            "strategy": "use_uploaded_identity_after_safe_matte",
-                            "profile": fallback_record["profile"],
-                            "source": fallback_source.name,
-                            "result": "rejected",
-                            "error": generated_semantic_fallback_error,
-                        },
-                    )
-                    fallback_uses_uploaded_identity = True
-                    fallback_source = Path(identity_source_path)
-                    fallback_green = (
-                        job_dir
-                        / "cartoon_reference_uploaded_identity_matte_green.png"
-                    )
-                    fallback_cutout = (
-                        job_dir
-                        / "cartoon_reference_uploaded_identity_matte_cutout.png"
-                    )
-                    fallback_semantic = (
-                        job_dir
-                        / "cartoon_reference_uploaded_identity_matte_semantic.png"
-                    )
-                    try:
+                    if (
+                        GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                        and not fallback_uses_uploaded_identity
+                    ):
+                        generated_semantic_fallback_error = (
+                            f"{type(exc).__name__}: {str(exc)[:1000]}"
+                        )
                         chroma_metrics = semantic_background_recovery(
                             fallback_source,
                             fallback_green,
                             fallback_cutout,
                             fallback_semantic,
-                            validate_canonical_interior=True,
+                            validate_canonical_interior=False,
+                            enforce_visual_quality=False,
                         )
-                    except Exception as uploaded_exc:
-                        uploaded_error = (
-                            f"{type(uploaded_exc).__name__}: "
-                            f"{str(uploaded_exc)[:1000]}"
+                        completion_first_canonical_fallback = True
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "cartoon_reference_semantic_recovery",
+                                "attempt": fallback_record["attempt"],
+                                "reason": "strict_visual_canonical_matte_invalid",
+                                "strategy": (
+                                    "use_best_generated_semantic_matte_without_"
+                                    "visual_block"
+                                ),
+                                "profile": fallback_record["profile"],
+                                "source": fallback_source.name,
+                                "result": "accepted_completion_fallback",
+                                "strict_error": generated_semantic_fallback_error,
+                                "policy": (
+                                    GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                                ),
+                            },
+                        )
+                        update_job(
+                            job_id,
+                            canonical_completion_fallback_used=True,
+                            canonical_completion_fallback_policy=(
+                                GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                            ),
+                            canonical_completion_fallback_strict_error=(
+                                generated_semantic_fallback_error
+                            ),
+                            canonical_completion_fallback_source=(
+                                fallback_source.name
+                            ),
+                            canonical_completion_fallback_attempt=(
+                                fallback_record["attempt"]
+                            ),
+                        )
+                    elif fallback_uses_uploaded_identity:
+                        raise
+                    else:
+                        generated_semantic_fallback_error = (
+                            f"{type(exc).__name__}: {str(exc)[:1000]}"
                         )
                         append_recovery_event(
                             job_id,
                             {
                                 "stage": "cartoon_reference_semantic_recovery",
-                                "attempt": len(cartoon_attempts) + 1,
+                                "attempt": fallback_record["attempt"],
                                 "reason": (
-                                    "canonical_uploaded_identity_matte_invalid"
+                                    "canonical_generated_semantic_matte_invalid"
                                 ),
                                 "strategy": (
                                     "use_uploaded_identity_after_safe_matte"
                                 ),
+                                "profile": fallback_record["profile"],
                                 "source": fallback_source.name,
                                 "result": "rejected",
-                                "error": uploaded_error,
+                                "error": generated_semantic_fallback_error,
                             },
                         )
-                        raise RuntimeError(
-                            "Generated canonical semantic matte failed and the "
-                            "uploaded identity safe-matte recovery also failed: "
-                            f"generated={generated_semantic_fallback_error}; "
-                            f"uploaded={uploaded_error}"
-                        ) from uploaded_exc
+                        fallback_uses_uploaded_identity = True
+                        fallback_source = Path(identity_source_path)
+                        fallback_green = (
+                            job_dir
+                            / "cartoon_reference_uploaded_identity_matte_green.png"
+                        )
+                        fallback_cutout = (
+                            job_dir
+                            / "cartoon_reference_uploaded_identity_matte_cutout.png"
+                        )
+                        fallback_semantic = (
+                            job_dir
+                            / "cartoon_reference_uploaded_identity_matte_semantic.png"
+                        )
+                        try:
+                            chroma_metrics = semantic_background_recovery(
+                                fallback_source,
+                                fallback_green,
+                                fallback_cutout,
+                                fallback_semantic,
+                                validate_canonical_interior=True,
+                            )
+                        except Exception as uploaded_exc:
+                            uploaded_error = (
+                                f"{type(uploaded_exc).__name__}: "
+                                f"{str(uploaded_exc)[:1000]}"
+                            )
+                            append_recovery_event(
+                                job_id,
+                                {
+                                    "stage": (
+                                        "cartoon_reference_semantic_recovery"
+                                    ),
+                                    "attempt": len(cartoon_attempts) + 1,
+                                    "reason": (
+                                        "canonical_uploaded_identity_matte_invalid"
+                                    ),
+                                    "strategy": (
+                                        "use_uploaded_identity_after_safe_matte"
+                                    ),
+                                    "source": fallback_source.name,
+                                    "result": "rejected",
+                                    "error": uploaded_error,
+                                },
+                            )
+                            raise RuntimeError(
+                                "Generated canonical semantic matte failed and the "
+                                "uploaded identity safe-matte recovery also failed: "
+                                f"generated={generated_semantic_fallback_error}; "
+                                f"uploaded={uploaded_error}"
+                            ) from uploaded_exc
                 else:
                     best_identity_record = fallback_record
                     best_identity_source = job_dir / best_identity_record["keyframe"]
@@ -2526,24 +2592,36 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 fallback_profile = (
                     "uploaded_identity_semantic_fallback"
                     if fallback_uses_uploaded_identity
-                    else "rembg_u2net_fallback"
+                    else (
+                        "generated_semantic_completion_fallback"
+                        if completion_first_canonical_fallback
+                        else "rembg_u2net_fallback"
+                    )
                 )
                 fallback_recovery_reason = (
-                    "canonical_generated_semantic_matte_invalid"
-                    if generated_semantic_fallback_error is not None
+                    "strict_visual_canonical_matte_invalid"
+                    if completion_first_canonical_fallback
                     else (
-                        "canonical_identity_palette_drift_exhausted"
-                        if fallback_uses_uploaded_identity
-                        else "qwen_chroma_retries_exhausted"
+                        "canonical_generated_semantic_matte_invalid"
+                        if generated_semantic_fallback_error is not None
+                        else (
+                            "canonical_identity_palette_drift_exhausted"
+                            if fallback_uses_uploaded_identity
+                            else "qwen_chroma_retries_exhausted"
+                        )
                     )
                 )
                 fallback_recovery_strategy = (
-                    "use_uploaded_identity_after_generated_matte_failure"
-                    if generated_semantic_fallback_error is not None
+                    "use_best_generated_semantic_matte_without_visual_block"
+                    if completion_first_canonical_fallback
                     else (
-                        "use_original_uploaded_identity_after_safe_matte"
-                        if fallback_uses_uploaded_identity
-                        else "rembg_u2net_fallback"
+                        "use_uploaded_identity_after_generated_matte_failure"
+                        if generated_semantic_fallback_error is not None
+                        else (
+                            "use_original_uploaded_identity_after_safe_matte"
+                            if fallback_uses_uploaded_identity
+                            else "rembg_u2net_fallback"
+                        )
                     )
                 )
                 fallback_raw_candidate_identity_palette = (
@@ -2587,6 +2665,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                 if (
                     canonical_identity_palette_gate_required
+                    and not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
                     and (
                         not isinstance(fallback_palette_quality, dict)
                         or fallback_palette_quality.get("acceptable") is not True
@@ -2758,6 +2837,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         GENERATION_VISUAL_AUDITS_BLOCKING
                         or canonical_identity_palette_gate_required
                     )
+                    and not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
                     and
                     fallback_palette_quality is not None
                     and fallback_palette_quality.get("acceptable") is not True
@@ -2809,6 +2889,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "profile_index": int(fallback_record["attempt"]) - 1,
                     "transparent": True,
                     "background_removal_failed": False,
+                    "completion_first_fallback": (
+                        completion_first_canonical_fallback
+                        or bool(
+                            isinstance(fallback_palette_quality, dict)
+                            and fallback_palette_quality.get("acceptable")
+                            is not True
+                            and GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                        )
+                    ),
                 }
                 cartoon_attempts.append(
                     {
@@ -2869,6 +2958,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     validate_canonical_interior=(
                         GENERATION_VISUAL_AUDITS_BLOCKING
                         or canonical_identity_palette_gate_required
+                    )
+                    and not bool(
+                        selected_cartoon.get("completion_first_fallback")
                     ),
                 )
                 if not normalized_chroma["acceptable"]:
@@ -2995,6 +3087,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             canonical_identity_palette_verdict=canonical_palette_audit[
                 "identity_palette_verdict"
             ],
+            canonical_completion_fallback_used=bool(
+                selected_cartoon.get("completion_first_fallback")
+            ),
+            canonical_completion_fallback_policy=(
+                GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                if selected_cartoon.get("completion_first_fallback")
+                else None
+            ),
         )
         append_output(
             job_id,
@@ -3885,8 +3985,6 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             if (
                 strict_first_frame_required
                 and first_frame_retry_wave == 0
-                and GENERATION_ACTION_CANDIDATE_GATE_POLICY
-                != "generate_five_then_select_best_identity_safe_candidate_v1"
             ):
                 cached_attempt = load_validated_first_frame_cache(
                     job_id,
@@ -8560,6 +8658,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 strict_first_frame_required
                 and not identity_safe_attempt_exists
                 and best_semantic_source is None
+                and not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
             ):
                 fail_identity_budget_exhausted()
             if (
@@ -8704,14 +8803,25 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 best_attempt is None
                 and strict_first_frame_required
                 and best_strict_first_frame_attempt is not None
-                and isinstance(
-                    best_strict_first_frame_attempt.get("identity_palette"),
-                    dict,
+                and bool(best_strict_first_frame_attempt.get("cutout"))
+                and (
+                    job_dir / str(best_strict_first_frame_attempt["cutout"])
+                ).is_file()
+                and (
+                    GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                    or (
+                        isinstance(
+                            best_strict_first_frame_attempt.get(
+                                "identity_palette"
+                            ),
+                            dict,
+                        )
+                        and best_strict_first_frame_attempt[
+                            "identity_palette"
+                        ].get("acceptable")
+                        is True
+                    )
                 )
-                and best_strict_first_frame_attempt["identity_palette"].get(
-                    "acceptable"
-                )
-                is True
             ):
                 best_attempt = best_strict_first_frame_attempt
                 strict_best_effort_issues = strict_first_frame_record_issues(
@@ -8727,7 +8837,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     degraded_fallback_accepted=True,
                     degraded_reason="bounded_first_frame_attempt_budget_exhausted",
                     degraded_selection_policy=(
-                        "generated_candidate_identity_action_best_of_five_v2"
+                        QWEN_GENERATED_COMPLETION_SELECTION_POLICY
                     ),
                     degraded_selection_key=list(
                         best_attempt[
@@ -8750,7 +8860,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "pose_index": index,
                         "attempt": best_attempt["attempt"],
                         "reason": "bounded_first_frame_attempt_budget_exhausted",
-                        "strategy": "select_generated_identity_action_best_of_five",
+                        "strategy": (
+                            "select_generated_visual_completion_best_of_five"
+                        ),
                         "profile": best_attempt["profile"],
                         "result": "accepted_best_effort",
                         "issues": strict_best_effort_issues,
@@ -8770,6 +8882,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     qwen_first_frame_best_effort_attempt=best_attempt["attempt"],
                     qwen_first_frame_best_effort_issues=(strict_best_effort_issues),
                     qwen_first_frame_attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                    visual_completion_fallback_used=True,
+                    visual_completion_fallback_policy=(
+                        GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                    ),
                 )
             if (
                 best_attempt is None
@@ -8800,11 +8916,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 if exhausted_recovery in {
                     "identity_safe_generated_candidate",
                     "identity_safe_generated_candidate_requires_final_action_gate",
+                    "generated_completion_candidate",
                 }:
                     best_attempt = best_action_candidate_degraded_attempt
                     requires_final_action_gate = bool(
                         exhausted_recovery
                         == "identity_safe_generated_candidate_requires_final_action_gate"
+                    )
+                    completion_candidate = bool(
+                        exhausted_recovery == "generated_completion_candidate"
                     )
                     selected_candidate_gate = dict(
                         best_attempt.get("action_candidate_gate") or {}
@@ -8816,7 +8936,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         degraded_fallback_accepted=True,
                         degraded_reason="candidate_attempt_budget_exhausted",
                         degraded_selection_policy=(
-                            "identity_safe_structural_action_generated_candidate_v3"
+                            QWEN_GENERATED_COMPLETION_SELECTION_POLICY
+                            if completion_candidate
+                            else (
+                                "identity_safe_structural_action_generated_"
+                                "candidate_v3"
+                            )
                         ),
                         degraded_selection_key=list(
                             best_attempt[
@@ -8840,11 +8965,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "attempt": best_attempt["attempt"],
                             "reason": "action_candidate_gate_attempts_exhausted",
                             "strategy": (
+                                "select_generated_visual_completion_candidate"
+                                if completion_candidate
+                                else (
                                 "select_identity_safe_structural_action_generated_"
                                 "candidate_with_required_final_action_gate"
                                 if requires_final_action_gate
                                 else "select_identity_safe_structural_action_generated_"
                                 "candidate"
+                                )
                             ),
                             "profile": best_attempt["profile"],
                             "result": "accepted_degraded_generated_candidate",
@@ -8862,9 +8991,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             GENERATION_ACTION_CANDIDATE_GATE_POLICY
                         ),
                         action_candidate_gate_status=(
-                            "identity_safe_candidate_pending_final_action_gate"
-                            if requires_final_action_gate
-                            else "identity_safe_degraded_candidate_selected"
+                            "generated_completion_candidate_selected"
+                            if completion_candidate
+                            else (
+                                "identity_safe_candidate_pending_final_action_gate"
+                                if requires_final_action_gate
+                                else "identity_safe_degraded_candidate_selected"
+                            )
                         ),
                         action_candidate_final_gate_required_actions=sorted(
                             {
@@ -8892,6 +9025,12 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         action_candidate_gate_degraded_fallback_used=True,
                         action_candidate_gate_returns_original_upload=False,
                         action_candidate_gate_returns_approved_canonical=False,
+                        visual_completion_fallback_used=completion_candidate,
+                        visual_completion_fallback_policy=(
+                            GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                            if completion_candidate
+                            else None
+                        ),
                     )
                 elif exhausted_recovery == "upload_anchored_canonical":
                     standing_fallback = fallback_action == "standing"
@@ -9554,13 +9693,48 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 fallback_semantic = (
                     job_dir / f"pose_{index:02d}_semantic_cutout_raw.png"
                 )
-                chroma_metrics = semantic_background_recovery(
-                    fallback_source,
-                    fallback_green,
-                    fallback_cutout,
-                    fallback_semantic,
-                    pose=pose,
-                )
+                action_semantic_strict_error: str | None = None
+                try:
+                    chroma_metrics = semantic_background_recovery(
+                        fallback_source,
+                        fallback_green,
+                        fallback_cutout,
+                        fallback_semantic,
+                        pose=pose,
+                    )
+                except Exception as exc:
+                    if not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED:
+                        raise
+                    action_semantic_strict_error = (
+                        f"{type(exc).__name__}: {str(exc)[:1000]}"
+                    )
+                    chroma_metrics = semantic_background_recovery(
+                        fallback_source,
+                        fallback_green,
+                        fallback_cutout,
+                        fallback_semantic,
+                        pose=pose,
+                        enforce_visual_quality=False,
+                    )
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_keyframe_semantic_recovery",
+                            "pose_index": index,
+                            "attempt": fallback_record["attempt"],
+                            "reason": "strict_visual_semantic_matte_invalid",
+                            "strategy": (
+                                "use_generated_semantic_matte_without_visual_block"
+                            ),
+                            "profile": fallback_record["profile"],
+                            "source": fallback_source.name,
+                            "result": "accepted_completion_fallback",
+                            "strict_error": action_semantic_strict_error,
+                            "policy": (
+                                GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                            ),
+                        },
+                    )
                 quality = (
                     pose_cutout_quality(
                         fallback_cutout,
@@ -9885,7 +10059,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     isinstance(semantic_palette_quality, dict)
                     and semantic_palette_quality.get("acceptable") is True
                 )
-                semantic_best_effort_issues: list[str] = []
+                semantic_best_effort_issues: list[str] = (
+                    ["strict_visual_semantic_matte_invalid"]
+                    if action_semantic_strict_error is not None
+                    else []
+                )
                 if semantic_rejection_reason is not None:
                     append_recovery_event(
                         job_id,
@@ -9899,7 +10077,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "result": (
                                 "accepted_best_effort"
                                 if strict_first_frame_required
-                                and semantic_identity_safe
+                                and (
+                                    semantic_identity_safe
+                                    or GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                                )
                                 else "rejected"
                             ),
                             "chroma": chroma_metrics,
@@ -9920,7 +10101,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         issues.extend(semantic_fur_silhouette_quality["issues"])
                     if semantic_fur_surface_quality is not None:
                         issues.extend(semantic_fur_surface_quality["issues"])
-                    semantic_best_effort_issues = list(dict.fromkeys(issues))
+                    semantic_best_effort_issues = list(
+                        dict.fromkeys([*semantic_best_effort_issues, *issues])
+                    )
                     if fur_surface_gate_required and not strict_first_frame_required:
                         update_job(
                             job_id,
@@ -9995,13 +10178,19 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "transparent": True,
                     "background_removal_failed": False,
                 }
-                if semantic_best_effort_issues and semantic_identity_safe:
+                if semantic_best_effort_issues and (
+                    semantic_identity_safe
+                    or GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                ):
                     best_attempt["strict_first_frame_best_effort_selected"] = True
                     best_attempt["strict_first_frame_best_effort_issues"] = (
                         semantic_best_effort_issues
                     )
                     best_attempt["strict_first_frame_best_effort_semantic_recovery"] = (
                         True
+                    )
+                    best_attempt["visual_completion_fallback"] = bool(
+                        not semantic_identity_safe
                     )
                 append_recovery_event(
                     job_id,
@@ -10015,7 +10204,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "result": (
                             "accepted"
                             if semantic_identity_safe
-                            else "rejected_identity_unsafe"
+                            else (
+                                "accepted_visual_completion_fallback"
+                                if GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                                else "rejected_identity_unsafe"
+                            )
                         ),
                         "chroma": chroma_metrics,
                         "quality": quality,
@@ -10032,9 +10225,20 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "Selected action candidate is outside the five-attempt budget."
                 )
             selected_palette = best_attempt.get("identity_palette")
+            selected_identity_palette_acceptable = bool(
+                isinstance(selected_palette, dict)
+                and selected_palette.get("acceptable") is True
+            )
+            selected_visual_completion_fallback = bool(
+                best_attempt.get("strict_first_frame_best_effort_selected")
+                or not selected_identity_palette_acceptable
+            )
             if (
+                not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                and (
                 not isinstance(selected_palette, dict)
                 or selected_palette.get("acceptable") is not True
+                )
             ):
                 fail_identity_budget_exhausted(
                     selected_palette
@@ -10059,7 +10263,17 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
                 "selected_attempt": selected_attempt_number,
                 "selected_penalty": best_attempt.get("combined_penalty"),
-                "identity_palette_acceptable": True,
+                "identity_palette_acceptable": (
+                    selected_identity_palette_acceptable
+                ),
+                "result": (
+                    "selected_best_of_five"
+                    if not selected_visual_completion_fallback
+                    else "selected_generated_completion_fallback"
+                ),
+                "visual_completion_fallback": (
+                    selected_visual_completion_fallback
+                ),
                 "selected_keyframe_sha256": file_sha256(
                     selected_keyframe_source
                 ),
@@ -10072,7 +10286,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 action_candidate_gate_policy=(
                     GENERATION_ACTION_CANDIDATE_GATE_POLICY
                 ),
-                action_candidate_gate_status="best_of_five_selected",
+                action_candidate_gate_status=(
+                    "best_of_five_selected"
+                    if not selected_visual_completion_fallback
+                    else "completion_first_best_of_five_selected"
+                ),
                 action_candidate_gate_action=action_key(pose),
                 action_candidate_gate_attempt_budget=(
                     QWEN_ACTION_CANDIDATE_ATTEMPTS
@@ -10087,6 +10305,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 action_candidate_gate_returns_original_upload=False,
                 action_candidate_gate_returns_approved_canonical=False,
                 action_candidate_selection_by_action=action_selection_records,
+                visual_completion_fallback_used=(
+                    selected_visual_completion_fallback
+                ),
+                visual_completion_fallback_policy=(
+                    GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                    if selected_visual_completion_fallback
+                    else None
+                ),
             )
             append_recovery_event(
                 job_id,
@@ -10097,9 +10323,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "reason": "five_candidate_budget_completed",
                     "strategy": (
                         "select_lowest_penalty_identity_safe_generated_candidate"
+                        if not selected_visual_completion_fallback
+                        else "select_lowest_risk_generated_completion_candidate"
                     ),
                     "profile": best_attempt["profile"],
-                    "result": "selected_best_of_five",
+                    "result": (
+                        "selected_best_of_five"
+                        if not selected_visual_completion_fallback
+                        else "selected_generated_completion_fallback"
+                    ),
                     "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
                     "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
                     "combined_penalty": best_attempt.get("combined_penalty"),
@@ -10746,7 +10978,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "selected_attempt": best_attempt["attempt"],
                     "selected_profile": best_attempt["profile"],
                     "selection_policy": (
-                        "generated_candidate_identity_action_best_of_five_v2"
+                        QWEN_GENERATED_COMPLETION_SELECTION_POLICY
                         if best_effort_selected
                         else "strict_quality_gate_first_pass_v1"
                     ),

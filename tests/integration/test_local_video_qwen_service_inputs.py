@@ -610,12 +610,15 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertTrue(guard["canonical_raw_palette_retained_for_audit"])
         canonical_palette_gate = guard["canonical_identity_palette_gate"]
         self.assertTrue(canonical_palette_gate["enabled"])
-        self.assertTrue(
+        self.assertFalse(
             canonical_palette_gate["fail_closed_for_generated_candidates"]
         )
         self.assertEqual(
             canonical_palette_gate["terminal_recovery"],
-            "original_uploaded_identity_safe_matte",
+            "best_generated_semantic_matte",
+        )
+        self.assertFalse(
+            canonical_palette_gate["terminal_recovery_must_pass_same_palette_gate"]
         )
         spatial_marking_gate = canonical_palette_gate["spatial_marking_gate"]
         self.assertEqual(
@@ -2247,7 +2250,9 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             ),
         )
 
-    def test_exhausted_action_candidate_never_reuses_identity_drift(self) -> None:
+    def test_exhausted_action_candidate_uses_generated_completion_fallback(
+        self,
+    ) -> None:
         safe = {"identity_palette": {"acceptable": True}}
         drifted = {"identity_palette": {"acceptable": False}}
 
@@ -2280,7 +2285,7 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                 action="standing",
                 approved_canonical_available=True,
             ),
-            "reject",
+            "generated_completion_candidate",
         )
         for action in (
             "eating",
@@ -2296,7 +2301,7 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                         action=action,
                         approved_canonical_available=True,
                     ),
-                    "reject",
+                    "generated_completion_candidate",
                 )
 
     def test_eating_transparent_output_starts_at_validated_contact_phase(

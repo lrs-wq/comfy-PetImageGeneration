@@ -2349,7 +2349,7 @@ def revalidate_uploaded_qwen_references_before_scail(
             ).strip().lower()
             if (
                 stored_best_effort.get("policy")
-                != "generated_candidate_identity_action_best_of_five_v2"
+                != QWEN_GENERATED_COMPLETION_SELECTION_POLICY
                 or stored_best_effort.get("attempt_limit")
                 != QWEN_FIRST_FRAME_MAX_ATTEMPTS
                 or stored_best_effort.get("published_reference_path")

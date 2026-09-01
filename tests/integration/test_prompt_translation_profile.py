@@ -1040,7 +1040,7 @@ class IdentityPaletteGuardTests(unittest.TestCase):
 
         self.assertNotIn("Previous output recolored the pet", prompt)
 
-    def test_all_rejected_canonical_retries_require_uploaded_identity_fallback(
+    def test_all_rejected_canonical_retries_keep_generated_completion_fallback(
         self,
     ) -> None:
         attempts = [
@@ -1063,7 +1063,7 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         )
 
         self.assertEqual(len(recovery_profiles), 3)
-        self.assertTrue(
+        self.assertFalse(
             pipeline.canonical_generated_attempts_require_uploaded_fallback(
                 attempts,
                 identity_palette_required=True,
@@ -1607,7 +1607,9 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         self.assertIs(selected, identity_safe)
 
     @patch.object(pipeline, "GENERATION_VISUAL_AUDITS_BLOCKING", True)
-    def test_strict_fallback_selection_fails_when_all_candidates_drift(self) -> None:
+    def test_strict_fallback_selection_keeps_best_generated_candidate(
+        self,
+    ) -> None:
         attempts = [
             {
                 "identity_palette": {
@@ -1629,14 +1631,12 @@ class IdentityPaletteGuardTests(unittest.TestCase):
             },
         ]
 
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "Canonical identity palette drift remained after 2 attempts",
-        ):
-            pipeline.select_canonical_fallback_attempt(
-                attempts,
-                identity_palette_required=True,
-            )
+        selected = pipeline.select_canonical_fallback_attempt(
+            attempts,
+            identity_palette_required=True,
+        )
+
+        self.assertIs(selected, attempts[0])
 
 
 if __name__ == "__main__":

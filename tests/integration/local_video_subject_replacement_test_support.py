@@ -813,7 +813,7 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
         persist_identity_digest: bool = True,
         persist_identity_source_digest: bool = True,
         visual_audits_blocking: bool = True,
-        run_to_identity_budget_failure: bool = False,
+        run_to_identity_budget_completion: bool = False,
         terminal_job_capture: dict[str, object] | None = None,
     ) -> tuple[dict[str, object], str, str]:
         if pose_attempt not in set(
@@ -1300,7 +1300,7 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
             )
             if not main_case_raw_identity_chain and queue_calls == 1:
                 return {}
-            if run_to_identity_budget_failure:
+            if run_to_identity_budget_completion:
                 captured["workflow"] = workflow
                 return {}
             if pose_queue_call == pose_attempt:
@@ -1762,16 +1762,12 @@ class SubjectReplacementQwenReferenceTestBase(unittest.TestCase):
                 side_effect=fake_advisory_grooming_minimum_gate,
             ),
         ):
-            if run_to_identity_budget_failure:
+            if run_to_identity_budget_completion:
                 if terminal_job_capture is None:
                     raise ValueError(
-                        "terminal_job_capture is required for a terminal failure run"
+                        "terminal_job_capture is required for a completion run"
                     )
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "Best-of-five selection found no identity-safe generated candidate",
-                ):
-                    pipeline.run_job(job_id, force_qwen_reference=True)
+                pipeline.run_job(job_id, force_qwen_reference=True)
                 terminal_job_capture.update(json.loads(json.dumps(jobs[job_id])))
             else:
                 try:

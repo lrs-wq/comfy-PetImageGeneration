@@ -106,7 +106,7 @@
       "type": "business_rule",
       "name": "五轮候选身份问题感知重试",
       "status": "active",
-      "tags": ["identity", "five-attempts", "stripe-amplification", "attempt4-to-attempt5-refine", "fail-closed"],
+      "tags": ["identity", "five-attempts", "stripe-amplification", "attempt4-to-attempt5-refine", "strict-first"],
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
     {
@@ -140,6 +140,14 @@
       "status": "active",
       "tags": ["eating", "identity", "achromatic", "dark-feature-expansion", "pet-only-lab-l", "bowl-pixel-lock", "identity-revalidation", "white-pomeranian", "five-attempts", "fail-closed"],
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
+    },
+    {
+      "id": "comfy.recovery.generated_visual_completion_fallback",
+      "type": "business_rule",
+      "name": "生成视觉门耗尽后的完成优先回退",
+      "status": "active",
+      "tags": ["completion-first", "best-effort", "canonical-semantic-matte", "five-attempts", "visual-quality-advisory", "runtime-integrity-required", "no-original-output"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {
       "id": "comfy.module.transparent_animation",
@@ -233,8 +241,8 @@
     {
       "id": "comfy.decision.generated_candidate_selection",
       "type": "decision",
-      "name": "固定生成五轮并选择身份合格的最优候选",
-      "status": "accepted",
+      "name": "固定生成五轮并选择身份合格的最优候选（部分取代）",
+      "status": "superseded",
       "tags": ["generation", "five-attempts", "best-candidate", "no-cache-shortcut", "no-original-fallback"],
       "evidence": "docs/knowledge/DECISIONS/0001-generated-candidate-selection.md"
     },
@@ -245,6 +253,14 @@
       "status": "accepted",
       "tags": ["regression", "stability", "completion-only", "quality-diagnostic"],
       "evidence": "docs/knowledge/DECISIONS/0002-historical-regression-gallery.md"
+    },
+    {
+      "id": "comfy.decision.generated_visual_completion_first",
+      "type": "decision",
+      "name": "生成视觉门耗尽后完成优先",
+      "status": "accepted",
+      "tags": ["completion-first", "best-effort", "visual-quality-advisory", "runtime-integrity-fail-closed", "no-original-output"],
+      "evidence": "docs/knowledge/DECISIONS/0003-generated-visual-completion-first.md"
     }
   ],
   "edges": [
@@ -339,6 +355,12 @@
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {
+      "from": "comfy.module.pipeline",
+      "relation": "recovers_with",
+      "to": "comfy.recovery.generated_visual_completion_fallback",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
+    },
+    {
       "from": "comfy.recovery.eating_light_achromatic_dark_feature",
       "relation": "revalidated_by",
       "to": "comfy.quality.identity_issue_aware_retry",
@@ -397,6 +419,24 @@
       "relation": "governed_by",
       "to": "comfy.decision.generated_candidate_selection",
       "evidence": "docs/knowledge/DECISIONS/0001-generated-candidate-selection.md"
+    },
+    {
+      "from": "comfy.decision.generated_candidate_selection",
+      "relation": "superseded_by",
+      "to": "comfy.decision.generated_visual_completion_first",
+      "evidence": "docs/knowledge/DECISIONS/0003-generated-visual-completion-first.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "governed_by",
+      "to": "comfy.decision.generated_visual_completion_first",
+      "evidence": "docs/knowledge/DECISIONS/0003-generated-visual-completion-first.md"
+    },
+    {
+      "from": "comfy.recovery.generated_visual_completion_fallback",
+      "relation": "governed_by",
+      "to": "comfy.decision.generated_visual_completion_first",
+      "evidence": "docs/knowledge/DECISIONS/0003-generated-visual-completion-first.md"
     },
     {
       "from": "comfy.module.pipeline",

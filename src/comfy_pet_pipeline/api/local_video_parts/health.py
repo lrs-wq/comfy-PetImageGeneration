@@ -134,6 +134,9 @@ def health() -> dict[str, Any]:
             "generate_full_budget_before_selection": True,
             "select_best_generated_candidate_on_exhaustion": True,
             "best_effort_candidate_continues_to_scail": True,
+            "best_effort_selection_policy": (
+                QWEN_GENERATED_COMPLETION_SELECTION_POLICY
+            ),
             "original_upload_fallback_published": False,
             "failed_action_removed": False,
         },
@@ -152,10 +155,10 @@ def health() -> dict[str, Any]:
         "canonical_raw_palette_retained_for_audit": True,
         "canonical_identity_palette_gate": {
             "enabled": True,
-            "fail_closed_for_generated_candidates": True,
+            "fail_closed_for_generated_candidates": False,
             "retry_all_canonical_profiles": True,
-            "terminal_recovery": "original_uploaded_identity_safe_matte",
-            "terminal_recovery_must_pass_same_palette_gate": True,
+            "terminal_recovery": "best_generated_semantic_matte",
+            "terminal_recovery_must_pass_same_palette_gate": False,
         },
         "canonical_chroma_despill": (
             "alpha_boundary_plus_source_palette_guarded_interior_v1"
@@ -613,6 +616,13 @@ def health() -> dict[str, Any]:
             ),
             "visual_content_blocking": GENERATION_VISUAL_AUDITS_BLOCKING,
             "runtime_integrity_checks_required": True,
+            "visual_completion_fallback": {
+                "enabled": GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED,
+                "policy": GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY,
+                "visual_defects_block_job_after_budget": False,
+                "requires_generated_media_integrity": True,
+                "returns_original_upload": False,
+            },
             "required_checks": [
                 "input_digest",
                 "asset_presence",
@@ -956,9 +966,10 @@ def health() -> dict[str, Any]:
                 "action_candidate_selection": {
                     "policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
                     "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                    "selection": "lowest_penalty_identity_safe_generated_candidate",
+                    "selection": "lowest_risk_usable_generated_candidate",
                     "generate_full_budget_before_selection": True,
                     "original_upload_output_fallback": False,
+                    "job_fails_on_visual_exhaustion": False,
                 },
                 "recoverable_fallback": {
                     "enabled": True,
@@ -1071,9 +1082,8 @@ def health() -> dict[str, Any]:
                         GENERATION_VISUAL_AUDITS_BLOCKING
                         or GENERATION_ACTION_CANDIDATE_GATES_ENABLED
                     ),
-                    "job_fails_on_exhaustion": (
-                        GENERATION_VISUAL_AUDITS_BLOCKING
-                    ),
+                    "job_fails_on_exhaustion": False,
+                    "terminal_recovery": "lowest_risk_generated_candidate",
                 },
                 "canonical_action_candidate_gate": {
                     "enabled": GENERATION_ACTION_CANDIDATE_GATES_ENABLED,
@@ -1081,9 +1091,9 @@ def health() -> dict[str, Any]:
                     "scope": "uploaded_canonical_non_grooming_action_candidates",
                     "full_retry_budget": True,
                     "rejects_identity_palette_quality_similarity_and_silhouette_drift": True,
-                    "job_fails_on_exhaustion": GENERATION_VISUAL_AUDITS_BLOCKING,
+                    "job_fails_on_exhaustion": False,
                     "advisory_terminal_recovery": (
-                        "identity_first_lowest_risk_generated_candidate"
+                        "lowest_risk_generated_completion_candidate"
                     ),
                     "returns_original_upload": False,
                 },
@@ -1097,10 +1107,10 @@ def health() -> dict[str, Any]:
                 "canonical_identity_palette_gate": {
                     "enabled": True,
                     "policy": IDENTITY_PALETTE_POLICY,
-                    "fail_closed_for_generated_candidates": True,
+                    "fail_closed_for_generated_candidates": False,
                     "retry_all_canonical_profiles": True,
-                    "terminal_recovery": "original_uploaded_identity_safe_matte",
-                    "terminal_recovery_must_pass_same_palette_gate": True,
+                    "terminal_recovery": "best_generated_semantic_matte",
+                    "terminal_recovery_must_pass_same_palette_gate": False,
                     "bidirectional_drift": {
                         "policy": IDENTITY_PALETTE_BIDIRECTIONAL_DRIFT_POLICY,
                         "warm_coat_source_min": IDENTITY_WARM_COAT_SOURCE_MIN,
