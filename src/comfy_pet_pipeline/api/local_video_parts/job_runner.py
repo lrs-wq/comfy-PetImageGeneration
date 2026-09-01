@@ -1189,6 +1189,24 @@ def load_validated_first_frame_cache(
         return None
 
 
+def should_reuse_validated_first_frame_cache(
+    *,
+    strict_first_frame_required: bool,
+    first_frame_retry_wave: int,
+) -> bool:
+    """Keep fixed-budget generation independent from historical cache records."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"should_reuse_validated_first_frame_cache"},
+    )
+    return bool(
+        QWEN_VALIDATED_FIRST_FRAME_CACHE_REUSE_ENABLED
+        and strict_first_frame_required
+        and first_frame_retry_wave == 0
+    )
+
+
 def store_validated_first_frame_cache(
     job_id: str,
     job: dict[str, Any],
@@ -3982,9 +4000,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                     pose_candidate_matte_policy=(QWEN_ACTION_CANDIDATE_MATTE_POLICY),
                 )
-            if (
-                strict_first_frame_required
-                and first_frame_retry_wave == 0
+            if should_reuse_validated_first_frame_cache(
+                strict_first_frame_required=strict_first_frame_required,
+                first_frame_retry_wave=first_frame_retry_wave,
             ):
                 cached_attempt = load_validated_first_frame_cache(
                     job_id,

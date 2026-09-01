@@ -225,6 +225,37 @@ class ValidatedFirstFrameCacheTests(unittest.TestCase):
             "qwen_reference_degraded_actions": {},
         }
 
+    def test_fixed_budget_cache_reuse_guard_is_explicit(self) -> None:
+        self.assertFalse(
+            pipeline.should_reuse_validated_first_frame_cache(
+                strict_first_frame_required=True,
+                first_frame_retry_wave=0,
+            )
+        )
+        with patch.object(
+            pipeline,
+            "QWEN_VALIDATED_FIRST_FRAME_CACHE_REUSE_ENABLED",
+            True,
+        ):
+            self.assertTrue(
+                pipeline.should_reuse_validated_first_frame_cache(
+                    strict_first_frame_required=True,
+                    first_frame_retry_wave=0,
+                )
+            )
+            self.assertFalse(
+                pipeline.should_reuse_validated_first_frame_cache(
+                    strict_first_frame_required=False,
+                    first_frame_retry_wave=0,
+                )
+            )
+            self.assertFalse(
+                pipeline.should_reuse_validated_first_frame_cache(
+                    strict_first_frame_required=True,
+                    first_frame_retry_wave=1,
+                )
+            )
+
     def test_exact_input_history_is_promoted_and_remapped(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

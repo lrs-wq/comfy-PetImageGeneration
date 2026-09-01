@@ -124,7 +124,9 @@ def health() -> dict[str, Any]:
             "policy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
             "cache_version": QWEN_VALIDATED_FIRST_FRAME_CACHE_VERSION,
             "strict_quality_gate_required": True,
-            "content_addressed_exact_input_reuse": False,
+            "content_addressed_exact_input_reuse": (
+                QWEN_VALIDATED_FIRST_FRAME_CACHE_REUSE_ENABLED
+            ),
             "cache_storage_for_audit_only": True,
             "cache_integrity_sha256_required": True,
             "current_gate_revalidation_on_hit": False,

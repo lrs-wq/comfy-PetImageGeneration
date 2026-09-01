@@ -11,7 +11,7 @@
 
 ### 1.1 当前生产链路的完成优先边界
 
-本文件后续章节保留早期 DashScope/Wan 双动作实验结构；当前 `local-video-api v2.26.50` 的正式上传链路以 `src/comfy_pet_pipeline/api/local_video.py` 及 `local_video_parts/` 为准。正式链路先生成 canonical，再为每个动作固定生成五轮 Qwen 候选并进入 SCAIL。
+本文件后续章节保留早期 DashScope/Wan 双动作实验结构；当前 `local-video-api v2.26.51` 的正式上传链路以 `src/comfy_pet_pipeline/api/local_video.py` 及 `local_video_parts/` 为准。正式链路先生成 canonical，再为每个动作固定生成五轮 Qwen 候选并进入 SCAIL；首帧历史缓存只写审计、不参与固定五轮的读取或计数。
 
 质量门分为两层：媒体与运行完整性是硬门，包括模型/进程成功、文件可读取、主体 alpha 可用、归一化输出存在和 SHA-256 一致；身份色盘、花纹、姿态、构图、毛面、背景及 canonical 内部洞属于视觉门。视觉门仍决定重试和严格候选排序，但预算耗尽后不再终止任务：canonical 对最佳生成图使用非阻断语义抠图，动作从五轮可用生成候选中选最低风险者，以 `best_effort` 继续 SCAIL。上传原图只能提供身份锚定和回绘佐证，不能作为动作首帧或最终输出。
 

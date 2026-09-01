@@ -147,6 +147,21 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             guard["reference_pipeline"],
             pipeline.QWEN_FULL_BODY_FIRST_FRAME_PIPELINE,
         )
+        first_frame_publication = payload["subject_replacement"][
+            "upload_validation"
+        ]["first_frame_publication"]
+        self.assertFalse(
+            first_frame_publication["content_addressed_exact_input_reuse"]
+        )
+        self.assertFalse(pipeline.QWEN_VALIDATED_FIRST_FRAME_CACHE_REUSE_ENABLED)
+        self.assertTrue(first_frame_publication["cache_storage_for_audit_only"])
+        self.assertTrue(
+            first_frame_publication["generate_full_budget_before_selection"]
+        )
+        self.assertEqual(
+            first_frame_publication["generated_candidate_attempt_limit"],
+            pipeline.QWEN_ACTION_CANDIDATE_ATTEMPTS,
+        )
         self.assertEqual(
             guard["upload_pose_reference_source"],
             "per_action_qwen_canonical_and_main_case_geometry_roles",
