@@ -158,12 +158,30 @@
       "evidence": "docs/operations/PROJECT_LAYOUT.md"
     },
     {
+      "id": "comfy.asset.historical_canary_inputs",
+      "type": "asset",
+      "name": "历史 canary 输入语料（6案例/16视图）",
+      "path": "/data/comfy-pet-pipeline/archive/regression-gallery/v1/canaries",
+      "status": "active",
+      "tags": ["sha-pinned", "6-canaries", "16-input-views", "cat-and-dog", "single-and-three-view", "not-in-git"],
+      "evidence": "tests/regression/historical_gallery.json"
+    },
+    {
+      "id": "comfy.asset.historical_pose_keyframes",
+      "type": "asset",
+      "name": "历史 canary 姿态关键帧库存（15动作）",
+      "path": "/data/comfy-pet-pipeline/outputs/local_video_api",
+      "status": "active",
+      "tags": ["6-source-jobs", "15-pose-keyframes", "visual-reference", "quality-non-blocking", "not-in-git"],
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
       "id": "comfy.verification.historical_stability_gallery",
       "type": "verification",
-      "name": "历史输入与线上完成性稳定图集",
+      "name": "历史输入与线上完成性稳定图集（6案例/16输入/15姿态）",
       "path": "src/comfy_pet_pipeline/regression",
       "status": "active",
-      "tags": ["historical-inputs", "completion-only", "live-canary", "quality-non-blocking"],
+      "tags": ["historical-inputs", "6-canaries", "16-input-views", "15-pose-keyframes", "completion-only", "live-canary", "smoke-2-cases", "quality-non-blocking"],
       "evidence": "docs/operations/REGRESSION_GALLERY.md"
     },
     {
@@ -368,6 +386,24 @@
       "relation": "reads",
       "to": "comfy.runtime.data",
       "evidence": "tests/regression/historical_gallery.json"
+    },
+    {
+      "from": "comfy.asset.historical_canary_inputs",
+      "relation": "supports",
+      "to": "comfy.verification.historical_stability_gallery",
+      "evidence": "tests/regression/historical_gallery.json"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "produces",
+      "to": "comfy.asset.historical_pose_keyframes",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.asset.historical_pose_keyframes",
+      "relation": "supports",
+      "to": "comfy.verification.historical_stability_gallery",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
     },
     {
       "from": "comfy.verification.historical_stability_gallery",

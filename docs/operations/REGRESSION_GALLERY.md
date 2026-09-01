@@ -77,6 +77,21 @@ bash ops/scripts/verify-change.sh
 
 集合来自已经完成过的历史任务。`source_job_id` 只用于来源追踪；每次 live 运行都会产生新的任务 ID，不复用历史输出作为通过结论。
 
+### 结构化库存
+
+当前 v1 语料共 `6` 个 canary、`16` 张输入视图和 `15` 张历史姿态关键帧。输入文件按 SHA-256 固化；姿态关键帧只用于查看每个历史动作对应的生成姿态，不是质量基线，也不参与完成性硬门禁。
+
+| canary | 来源任务 | 输入视图 | 历史姿态关键帧 |
+| --- | --- | ---: | --- |
+| `orange-tabby-duplicate-three-view` | `20260831T094915Z-5c93eda6e9` | 3 | `pose_01=eating`、`pose_02=grooming` |
+| `tabby-kitten-colored-background` | `20260831T015134Z-376a202e84` | 3 | `pose_01=eating`、`pose_02=grooming` |
+| `white-cat-real-three-view` | `20260828T112414Z-38b93945ef` | 3 | `pose_01=eating`、`pose_02=grooming` |
+| `labrador-six-actions` | `20260827T100639Z-1d8b9ff966` | 3 | `pose_01=eating`、`pose_02=drinking`、`pose_03=running`、`pose_04=sleeping`、`pose_05=toileting`、`pose_06=standing` |
+| `pomeranian-single-view` | `20260821T075838Z-0e6161264e` | 1 | `pose_01=eating` |
+| `golden-retriever-outdoor` | `20260831T015110Z-d8182c974d` | 3 | `pose_01=eating`、`pose_02=standing` |
+
+输入语料位于 `/data/comfy-pet-pipeline/archive/regression-gallery/v1/canaries/`；姿态关键帧仍保留在对应来源任务的 `/data/comfy-pet-pipeline/outputs/local_video_api/<source_job_id>/` 中。Git 和知识图谱只记录上述非敏感资源身份、位置、数量和关系，不复制原图、关键帧、动画或运行日志。
+
 ## 数据与报告
 
 Git 只保存 [`tests/regression/historical_gallery.json`](../../tests/regression/historical_gallery.json) 中的来源任务 ID、相对路径、SHA-256、案例标签和动作范围。原始上传图、生成图和动画只留在服务器数据根目录，不进入 Git 或知识图谱。
@@ -106,6 +121,10 @@ Git 只保存 [`tests/regression/historical_gallery.json`](../../tests/regressio
 ```
 
 报告不保存 API key，也不以质量字段决定通过与否。
+
+## 已核验完成性快照
+
+2026-09-01 在提交 `a0cd7ce` 上运行默认 smoke，两组 canary 均完成（`2/2`）：重复三视图橘虎斑猫的 `grooming` 与户外金毛犬的 `standing` 都发布了可读取的 `512×512`、`100` 帧主 APNG。该快照只证明当次完成性合同通过，不建立任何画质结论；新的服务修改仍必须重新运行 smoke。
 
 ## 更新图集
 
