@@ -193,6 +193,15 @@
       "evidence": "docs/operations/REGRESSION_GALLERY.md"
     },
     {
+      "id": "comfy.verification.pomeranian_identity_recovery_live",
+      "type": "verification",
+      "name": "v2.26.49 白色博美身份恢复生产 live 验证",
+      "path": "/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260901T065511Z-13ed0af6a3/report.json",
+      "status": "passed",
+      "tags": ["commit-13ed0af", "job-20260901T065517Z-d20dda3064", "pomeranian-single-view", "eating", "five-attempts", "selected-attempt-4", "identity-passed", "completed", "apng-512x512-100f"],
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
       "id": "comfy.action.cat_default",
       "type": "business_rule",
       "name": "猫默认动作：eating 与 grooming",
@@ -436,6 +445,24 @@
       "relation": "governed_by",
       "to": "comfy.decision.completion_only_regression",
       "evidence": "docs/knowledge/DECISIONS/0002-historical-regression-gallery.md"
+    },
+    {
+      "from": "comfy.verification.pomeranian_identity_recovery_live",
+      "relation": "verifies",
+      "to": "comfy.recovery.eating_light_achromatic_dark_feature",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.verification.pomeranian_identity_recovery_live",
+      "relation": "exercises",
+      "to": "comfy.api.local_video",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.asset.historical_canary_inputs",
+      "relation": "supports",
+      "to": "comfy.verification.pomeranian_identity_recovery_live",
+      "evidence": "tests/regression/historical_gallery.json"
     }
   ]
 }
