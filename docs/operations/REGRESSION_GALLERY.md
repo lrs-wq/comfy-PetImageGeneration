@@ -134,6 +134,8 @@ live 报告同时显示每个动作的非阻断诊断：首帧选中轮次、最
 
 提交 `45082ff` 部署后的 v2.26.54 默认 smoke 为 `2/2`：猫舔毛任务 `20260902T035216Z-c146ae8758` 与犬站立任务 `20260902T040146Z-a1586dbfa7` 均完成，主 APNG 都可读取、`512×512 / 100` 帧；报告位于 `/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260902T035208Z-45082ffb95/`。再以源任务 `20260901T083322Z-72165d7e84` 的三张 SHA 锁定输入精确复跑舔毛，任务 `20260902T041526Z-67216d465d` 为 `1/1`：严格生成五轮且未读缓存、未增加第六轮，选中第 5 轮解剖优先候选，前肢拓扑覆盖率 `0.904762`、平均匹配距离 `2.804203 px`、方向一致性 `0.888213`，SCAIL 首轮通过，最终主 APNG 可读取、`512×512 / 100` 帧；报告位于 `/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260902T041515Z-45082ffb95/`。最低身份门的 `degraded_passed` 仍是非阻断诊断，图集 PASS 只取完成性和媒体可读性。
 
+同版随后使用原失败任务 `20260902T032017Z-cf5f87991a` 的三张 SHA 锁定输入、犬类 Profile 与 `eating + standing` 精确复跑，新任务 `20260902T054129Z-7711e8fff7` 为 `1/1`。该任务再次命中与旧任务相同的 `no_face_muzzle_anchor`、`static_pose_fallback_forbidden` 和 `white_driver_motion_signal_missing`；两个动作都真实生成五轮且选中候选的身份视觉字段均为 `false`。新版没有在 67.5% 失败，而是从 eating 第 4 轮的 SHA 锁定 Qwen cutout 制作降级循环并完成；eating 主 GIF 与 standing 主 APNG 均可读取、`512×512 / 100` 帧，未使用原图或 canonical 代替输出。报告位于 `/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260902T054122Z-172a78f4d0/`。
+
 ## 更新图集
 
 1. 只选已完成且输入文件仍可确认来源的历史任务。

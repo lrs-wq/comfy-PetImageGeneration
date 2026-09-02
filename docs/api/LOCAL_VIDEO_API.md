@@ -6,6 +6,8 @@
 
 `v2.26.54` 关闭完成优先恢复中遗留的身份门失败窗口。旧版已在五轮耗尽时正确选中 `selected_generated_completion_fallback`，但下游 SCAIL 或透明提取再发生异常时，静态循环恢复仍额外要求 `identity_palette_acceptable=true`，导致已有 SHA 锁定、可读且完成 `5/5` 生成的候选被返回为空。任务 `20260902T032017Z-cf5f87991a` 因此在已发布 standing 主媒体后，eating 恢复报 `No readable generated action candidate is available` 并失败。新版允许仅当任务已启用完成优先、动作选择明确为 `selected_generated_completion_fallback`、固定五轮完成、选中轮次与 SHA 有效，且确认未使用原图/canonical 作输出时，忽略该视觉身份布尔值并从同一选中的生成首帧制作降级动画。无完成优先标记的身份拒绝仍不可恢复；媒体摘要、alpha、可读性和原图禁用约束均不变。
 
+使用原任务三张 SHA 锁定输入、有效犬类 Profile 和 `eating + standing` 在同一部署上精确复跑为任务 `20260902T054129Z-7711e8fff7`。新版再次复现 `eating_reference_motion_unreliable: no_face_muzzle_anchor`，预 SCAIL 动作合同仍报告 `static_pose_fallback_forbidden` 与 `white_driver_motion_signal_missing`；eating 与 standing 也都真实生成 `5/5`，选中候选的 `identity_palette_acceptable` 均为 `false`。区别是 eating 恢复现在从第 4 轮、SHA 锁定的 `action_qwen_cutout` 制作降级循环，未使用原图或 canonical，任务终态为 `completed_with_degraded_output`。完成性报告 `/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260902T054122Z-172a78f4d0/report.json` 为 `1/1`：eating 主 GIF 与 standing 主 APNG 均可读取、`512×512 / 100` 帧。
+
 `v2.26.53` 修复舔毛首帧“整体姿态正确，但抬起前肢与胸部融合”的选择盲区。旧局部门把前肢 ROI 中的密集毛发和条纹边缘当成有效肢体结构，而该 ROI 在导图与五张候选中均为 `13904/13904` 前景像素，因此实际没有证明肩—肘—腕—爪链路与躯干分开。新门 `main_case_grooming_raised_paw_cv_v5` 从原有公开单色导图中抽取绿色 C 形内部通道，比较候选的低频边界覆盖、距离与方向一致性，并把连续拓扑罚分排在身份负债之前。该证据不需要新的模型输入，不读取私有 CV 亮度或上传外观。
 
 第 4、5 轮舔毛 Qwen 同时启用解剖优先自由重绘：导图是粗略几何而非像素锁，模型可为正确解剖调整头部、肩部、关节、身体比例、取景与次要花纹；必须优先生成恰好四条与身体连接的腿，抬起的观者左前腿必须可读为连续的肩—肘—腕—爪，另一前爪落地，后腿可因坐姿局部遮挡。固定预算仍是真实生成 `5/5`，不用缓存替代，不追加第 6 轮。拓扑状态、选中证据、第 4/5 轮自由重绘标记与非阻断边界都写入任务和 live 图集诊断。拓扑门不改变 `acceptable`、不阻断终态；五轮皆有视觉偏差时仍选可读且风险最低的真实生成候选继续。

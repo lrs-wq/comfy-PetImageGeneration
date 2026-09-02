@@ -288,6 +288,15 @@
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
     {
+      "id": "comfy.verification.original_completion_recovery_rerun_45082ff",
+      "type": "verification",
+      "name": "原完成优先恢复失败任务生产精确复跑",
+      "path": "/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260902T054122Z-172a78f4d0/report.json",
+      "status": "passed",
+      "tags": ["commit-45082ff", "source-job-20260902T032017Z-cf5f87991a", "job-20260902T054129Z-7711e8fff7", "sha-pinned-three-view", "dog", "eating", "standing", "five-attempts-each", "identity-visual-false-non-blocking", "no-face-muzzle-anchor-reproduced", "generated-cutout-recovery", "no-original-output", "completed-with-degraded-output", "gallery-1-of-1", "two-readable-512x512-100f-outputs"],
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
       "id": "comfy.action.cat_default",
       "type": "business_rule",
       "name": "猫默认动作：eating 与 grooming",
@@ -756,6 +765,24 @@
     },
     {
       "from": "comfy.verification.original_grooming_topology_rerun_45082ff",
+      "relation": "exercises",
+      "to": "comfy.api.local_video",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.verification.original_completion_recovery_rerun_45082ff",
+      "relation": "verifies",
+      "to": "comfy.recovery.generated_visual_completion_fallback",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.verification.original_completion_recovery_rerun_45082ff",
+      "relation": "governed_by",
+      "to": "comfy.decision.generated_visual_completion_first",
+      "evidence": "docs/knowledge/DECISIONS/0003-generated-visual-completion-first.md"
+    },
+    {
+      "from": "comfy.verification.original_completion_recovery_rerun_45082ff",
       "relation": "exercises",
       "to": "comfy.api.local_video",
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
