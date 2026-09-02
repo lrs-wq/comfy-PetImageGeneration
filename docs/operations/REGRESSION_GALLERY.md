@@ -126,6 +126,10 @@ live 报告同时显示每个动作的非阻断诊断：首帧选中轮次、最
 
 ## 已核验完成性快照
 
+提交 `6f20788` 部署为 `v2.26.57` 后，默认生产 smoke 报告 `/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260902T112749Z-6f207881c2/report.json` 为 `2/2`。预检版本为 `2.26.57`，worker、ComfyUI 和模型均健康；猫任务 `20260902T112757Z-05b61e8e16` 与户外金毛任务 `20260902T113839Z-dec1cf3d6c` 均 `completed`。
+
+随后把源任务 `20260902T061115Z-93095dbfff` 的三张 SHA 锁定输入与 `eating + standing` 精确复跑为 `20260902T115351Z-20c5865423`；报告 `/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260902T115345Z-6f207881c2/report.json` 为 `1/1`。两个动作均真实完成 `5/5`，分别选中第 `3/4` 轮且都为 `validated`；两份主 APNG 可读、`512×512 / 100` 帧，SHA-256 分别为 `5493f32ef8e85bf49db96b750a1bfbd10d4c8413b3aad151e56fca8ccc8d71fa` 与 `abdca496b714ac18d58fa6297413a93be63698e64a12569d720ae5def37a419e`。canonical 暖色恢复把上半身白色从 `0.113897` 降至 `0.000031`、暖色从 `0.794310` 升至 `0.971048`，修改 `94864` 个候选像素，alpha 完全一致且没有复制源空间像素；两个动作候选自身已经通过暖色门，故动作后修色未触发。吃饭 SCAIL 使用 `81` 个真实源帧，邻帧灰度 MAE `0.550668`（门限 `0.55`）、相对首帧最大 MAE `8.539383`（门限 `3.0`）、动作 excursion ratio `2.846461`，不是静态首帧循环。站立使用 `reference_guided_hybrid_semantic_plus_bounded_canvas_matte_v2`；独立对 100 帧 alpha 以阈值 `8` 扫描，最大封闭透明组件仅 `21 px`，没有大于 `64 px` 的显著面部或身体孔洞。
+
 提交 `a538013` 部署为 `v2.26.56` 后，默认生产 smoke 报告 `/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260902T095548Z-a53801311e/report.json` 为 `2/2`。猫舔毛任务 `20260902T095553Z-261629d3e2` 与户外金毛犬站立任务 `20260902T100536Z-f08b885750` 均 `completed`，两个主 APNG 都可读取且为 `512×512 / 100` 帧；后者使用与 `v2.26.55` 失败任务相同的犬输入，canonical 暖色恢复被接受，归一化内部洞不再终止任务。
 
 随后把源任务 `20260902T061115Z-93095dbfff` 的三张 SHA 锁定输入、犬类 Profile 与 `eating + standing` 精确复跑为 `20260902T102135Z-c2efcdd105`；报告 `/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260902T102129Z-a53801311e/report.json` 为 `1/1`。两个动作都真实生成 `5/5`，任务终态 `completed`，两份主 APNG 均可读、`512×512 / 100` 帧。吃饭 SCAIL 输出含 `81` 个真实源帧，邻帧灰度运动均值 `0.554275`（门限 `0.55`）、相对首帧最大灰度变化 `8.866577`（门限 `3.0`）、轮廓最大变化 `0.103970`，不再是静态首帧循环；站立使用 `reference_guided_hybrid_semantic_plus_bounded_canvas_matte_v2`，引导式内部洞修补共处理 `80` 个组件、`10554` 像素且保留外部自然间隙。
