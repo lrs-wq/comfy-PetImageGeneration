@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.56"
+API_VERSION = "2.26.57"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -6011,6 +6011,9 @@ identity_palette_prompt = _local_video_identity_quality.identity_palette_prompt
 WARM_CANONICAL_PALETTE_RECOVERY_POLICY = (
     _local_video_identity_quality.WARM_CANONICAL_PALETTE_RECOVERY_POLICY
 )
+WARM_ACTION_PALETTE_RECOVERY_POLICY = (
+    _local_video_identity_quality.WARM_ACTION_PALETTE_RECOVERY_POLICY
+)
 WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES = (
     _local_video_identity_quality.WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES
 )
@@ -6028,6 +6031,11 @@ prepare_warm_canonical_palette_recovery = (
 
 attempt_warm_canonical_palette_recovery = (
     _local_video_identity_quality.attempt_warm_canonical_palette_recovery
+)
+
+
+attempt_warm_action_palette_recovery = (
+    _local_video_identity_quality.attempt_warm_action_palette_recovery
 )
 
 

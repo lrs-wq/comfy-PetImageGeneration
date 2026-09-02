@@ -10536,6 +10536,165 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 raise RuntimeError(
                     "Selected action candidate is outside the five-attempt budget."
                 )
+            selected_keyframe_source = job_dir / str(best_attempt["keyframe"])
+            selected_cutout_source = job_dir / str(best_attempt["cutout"])
+            selected_palette_before_recovery = best_attempt.get("identity_palette")
+            warm_action_recovery: dict[str, Any] | None = None
+            if (
+                isinstance(selected_palette_before_recovery, dict)
+                and isinstance(pose_reference_identity_palette, dict)
+                and canonical_similarity_reference is not None
+                and canonical_similarity_reference.is_file()
+                and selected_cutout_source.is_file()
+            ):
+                recovered_action_cutout = (
+                    job_dir
+                    / f"pose_{index:02d}_selected_warm_palette_recovered.png"
+                )
+                recovered_action_green = (
+                    job_dir
+                    / f"pose_{index:02d}_selected_warm_palette_recovered_green.png"
+                )
+                warm_action_recovery = attempt_warm_action_palette_recovery(
+                    selected_cutout_source,
+                    canonical_similarity_reference,
+                    recovered_action_cutout,
+                    recovered_action_green,
+                    source_palette=pose_reference_identity_palette,
+                    source_upper_body_palette=(
+                        pose_reference_upper_body_identity_palette
+                    ),
+                    current_quality=selected_palette_before_recovery,
+                    bottom_exclusion=pose_palette_bottom_exclusion,
+                    action=action_key(pose),
+                )
+                if warm_action_recovery.get("accepted") is True:
+                    recovered_pose_quality = pose_cutout_quality(
+                        recovered_action_cutout,
+                        pose,
+                        require_eating_mouth_contact=(
+                            require_eating_mouth_contact
+                        ),
+                    )
+                    previous_pose_quality = best_attempt.get("quality")
+                    pose_gate_non_regressed = bool(
+                        not isinstance(previous_pose_quality, dict)
+                        or previous_pose_quality.get("acceptable") is not True
+                        or recovered_pose_quality.get("acceptable") is True
+                    )
+                    warm_action_recovery.update(
+                        {
+                            "pre_recovery_pose_quality": previous_pose_quality,
+                            "post_recovery_pose_quality": recovered_pose_quality,
+                            "pose_gate_non_regressed": pose_gate_non_regressed,
+                        }
+                    )
+                    if not pose_gate_non_regressed:
+                        warm_action_recovery.update(
+                            {
+                                "accepted": False,
+                                "rejection_reason": (
+                                    "post_recovery_pose_gate_regressed"
+                                ),
+                                "completion_blocked": False,
+                            }
+                        )
+                    else:
+                        previous_palette_penalty = float(
+                            selected_palette_before_recovery.get(
+                                "penalty",
+                                0.0,
+                            )
+                            or 0.0
+                        )
+                        recovered_palette = warm_action_recovery[
+                            "post_recovery_quality"
+                        ]
+                        recovered_palette_penalty = float(
+                            recovered_palette.get("penalty", 0.0) or 0.0
+                        )
+                        best_attempt["keyframe"] = recovered_action_green.name
+                        best_attempt["cutout"] = recovered_action_cutout.name
+                        best_attempt["quality"] = recovered_pose_quality
+                        best_attempt["identity_palette"] = recovered_palette
+                        best_attempt["candidate_identity_palette"] = (
+                            warm_action_recovery.get("candidate_palette")
+                        )
+                        best_attempt[
+                            "candidate_upper_body_identity_palette"
+                        ] = warm_action_recovery.get(
+                            "upper_body_candidate_palette"
+                        )
+                        best_attempt["combined_penalty"] = round(
+                            max(
+                                0.0,
+                                float(
+                                    best_attempt.get("combined_penalty", 0.0)
+                                    or 0.0
+                                )
+                                - previous_palette_penalty
+                                + recovered_palette_penalty,
+                            ),
+                            6,
+                        )
+                        prior_color_recovery = best_attempt.get("color_recovery")
+                        best_attempt["color_recovery"] = {
+                            **(
+                                prior_color_recovery
+                                if isinstance(prior_color_recovery, dict)
+                                else {}
+                            ),
+                            "warm_action_palette_recovery": (
+                                warm_action_recovery
+                            ),
+                        }
+                        best_attempt["warm_action_palette_recovery"] = (
+                            warm_action_recovery
+                        )
+                        best_attempt["chroma"] = {
+                            **best_attempt["chroma"],
+                            "warm_action_palette_recovery": (
+                                warm_action_recovery
+                            ),
+                        }
+                        selected_keyframe_source = recovered_action_green
+                        selected_cutout_source = recovered_action_cutout
+                action_recovery_records = get_job(job_id).get(
+                    "action_warm_palette_recovery"
+                )
+                if isinstance(action_recovery_records, dict):
+                    action_recovery_records = json.loads(
+                        json.dumps(action_recovery_records)
+                    )
+                else:
+                    action_recovery_records = {}
+                action_recovery_records[action_key(pose)] = warm_action_recovery
+                update_job(
+                    job_id,
+                    action_warm_palette_recovery=action_recovery_records,
+                    action_warm_palette_recovery_policy=(
+                        WARM_ACTION_PALETTE_RECOVERY_POLICY
+                    ),
+                    action_warm_palette_recovery_blocks_completion=False,
+                )
+                if warm_action_recovery.get("attempted") is True:
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "selected_action_warm_palette_recovery",
+                            "pose_index": index,
+                            "attempt": selected_attempt_number,
+                            "action": action_key(pose),
+                            "reason": "generated_action_invented_neutral_patch",
+                            "strategy": WARM_ACTION_PALETTE_RECOVERY_POLICY,
+                            "result": (
+                                "accepted"
+                                if warm_action_recovery.get("accepted") is True
+                                else "skipped_nonblocking"
+                            ),
+                            "recovery": warm_action_recovery,
+                        },
+                    )
             selected_palette = best_attempt.get("identity_palette")
             selected_identity_palette_acceptable = bool(
                 isinstance(selected_palette, dict)
@@ -10557,8 +10716,6 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     if isinstance(selected_palette, dict)
                     else None
                 )
-            selected_keyframe_source = job_dir / str(best_attempt["keyframe"])
-            selected_cutout_source = job_dir / str(best_attempt["cutout"])
             action_selection_records = get_job(job_id).get(
                 "action_candidate_selection_by_action"
             )
@@ -11167,6 +11324,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "grooming_advisory_minimum_gate"
                     ),
                     "selected_color_recovery": best_attempt.get("color_recovery"),
+                    "selected_warm_palette_recovery": best_attempt.get(
+                        "warm_action_palette_recovery"
+                    ),
                     "reference_identity_palette": pose_reference_identity_palette,
                     "prompt_reference_identity_palette": (
                         pose_identity_palette_prompt_signature

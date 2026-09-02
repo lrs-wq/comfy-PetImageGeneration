@@ -741,6 +741,49 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             self.assertTrue(metrics["alpha_geometry_preserved_exactly"])
             self.assertFalse(metrics["source_spatial_pixels_copied"])
 
+    def test_warm_action_palette_recovery_preserves_eating_prop_pixels(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_path = root / "source.png"
+            candidate_path = root / "candidate.png"
+            target_path = root / "recovered.png"
+            source = np.zeros((512, 512, 4), dtype=np.uint8)
+            candidate = np.zeros_like(source)
+            subject_mask = np.zeros((512, 512), dtype=bool)
+            subject_mask[52:420, 116:410] = True
+            subject_mask[394:454, 24:178] = False
+            source[subject_mask] = (196, 132, 62, 255)
+            candidate[subject_mask] = (238, 238, 238, 255)
+            candidate[52:420, 260:410] = (174, 105, 44, 255)
+            candidate[394:454, 24:178] = (242, 242, 236, 255)
+            candidate[410:425, 42:160] = (112, 66, 34, 255)
+            Image.fromarray(source, mode="RGBA").save(source_path)
+            Image.fromarray(candidate, mode="RGBA").save(candidate_path)
+
+            metrics = pipeline.prepare_warm_canonical_palette_recovery(
+                candidate_path,
+                source_path,
+                target_path,
+                source_achromatic_fraction=0.01,
+                candidate_subject_mask=subject_mask,
+            )
+            recovered = np.asarray(
+                Image.open(target_path).convert("RGBA"),
+                dtype=np.uint8,
+            )
+
+        prop_region = np.s_[394:454, 24:178]
+        self.assertTrue(
+            np.array_equal(recovered[prop_region], candidate[prop_region])
+        )
+        self.assertTrue(np.array_equal(recovered[:, :, 3], candidate[:, :, 3]))
+        self.assertGreater(int(recovered[180, 180, 0]), int(recovered[180, 180, 2]))
+        self.assertTrue(metrics["candidate_subject_mask_applied"])
+        self.assertGreater(metrics["recolored_pixels"], 10000)
+        self.assertFalse(metrics["source_spatial_pixels_copied"])
+
     def test_profile_geometry_first_final_bowl_retry_has_consistent_contact(
         self,
     ) -> None:

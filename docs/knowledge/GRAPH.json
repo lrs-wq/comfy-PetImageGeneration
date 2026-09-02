@@ -158,6 +158,14 @@
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
     },
     {
+      "id": "comfy.recovery.warm_action_palette",
+      "type": "business_rule",
+      "name": "选中生成动作的宠物专属暖色分布非阻断恢复",
+      "status": "active",
+      "tags": ["action-keyframe", "selected-generated-candidate", "warm-coat", "discrete-white-patch", "subject-only", "eating-prop-lock", "lab-distribution", "no-spatial-source-copy", "pose-alpha-preserved", "no-extra-model-attempt", "completion-first"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
+    },
+    {
       "id": "comfy.recovery.canonical_normalized_interior",
       "type": "business_rule",
       "name": "canonical 归一化尺度内部洞候选内有界恢复",
@@ -342,9 +350,27 @@
       "type": "incident",
       "name": "v2.26.55 金毛 smoke 的尺度相关 canonical 最终化失败",
       "path": "/data/comfy-pet-pipeline/outputs/local_video_api/20260902T092351Z-8709d1e5f0",
-      "status": "resolved_offline_pending_live_verification",
+      "status": "resolved_verified_online",
       "tags": ["job-20260902T092351Z-8709d1e5f0", "dog", "golden-retriever", "standing", "original-ratio-0.003335", "normalized-ratio-0.004908", "visual-only-failure", "v2.26.56", "offline-repaired-ratio-0.000145"],
       "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "id": "comfy.verification.v22656_live_and_original_golden_rerun",
+      "type": "verification",
+      "name": "v2.26.56 默认 smoke 与原金毛三视图生产精确复跑",
+      "path": "/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260902T102129Z-a53801311e/report.json",
+      "status": "passed",
+      "tags": ["commit-a538013", "default-smoke-2-of-2", "source-job-20260902T061115Z-93095dbfff", "job-20260902T102135Z-c2efcdd105", "sha-pinned-three-view", "eating", "standing", "five-attempts-each", "81-frame-eating-motion", "standing-guided-hole-repair", "completed", "two-readable-512x512-100f-outputs"],
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "id": "comfy.verification.v22657_selected_action_warm_recovery_offline",
+      "type": "verification",
+      "name": "原金毛 eating 选中动作宠物专属暖色恢复离线复验",
+      "path": "/data/comfy-pet-pipeline/outputs/local_video_api/20260902T102135Z-c2efcdd105",
+      "status": "passed",
+      "tags": ["v2.26.57", "eating", "selected-attempt-3", "white-0.082580-to-0", "warm-0.899678-to-0.983364", "recolored-subject-pixels-18921", "locked-prop-pixels-6892", "alpha-exact", "completion-non-blocking"],
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
     {
       "id": "comfy.action.cat_default",
@@ -522,11 +548,23 @@
     {
       "from": "comfy.module.pipeline",
       "relation": "recovers_with",
+      "to": "comfy.recovery.warm_action_palette",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "recovers_with",
       "to": "comfy.recovery.canonical_normalized_interior",
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {
       "from": "comfy.recovery.warm_canonical_palette",
+      "relation": "revalidated_by",
+      "to": "comfy.quality.identity_issue_aware_retry",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
+    },
+    {
+      "from": "comfy.recovery.warm_action_palette",
       "relation": "revalidated_by",
       "to": "comfy.quality.identity_issue_aware_retry",
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
@@ -895,6 +933,36 @@
       "from": "comfy.incident.v22655_scaled_canonical_hole_smoke",
       "relation": "exercises",
       "to": "comfy.recovery.warm_canonical_palette",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.incident.v22655_scaled_canonical_hole_smoke",
+      "relation": "verified_by",
+      "to": "comfy.verification.v22656_live_and_original_golden_rerun",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.verification.v22656_live_and_original_golden_rerun",
+      "relation": "verifies",
+      "to": "comfy.recovery.canonical_normalized_interior",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.verification.v22656_live_and_original_golden_rerun",
+      "relation": "verifies",
+      "to": "comfy.recovery.eating_full_driver_motion",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.verification.v22656_live_and_original_golden_rerun",
+      "relation": "verifies",
+      "to": "comfy.recovery.standing_adaptive_matte",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.verification.v22657_selected_action_warm_recovery_offline",
+      "relation": "verifies",
+      "to": "comfy.recovery.warm_action_palette",
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     }
   ]

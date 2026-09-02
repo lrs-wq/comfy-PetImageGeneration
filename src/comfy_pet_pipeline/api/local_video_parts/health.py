@@ -1164,6 +1164,14 @@ def health() -> dict[str, Any]:
                         "source_spatial_pixels_copied": False,
                         "visual_failure_blocks_completion": False,
                     },
+                    "selected_action_warm_palette_recovery": {
+                        "policy": WARM_ACTION_PALETTE_RECOVERY_POLICY,
+                        "selected_generated_candidate_only": True,
+                        "changes_pose_or_alpha": False,
+                        "eating_prop_excluded": True,
+                        "source_spatial_pixels_copied": False,
+                        "visual_failure_blocks_completion": False,
+                    },
                     "spatial_marking_gate": {
                         "policy": IDENTITY_MARKING_SPATIAL_POLICY,
                         "source_stripe_area_max": (

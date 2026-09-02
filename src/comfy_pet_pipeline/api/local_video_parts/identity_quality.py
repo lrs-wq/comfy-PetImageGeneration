@@ -18,6 +18,9 @@ CANONICAL_NORMALIZED_INTERIOR_RECOVERY_POLICY = (
 WARM_CANONICAL_PALETTE_RECOVERY_POLICY = (
     "warm_identity_distribution_without_spatial_pixel_copy_v1"
 )
+WARM_ACTION_PALETTE_RECOVERY_POLICY = (
+    "selected_generated_subject_only_warm_distribution_v1"
+)
 WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES = frozenset(
     {
         "warm_source_invented_discrete_white_patches",
@@ -25,6 +28,10 @@ WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES = frozenset(
         "new_gray_or_dark_markings_expanded",
         "invented_stripe_pattern",
     }
+)
+WARM_ACTION_PALETTE_RECOVERY_ALLOWED_ISSUES = (
+    WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES
+    | {"canonical_action_warm_expansion_drift"}
 )
 
 
@@ -1730,6 +1737,7 @@ def prepare_warm_canonical_palette_recovery(
     target: Path,
     *,
     source_achromatic_fraction: float,
+    candidate_subject_mask: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Restore a warm coat distribution while preserving generated geometry.
 
@@ -1751,7 +1759,15 @@ def prepare_warm_canonical_palette_recovery(
 
     candidate_alpha = candidate_rgba[:, :, 3]
     source_alpha = source_rgba[:, :, 3]
-    candidate_foreground = candidate_alpha > 96
+    candidate_foreground_all = candidate_alpha > 96
+    candidate_foreground = candidate_foreground_all.copy()
+    if candidate_subject_mask is not None:
+        candidate_subject_mask = np.asarray(candidate_subject_mask, dtype=bool)
+        if candidate_subject_mask.shape != candidate_foreground.shape:
+            raise ValueError(
+                "Warm palette recovery subject mask size does not match candidate."
+            )
+        candidate_foreground &= candidate_subject_mask
     source_foreground = source_alpha > 96
     source_mask_method = "alpha"
     source_alpha_fraction = float(np.count_nonzero(source_foreground)) / float(
@@ -1895,6 +1911,10 @@ def prepare_warm_canonical_palette_recovery(
         "target_path": str(target),
         "target_sha256": file_sha256(target),
         "candidate_foreground_pixels": candidate_pixels,
+        "candidate_total_foreground_pixels": int(
+            np.count_nonzero(candidate_foreground_all)
+        ),
+        "candidate_subject_mask_applied": candidate_subject_mask is not None,
         "source_foreground_pixels": source_pixels,
         "source_foreground_mask_method": source_mask_method,
         "neutral_candidate_pixels": neutral_count,
@@ -2017,6 +2037,173 @@ def attempt_warm_canonical_palette_recovery(
         result["green_sha256"] = file_sha256(green_target)
         return result
     except Exception as exc:  # noqa: BLE001 - visual recovery must not block completion
+        result.update(
+            {
+                "accepted": False,
+                "improved": False,
+                "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                "completion_blocked": False,
+            }
+        )
+        return result
+
+
+def attempt_warm_action_palette_recovery(
+    candidate: Path,
+    source_identity: Path,
+    cutout_target: Path,
+    green_target: Path,
+    *,
+    source_palette: dict[str, Any],
+    source_upper_body_palette: dict[str, Any] | None,
+    current_quality: dict[str, Any],
+    bottom_exclusion: float,
+    action: str,
+) -> dict[str, Any]:
+    """Recover an invented neutral patch on the selected generated pet only.
+
+    This is deliberately a post-selection, completion-safe operation.  It never
+    asks the model for another candidate and never changes alpha or pose.  For
+    eating, the downstream subject/prop splitter excludes the complete bowl and
+    food before any LAB value is changed.
+    """
+
+    _sync_local_video_runtime(
+        globals(),
+        {"attempt_warm_action_palette_recovery"},
+    )
+    action_name = str(action).strip().lower()
+    result = warm_canonical_palette_recovery_eligibility(current_quality)
+    result.update(
+        {
+            "policy": WARM_ACTION_PALETTE_RECOVERY_POLICY,
+            "action": action_name,
+            "attempted": False,
+            "accepted": False,
+            "completion_blocked": False,
+            "pose_geometry_changed": False,
+            "alpha_geometry_changed": False,
+            "source_spatial_pixels_may_be_copied": False,
+        }
+    )
+    if result.get("eligible") is not True:
+        return result
+    result["attempted"] = True
+    try:
+        subject_mask: np.ndarray | None = None
+        prop_audit: dict[str, Any] = {
+            "required": action_name == "eating",
+            "applied": False,
+            "prop_pixels": 0,
+        }
+        if action_name == "eating":
+            from ...pipeline.subject_replacement import (
+                make_eating_reference_identity_mask,
+            )
+
+            with Image.open(candidate) as loaded:
+                candidate_image = loaded.convert("RGBA")
+            colored_mask, _prop_exclusion, prop_metadata = (
+                make_eating_reference_identity_mask(candidate_image)
+            )
+            colored = np.asarray(colored_mask.convert("RGB"), dtype=np.uint8)
+            subject_mask = np.all(colored == (0, 0, 255), axis=2)
+            prop_mask = np.all(colored == (255, 0, 0), axis=2)
+            subject_pixels = int(np.count_nonzero(subject_mask))
+            prop_pixels = int(np.count_nonzero(prop_mask))
+            if subject_pixels < 4096 or prop_pixels < 100:
+                raise ValueError(
+                    "Eating warm recovery subject/prop partition is too small."
+                )
+            prop_audit = {
+                "required": True,
+                "applied": True,
+                "subject_pixels": subject_pixels,
+                "prop_pixels": prop_pixels,
+                "metadata": prop_metadata,
+                "prop_pixels_preserved_exactly": True,
+            }
+
+        recovery = prepare_warm_canonical_palette_recovery(
+            candidate,
+            source_identity,
+            cutout_target,
+            source_achromatic_fraction=float(
+                current_quality.get("source_achromatic_fraction", 0.0) or 0.0
+            ),
+            candidate_subject_mask=subject_mask,
+        )
+        recovered = evaluate_pose_identity_palette(
+            cutout_target,
+            primary_reference=source_palette,
+            upper_body_reference=source_upper_body_palette,
+            bottom_exclusion=bottom_exclusion,
+            bowl_action=action_name == "eating",
+        )
+        recovered_quality = canonical_action_identity_palette_quality(
+            recovered["quality"]
+        )
+        if not isinstance(recovered_quality, dict):
+            raise RuntimeError("Recovered action palette audit is unavailable.")
+        before_penalty = float(current_quality.get("penalty", 500.0) or 500.0)
+        after_penalty = float(recovered_quality.get("penalty", 500.0) or 500.0)
+        improved = bool(
+            recovered_quality.get("acceptable") is True
+            or (
+                after_penalty < before_penalty
+                and float(
+                    recovered_quality.get("candidate_white_fraction", 1.0)
+                    or 0.0
+                )
+                + 0.03
+                < float(current_quality.get("candidate_white_fraction", 0.0) or 0.0)
+                and not (
+                    {
+                        str(issue)
+                        for issue in recovered_quality.get("issues", [])
+                    }
+                    - WARM_ACTION_PALETTE_RECOVERY_ALLOWED_ISSUES
+                )
+            )
+        )
+        result.update(
+            {
+                "pre_recovery_quality": current_quality,
+                "post_recovery_quality": recovered_quality,
+                "recovery": recovery,
+                "prop_exclusion": prop_audit,
+                "candidate_palette": recovered["candidate"],
+                "upper_body_candidate_palette": recovered[
+                    "upper_body_candidate"
+                ],
+                "improved": improved,
+                "accepted": improved,
+                "palette_gate_passed": (
+                    recovered_quality.get("acceptable") is True
+                ),
+                "cutout_path": str(cutout_target),
+                "green_path": str(green_target),
+            }
+        )
+        if not improved:
+            return result
+        with Image.open(cutout_target) as loaded:
+            recovered_rgba = loaded.convert("RGBA")
+            recovered_rgba.load()
+        recovered_green = Image.new(
+            "RGBA",
+            recovered_rgba.size,
+            (0, 255, 0, 255),
+        )
+        recovered_green.alpha_composite(recovered_rgba)
+        recovered_green.convert("RGB").save(
+            green_target,
+            format="PNG",
+            optimize=True,
+        )
+        result["green_sha256"] = file_sha256(green_target)
+        return result
+    except Exception as exc:  # noqa: BLE001 - visual recovery cannot block completion
         result.update(
             {
                 "accepted": False,
