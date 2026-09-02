@@ -1407,13 +1407,24 @@ def _recoverable_reference_candidates(
         if isinstance(selection_records, dict)
         else None
     )
+    identity_approved = bool(
+        isinstance(selection, dict)
+        and selection.get("identity_palette_acceptable") is True
+    )
+    completion_fallback_approved = bool(
+        isinstance(selection, dict)
+        and job.get("visual_completion_fallback_enabled") is True
+        and selection.get("visual_completion_fallback") is True
+        and selection.get("result")
+        == "selected_generated_completion_fallback"
+    )
     if (
         not isinstance(selection, dict)
         or selection.get("source_kind") != "qwen_generated_action_candidate"
         or int(selection.get("attempt_budget") or 0) != 5
         or int(selection.get("attempts_completed") or 0) != 5
         or not 1 <= int(selection.get("selected_attempt") or 0) <= 5
-        or selection.get("identity_palette_acceptable") is not True
+        or not (identity_approved or completion_fallback_approved)
         or selection.get("original_upload_used") is not False
         or selection.get("approved_canonical_used_as_output") is not False
     ):

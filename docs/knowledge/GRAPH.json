@@ -146,7 +146,7 @@
       "type": "business_rule",
       "name": "生成视觉门耗尽后的完成优先回退",
       "status": "active",
-      "tags": ["completion-first", "best-effort", "canonical-semantic-matte", "five-attempts", "no-cache-reuse", "audit-cache-write-only", "visual-quality-advisory", "runtime-integrity-required", "no-original-output"],
+      "tags": ["completion-first", "best-effort", "canonical-semantic-matte", "five-attempts", "no-cache-reuse", "audit-cache-write-only", "visual-quality-advisory", "identity-rejected-generated-candidate-recoverable", "digest-bound-downstream-recovery", "runtime-integrity-required", "no-original-output"],
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {

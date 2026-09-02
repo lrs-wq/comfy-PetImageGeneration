@@ -270,6 +270,80 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
                 {"ffmpeg_palette", "pillow_multiframe"},
             )
 
+    def test_visual_completion_candidate_recovers_despite_identity_warning(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary)
+            job_id = "visual-completion-identity-warning"
+            job_dir = output_root / job_id
+            job_dir.mkdir()
+            _write_transparent_identity(job_dir / "input.png")
+            _write_transparent_identity(job_dir / "pose_01_qwen_cutout.png")
+            job = _accepted_job(job_id, ["eating"], status="running")
+            _mark_generated_candidates_selected(job_dir, job, ["eating"])
+            selection = job["action_candidate_selection_by_action"]["eating"]
+            selection.update(
+                identity_palette_acceptable=False,
+                visual_completion_fallback=True,
+                result="selected_generated_completion_fallback",
+            )
+            job["visual_completion_fallback_enabled"] = True
+            jobs = {job_id: job}
+
+            with patch.multiple(
+                pipeline,
+                OUTPUT_ROOT=output_root,
+                JOBS=jobs,
+            ):
+                recovered = pipeline.recover_subject_replacement_job_with_fallback(
+                    job_id,
+                    RuntimeError("forced downstream eating recovery"),
+                )
+
+            self.assertTrue(recovered)
+            self.assertEqual(jobs[job_id]["status"], "completed")
+            result = jobs[job_id]["subject_replacement_results"][0]
+            self.assertEqual(result["fallback_source_role"], "action_qwen_cutout")
+            self.assertFalse(
+                job["action_candidate_selection_by_action"]["eating"][
+                    "identity_palette_acceptable"
+                ]
+            )
+
+    def test_identity_warning_without_completion_selection_stays_unrecoverable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary)
+            job_id = "identity-warning-without-completion-contract"
+            job_dir = output_root / job_id
+            job_dir.mkdir()
+            _write_transparent_identity(job_dir / "input.png")
+            _write_transparent_identity(job_dir / "pose_01_qwen_cutout.png")
+            job = _accepted_job(job_id, ["eating"], status="running")
+            _mark_generated_candidates_selected(job_dir, job, ["eating"])
+            job["action_candidate_selection_by_action"]["eating"][
+                "identity_palette_acceptable"
+            ] = False
+            jobs = {job_id: job}
+
+            with (
+                patch.multiple(
+                    pipeline,
+                    OUTPUT_ROOT=output_root,
+                    JOBS=jobs,
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "No readable generated action candidate",
+                ),
+            ):
+                pipeline.recover_subject_replacement_job_with_fallback(
+                    job_id,
+                    RuntimeError("forced ineligible recovery"),
+                )
+
     def test_persisted_original_upload_path_is_not_a_recovery_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output_root = Path(temporary)

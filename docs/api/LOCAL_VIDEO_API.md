@@ -2,7 +2,9 @@
 
 服务地址：`https://ai.hzzootech.com/api/local-video`
 
-当前候选主体替换版本为 `local-video-api v2.26.53`。上传任务采用 Qwen Image Edit 与 SCAIL-2 串行编排，单张 A10 GPU 通过异步队列执行。原始上传照只用于建立身份、审计和必要的身份回绘佐证，不能作为动作首帧、SCAIL 动作参考或最终降级输出。动作 Profile 仅提供动作几何与时序，不再向上传宠物注入外观身份词。接口字段、默认 Profile 和自动物种路由保持不变；中型犬/小型犬只由测试平台通过既有 `subject_profile` 字段显式选择。
+当前候选主体替换版本为 `local-video-api v2.26.54`。上传任务采用 Qwen Image Edit 与 SCAIL-2 串行编排，单张 A10 GPU 通过异步队列执行。原始上传照只用于建立身份、审计和必要的身份回绘佐证，不能作为动作首帧、SCAIL 动作参考或最终降级输出。动作 Profile 仅提供动作几何与时序，不再向上传宠物注入外观身份词。接口字段、默认 Profile 和自动物种路由保持不变；中型犬/小型犬只由测试平台通过既有 `subject_profile` 字段显式选择。
+
+`v2.26.54` 关闭完成优先恢复中遗留的身份门失败窗口。旧版已在五轮耗尽时正确选中 `selected_generated_completion_fallback`，但下游 SCAIL 或透明提取再发生异常时，静态循环恢复仍额外要求 `identity_palette_acceptable=true`，导致已有 SHA 锁定、可读且完成 `5/5` 生成的候选被返回为空。任务 `20260902T032017Z-cf5f87991a` 因此在已发布 standing 主媒体后，eating 恢复报 `No readable generated action candidate is available` 并失败。新版允许仅当任务已启用完成优先、动作选择明确为 `selected_generated_completion_fallback`、固定五轮完成、选中轮次与 SHA 有效，且确认未使用原图/canonical 作输出时，忽略该视觉身份布尔值并从同一选中的生成首帧制作降级动画。无完成优先标记的身份拒绝仍不可恢复；媒体摘要、alpha、可读性和原图禁用约束均不变。
 
 `v2.26.53` 修复舔毛首帧“整体姿态正确，但抬起前肢与胸部融合”的选择盲区。旧局部门把前肢 ROI 中的密集毛发和条纹边缘当成有效肢体结构，而该 ROI 在导图与五张候选中均为 `13904/13904` 前景像素，因此实际没有证明肩—肘—腕—爪链路与躯干分开。新门 `main_case_grooming_raised_paw_cv_v5` 从原有公开单色导图中抽取绿色 C 形内部通道，比较候选的低频边界覆盖、距离与方向一致性，并把连续拓扑罚分排在身份负债之前。该证据不需要新的模型输入，不读取私有 CV 亮度或上传外观。
 
