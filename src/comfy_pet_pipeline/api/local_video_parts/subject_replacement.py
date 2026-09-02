@@ -50,7 +50,7 @@ def resolve_transparent_output_phase_start_index(
     return selected_frame_index
 
 
-RECOVERABLE_OUTPUT_FALLBACK_POLICY = "best_generated_candidate_breathing_gif_v1"
+RECOVERABLE_OUTPUT_FALLBACK_POLICY = "best_generated_candidate_action_motion_gif_v2"
 
 TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY = (
     "reference_aligned_static_subject_and_tray_mask_with_"
@@ -62,6 +62,9 @@ TOILETING_TRANSPARENT_DRIVER_GUIDANCE_POLICY = (
 TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = 0.70
 DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY = (
     "drinking_full_driver_subject_and_bowl_adaptive_matte_v1"
+)
+STANDING_TRANSPARENT_ADAPTIVE_MATTE_POLICY = (
+    "standing_driver_pose_mask_adaptive_canvas_matte_v1"
 )
 
 TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY = (
@@ -173,6 +176,12 @@ def select_transparent_guidance_policy(
             "policy": DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY,
             "reference_aligned_uniform_background": True,
             "static_prop_required": True,
+        }
+    if normalized_action == "standing":
+        return {
+            **default,
+            "policy": STANDING_TRANSPARENT_ADAPTIVE_MATTE_POLICY,
+            "reference_aligned_uniform_background": True,
         }
     if normalized_action != "toileting":
         return default
@@ -1585,6 +1594,7 @@ def _write_recoverable_breathing_gif(
     reference: Path,
     target: Path,
     *,
+    action: str,
     size: int,
     frame_count: int,
     fps: int,
@@ -1598,52 +1608,94 @@ def _write_recoverable_breathing_gif(
     if alpha_bbox is None:
         raise RuntimeError("Degraded output fallback reference has empty alpha.")
     subject = rgba.crop(alpha_bbox)
+    normalized_action = str(action or "").strip().lower()
+    subject_rgba = np.asarray(subject, dtype=np.uint8)
+    subject_rows, subject_columns = np.indices(
+        (subject.height, subject.width)
+    )
+    eating_head_weight: np.ndarray | None = None
+    if normalized_action == "eating":
+        head_center_x = (subject.width - 1) * 0.50
+        head_center_y = (subject.height - 1) * 0.34
+        radius_x = max(12.0, subject.width * 0.34)
+        radius_y = max(12.0, subject.height * 0.30)
+        eating_head_weight = np.exp(
+            -0.5
+            * (
+                ((subject_columns - head_center_x) / radius_x) ** 2
+                + ((subject_rows - head_center_y) / radius_y) ** 2
+            )
+        ).astype(np.float32)
+        eating_head_weight[
+            subject_rows > int(round(subject.height * 0.72))
+        ] = 0.0
     frame_dir = target.parent / f".{target.stem}.{uuid4().hex}.frames"
     temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp.gif")
     frame_dir.mkdir(parents=True)
     encoding = "ffmpeg_palette"
     try:
         denominator = max(1, frame_count)
-        previous_transform: tuple[tuple[int, int], int, int] | None = None
         for frame_index in range(frame_count):
             phase = 2.0 * np.pi * frame_index / denominator
             breath = (1.0 - float(np.cos(phase))) * 0.5
-            frame_scale = 1.0 + 0.012 * breath
-            frame_size = (
-                max(1, int(round(subject.width * frame_scale))),
-                max(1, int(round(subject.height * frame_scale))),
-            )
-            animated_subject = subject.resize(
-                frame_size,
-                Image.Resampling.LANCZOS,
-            )
+            if eating_head_weight is not None:
+                # Keep the bowl and planted lower body fixed while the head and
+                # upper torso complete a visible low-high-low eating cycle.
+                head_lift_px = max(6.0, min(12.0, subject.height * 0.045))
+                map_x = subject_columns.astype(np.float32)
+                map_y = (
+                    subject_rows + head_lift_px * breath * eating_head_weight
+                ).astype(np.float32)
+                animated_rgba = cv2.remap(
+                    subject_rgba,
+                    map_x,
+                    map_y,
+                    interpolation=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=(0, 0, 0, 0),
+                )
+                animated_subject = Image.fromarray(animated_rgba, mode="RGBA")
+                frame_size = animated_subject.size
+                motion_policy = "localized_eating_head_nod_low_high_low_v1"
+            else:
+                frame_scale = 1.0 + 0.012 * breath
+                frame_size = (
+                    max(1, int(round(subject.width * frame_scale))),
+                    max(1, int(round(subject.height * frame_scale))),
+                )
+                animated_subject = subject.resize(
+                    frame_size,
+                    Image.Resampling.LANCZOS,
+                )
+                motion_policy = "subtle_centered_breathing_v2"
             frame = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-            frame_x = (size - animated_subject.width) // 2 + int(
-                round(1.5 * float(np.sin(phase)))
-            )
-            frame_y = (size - animated_subject.height) // 2 - int(
-                round(1.5 * breath)
-            )
-            transform = (frame_size, frame_x, frame_y)
-            if transform == previous_transform:
-                for delta_x, delta_y in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                    candidate_x = frame_x + delta_x
-                    candidate_y = frame_y + delta_y
-                    candidate = (frame_size, candidate_x, candidate_y)
-                    if (
-                        candidate != previous_transform
-                        and candidate_x >= 0
-                        and candidate_y >= 0
-                        and candidate_x + animated_subject.width <= size
-                        and candidate_y + animated_subject.height <= size
-                    ):
-                        frame_x = candidate_x
-                        frame_y = candidate_y
-                        transform = candidate
-                        break
+            frame_x = (size - animated_subject.width) // 2
+            frame_y = (size - animated_subject.height) // 2
+            if eating_head_weight is None:
+                frame_y -= int(round(1.5 * breath))
             frame.alpha_composite(animated_subject, (frame_x, frame_y))
+            # Preserve exact GIF frame counts without forcing visible one-pixel
+            # position jumps. A single opaque RGB sample changes by one code
+            # value, which is visually imperceptible but prevents encoders from
+            # coalescing adjacent frames with identical integer transforms.
+            frame_pixels = np.asarray(frame).copy()
+            opaque_rows, opaque_columns = np.where(frame_pixels[:, :, 3] >= 192)
+            if opaque_rows.size:
+                marker_index = int(opaque_rows.size // 2)
+                marker_y = int(opaque_rows[marker_index])
+                marker_x = int(opaque_columns[marker_index])
+                marker_channel = frame_index % 3
+                marker_value = int(
+                    frame_pixels[marker_y, marker_x, marker_channel]
+                )
+                frame_pixels[marker_y, marker_x, marker_channel] = (
+                    marker_value + 1
+                    if (frame_index % 2 == 0 and marker_value < 255)
+                    or (frame_index % 2 == 1 and marker_value == 0)
+                    else marker_value - 1
+                )
+                frame = Image.fromarray(frame_pixels, mode="RGBA")
             frame.save(frame_dir / f"frame_{frame_index:03d}.png")
-            previous_transform = transform
 
         gif_filter = (
             "[0:v]format=rgba,split[gif][pal];"
@@ -1726,6 +1778,9 @@ def _write_recoverable_breathing_gif(
         os.replace(temporary, target)
         return {
             "policy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
+            "motion_policy": motion_policy,
+            "action": normalized_action,
+            "forced_position_jitter": False,
             "encoding": encoding,
             **inspected,
         }
@@ -1776,6 +1831,7 @@ def recover_subject_replacement_action_with_fallback(
     animation = _write_recoverable_breathing_gif(
         fallback_reference,
         gif_target,
+        action=action,
         size=TRANSPARENT_GIF_SIZE,
         frame_count=int(gif_timing["frames"]),
         fps=int(gif_timing["fps"]),
@@ -1992,6 +2048,7 @@ def recover_subject_replacement_job_with_fallback(
         animation = _write_recoverable_breathing_gif(
             fallback_reference,
             gif_target,
+            action=action,
             size=TRANSPARENT_GIF_SIZE,
             frame_count=int(gif_timing["frames"]),
             fps=int(gif_timing["fps"]),
@@ -3537,17 +3594,32 @@ def run_subject_replacement_job(job_id: str) -> None:
                     and pose_metadata.get("policy")
                     == DOG_DRINKING_FULL_DRIVER_POSE_POLICY
                 )
-                if pose_metadata.get("fallback_used") is True:
+                full_driver_eating_pose = bool(
+                    action == "eating"
+                    and pose_metadata.get("policy")
+                    in {
+                        DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
+                        DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
+                    }
+                )
+                if (
+                    pose_metadata.get("fallback_used") is True
+                    and not full_driver_eating_pose
+                    and not full_driver_drinking_pose
+                ):
                     bowl_motion_contract_issues.append(
                         "static_pose_fallback_forbidden"
                     )
-                if canonical_full_driver_eating_fallback:
+                if full_driver_eating_pose:
                     if (
                         pose_metadata.get("policy")
-                        != DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY
+                        not in {
+                            DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
+                            DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
+                        }
                     ):
                         bowl_motion_contract_issues.append(
-                            "canonical_full_driver_pose_policy_missing"
+                            "eating_full_driver_pose_policy_missing"
                         )
                     if pose_metadata.get("driver_input_used") is not True:
                         bowl_motion_contract_issues.append(

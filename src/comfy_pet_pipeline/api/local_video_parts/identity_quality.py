@@ -12,6 +12,16 @@ CANONICAL_INTERIOR_HOLE_GATE_POLICY = (
     "central_medial_overlap_component_v2"
 )
 CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN = 0.12
+WARM_CANONICAL_PALETTE_RECOVERY_POLICY = (
+    "warm_identity_distribution_without_spatial_pixel_copy_v1"
+)
+WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES = frozenset(
+    {
+        "warm_source_recolored_achromatic",
+        "new_gray_or_dark_markings_expanded",
+        "invented_stripe_pattern",
+    }
+)
 
 
 def require_ffmpeg() -> None:
@@ -1390,7 +1400,26 @@ def identity_palette_prompt(
             "markings or expand them into large invented black patches."
         )
     else:
-        rule = f"The visible source coat palette is predominantly {palette}."
+        percentage_palette = ", ".join(
+            f"{IDENTITY_PALETTE_PROMPT_LABELS[item]} "
+            f"{float(fractions.get(item, 0.0)) * 100.0:.1f}%"
+            for item in dominant
+        )
+        rule = (
+            "The visible source coat palette is continuous, not a list of new "
+            f"marking colors, and is approximately {percentage_palette or palette}."
+        )
+        if warm_fur_family >= 0.65:
+            rule += (
+                " Treat the dominant warm brown/orange/ginger/tan/golden/cream "
+                "family as one continuous base coat. Near-white or pale pixels may "
+                "be photographic highlights or naturally lighter fur tips; preserve "
+                "their exact source placement and proportion, but never reinterpret "
+                "them as new discrete white spots, white body patches, a piebald "
+                "pattern, or a different white-marked breed. Likewise, do not turn "
+                "shadows into gray, black, brindle, tiger, stripe, or spotted coat "
+                "markings."
+            )
     if absent_chromatic:
         rule += (
             " Do not introduce these absent dominant fur hues: "
@@ -1403,6 +1432,341 @@ def identity_palette_prompt(
         "color region. Never add calico, tortoiseshell, tabby, stripe, spot, patch, "
         f"or warm highlight that is absent from the uploaded pet.{retry_rule}"
     )
+
+
+def warm_canonical_palette_recovery_eligibility(
+    quality: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Identify a narrow warm-coat-to-achromatic canonical failure."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"warm_canonical_palette_recovery_eligibility"},
+    )
+    palette = quality if isinstance(quality, dict) else {}
+    issues = {
+        str(issue)
+        for issue in palette.get("issues", [])
+        if str(issue).strip()
+    }
+    source_warm = float(palette.get("source_warm_fraction", 0.0) or 0.0)
+    candidate_warm = float(
+        palette.get("candidate_warm_fraction", 0.0) or 0.0
+    )
+    source_achromatic = float(
+        palette.get("source_achromatic_fraction", 1.0) or 0.0
+    )
+    candidate_achromatic = float(
+        palette.get("candidate_achromatic_fraction", 0.0) or 0.0
+    )
+    source_gray_or_dark = float(
+        palette.get("source_gray_or_dark_fraction", 1.0) or 0.0
+    )
+    checks = {
+        "quality_available": palette.get("available") is True,
+        "quality_failed": palette.get("acceptable") is not True,
+        "warm_loss_issue_present": (
+            "warm_source_recolored_achromatic" in issues
+        ),
+        "issues_distribution_repairable": bool(issues)
+        and not (issues - WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES),
+        "source_is_strongly_warm": source_warm >= 0.65,
+        "source_has_little_gray_or_dark_coat": source_gray_or_dark <= 0.08,
+        "candidate_lost_warm_coat": source_warm - candidate_warm >= 0.20,
+        "candidate_gained_achromatic_coat": (
+            candidate_achromatic - source_achromatic >= 0.15
+        ),
+    }
+    eligible = all(checks.values())
+    return {
+        "policy": WARM_CANONICAL_PALETTE_RECOVERY_POLICY,
+        "eligible": eligible,
+        "issues": sorted(issues),
+        "allowed_issues": sorted(
+            WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES
+        ),
+        "source_warm_fraction": round(source_warm, 6),
+        "candidate_warm_fraction": round(candidate_warm, 6),
+        "source_achromatic_fraction": round(source_achromatic, 6),
+        "candidate_achromatic_fraction": round(candidate_achromatic, 6),
+        "source_gray_or_dark_fraction": round(source_gray_or_dark, 6),
+        "checks": checks,
+        "identity_palette_gate_bypassed": False,
+        "identity_palette_gate_must_be_revalidated": True,
+        "source_spatial_pixels_may_be_copied": False,
+    }
+
+
+def prepare_warm_canonical_palette_recovery(
+    candidate: Path,
+    source_identity: Path,
+    target: Path,
+    *,
+    source_achromatic_fraction: float,
+) -> dict[str, Any]:
+    """Restore a warm coat distribution while preserving generated geometry.
+
+    Only per-channel source distributions are used. No source pixel is placed at
+    a corresponding output location, so the generated pose, silhouette, alpha,
+    face layout, and rendering geometry remain the model's own result.
+    """
+
+    _sync_local_video_runtime(
+        globals(),
+        {"prepare_warm_canonical_palette_recovery"},
+    )
+    if not candidate.is_file() or not source_identity.is_file():
+        raise FileNotFoundError("Warm canonical palette recovery input is missing.")
+    with Image.open(candidate) as loaded:
+        candidate_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+    with Image.open(source_identity) as loaded:
+        source_rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+
+    candidate_alpha = candidate_rgba[:, :, 3]
+    source_alpha = source_rgba[:, :, 3]
+    candidate_foreground = candidate_alpha > 96
+    source_foreground = source_alpha > 96
+    candidate_pixels = int(np.count_nonzero(candidate_foreground))
+    source_pixels = int(np.count_nonzero(source_foreground))
+    if candidate_pixels < 4096 or source_pixels < 1024:
+        raise ValueError("Warm canonical palette recovery foreground is too small.")
+
+    candidate_lab = cv2.cvtColor(
+        candidate_rgba[:, :, :3],
+        cv2.COLOR_RGB2LAB,
+    )
+    source_lab = cv2.cvtColor(
+        source_rgba[:, :, :3],
+        cv2.COLOR_RGB2LAB,
+    )
+    source_warm = (
+        source_foreground
+        & (source_lab[:, :, 0] >= 36)
+        & (source_lab[:, :, 1] >= 128)
+        & (source_lab[:, :, 2] >= 138)
+    )
+    if int(np.count_nonzero(source_warm)) < 512:
+        raise ValueError("Source identity lacks a stable warm-coat distribution.")
+
+    candidate_ab_distance = np.sqrt(
+        (candidate_lab[:, :, 1].astype(np.float32) - 128.0) ** 2
+        + (candidate_lab[:, :, 2].astype(np.float32) - 128.0) ** 2
+    )
+    neutral_candidate = (
+        candidate_foreground
+        & (candidate_ab_distance <= 30.0)
+        & (candidate_lab[:, :, 0] >= 36)
+    )
+    neutral_rows, neutral_columns = np.where(neutral_candidate)
+    neutral_count = int(neutral_rows.size)
+    if neutral_count < 512:
+        raise ValueError("Candidate has too little neutral coat to recover safely.")
+
+    # A source-supported near-white fraction can be photographic highlight on a
+    # continuous golden coat; leaving the same *amount* of neutral pixels in the
+    # generated image would preserve an invented piebald layout. Restore every
+    # non-feature neutral region to the source warm family. Bright values remain
+    # bright after luma matching and therefore survive as golden/cream highlights,
+    # not discrete neutral-white patches.
+    preserve_neutral_count = 0
+    recolor_selection = np.arange(neutral_count, dtype=np.int64)
+    recolor = np.zeros(candidate_foreground.shape, dtype=bool)
+    recolor[
+        neutral_rows[recolor_selection],
+        neutral_columns[recolor_selection],
+    ] = True
+    recolor_count = int(np.count_nonzero(recolor))
+    if recolor_count < 256:
+        raise ValueError("Warm canonical palette recovery scope is too small.")
+
+    source_warm_luma = source_lab[:, :, 0][source_warm]
+    candidate_recolor_luma = candidate_lab[:, :, 0][recolor]
+    candidate_hist = np.bincount(
+        candidate_recolor_luma,
+        minlength=256,
+    ).astype(np.float64)
+    source_hist = np.bincount(
+        source_warm_luma,
+        minlength=256,
+    ).astype(np.float64)
+    candidate_cdf = np.cumsum(candidate_hist) / float(candidate_hist.sum())
+    source_cdf = np.cumsum(source_hist) / float(source_hist.sum())
+    luma_lut = np.searchsorted(source_cdf, candidate_cdf, side="left")
+    luma_lut = np.clip(luma_lut, 0, 255).astype(np.uint8)
+
+    recovered_lab = candidate_lab.copy()
+    recovered_lab[:, :, 0][recolor] = luma_lut[candidate_recolor_luma]
+    target_a = int(round(float(np.median(source_lab[:, :, 1][source_warm]))))
+    target_b = int(round(float(np.median(source_lab[:, :, 2][source_warm]))))
+    original_a = candidate_lab[:, :, 1][recolor].astype(np.float32)
+    original_b = candidate_lab[:, :, 2][recolor].astype(np.float32)
+    recovered_lab[:, :, 1][recolor] = np.rint(
+        original_a * 0.12 + target_a * 0.88
+    ).clip(0, 255).astype(np.uint8)
+    recovered_lab[:, :, 2][recolor] = np.rint(
+        original_b * 0.12 + target_b * 0.88
+    ).clip(0, 255).astype(np.uint8)
+
+    recovered_rgb = cv2.cvtColor(recovered_lab, cv2.COLOR_LAB2RGB)
+    output_rgba = candidate_rgba.copy()
+    output_rgba[:, :, :3][recolor] = recovered_rgb[recolor]
+    output_rgba[~candidate_foreground, :3] = candidate_rgba[
+        ~candidate_foreground,
+        :3,
+    ]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(output_rgba, mode="RGBA").save(target)
+    with Image.open(target) as loaded:
+        verified = np.asarray(loaded.convert("RGBA"), dtype=np.uint8)
+    if not np.array_equal(verified[:, :, 3], candidate_alpha):
+        raise RuntimeError("Warm canonical palette recovery changed alpha geometry.")
+    if not np.array_equal(
+        verified[:, :, :3][~recolor],
+        candidate_rgba[:, :, :3][~recolor],
+    ):
+        raise RuntimeError(
+            "Warm canonical palette recovery changed pixels outside its scope."
+        )
+
+    return {
+        "policy": WARM_CANONICAL_PALETTE_RECOVERY_POLICY,
+        "source_path": str(candidate),
+        "source_sha256": file_sha256(candidate),
+        "source_identity_path": str(source_identity),
+        "source_identity_sha256": file_sha256(source_identity),
+        "target_path": str(target),
+        "target_sha256": file_sha256(target),
+        "candidate_foreground_pixels": candidate_pixels,
+        "source_foreground_pixels": source_pixels,
+        "neutral_candidate_pixels": neutral_count,
+        "preserved_source_supported_neutral_pixels": preserve_neutral_count,
+        "reported_source_achromatic_fraction": round(
+            float(source_achromatic_fraction),
+            6,
+        ),
+        "recolored_pixels": recolor_count,
+        "source_warm_lab_median_ab": [target_a, target_b],
+        "alpha_geometry_preserved_exactly": True,
+        "pixels_outside_recovery_scope_preserved_exactly": True,
+        "source_spatial_pixels_copied": False,
+        "source_distribution_only": True,
+    }
+
+
+def attempt_warm_canonical_palette_recovery(
+    candidate: Path,
+    source_identity: Path,
+    cutout_target: Path,
+    green_target: Path,
+    *,
+    source_palette: dict[str, Any],
+    source_upper_body_palette: dict[str, Any],
+    current_quality: dict[str, Any],
+    upper_body_exclusion: float,
+) -> dict[str, Any]:
+    """Run warm-palette recovery as a non-blocking best-effort operation."""
+
+    _sync_local_video_runtime(
+        globals(),
+        {"attempt_warm_canonical_palette_recovery"},
+    )
+    result = warm_canonical_palette_recovery_eligibility(current_quality)
+    result.update({"attempted": False, "accepted": False})
+    if result.get("eligible") is not True:
+        return result
+    result["attempted"] = True
+    try:
+        recovery = prepare_warm_canonical_palette_recovery(
+            candidate,
+            source_identity,
+            cutout_target,
+            source_achromatic_fraction=float(
+                current_quality.get("source_achromatic_fraction", 0.0)
+                or 0.0
+            ),
+        )
+        candidate_palette = identity_palette_signature(cutout_target)
+        upper_candidate_palette = identity_palette_signature(
+            cutout_target,
+            exclude_bottom_fraction=upper_body_exclusion,
+        )
+        recovered_quality = canonical_identity_palette_quality(
+            identity_palette_quality(source_palette, candidate_palette),
+            identity_palette_quality(
+                source_upper_body_palette,
+                upper_candidate_palette,
+            ),
+        )
+        before_penalty = float(current_quality.get("penalty", 500.0) or 500.0)
+        after_penalty = float(
+            recovered_quality.get("penalty", 500.0) or 500.0
+        )
+        recovered_issues = {
+            str(issue) for issue in recovered_quality.get("issues", [])
+        }
+        improved = bool(
+            recovered_quality.get("acceptable") is True
+            or (
+                after_penalty < before_penalty
+                and float(
+                    recovered_quality.get("candidate_warm_fraction", 0.0)
+                    or 0.0
+                )
+                > float(
+                    current_quality.get("candidate_warm_fraction", 0.0)
+                    or 0.0
+                )
+                + 0.15
+                and not (
+                    recovered_issues
+                    - WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES
+                )
+            )
+        )
+        result.update(
+            {
+                "pre_recovery_quality": current_quality,
+                "post_recovery_quality": recovered_quality,
+                "recovery": recovery,
+                "improved": improved,
+                "accepted": improved,
+                "palette_gate_passed": (
+                    recovered_quality.get("acceptable") is True
+                ),
+                "candidate_palette": candidate_palette,
+                "upper_body_candidate_palette": upper_candidate_palette,
+                "cutout_path": str(cutout_target),
+                "green_path": str(green_target),
+            }
+        )
+        if not improved:
+            return result
+        with Image.open(cutout_target) as loaded:
+            recovered_rgba = loaded.convert("RGBA")
+            recovered_rgba.load()
+        recovered_green = Image.new(
+            "RGBA",
+            recovered_rgba.size,
+            (0, 255, 0, 255),
+        )
+        recovered_green.alpha_composite(recovered_rgba)
+        recovered_green.convert("RGB").save(
+            green_target,
+            format="PNG",
+            optimize=True,
+        )
+        result["green_sha256"] = file_sha256(green_target)
+        return result
+    except Exception as exc:  # noqa: BLE001 - visual recovery must not block completion
+        result.update(
+            {
+                "accepted": False,
+                "improved": False,
+                "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                "completion_blocked": False,
+            }
+        )
+        return result
 
 
 def identity_palette_negative_prompt(signature: dict[str, Any]) -> str:

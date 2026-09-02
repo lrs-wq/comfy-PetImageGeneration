@@ -100,6 +100,9 @@ ACTION_TAIL_GEOMETRY_SAFE_LOOP_POLICY = (
 DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY = (
     "canonical_identity_full_white_driver_eating_fallback_v1"
 )
+DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY = (
+    "reference_identity_full_white_driver_eating_recovery_v1"
+)
 
 DEFAULT_PROMPT = (
     "A complete full-body premium stylized 3D cartoon cat matching the sleek "
@@ -1898,6 +1901,47 @@ def make_dog_eating_canonical_full_driver_pose_frames(
                 "digest_bound_white_maquette_video"
             ),
             "scene_prop_authority": "digest_bound_white_maquette_video",
+        }
+    )
+    return pose_frames, pose_masks, pose_metadata
+
+
+def make_dog_eating_reference_full_driver_recovery_pose_frames(
+    sampled_frames: list[Image.Image],
+    canvas_size: tuple[int, int],
+    *,
+    fallback_reason: str,
+) -> tuple[list[Image.Image], list[Image.Image], dict[str, Any]]:
+    """Recover an unusable reference-space nod with real driver motion.
+
+    The selected Qwen eating keyframe remains SCAIL's identity reference. The
+    digest-bound white-maquette clip supplies the complete animated body and
+    bowl geometry, so a missing color-specific muzzle anchor can never turn the
+    action into a repeated static first frame.
+    """
+
+    pose_frames, pose_masks, pose_metadata = (
+        make_full_eating_pose_and_mask_frames(
+            sampled_frames,
+            canvas_size,
+        )
+    )
+    pose_metadata.update(
+        {
+            "policy": DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
+            "fallback_used": True,
+            "fallback_kind": "animated_full_driver_recovery",
+            "fallback_reason": fallback_reason[:1000],
+            "reference_identity_only": True,
+            "reference_scene_prop_inference_disabled": True,
+            "full_white_driver_geometry": True,
+            "driver_input_used": True,
+            "identity_authority": "selected_qwen_eating_reference",
+            "action_geometry_authority": (
+                "digest_bound_white_maquette_video"
+            ),
+            "scene_prop_authority": "digest_bound_white_maquette_video",
+            "static_pose_fallback_forbidden": True,
         }
     )
     return pose_frames, pose_masks, pose_metadata
@@ -6459,6 +6503,192 @@ def clean_transparent_edge_halo(
     }
 
 
+def repair_guided_alpha_interior_holes(
+    rgb: np.ndarray,
+    alpha: np.ndarray,
+    guidance: np.ndarray | None,
+    *,
+    minimum_hole_pixels: int = 8,
+    maximum_hole_fraction: float = 0.015,
+    minimum_guidance_core_overlap_fraction: float = 0.20,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Fill only enclosed matte holes supported by the pose-guidance core.
+
+    Exterior background, including the gap between planted legs or between a
+    tail and torso, remains connected to a canvas border and is never eligible.
+    Guidance is eroded before use so a loose driver silhouette cannot grow the
+    replacement animal's outer boundary.
+    """
+
+    rgb = np.asarray(rgb, dtype=np.uint8)
+    alpha = np.asarray(alpha, dtype=np.uint8)
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError("Guided alpha repair RGB must have shape HxWx3.")
+    if alpha.ndim != 2 or alpha.shape != rgb.shape[:2]:
+        raise ValueError("Guided alpha repair alpha must match RGB dimensions.")
+    if guidance is None:
+        return rgb.copy(), alpha.copy(), {
+            "policy": "guided_enclosed_alpha_interior_repair_v1",
+            "applied": False,
+            "status": "guidance_unavailable",
+            "repaired_pixels": 0,
+            "repaired_components": 0,
+            "eligible_components": [],
+        }
+    guidance = np.asarray(guidance, dtype=bool)
+    if guidance.shape != alpha.shape:
+        raise ValueError("Guided alpha repair guidance size changed.")
+    guidance_u8 = guidance.astype(np.uint8)
+    guidance_core = cv2.erode(
+        guidance_u8,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)),
+        iterations=1,
+    ).astype(bool)
+    if int(np.count_nonzero(guidance_core)) < 64:
+        guidance_core = guidance
+
+    transparent = (alpha < 64).astype(np.uint8)
+    count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        transparent,
+        connectivity=8,
+    )
+    border_labels = set(
+        int(value)
+        for value in np.unique(
+            np.concatenate(
+                (
+                    labels[0, :],
+                    labels[-1, :],
+                    labels[:, 0],
+                    labels[:, -1],
+                )
+            )
+        )
+    )
+    maximum_hole_pixels = max(
+        int(minimum_hole_pixels),
+        int(round(alpha.size * float(maximum_hole_fraction))),
+    )
+    repair_mask = np.zeros(alpha.shape, dtype=bool)
+    eligible_components: list[dict[str, Any]] = []
+    for label in range(1, count):
+        if label in border_labels:
+            continue
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if not int(minimum_hole_pixels) <= area <= maximum_hole_pixels:
+            continue
+        component = labels == label
+        guidance_overlap = int(
+            np.count_nonzero(component & guidance_core)
+        )
+        guidance_overlap_fraction = guidance_overlap / float(max(1, area))
+        if (
+            guidance_overlap < max(4, int(round(area * 0.05)))
+            or guidance_overlap_fraction
+            < float(minimum_guidance_core_overlap_fraction)
+        ):
+            continue
+        repair_mask |= component
+        eligible_components.append(
+            {
+                "x": int(stats[label, cv2.CC_STAT_LEFT]),
+                "y": int(stats[label, cv2.CC_STAT_TOP]),
+                "width": int(stats[label, cv2.CC_STAT_WIDTH]),
+                "height": int(stats[label, cv2.CC_STAT_HEIGHT]),
+                "pixels": area,
+                "guidance_core_overlap_pixels": guidance_overlap,
+                "guidance_core_overlap_fraction": round(
+                    guidance_overlap_fraction,
+                    6,
+                ),
+            }
+        )
+
+    repaired_pixels = int(np.count_nonzero(repair_mask))
+    if not repaired_pixels:
+        return rgb.copy(), alpha.copy(), {
+            "policy": "guided_enclosed_alpha_interior_repair_v1",
+            "applied": False,
+            "status": "no_supported_enclosed_hole",
+            "repaired_pixels": 0,
+            "repaired_components": 0,
+            "eligible_components": [],
+            "maximum_hole_pixels": maximum_hole_pixels,
+            "guidance_core_pixels": int(np.count_nonzero(guidance_core)),
+        }
+
+    repaired_rgb = cv2.inpaint(
+        rgb,
+        repair_mask.astype(np.uint8) * 255,
+        3.0,
+        cv2.INPAINT_TELEA,
+    )
+    repaired_alpha = alpha.copy()
+    component_ring = (
+        cv2.dilate(
+            repair_mask.astype(np.uint8),
+            np.ones((5, 5), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        & ~repair_mask
+        & (alpha >= 64)
+    )
+    ring_alpha = alpha[component_ring]
+    fill_alpha = int(
+        max(
+            160,
+            round(float(np.percentile(ring_alpha, 25)))
+            if ring_alpha.size
+            else 255,
+        )
+    )
+    repaired_alpha[repair_mask] = np.maximum(
+        repaired_alpha[repair_mask],
+        fill_alpha,
+    )
+    return repaired_rgb, repaired_alpha, {
+        "policy": "guided_enclosed_alpha_interior_repair_v1",
+        "applied": True,
+        "status": "repaired",
+        "repaired_pixels": repaired_pixels,
+        "repaired_components": len(eligible_components),
+        "eligible_components": eligible_components,
+        "fill_alpha": fill_alpha,
+        "maximum_hole_pixels": maximum_hole_pixels,
+        "guidance_core_pixels": int(np.count_nonzero(guidance_core)),
+        "exterior_background_preserved": True,
+    }
+
+
+def select_safe_transparent_edge_cleanup(
+    original_rgb: np.ndarray,
+    original_alpha: np.ndarray,
+    cleaned_rgb: np.ndarray,
+    cleaned_alpha: np.ndarray,
+    metrics: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Rollback a halo cleanup whose own residual audit is unacceptable."""
+
+    selected_metrics = dict(metrics)
+    if bool(metrics.get("acceptable")):
+        selected_metrics["rolled_back"] = False
+        selected_metrics["published_result"] = "cleaned"
+        return cleaned_rgb, cleaned_alpha, selected_metrics
+    selected_metrics.update(
+        {
+            "rolled_back": True,
+            "published_result": "pre_cleanup_matte",
+            "attempted_alpha_adjusted_pixels": int(
+                metrics.get("alpha_adjusted_pixels", 0)
+            ),
+            "alpha_adjusted_pixels": 0,
+            "published_alpha_adjusted_pixels": 0,
+            "completion_blocked": False,
+        }
+    )
+    return original_rgb.copy(), original_alpha.copy(), selected_metrics
+
+
 def _remove_dark_silhouette_halo(
     rgb: np.ndarray,
     alpha: np.ndarray,
@@ -6664,8 +6894,17 @@ DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN = 0.90
 DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS = 6
 
 
-def _canvas_border_color_distance_p999(rgb: np.ndarray) -> float:
-    """Measure how far a generated canvas border varies from its median RGB."""
+def _canvas_border_color_distance_p999(
+    rgb: np.ndarray,
+    *,
+    exclusion_mask: np.ndarray | None = None,
+) -> float:
+    """Measure canvas-border variation while excluding guided foreground.
+
+    A valid moving tail or paw can briefly touch the image border.  Those few
+    foreground pixels must not make an otherwise pure, uniform canvas look
+    non-uniform and force the pale animal through a semantic matte.
+    """
     if rgb.ndim != 3 or rgb.shape[2] != 3:
         raise ValueError("Canvas border measurement requires an RGB frame")
     height, width = rgb.shape[:2]
@@ -6680,11 +6919,33 @@ def _canvas_border_color_distance_p999(rgb: np.ndarray) -> float:
         ),
         axis=0,
     )
+    if exclusion_mask is not None:
+        exclusion_mask = np.asarray(exclusion_mask, dtype=bool)
+        if exclusion_mask.shape != (height, width):
+            raise ValueError(
+                "Canvas border exclusion mask must match RGB dimensions"
+            )
+        border_excluded = np.concatenate(
+            (
+                exclusion_mask[:border_width, :].reshape(-1),
+                exclusion_mask[-border_width:, :].reshape(-1),
+                exclusion_mask[:, :border_width].reshape(-1),
+                exclusion_mask[:, -border_width:].reshape(-1),
+            )
+        )
+        retained_border = border_pixels[~border_excluded]
+        if retained_border.shape[0] >= max(64, border_pixels.shape[0] // 4):
+            border_pixels = retained_border
     background_rgb = np.median(border_pixels, axis=0)
     border_distance = np.sqrt(
         np.sum((border_pixels - background_rgb) ** 2, axis=1)
     )
-    return float(np.percentile(border_distance, 99.9))
+    distance_p99 = float(np.percentile(border_distance, 99.0))
+    distance_p999 = float(np.percentile(border_distance, 99.9))
+    # Isolated codec specks outside the pose envelope must not route every
+    # frame through U2Net.  A genuinely varying canvas also raises p99, while
+    # sub-percent contamination is bounded to an eight-unit outlier allowance.
+    return min(distance_p999, distance_p99 + 8.0)
 
 
 def reference_aligned_transparent_extraction_strategy(
@@ -6837,7 +7098,15 @@ def _reference_guided_uniform_background_mask(
         axis=0,
     )
     background_rgb = np.median(border_pixels, axis=0)
-    border_distance_p999 = _canvas_border_color_distance_p999(rgb)
+    guidance_exclusion = cv2.dilate(
+        guidance.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (61, 61)),
+        iterations=1,
+    ).astype(bool)
+    border_distance_p999 = _canvas_border_color_distance_p999(
+        rgb,
+        exclusion_mask=guidance_exclusion,
+    )
     if border_distance_p999 > 32.0:
         raise RuntimeError(
             "Reference-aligned toileting canvas varies too much at frame "
@@ -7207,6 +7476,32 @@ def build_unstabilized_transparent_gif(
             )
 
         normalized_source = [normalized_rgb(frame) for frame in source_frames]
+        def normalized_guidance_roles(
+            index: int,
+        ) -> tuple[np.ndarray | None, np.ndarray | None]:
+            if guidance_frames is None:
+                return None, None
+            guidance_rgb = normalized_rgb(guidance_frames[index])
+            identity = (
+                (guidance_rgb[:, :, 2] >= 225)
+                & (guidance_rgb[:, :, 0] <= 30)
+                & (guidance_rgb[:, :, 1] <= 30)
+            )
+            static_prop = (
+                (guidance_rgb[:, :, 0] >= 225)
+                & (guidance_rgb[:, :, 1] <= 30)
+                & (guidance_rgb[:, :, 2] <= 30)
+            )
+            if not reference_aligned_uniform_background:
+                return identity, None
+            if int(np.count_nonzero(static_prop)) < 64:
+                return identity, None
+            return identity | static_prop, static_prop
+
+        def normalized_guidance_mask(index: int) -> np.ndarray | None:
+            guidance, _static_prop = normalized_guidance_roles(index)
+            return guidance
+
         reference_aligned_border_distance_p999_values: list[float] = []
         reference_aligned_extraction_strategy: str | None = None
         drinking_static_prop_recovery_required = bool(
@@ -7219,10 +7514,24 @@ def build_unstabilized_transparent_gif(
                     "Reference-aligned adaptive extraction requires a "
                     "guidance mask video"
                 )
-            reference_aligned_border_distance_p999_values = [
-                _canvas_border_color_distance_p999(frame)
-                for frame in normalized_source
-            ]
+            for index, frame in enumerate(normalized_source):
+                guidance = normalized_guidance_mask(index)
+                if guidance is None:
+                    raise RuntimeError(
+                        "Reference-aligned adaptive extraction requires pose "
+                        "guidance in every frame"
+                    )
+                exclusion = cv2.dilate(
+                    guidance.astype(np.uint8),
+                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (61, 61)),
+                    iterations=1,
+                ).astype(bool)
+                reference_aligned_border_distance_p999_values.append(
+                    _canvas_border_color_distance_p999(
+                        frame,
+                        exclusion_mask=exclusion,
+                    )
+                )
             reference_aligned_extraction_strategy = (
                 reference_aligned_transparent_extraction_strategy(
                     max(reference_aligned_border_distance_p999_values)
@@ -7243,30 +7552,6 @@ def build_unstabilized_transparent_gif(
                 reference_aligned_extraction_strategy = (
                     REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY
                 )
-
-        def normalized_guidance_roles(
-            index: int,
-        ) -> tuple[np.ndarray | None, np.ndarray | None]:
-            if guidance_frames is None:
-                return None, None
-            guidance_rgb = normalized_rgb(guidance_frames[index])
-            identity = (
-                (guidance_rgb[:, :, 2] >= 225)
-                & (guidance_rgb[:, :, 0] <= 30)
-                & (guidance_rgb[:, :, 1] <= 30)
-            )
-            static_prop = (
-                (guidance_rgb[:, :, 0] >= 225)
-                & (guidance_rgb[:, :, 1] <= 30)
-                & (guidance_rgb[:, :, 2] <= 30)
-            )
-            if not reference_aligned_uniform_background:
-                return identity, None
-            return identity | static_prop, static_prop
-
-        def normalized_guidance_mask(index: int) -> np.ndarray | None:
-            guidance, _static_prop = normalized_guidance_roles(index)
-            return guidance
 
         chroma_masks: list[tuple[np.ndarray, np.ndarray]] = []
         chroma_usable = True
@@ -7861,9 +8146,28 @@ def build_unstabilized_transparent_gif(
                     }
                 )
 
+        interior_repair_metrics: list[dict[str, Any]] = []
+        pre_cleanup_repaired_frames: list[tuple[np.ndarray, np.ndarray]] = []
+        for frame_index, (rgb, alpha) in enumerate(extracted_frames):
+            guidance = normalized_guidance_mask(frame_index)
+            repaired_rgb, repaired_alpha, repair_metrics = (
+                repair_guided_alpha_interior_holes(
+                    rgb,
+                    alpha,
+                    guidance,
+                )
+            )
+            repair_metrics["frame_index"] = frame_index
+            repair_metrics["stage"] = "post_extraction_pre_edge_cleanup"
+            interior_repair_metrics.append(repair_metrics)
+            pre_cleanup_repaired_frames.append(
+                (repaired_rgb, repaired_alpha)
+            )
+        extracted_frames = pre_cleanup_repaired_frames
+
         edge_cleanup_metrics: list[dict[str, Any]] = []
         cleaned_extracted_frames: list[tuple[np.ndarray, np.ndarray]] = []
-        for rgb, alpha in extracted_frames:
+        for frame_index, (rgb, alpha) in enumerate(extracted_frames):
             cleaned_rgb, cleaned_alpha, cleanup_metrics = (
                 clean_transparent_edge_halo(
                     rgb,
@@ -7931,6 +8235,26 @@ def build_unstabilized_transparent_gif(
                             first_metrics.get("penalty", 0.0)
                         ),
                     }
+            cleaned_rgb, cleaned_alpha, cleanup_metrics = (
+                select_safe_transparent_edge_cleanup(
+                    rgb,
+                    alpha,
+                    cleaned_rgb,
+                    cleaned_alpha,
+                    cleanup_metrics,
+                )
+            )
+            guidance = normalized_guidance_mask(frame_index)
+            cleaned_rgb, cleaned_alpha, post_repair_metrics = (
+                repair_guided_alpha_interior_holes(
+                    cleaned_rgb,
+                    cleaned_alpha,
+                    guidance,
+                )
+            )
+            post_repair_metrics["frame_index"] = frame_index
+            post_repair_metrics["stage"] = "post_edge_cleanup"
+            interior_repair_metrics.append(post_repair_metrics)
             cleaned_extracted_frames.append((cleaned_rgb, cleaned_alpha))
             edge_cleanup_metrics.append(cleanup_metrics)
         extracted_frames = cleaned_extracted_frames
@@ -8259,6 +8583,33 @@ def build_unstabilized_transparent_gif(
                     DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS
                 ),
             },
+            "interior_alpha_repair": {
+                "policy": "guided_enclosed_alpha_interior_repair_v1",
+                "visual_advisory_only": True,
+                "completion_blocked": False,
+                "passes_per_source_frame": 2,
+                "applied_passes": sum(
+                    1
+                    for item in interior_repair_metrics
+                    if bool(item.get("applied"))
+                ),
+                "repaired_pixels_total": sum(
+                    int(item.get("repaired_pixels", 0))
+                    for item in interior_repair_metrics
+                ),
+                "repaired_pixels_max": max(
+                    (
+                        int(item.get("repaired_pixels", 0))
+                        for item in interior_repair_metrics
+                    ),
+                    default=0,
+                ),
+                "repaired_components_total": sum(
+                    int(item.get("repaired_components", 0))
+                    for item in interior_repair_metrics
+                ),
+                "exterior_background_preserved": True,
+            },
             "silhouette_edge_cleanup": {
                 "policy": "local_inward_color_alpha_dark_halo_v2",
                 "action": action,
@@ -8326,6 +8677,13 @@ def build_unstabilized_transparent_gif(
                     for item in edge_cleanup_metrics
                     if bool(item.get("second_pass_selected"))
                 ),
+                "rolled_back_frames": sum(
+                    1
+                    for item in edge_cleanup_metrics
+                    if bool(item.get("rolled_back"))
+                ),
+                "unacceptable_cleanup_published_frames": 0,
+                "completion_blocked_by_cleanup": False,
                 "residual_candidate_fraction_max": max(
                     (
                         float(
@@ -9028,11 +9386,9 @@ def main() -> int:
                     ):
                         raise
                     pose_frames, pose_masks, pose_metadata = (
-                        make_static_reference_eating_pose_frames(
-                            reference,
-                            reference_mask,
+                        make_dog_eating_reference_full_driver_recovery_pose_frames(
+                            sampled,
                             (args.width, args.height),
-                            frame_count=args.frames,
                             fallback_reason=str(exc),
                         )
                     )

@@ -519,6 +519,39 @@ class EatingScenePropMaskTests(unittest.TestCase):
         self.assertFalse(pose_metadata["fallback_used"])
         self.assertFalse(pose_metadata["driver_signal_only"])
 
+    def test_missing_muzzle_anchor_recovers_with_full_driver_motion(self) -> None:
+        poses, masks, metadata = (
+            scail.make_dog_eating_reference_full_driver_recovery_pose_frames(
+                self._geometry_frames(full_body_motion=True),
+                (512, 512),
+                fallback_reason=(
+                    "eating_reference_motion_unreliable: no_face_muzzle_anchor"
+                ),
+            )
+        )
+
+        self.assertEqual(len(poses), len(masks))
+        self.assertEqual(
+            metadata["policy"],
+            scail.DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
+        )
+        self.assertTrue(metadata["fallback_used"])
+        self.assertEqual(
+            metadata["fallback_kind"],
+            "animated_full_driver_recovery",
+        )
+        self.assertTrue(metadata["driver_input_used"])
+        self.assertTrue(metadata["full_white_driver_geometry"])
+        self.assertTrue(metadata["reference_identity_only"])
+        self.assertFalse(metadata["driver_signal_only"])
+        first = np.asarray(masks[0], dtype=np.uint8)
+        self.assertTrue(
+            any(
+                not np.array_equal(first, np.asarray(mask, dtype=np.uint8))
+                for mask in masks[1:]
+            )
+        )
+
     def test_full_eating_pose_rejects_head_only_motion(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
@@ -1621,6 +1654,56 @@ class SemanticCleanupComponentTests(unittest.TestCase):
         retained_edge = (cleaned_alpha > 0) & (alpha < 255)
         self.assertGreater(float(cleaned_rgb[retained_edge].mean()), 150.0)
         self.assertTrue(metrics["acceptable"])
+
+    def test_guided_interior_hole_repair_keeps_exterior_leg_gap(self) -> None:
+        rgb = np.full((96, 96, 3), 214, dtype=np.uint8)
+        alpha = np.zeros((96, 96), dtype=np.uint8)
+        alpha[10:62, 18:78] = 255
+        alpha[62:90, 18:36] = 255
+        alpha[62:90, 60:78] = 255
+        alpha[28:38, 38:50] = 0
+        guidance = alpha >= 64
+        guidance[28:38, 38:50] = True
+
+        repaired_rgb, repaired_alpha, metrics = (
+            scail.repair_guided_alpha_interior_holes(
+                rgb,
+                alpha,
+                guidance,
+            )
+        )
+
+        self.assertTrue(metrics["applied"])
+        self.assertEqual(metrics["repaired_components"], 1)
+        self.assertGreaterEqual(int(repaired_alpha[32, 44]), 160)
+        self.assertEqual(int(repaired_alpha[80, 48]), 0)
+        self.assertGreater(int(repaired_rgb[32, 44].mean()), 150)
+
+    def test_unacceptable_edge_cleanup_rolls_back_matte(self) -> None:
+        original_rgb = np.full((24, 24, 3), 180, dtype=np.uint8)
+        original_alpha = np.zeros((24, 24), dtype=np.uint8)
+        original_alpha[4:20, 4:20] = 255
+        cleaned_rgb = np.zeros_like(original_rgb)
+        cleaned_alpha = np.zeros_like(original_alpha)
+
+        selected_rgb, selected_alpha, metrics = (
+            scail.select_safe_transparent_edge_cleanup(
+                original_rgb,
+                original_alpha,
+                cleaned_rgb,
+                cleaned_alpha,
+                {
+                    "acceptable": False,
+                    "alpha_adjusted_pixels": 256,
+                },
+            )
+        )
+
+        self.assertTrue(metrics["rolled_back"])
+        self.assertEqual(metrics["published_result"], "pre_cleanup_matte")
+        self.assertEqual(metrics["alpha_adjusted_pixels"], 0)
+        self.assertTrue(np.array_equal(selected_rgb, original_rgb))
+        self.assertTrue(np.array_equal(selected_alpha, original_alpha))
 
     def test_eating_contact_shadow_is_removed_without_erasing_dark_tail(self) -> None:
         rgb = np.full((128, 128, 3), 238, dtype=np.uint8)

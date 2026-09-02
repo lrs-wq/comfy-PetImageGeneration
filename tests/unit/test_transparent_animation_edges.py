@@ -24,6 +24,7 @@ from src.comfy_pet_pipeline.pipeline.subject_replacement import (
     REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY,
     REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY,
     REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY,
+    _canvas_border_color_distance_p999,
     _merge_reference_aligned_static_prop,
     _reference_guided_uniform_background_mask,
     encode_static_mask_video,
@@ -123,6 +124,21 @@ class TransparentVideoCliTests(unittest.TestCase):
             reference_aligned_transparent_extraction_strategy(40.0),
             REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY,
         )
+
+    def test_canvas_measurement_ignores_guided_tail_touching_border(self):
+        rgb = np.full((128, 128, 3), 255, dtype=np.uint8)
+        guidance = np.zeros((128, 128), dtype=np.uint8)
+        cv2.rectangle(rgb, (116, 30), (127, 90), (178, 112, 62), -1)
+        cv2.rectangle(guidance, (112, 26), (127, 94), 1, -1)
+
+        unmasked = _canvas_border_color_distance_p999(rgb)
+        masked = _canvas_border_color_distance_p999(
+            rgb,
+            exclusion_mask=guidance.astype(bool),
+        )
+
+        self.assertGreater(unmasked, 32.0)
+        self.assertLess(masked, 1.0)
 
     def test_drinking_and_running_use_bounded_limb_proximity(self):
         for action in ("drinking", "running"):

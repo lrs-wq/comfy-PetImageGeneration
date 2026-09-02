@@ -2671,11 +2671,84 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     fallback_primary_quality,
                     fallback_upper_quality,
                 )
+                warm_palette_recovery_used = False
+                warm_palette_recovery = (
+                    attempt_warm_canonical_palette_recovery(
+                        fallback_cutout,
+                        Path(identity_source_path),
+                        job_dir
+                        / "cartoon_reference_warm_palette_recovery_cutout.png",
+                        job_dir
+                        / "cartoon_reference_warm_palette_recovery_green.png",
+                        source_palette=source_identity_palette,
+                        source_upper_body_palette=(
+                            canonical_source_upper_body_palette
+                        ),
+                        current_quality=fallback_palette_quality,
+                        upper_body_exclusion=(
+                            BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
+                        ),
+                    )
+                )
+                if warm_palette_recovery.get("accepted") is True:
+                    fallback_cutout = Path(
+                        warm_palette_recovery["cutout_path"]
+                    )
+                    fallback_green = Path(warm_palette_recovery["green_path"])
+                    fallback_candidate_palette = warm_palette_recovery[
+                        "candidate_palette"
+                    ]
+                    fallback_upper_body_candidate_palette = (
+                        warm_palette_recovery[
+                            "upper_body_candidate_palette"
+                        ]
+                    )
+                    fallback_palette_quality = warm_palette_recovery[
+                        "post_recovery_quality"
+                    ]
+                    chroma_metrics = {
+                        **chroma_metrics,
+                        "warm_canonical_palette_recovery": (
+                            warm_palette_recovery
+                        ),
+                    }
+                    warm_palette_recovery_used = True
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_reference",
+                            "attempt": fallback_record["attempt"],
+                            "reason": "warm_source_recolored_achromatic",
+                            "strategy": WARM_CANONICAL_PALETTE_RECOVERY_POLICY,
+                            "result": (
+                                "accepted_palette_pass"
+                                if fallback_palette_quality.get("acceptable")
+                                is True
+                                else "accepted_lower_risk_best_effort"
+                            ),
+                            "identity_palette": fallback_palette_quality,
+                        },
+                    )
+                    update_job(
+                        job_id,
+                        canonical_warm_palette_recovery=(
+                            warm_palette_recovery
+                        ),
+                    )
+                elif warm_palette_recovery.get("attempted") is True:
+                    update_job(
+                        job_id,
+                        canonical_warm_palette_recovery=(
+                            warm_palette_recovery
+                        ),
+                    )
                 fallback_profile = (
                     "uploaded_identity_semantic_fallback"
                     if fallback_uses_uploaded_identity
                     else (
-                        "generated_semantic_completion_fallback"
+                        "generated_warm_palette_completion_fallback"
+                        if warm_palette_recovery_used
+                        else "generated_semantic_completion_fallback"
                         if completion_first_canonical_fallback
                         else "rembg_u2net_fallback"
                     )

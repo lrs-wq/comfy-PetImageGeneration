@@ -656,6 +656,91 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertIn("Do not use chibi enlargement", prompt)
         self.assertNotIn("slightly oversized round head", prompt)
 
+    def test_warm_palette_prompt_does_not_turn_highlights_into_white_patches(
+        self,
+    ) -> None:
+        prompt = pipeline.identity_palette_prompt(
+            {
+                "available": True,
+                "fractions": {
+                    "black": 0.004,
+                    "white": 0.131,
+                    "gray": 0.005,
+                    "warm_brown_or_orange": 0.844,
+                    "red_or_pink": 0.016,
+                    "yellow_or_gold": 0.0,
+                    "green": 0.0,
+                    "blue_or_cyan": 0.0,
+                    "purple": 0.0,
+                },
+                "dominant": ["white", "warm_brown_or_orange"],
+            }
+        )
+
+        self.assertIn("warm brown/orange/ginger/tan/golden/cream 84.4%", prompt)
+        self.assertIn("one continuous base coat", prompt)
+        self.assertIn("never reinterpret", prompt)
+        self.assertIn("new discrete white spots", prompt)
+        self.assertIn("different white-marked breed", prompt)
+
+    def test_warm_canonical_palette_recovery_preserves_generated_geometry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_path = root / "source.png"
+            candidate_path = root / "candidate.png"
+            target_path = root / "recovered.png"
+            source = np.zeros((128, 128, 4), dtype=np.uint8)
+            candidate = np.zeros_like(source)
+            source[12:116, 20:108] = (196, 132, 62, 255)
+            candidate[12:116, 20:64] = (238, 238, 238, 255)
+            candidate[12:116, 64:108] = (92, 92, 92, 255)
+            candidate[28:36, 58:70] = (16, 16, 16, 255)
+            Image.fromarray(source, mode="RGBA").save(source_path)
+            Image.fromarray(candidate, mode="RGBA").save(candidate_path)
+
+            eligibility = pipeline.warm_canonical_palette_recovery_eligibility(
+                {
+                    "available": True,
+                    "acceptable": False,
+                    "issues": [
+                        "warm_source_recolored_achromatic",
+                        "new_gray_or_dark_markings_expanded",
+                    ],
+                    "source_warm_fraction": 0.86,
+                    "candidate_warm_fraction": 0.38,
+                    "source_achromatic_fraction": 0.14,
+                    "candidate_achromatic_fraction": 0.62,
+                    "source_gray_or_dark_fraction": 0.009,
+                }
+            )
+            self.assertTrue(eligibility["eligible"])
+            metrics = pipeline.prepare_warm_canonical_palette_recovery(
+                candidate_path,
+                source_path,
+                target_path,
+                source_achromatic_fraction=0.14,
+            )
+
+            recovered = np.asarray(
+                Image.open(target_path).convert("RGBA"),
+                dtype=np.uint8,
+            )
+            self.assertTrue(
+                np.array_equal(recovered[:, :, 3], candidate[:, :, 3])
+            )
+            self.assertTrue(
+                np.array_equal(recovered[28:36, 58:70], candidate[28:36, 58:70])
+            )
+            self.assertGreater(
+                float(recovered[50:100, 30:95, 0].mean()),
+                float(recovered[50:100, 30:95, 2].mean()),
+            )
+            self.assertGreater(metrics["recolored_pixels"], 1000)
+            self.assertTrue(metrics["alpha_geometry_preserved_exactly"])
+            self.assertFalse(metrics["source_spatial_pixels_copied"])
+
     def test_profile_geometry_first_final_bowl_retry_has_consistent_contact(
         self,
     ) -> None:

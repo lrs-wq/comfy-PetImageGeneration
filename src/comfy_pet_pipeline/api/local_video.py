@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.54"
+API_VERSION = "2.26.55"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -816,6 +816,9 @@ DOG_EATING_STATIC_POSE_FALLBACK_POLICY = (
 )
 DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY = (
     "canonical_identity_full_white_driver_eating_fallback_v1"
+)
+DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY = (
+    "reference_identity_full_white_driver_eating_recovery_v1"
 )
 DOG_EATING_CANONICAL_IDENTITY_FALLBACK_POLICY = (
     "upload_anchored_canonical_eating_identity_full_white_driver_v1"
@@ -2269,6 +2272,9 @@ def require_expected_scail_pose_policy(
     ):
         accepted_policies.add(DOG_EATING_STATIC_POSE_FALLBACK_POLICY)
         accepted_policies.add(DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY)
+        accepted_policies.add(
+            DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY
+        )
     if (
         action == "drinking"
         and expected_policy == DOG_DRINKING_REFERENCE_ALIGNED_POSE_POLICY
@@ -5990,6 +5996,29 @@ identity_palette_is_achromatic = _local_video_identity_quality.identity_palette_
 identity_palette_prompt = _local_video_identity_quality.identity_palette_prompt
 
 
+WARM_CANONICAL_PALETTE_RECOVERY_POLICY = (
+    _local_video_identity_quality.WARM_CANONICAL_PALETTE_RECOVERY_POLICY
+)
+WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES = (
+    _local_video_identity_quality.WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES
+)
+
+
+warm_canonical_palette_recovery_eligibility = (
+    _local_video_identity_quality.warm_canonical_palette_recovery_eligibility
+)
+
+
+prepare_warm_canonical_palette_recovery = (
+    _local_video_identity_quality.prepare_warm_canonical_palette_recovery
+)
+
+
+attempt_warm_canonical_palette_recovery = (
+    _local_video_identity_quality.attempt_warm_canonical_palette_recovery
+)
+
+
 identity_palette_retry_guidance = (
     _local_video_identity_quality.identity_palette_retry_guidance
 )
@@ -7030,6 +7059,9 @@ TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = (
 )
 DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY = (
     _local_video_subject_replacement.DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY
+)
+STANDING_TRANSPARENT_ADAPTIVE_MATTE_POLICY = (
+    _local_video_subject_replacement.STANDING_TRANSPARENT_ADAPTIVE_MATTE_POLICY
 )
 TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY = (
     _local_video_subject_replacement.TOILETING_SCAIL_TEMPORAL_IDENTITY_ARTIFACT_POLICY

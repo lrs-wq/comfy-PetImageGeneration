@@ -602,6 +602,7 @@ class SubjectReplacementEffectiveConfigTests(unittest.TestCase):
             pipeline.DOG_EATING_REFERENCE_ALIGNED_POSE_POLICY,
             pipeline.DOG_EATING_STATIC_POSE_FALLBACK_POLICY,
             pipeline.DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
+            pipeline.DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
         ):
             pipeline.require_expected_scail_pose_policy(
                 {"pose_metadata": {"policy": actual_policy}},
@@ -1554,6 +1555,17 @@ class TransparentGuidanceSelectionTests(unittest.TestCase):
         self.assertFalse(narrow["static_reference_mask"])
         self.assertEqual(drinking["policy"], "driver_pose_mask_v1")
         self.assertEqual(drinking["source_key"], "pose_mask_video")
+
+    def test_standing_uses_adaptive_canvas_matte(self) -> None:
+        plan = pipeline.select_transparent_guidance_policy("standing", {})
+
+        self.assertEqual(
+            plan["policy"],
+            pipeline.STANDING_TRANSPARENT_ADAPTIVE_MATTE_POLICY,
+        )
+        self.assertEqual(plan["source_key"], "pose_mask_video")
+        self.assertFalse(plan["static_reference_mask"])
+        self.assertTrue(plan["reference_aligned_uniform_background"])
 
     def test_full_driver_drinking_uses_static_bowl_retaining_matte(self) -> None:
         plan = pipeline.select_transparent_guidance_policy(

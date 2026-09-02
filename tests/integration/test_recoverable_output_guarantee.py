@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from PIL import Image, ImageDraw
+import numpy as np
+from PIL import Image, ImageDraw, ImageSequence
 
 import local_video_api as pipeline
 
@@ -528,6 +529,41 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
                 {result["action"] for result in final_job["subject_replacement_results"]},
                 {"eating", "standing"},
             )
+            results_by_action = {
+                str(result["action"]): result
+                for result in final_job["subject_replacement_results"]
+            }
+            eating_animation = results_by_action["eating"][
+                "transparent_metrics"
+            ]
+            self.assertEqual(
+                eating_animation["motion_policy"],
+                "localized_eating_head_nod_low_high_low_v1",
+            )
+            self.assertFalse(eating_animation["forced_position_jitter"])
+            with Image.open(
+                job_dir / gif_outputs["eating"]["filename"]
+            ) as encoded:
+                eating_frames = [
+                    np.asarray(frame.convert("RGBA"))[:, :, 3]
+                    for frame in ImageSequence.Iterator(encoded)
+                ]
+            first_alpha = eating_frames[0]
+            raised_alpha = eating_frames[len(eating_frames) // 2]
+            upper_changed = int(
+                np.count_nonzero(
+                    first_alpha[: TEST_GIF_SIZE // 2]
+                    != raised_alpha[: TEST_GIF_SIZE // 2]
+                )
+            )
+            lower_changed = int(
+                np.count_nonzero(
+                    first_alpha[TEST_GIF_SIZE * 3 // 4 :]
+                    != raised_alpha[TEST_GIF_SIZE * 3 // 4 :]
+                )
+            )
+            self.assertGreater(upper_changed, 8)
+            self.assertLessEqual(lower_changed, 4)
             self.assertEqual(
                 final_job["result_anomalies"][-1]["code"],
                 "degraded_output_fallback",
