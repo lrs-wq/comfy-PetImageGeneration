@@ -3118,6 +3118,126 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         selected_cartoon.get("completion_first_fallback")
                     ),
                 )
+                normalized_chroma["strict_acceptable"] = bool(
+                    normalized_chroma.get("acceptable")
+                )
+                normalized_issues = set(
+                    normalized_chroma.get("issues") or []
+                )
+                if normalized_issues == {
+                    "canonical_subject_interior_chroma_hole"
+                }:
+                    try:
+                        normalized_interior_recovery = (
+                            repair_canonical_cutout_interior_holes(
+                                cartoon_transparent
+                            )
+                        )
+                    except Exception as recovery_exc:  # noqa: BLE001 - visual recovery cannot end a valid task
+                        normalized_interior_recovery = {
+                            "policy": (
+                                CANONICAL_NORMALIZED_INTERIOR_RECOVERY_POLICY
+                            ),
+                            "attempted": True,
+                            "applied": False,
+                            "acceptable": False,
+                            "completion_blocked": False,
+                            "error": (
+                                f"{type(recovery_exc).__name__}: "
+                                f"{str(recovery_exc)[:1000]}"
+                            ),
+                        }
+                    normalized_chroma[
+                        "canonical_normalized_interior_recovery"
+                    ] = normalized_interior_recovery
+                    if normalized_interior_recovery.get("applied"):
+                        composite_rgba_reference_on_background(
+                            cartoon_transparent,
+                            cartoon_reference,
+                            (0, 255, 0),
+                        )
+                    if normalized_interior_recovery.get("acceptable") is True:
+                        normalized_chroma.update(
+                            {
+                                "acceptable": True,
+                                "issues": [],
+                                "canonical_interior_quality": (
+                                    normalized_interior_recovery.get(
+                                        "post_repair_quality"
+                                    )
+                                ),
+                                "normalization_recovered": True,
+                                "completion_blocked": False,
+                            }
+                        )
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "cartoon_reference_finalization",
+                                "attempt": selected_cartoon["attempt"],
+                                "reason": (
+                                    "scale_dependent_normalized_canonical_"
+                                    "interior_hole"
+                                ),
+                                "strategy": (
+                                    CANONICAL_NORMALIZED_INTERIOR_RECOVERY_POLICY
+                                ),
+                                "result": "accepted_after_candidate_only_repair",
+                                "recovery": normalized_interior_recovery,
+                            },
+                        )
+                        update_job(
+                            job_id,
+                            canonical_normalized_interior_recovery=(
+                                normalized_interior_recovery
+                            ),
+                        )
+                    elif GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED:
+                        runtime_issues = _validated_first_frame_image_issues(
+                            cartoon_transparent,
+                            expected_sha256=file_sha256(cartoon_transparent),
+                        )
+                        normalized_chroma[
+                            "runtime_integrity_issues"
+                        ] = runtime_issues
+                        if not runtime_issues:
+                            normalized_chroma.update(
+                                {
+                                    "acceptable": True,
+                                    "strict_acceptable": False,
+                                    "completion_first_visual_advisory": True,
+                                    "completion_blocked": False,
+                                }
+                            )
+                            selected_cartoon["completion_first_fallback"] = True
+                            append_recovery_event(
+                                job_id,
+                                {
+                                    "stage": "cartoon_reference_finalization",
+                                    "attempt": selected_cartoon["attempt"],
+                                    "reason": (
+                                        "normalized_canonical_interior_visual_"
+                                        "repair_unavailable"
+                                    ),
+                                    "strategy": (
+                                        GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                                    ),
+                                    "result": (
+                                        "accepted_runtime_integrity_visual_advisory"
+                                    ),
+                                    "recovery": normalized_interior_recovery,
+                                },
+                            )
+                            update_job(
+                                job_id,
+                                canonical_completion_fallback_used=True,
+                                canonical_completion_fallback_policy=(
+                                    GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                                ),
+                                canonical_normalized_interior_recovery=(
+                                    normalized_interior_recovery
+                                ),
+                            )
                 if not normalized_chroma["acceptable"]:
                     raise RuntimeError(
                         "Could not normalize the recovered cartoon reference to pure green."

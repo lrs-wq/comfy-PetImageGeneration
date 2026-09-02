@@ -154,7 +154,15 @@
       "type": "business_rule",
       "name": "暖色 canonical 连续底毛分布非阻断恢复",
       "status": "active",
-      "tags": ["canonical", "identity", "warm-coat", "no-white-patches", "lab-distribution", "no-spatial-source-copy", "alpha-geometry-preserved", "identity-revalidation", "completion-first"],
+      "tags": ["canonical", "identity", "warm-coat", "no-white-patches", "discrete-white-patch-threshold", "semantic-source-foreground", "lab-distribution", "no-spatial-source-copy", "alpha-geometry-preserved", "identity-revalidation", "completion-first"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
+    },
+    {
+      "id": "comfy.recovery.canonical_normalized_interior",
+      "type": "business_rule",
+      "name": "canonical 归一化尺度内部洞候选内有界恢复",
+      "status": "active",
+      "tags": ["canonical", "512-normalization", "scale-dependent-hole", "candidate-only", "bounded-medial-roi", "alpha-inpaint", "same-gate-revalidation", "visual-non-blocking", "runtime-integrity-required"],
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
     },
     {
@@ -330,6 +338,15 @@
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
     {
+      "id": "comfy.incident.v22655_scaled_canonical_hole_smoke",
+      "type": "incident",
+      "name": "v2.26.55 金毛 smoke 的尺度相关 canonical 最终化失败",
+      "path": "/data/comfy-pet-pipeline/outputs/local_video_api/20260902T092351Z-8709d1e5f0",
+      "status": "resolved_offline_pending_live_verification",
+      "tags": ["job-20260902T092351Z-8709d1e5f0", "dog", "golden-retriever", "standing", "original-ratio-0.003335", "normalized-ratio-0.004908", "visual-only-failure", "v2.26.56", "offline-repaired-ratio-0.000145"],
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
       "id": "comfy.action.cat_default",
       "type": "business_rule",
       "name": "猫默认动作：eating 与 grooming",
@@ -500,6 +517,12 @@
       "from": "comfy.module.pipeline",
       "relation": "recovers_with",
       "to": "comfy.recovery.warm_canonical_palette",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "recovers_with",
+      "to": "comfy.recovery.canonical_normalized_interior",
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
     },
     {
@@ -860,6 +883,18 @@
       "from": "comfy.verification.original_golden_three_issue_offline_v22655",
       "relation": "verifies",
       "to": "comfy.recovery.standing_adaptive_matte",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.incident.v22655_scaled_canonical_hole_smoke",
+      "relation": "resolved_by",
+      "to": "comfy.recovery.canonical_normalized_interior",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.incident.v22655_scaled_canonical_hole_smoke",
+      "relation": "exercises",
+      "to": "comfy.recovery.warm_canonical_palette",
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     }
   ]

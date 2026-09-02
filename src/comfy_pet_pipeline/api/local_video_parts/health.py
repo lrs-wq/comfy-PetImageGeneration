@@ -1143,6 +1143,26 @@ def health() -> dict[str, Any]:
                         "gray_or_dark_expansion_delta_min": (
                             IDENTITY_GRAY_OR_DARK_EXPANSION_DELTA_MIN
                         ),
+                        "discrete_white_patch": {
+                            "source_warm_min": (
+                                IDENTITY_WARM_COAT_DISCRETE_WHITE_SOURCE_WARM_MIN
+                            ),
+                            "source_white_max": (
+                                IDENTITY_WARM_COAT_DISCRETE_WHITE_SOURCE_MAX
+                            ),
+                            "candidate_white_min": (
+                                IDENTITY_WARM_COAT_DISCRETE_WHITE_CANDIDATE_MIN
+                            ),
+                            "white_delta_min": (
+                                IDENTITY_WARM_COAT_DISCRETE_WHITE_DELTA_MIN
+                            ),
+                        },
+                    },
+                    "normalized_interior_recovery": {
+                        "policy": CANONICAL_NORMALIZED_INTERIOR_RECOVERY_POLICY,
+                        "candidate_only": True,
+                        "source_spatial_pixels_copied": False,
+                        "visual_failure_blocks_completion": False,
                     },
                     "spatial_marking_gate": {
                         "policy": IDENTITY_MARKING_SPATIAL_POLICY,

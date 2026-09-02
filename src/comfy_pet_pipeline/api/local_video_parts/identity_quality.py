@@ -12,11 +12,15 @@ CANONICAL_INTERIOR_HOLE_GATE_POLICY = (
     "central_medial_overlap_component_v2"
 )
 CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN = 0.12
+CANONICAL_NORMALIZED_INTERIOR_RECOVERY_POLICY = (
+    "candidate_only_bounded_medial_alpha_inpaint_v2"
+)
 WARM_CANONICAL_PALETTE_RECOVERY_POLICY = (
     "warm_identity_distribution_without_spatial_pixel_copy_v1"
 )
 WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES = frozenset(
     {
+        "warm_source_invented_discrete_white_patches",
         "warm_source_recolored_achromatic",
         "new_gray_or_dark_markings_expanded",
         "invented_stripe_pattern",
@@ -199,6 +203,218 @@ def canonical_cutout_interior_quality(path: Path) -> dict[str, Any]:
         "largest_void_width_ratio": round(width_ratio, 6),
         "largest_void_height_ratio": round(height_ratio, 6),
     }
+
+
+def repair_canonical_cutout_interior_holes(path: Path) -> dict[str, Any]:
+    """Repair only alpha void regions that trip the canonical medial gate.
+
+    The repair is deliberately candidate-only: local generated RGB is inpainted
+    inside the same hull-bounded head/neck ROI used by the gate and no
+    uploaded/source pixel is copied. Canvas background outside that bounded ROI
+    is excluded, so natural lower-body spaces between legs and beside the tail
+    stay transparent even when a damaged neck void connects to the background.
+    """
+    _sync_local_video_runtime(
+        globals(),
+        {"repair_canonical_cutout_interior_holes"},
+    )
+
+    before = canonical_cutout_interior_quality(path)
+    result: dict[str, Any] = {
+        "policy": CANONICAL_NORMALIZED_INTERIOR_RECOVERY_POLICY,
+        "attempted": False,
+        "applied": False,
+        "acceptable": before.get("acceptable") is True,
+        "pre_repair_quality": before,
+        "candidate_only": True,
+        "source_spatial_pixels_copied": False,
+        "background_outside_gated_medial_roi_preserved": True,
+        "lower_body_and_tail_gaps_preserved": True,
+    }
+    if before.get("acceptable") is True:
+        result["reason"] = "canonical_interior_already_acceptable"
+        return result
+    if set(before.get("issues") or []) != {
+        "canonical_subject_interior_chroma_hole"
+    }:
+        result["reason"] = "canonical_interior_issue_not_repairable"
+        return result
+
+    result["attempted"] = True
+    with Image.open(path) as loaded:
+        rgba = np.asarray(loaded.convert("RGBA"), dtype=np.uint8).copy()
+    alpha = rgba[:, :, 3]
+    alpha_sha256_before = hashlib.sha256(alpha.tobytes()).hexdigest()
+    foreground = (alpha >= 64).astype(np.uint8)
+    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        foreground,
+        connectivity=8,
+    )
+    if component_count <= 1:
+        result["reason"] = "canonical_subject_missing_after_chroma_key"
+        return result
+    largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    component = (labels == largest_label).astype(np.uint8)
+    foreground_pixels = int(stats[largest_label, cv2.CC_STAT_AREA])
+    x0 = int(stats[largest_label, cv2.CC_STAT_LEFT])
+    y0 = int(stats[largest_label, cv2.CC_STAT_TOP])
+    subject_width = int(stats[largest_label, cv2.CC_STAT_WIDTH])
+    subject_height = int(stats[largest_label, cv2.CC_STAT_HEIGHT])
+    contours, _ = cv2.findContours(
+        component,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    if not contours:
+        result["reason"] = "canonical_subject_contour_unavailable"
+        return result
+    hull_mask = np.zeros(component.shape, dtype=np.uint8)
+    cv2.drawContours(
+        hull_mask,
+        [cv2.convexHull(max(contours, key=cv2.contourArea))],
+        -1,
+        1,
+        thickness=-1,
+    )
+    focus_x0 = x0 + int(round(subject_width * 0.18))
+    focus_x1 = x0 + int(round(subject_width * 0.82))
+    focus_y0 = y0 + int(round(subject_height * 0.28))
+    focus_y1 = y0 + int(round(subject_height * 0.58))
+    medial_x0 = x0 + int(round(subject_width * 0.36))
+    medial_x1 = x0 + int(round(subject_width * 0.64))
+
+    focus_mask = np.zeros(alpha.shape, dtype=np.uint8)
+    focus_mask[focus_y0:focus_y1, focus_x0:focus_x1] = 1
+    gate_void = (
+        (hull_mask > 0) & (component == 0) & (focus_mask > 0)
+    ).astype(np.uint8)
+    if min(gate_void.shape) >= 24:
+        gate_void = cv2.morphologyEx(
+            gate_void,
+            cv2.MORPH_OPEN,
+            np.ones((3, 3), dtype=np.uint8),
+        )
+    void_count, void_labels, void_stats, _ = cv2.connectedComponentsWithStats(
+        gate_void,
+        connectivity=8,
+    )
+    repair_mask = np.zeros(alpha.shape, dtype=bool)
+    repaired_components: list[dict[str, Any]] = []
+    for void_label in range(1, void_count):
+        gated = void_labels == void_label
+        gated_area = int(void_stats[void_label, cv2.CC_STAT_AREA])
+        if not gated_area:
+            continue
+        gated_width = int(void_stats[void_label, cv2.CC_STAT_WIDTH])
+        gated_height = int(void_stats[void_label, cv2.CC_STAT_HEIGHT])
+        medial_overlap = int(
+            np.count_nonzero(
+                gated[focus_y0:focus_y1, medial_x0:medial_x1]
+            )
+        )
+        medial_overlap_fraction = medial_overlap / float(max(1, gated_area))
+        if (
+            gated_area < max(96, int(round(foreground_pixels * 0.004)))
+            or gated_width / float(max(1, subject_width)) < 0.08
+            or gated_height / float(max(1, subject_height)) < 0.015
+            or medial_overlap_fraction
+            < CANONICAL_INTERIOR_VOID_MEDIAL_OVERLAP_FRACTION_MIN
+        ):
+            continue
+        # Include the anti-aliased rim, but keep the expansion inside the exact
+        # hull/focus corridor. This closes a scale-dependent neck hole without
+        # painting into canvas background or lower-body negative space.
+        repair_region = cv2.dilate(
+            gated.astype(np.uint8),
+            np.ones((5, 5), dtype=np.uint8),
+            iterations=1,
+        ).astype(bool)
+        repair_region &= (
+            (alpha < 192) & (hull_mask > 0) & (focus_mask > 0)
+        )
+        repair_mask |= repair_region
+        void_x = int(void_stats[void_label, cv2.CC_STAT_LEFT])
+        void_y = int(void_stats[void_label, cv2.CC_STAT_TOP])
+        repaired_components.append(
+            {
+                "label": void_label,
+                "bbox": [
+                    void_x,
+                    void_y,
+                    void_x + gated_width,
+                    void_y + gated_height,
+                ],
+                "gated_pixels": gated_area,
+                "repair_pixels": int(np.count_nonzero(repair_region)),
+                "medial_overlap_fraction": round(
+                    medial_overlap_fraction,
+                    6,
+                ),
+            }
+        )
+
+    repaired_pixels = int(np.count_nonzero(repair_mask))
+    if not repaired_pixels:
+        result["reason"] = "no_gate_matching_medial_void_region"
+        return result
+
+    repair_u8 = repair_mask.astype(np.uint8) * 255
+    reconstructed_rgb = rgba[:, :, :3].copy()
+    inpaint_radius = max(
+        3,
+        min(12, int(round(min(subject_width, subject_height) * 0.02))),
+    )
+    for channel in range(3):
+        reconstructed_rgb[:, :, channel] = cv2.inpaint(
+            reconstructed_rgb[:, :, channel],
+            repair_u8,
+            float(inpaint_radius),
+            cv2.INPAINT_TELEA,
+        )
+    ring = cv2.dilate(
+        repair_mask.astype(np.uint8),
+        np.ones((5, 5), dtype=np.uint8),
+        iterations=1,
+    ).astype(bool) & ~repair_mask & (alpha >= 64)
+    ring_alpha = alpha[ring]
+    fill_alpha = (
+        max(192, int(round(float(np.percentile(ring_alpha, 25)))))
+        if ring_alpha.size
+        else 255
+    )
+    rgba[:, :, :3][repair_mask] = reconstructed_rgb[repair_mask]
+    rgba[:, :, 3][repair_mask] = fill_alpha
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp.png")
+    try:
+        Image.fromarray(rgba, mode="RGBA").save(temporary, format="PNG", optimize=True)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+    after = canonical_cutout_interior_quality(path)
+    alpha_after = rgba[:, :, 3]
+    result.update(
+        {
+            "applied": True,
+            "acceptable": after.get("acceptable") is True,
+            "reason": (
+                "bounded_medial_alpha_void_repaired"
+                if after.get("acceptable") is True
+                else "repair_did_not_clear_canonical_interior_gate"
+            ),
+            "post_repair_quality": after,
+            "repaired_component_count": len(repaired_components),
+            "repaired_components": repaired_components,
+            "repaired_pixels": repaired_pixels,
+            "fill_alpha": fill_alpha,
+            "inpaint_radius": inpaint_radius,
+            "alpha_sha256_before": alpha_sha256_before,
+            "alpha_sha256_after": hashlib.sha256(
+                alpha_after.tobytes()
+            ).hexdigest(),
+        }
+    )
+    return result
 
 
 def evaluate_chroma_cutout(
@@ -1310,12 +1526,15 @@ def identity_palette_retry_guidance(
             "reference may not transfer its color into the pet."
         )
     if issues & {
+        "warm_source_invented_discrete_white_patches",
         "warm_source_recolored_achromatic",
         "source_chromatic_identity_accents_lost",
     }:
         guidance.append(
-            "Restore the source's genuine warm coat and localized chromatic accents "
-            "instead of flattening them into gray or white."
+            "Restore the source's genuine continuous warm coat and localized "
+            "chromatic accents instead of flattening them into gray or white; "
+            "remove every new white chest patch, sock, tail patch, blaze, and spot "
+            "that is absent from the upload."
         )
     return " " + " ".join(guidance)
 
@@ -1462,19 +1681,27 @@ def warm_canonical_palette_recovery_eligibility(
     source_gray_or_dark = float(
         palette.get("source_gray_or_dark_fraction", 1.0) or 0.0
     )
+    white_patch_issue_present = (
+        "warm_source_invented_discrete_white_patches" in issues
+    )
+    warm_loss_issue_present = "warm_source_recolored_achromatic" in issues
     checks = {
         "quality_available": palette.get("available") is True,
         "quality_failed": palette.get("acceptable") is not True,
-        "warm_loss_issue_present": (
-            "warm_source_recolored_achromatic" in issues
+        "warm_distribution_issue_present": (
+            warm_loss_issue_present or white_patch_issue_present
         ),
         "issues_distribution_repairable": bool(issues)
         and not (issues - WARM_CANONICAL_PALETTE_RECOVERY_ALLOWED_ISSUES),
         "source_is_strongly_warm": source_warm >= 0.65,
         "source_has_little_gray_or_dark_coat": source_gray_or_dark <= 0.08,
-        "candidate_lost_warm_coat": source_warm - candidate_warm >= 0.20,
+        "candidate_lost_warm_coat_or_invented_white_patch": (
+            source_warm - candidate_warm >= 0.20
+            or white_patch_issue_present
+        ),
         "candidate_gained_achromatic_coat": (
             candidate_achromatic - source_achromatic >= 0.15
+            or white_patch_issue_present
         ),
     }
     eligible = all(checks.values())
@@ -1526,6 +1753,37 @@ def prepare_warm_canonical_palette_recovery(
     source_alpha = source_rgba[:, :, 3]
     candidate_foreground = candidate_alpha > 96
     source_foreground = source_alpha > 96
+    source_mask_method = "alpha"
+    source_alpha_fraction = float(np.count_nonzero(source_foreground)) / float(
+        max(1, source_foreground.size)
+    )
+    if source_alpha_fraction > 0.95:
+        try:
+            from rembg import remove
+
+            semantic = remove(
+                Image.fromarray(source_rgba, mode="RGBA"),
+                session=get_rembg_session(),
+            )
+            if not isinstance(semantic, Image.Image):
+                semantic = Image.open(io.BytesIO(semantic)).convert("RGBA")
+            semantic_alpha = np.asarray(
+                semantic.convert("RGBA").getchannel("A"),
+                dtype=np.uint8,
+            )
+            semantic_foreground = semantic_alpha > 96
+            semantic_fraction = float(
+                np.count_nonzero(semantic_foreground)
+            ) / float(max(1, semantic_foreground.size))
+            if 0.02 <= semantic_fraction <= 0.95:
+                source_foreground = semantic_foreground
+                source_mask_method = f"rembg_{CHROMA_FALLBACK_REMBG_MODEL}"
+        except Exception:  # noqa: BLE001 - recovery stays non-blocking at caller
+            LOGGER.warning(
+                "Could not segment warm canonical recovery source %s",
+                source_identity.name,
+                exc_info=True,
+            )
     candidate_pixels = int(np.count_nonzero(candidate_foreground))
     source_pixels = int(np.count_nonzero(source_foreground))
     if candidate_pixels < 4096 or source_pixels < 1024:
@@ -1638,6 +1896,7 @@ def prepare_warm_canonical_palette_recovery(
         "target_sha256": file_sha256(target),
         "candidate_foreground_pixels": candidate_pixels,
         "source_foreground_pixels": source_pixels,
+        "source_foreground_mask_method": source_mask_method,
         "neutral_candidate_pixels": neutral_count,
         "preserved_source_supported_neutral_pixels": preserve_neutral_count,
         "reported_source_achromatic_fraction": round(
@@ -1927,6 +2186,8 @@ def identity_palette_quality(
     candidate_fur_warm = float(
         candidate_fractions.get("warm_brown_or_orange", 0.0)
     ) + float(candidate_fractions.get("yellow_or_gold", 0.0))
+    source_white_fraction = float(source_fractions.get("white", 0.0))
+    candidate_white_fraction = float(candidate_fractions.get("white", 0.0))
     source_gray_or_dark = float(source_fractions.get("black", 0.0)) + float(
         source_fractions.get("gray", 0.0)
     )
@@ -1982,6 +2243,16 @@ def identity_palette_quality(
     )
     if warm_coat_fraction_lost:
         issues.append("warm_source_recolored_achromatic")
+    invented_discrete_white_patches = bool(
+        source_coat_warm >= IDENTITY_WARM_COAT_DISCRETE_WHITE_SOURCE_WARM_MIN
+        and source_white_fraction <= IDENTITY_WARM_COAT_DISCRETE_WHITE_SOURCE_MAX
+        and candidate_white_fraction
+        >= IDENTITY_WARM_COAT_DISCRETE_WHITE_CANDIDATE_MIN
+        and candidate_white_fraction - source_white_fraction
+        >= IDENTITY_WARM_COAT_DISCRETE_WHITE_DELTA_MIN
+    )
+    if invented_discrete_white_patches:
+        issues.append("warm_source_invented_discrete_white_patches")
     gray_or_dark_markings_expanded = bool(
         source_coat_warm >= IDENTITY_WARM_COAT_SOURCE_MIN
         and source_gray_or_dark <= IDENTITY_GRAY_OR_DARK_SOURCE_MAX
@@ -2154,6 +2425,19 @@ def identity_palette_quality(
         "source_gray_or_dark_fraction": round(source_gray_or_dark, 6),
         "candidate_gray_or_dark_fraction": round(candidate_gray_or_dark, 6),
         "warm_coat_fraction_lost": warm_coat_fraction_lost,
+        "invented_discrete_white_patches": invented_discrete_white_patches,
+        "source_white_fraction": round(source_white_fraction, 6),
+        "candidate_white_fraction": round(candidate_white_fraction, 6),
+        "discrete_white_patch_thresholds": {
+            "source_warm_min": (
+                IDENTITY_WARM_COAT_DISCRETE_WHITE_SOURCE_WARM_MIN
+            ),
+            "source_white_max": IDENTITY_WARM_COAT_DISCRETE_WHITE_SOURCE_MAX,
+            "candidate_white_min": (
+                IDENTITY_WARM_COAT_DISCRETE_WHITE_CANDIDATE_MIN
+            ),
+            "white_delta_min": IDENTITY_WARM_COAT_DISCRETE_WHITE_DELTA_MIN,
+        },
         "gray_or_dark_markings_expanded": gray_or_dark_markings_expanded,
         "bidirectional_drift_policy": (
             IDENTITY_PALETTE_BIDIRECTIONAL_DRIFT_POLICY

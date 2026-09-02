@@ -743,6 +743,50 @@ class IdentityPaletteGuardTests(unittest.TestCase):
             quality["issues"],
         )
 
+    def test_warm_upper_body_rejects_new_discrete_white_patches(self) -> None:
+        source = self.golden_task_palette(candidate=False)
+        source.update(
+            {
+                "fractions": {
+                    **source["fractions"],
+                    "black": 0.004,
+                    "white": 0.009,
+                    "gray": 0.001,
+                    "warm_brown_or_orange": 0.956,
+                    "red_or_pink": 0.030,
+                },
+                "achromatic_fraction": 0.014,
+                "chromatic_fraction": 0.986,
+                "warm_fraction": 0.986,
+            }
+        )
+        candidate = {
+            **source,
+            "fractions": {
+                **source["fractions"],
+                "white": 0.100,
+                "warm_brown_or_orange": 0.865,
+            },
+            "achromatic_fraction": 0.105,
+            "chromatic_fraction": 0.895,
+            "warm_fraction": 0.895,
+        }
+
+        quality = pipeline.identity_palette_quality(source, candidate)
+        eligibility = pipeline.warm_canonical_palette_recovery_eligibility(
+            quality
+        )
+        guidance = pipeline.identity_palette_retry_guidance(quality)
+
+        self.assertFalse(quality["warm_coat_fraction_lost"], quality)
+        self.assertTrue(quality["invented_discrete_white_patches"], quality)
+        self.assertIn(
+            "warm_source_invented_discrete_white_patches",
+            quality["issues"],
+        )
+        self.assertTrue(eligibility["eligible"], eligibility)
+        self.assertIn("white chest patch", guidance)
+
     def test_golden_source_is_not_negated_as_golden_fur(self) -> None:
         source = self.golden_task_palette(candidate=False)
 

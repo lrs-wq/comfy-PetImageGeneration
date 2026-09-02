@@ -2101,6 +2101,37 @@ class CanonicalChromaIntegrityTests(unittest.TestCase):
         )
         self.assertGreater(hole_quality["largest_void_area_fraction"], 0.004)
 
+    def test_canonical_cutout_repairs_only_enclosed_medial_hole(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "hole.png"
+            image = Image.new("RGBA", (240, 320), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(image)
+            draw.ellipse((34, 18, 206, 164), fill=(190, 125, 62, 255))
+            draw.rectangle((54, 118, 186, 296), fill=(190, 125, 62, 255))
+            draw.rectangle((86, 124, 154, 148), fill=(0, 255, 0, 0))
+            image.save(path)
+            before_rgba = np.asarray(image, dtype=np.uint8)
+
+            recovery = pipeline.repair_canonical_cutout_interior_holes(path)
+            repaired = np.asarray(
+                Image.open(path).convert("RGBA"),
+                dtype=np.uint8,
+            )
+            quality = pipeline.canonical_cutout_interior_quality(path)
+
+        self.assertTrue(recovery["attempted"], recovery)
+        self.assertTrue(recovery["applied"], recovery)
+        self.assertTrue(recovery["acceptable"], recovery)
+        self.assertTrue(quality["acceptable"], quality)
+        self.assertGreater(recovery["repaired_pixels"], 1000)
+        self.assertEqual(recovery["repaired_component_count"], 1)
+        exterior = before_rgba[:, :, 3] == 0
+        exterior[124:149, 86:155] = False
+        self.assertTrue(np.array_equal(repaired[exterior], before_rgba[exterior]))
+        self.assertGreater(int(repaired[136, 120, 3]), 191)
+        self.assertTrue(recovery["candidate_only"])
+        self.assertFalse(recovery["source_spatial_pixels_copied"])
+
     def test_canonical_cutout_accepts_side_concavity_grazing_medial_corridor(
         self,
     ) -> None:
