@@ -2258,7 +2258,22 @@ def advisory_grooming_minimum_pose_quality(
             "full_pose_quality": pose_quality,
         }
     measured_issues = [str(issue) for issue in pose_quality.get("issues", [])]
+    measured_warnings = [
+        str(issue) for issue in pose_quality.get("warnings", [])
+    ]
     metrics = pose_quality.get("metrics")
+    topology = (
+        metrics.get("foreleg_topology")
+        if isinstance(metrics, dict)
+        and isinstance(metrics.get("foreleg_topology"), dict)
+        else {
+            "available": False,
+            "acceptable": True,
+            "issues": [],
+            "penalty": 0.0,
+            "blocking": False,
+        }
+    )
     appearance_consistency = (
         metrics.get("appearance_consistency")
         if isinstance(metrics, dict)
@@ -2289,13 +2304,30 @@ def advisory_grooming_minimum_pose_quality(
         for issue in measured_issues
         if issue in GROOMING_ADVISORY_BLOCKING_POSE_ISSUES
     ]
-    warnings = [issue for issue in measured_issues if issue not in blocking_issues]
+    warnings = list(
+        dict.fromkeys(
+            [
+                *measured_warnings,
+                *[
+                    issue
+                    for issue in measured_issues
+                    if issue not in blocking_issues
+                ],
+            ]
+        )
+    )
     return {
         "available": True,
         "acceptable": not blocking_issues,
         "issues": blocking_issues,
         "warnings": warnings,
-        "penalty": round(100.0 * len(blocking_issues), 6),
+        "penalty": round(
+            100.0 * len(blocking_issues)
+            + float(topology.get("penalty") or 0.0),
+            6,
+        ),
+        "topology": topology,
+        "topology_blocks_terminal_completion": False,
         "blocking_issue_policy": sorted(GROOMING_ADVISORY_BLOCKING_POSE_ISSUES),
         "hard_object_texture_evidence": {
             "available": bool(appearance_consistency.get("available") is True),
@@ -2581,6 +2613,7 @@ def evaluate_advisory_grooming_minimum_gate(
     identity_palette_reference_path: Path,
     geometry_guide: Path,
     geometry_metadata: Path,
+    topology_guide: Path | None = None,
     attempt: int = 1,
 ) -> dict[str, Any]:
     """Require recognizable identity and one real paw-to-mouth grooming limb.
@@ -2616,6 +2649,7 @@ def evaluate_advisory_grooming_minimum_gate(
         candidate,
         geometry_guide,
         geometry_metadata=geometry_metadata,
+        topology_guide=topology_guide,
     )
     pose_quality = advisory_grooming_minimum_pose_quality(full_pose_quality)
     issues = list(
@@ -2675,6 +2709,14 @@ def evaluate_advisory_grooming_minimum_gate(
         "geometry_guide_sha256": file_sha256(geometry_guide),
         "geometry_metadata_path": str(geometry_metadata),
         "geometry_metadata_sha256": file_sha256(geometry_metadata),
+        "topology_guide_path": (
+            str(topology_guide) if topology_guide is not None else None
+        ),
+        "topology_guide_sha256": (
+            file_sha256(topology_guide)
+            if topology_guide is not None and topology_guide.is_file()
+            else None
+        ),
         "identity_palette": palette_quality,
         "face_identity": face_quality,
         "canonical_action_edit": canonical_action_edit_quality,
@@ -2684,7 +2726,7 @@ def evaluate_advisory_grooming_minimum_gate(
 
 def advisory_grooming_degraded_candidate_selection_key(
     record: dict[str, Any],
-) -> tuple[int, int, int, int, int, float, float, int]:
+) -> tuple[int, int, int, int, float, int, int, int, int, float, float, int]:
     """Rank a complete raw Qwen draft when the strict action gate is exhausted.
 
     A gross full-body pose mismatch is ranked first because a horizontal
@@ -2701,6 +2743,15 @@ def advisory_grooming_degraded_candidate_selection_key(
     face = gate.get("face_identity")
     canonical_edit = gate.get("canonical_action_edit")
     canonical_edit = canonical_edit if isinstance(canonical_edit, dict) else {}
+    pose = gate.get("pose")
+    pose = pose if isinstance(pose, dict) else {}
+    topology = pose.get("topology")
+    topology = topology if isinstance(topology, dict) else {}
+    action_transfer = record.get("grooming_advisory_action_transfer")
+    anatomy_priority_retry = bool(
+        isinstance(action_transfer, dict)
+        and action_transfer.get("anatomy_priority_retry") is True
+    )
     metrics = canonical_edit.get("metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
     identity_unsafe = bool(
@@ -2727,6 +2778,13 @@ def advisory_grooming_degraded_candidate_selection_key(
     combined_penalty = float(record.get("combined_penalty") or 1000.0)
     return (
         int(gross_pose_mismatch),
+        int(topology.get("available") is not True),
+        int(
+            topology.get("available") is True
+            and topology.get("acceptable") is not True
+        ),
+        int(not anatomy_priority_retry),
+        float(topology.get("penalty") or 0.0),
         int(identity_unsafe),
         int(hard_object),
         int(evidence_missing),

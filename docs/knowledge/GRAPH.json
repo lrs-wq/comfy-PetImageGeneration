@@ -158,6 +158,14 @@
       "evidence": "src/comfy_pet_pipeline/quality/grooming_pose.py"
     },
     {
+      "id": "comfy.quality.grooming_foreleg_topology_advisory",
+      "type": "business_rule",
+      "name": "舔毛抬起前肢分离拓扑优先选择",
+      "status": "active",
+      "tags": ["grooming", "foreleg", "topology", "public-guide-separator", "low-frequency-edge", "anatomy-priority-attempts-4-5", "five-attempts", "advisory", "completion-first"],
+      "evidence": "src/comfy_pet_pipeline/quality/grooming_pose.py"
+    },
+    {
       "id": "comfy.recovery.grooming_scail_identity_best_effort",
       "type": "business_rule",
       "name": "舔毛 SCAIL 身份保持三轮选优",
@@ -321,6 +329,14 @@
       "status": "accepted",
       "tags": ["grooming", "canonical-identity", "appearance-free-geometry", "full-canvas-redraw", "global-pose", "scail-identity", "completion-first"],
       "evidence": "docs/knowledge/DECISIONS/0004-grooming-identity-geometry-separation.md"
+    },
+    {
+      "id": "comfy.decision.grooming_foreleg_topology_completion",
+      "type": "decision",
+      "name": "舔毛前肢拓扑优先且永不阻断完成",
+      "status": "accepted",
+      "tags": ["grooming", "foreleg-topology", "anatomy-freedom", "attempts-4-5", "five-attempts", "no-cache-read", "no-sixth-attempt", "completion-first"],
+      "evidence": "docs/knowledge/DECISIONS/0005-grooming-foreleg-topology-advisory.md"
     }
   ],
   "edges": [
@@ -428,6 +444,12 @@
     },
     {
       "from": "comfy.module.pipeline",
+      "relation": "checked_by",
+      "to": "comfy.quality.grooming_foreleg_topology_advisory",
+      "evidence": "src/comfy_pet_pipeline/quality/grooming_pose.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
       "relation": "recovers_with",
       "to": "comfy.recovery.grooming_scail_identity_best_effort",
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"
@@ -530,6 +552,18 @@
     },
     {
       "from": "comfy.module.pipeline",
+      "relation": "governed_by",
+      "to": "comfy.decision.grooming_foreleg_topology_completion",
+      "evidence": "docs/knowledge/DECISIONS/0005-grooming-foreleg-topology-advisory.md"
+    },
+    {
+      "from": "comfy.quality.grooming_foreleg_topology_advisory",
+      "relation": "governed_by",
+      "to": "comfy.decision.grooming_foreleg_topology_completion",
+      "evidence": "docs/knowledge/DECISIONS/0005-grooming-foreleg-topology-advisory.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
       "relation": "writes",
       "to": "comfy.runtime.data",
       "evidence": "docs/operations/PROJECT_LAYOUT.md"
@@ -575,6 +609,12 @@
       "relation": "governed_by",
       "to": "comfy.decision.completion_only_regression",
       "evidence": "docs/knowledge/DECISIONS/0002-historical-regression-gallery.md"
+    },
+    {
+      "from": "comfy.verification.historical_stability_gallery",
+      "relation": "reports",
+      "to": "comfy.quality.grooming_foreleg_topology_advisory",
+      "evidence": "src/comfy_pet_pipeline/regression/live_stability_gallery.py"
     },
     {
       "from": "comfy.verification.pomeranian_identity_recovery_live",

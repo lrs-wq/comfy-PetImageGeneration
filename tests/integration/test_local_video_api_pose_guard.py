@@ -444,8 +444,8 @@ class ValidatedFirstFrameCacheTests(unittest.TestCase):
             "validated_first_frame_cache": {"source_job_id": "source-job"},
         }
         current_gate = {
-            "policy": "grooming_action_identity_minimum_contract_v10",
-            "version": "10.0",
+            "policy": "grooming_action_identity_minimum_contract_v11",
+            "version": "11.0",
             "acceptable": True,
             "issues": [],
         }
@@ -455,6 +455,7 @@ class ValidatedFirstFrameCacheTests(unittest.TestCase):
             "identity_reference_path": Path("/current/canonical.png"),
             "geometry_guide": Path("/current/guide.png"),
             "geometry_metadata": Path("/current/guide.json"),
+            "topology_guide": Path("/current/public-guide.png"),
         }
 
         with patch.object(

@@ -653,11 +653,34 @@ def build_advisory_grooming_action_transfer_prompt(
     pose: str,
     *,
     profile_fur_lock: str = "",
+    anatomy_priority_retry: bool = False,
 ) -> str:
     """Return the canonical-identity plus appearance-free-geometry instruction."""
     _sync_local_video_runtime(globals(), {"build_advisory_grooming_action_transfer_prompt"})
 
     del pose, profile_fur_lock
+    if anatomy_priority_retry:
+        return (
+            "Image 1 is the cat identity reference. Image 2 is only a rough, "
+            "appearance-free grooming layout. Create one clean full-body frame of "
+            "the same cat naturally licking one raised front paw. Anatomical "
+            "plausibility has priority over exact guide alignment and exact pixel "
+            "identity: freely move the head, shoulders, elbows, wrists, paws, hips, "
+            "body proportions, framing, and minor markings whenever needed to make "
+            "a coherent living cat. Show exactly four attached legs total. The "
+            "viewer-left front leg must visibly begin at its shoulder, remain "
+            "continuous through one bent elbow and wrist, and end in exactly one "
+            "rounded paw at the tongue. Remove its old ground paw completely; do "
+            "not leave or invent a duplicate. The viewer-right front leg ends in "
+            "exactly one planted paw. Both hind legs attach at the hips and may be "
+            "partly hidden by the seated torso, but they must not resemble extra "
+            "front legs. Count the four legs and the two front paws before returning. "
+            "Keep recognizable colors, face, ears, natural fur, markings, and one "
+            "tail from Image 1 as well as anatomy allows. Use a flat pure #00FF00 "
+            "background with generous clearance. No floor, shadow, prop, clothing, "
+            "text, watermark, detached paw, fused limb, ghost limb, extra limb, or "
+            "extra subject."
+        )
     return (
         "Image 1 is the only cat identity and appearance authority. Image 2 is "
         "an appearance-free single-tone action-geometry guide, not a second cat. "

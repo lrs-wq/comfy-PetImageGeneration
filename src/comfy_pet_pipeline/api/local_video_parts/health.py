@@ -1678,6 +1678,11 @@ def health() -> dict[str, Any]:
                     "action_draft_maximum_attempts": (
                         GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
                     ),
+                    "anatomy_priority_retry_starts_at_attempt": (
+                        GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT
+                    ),
+                    "anatomy_priority_retry_guide_alignment": "advisory",
+                    "anatomy_priority_retry_can_relax_identity_detail": True,
                     "identity_refine_maximum_attempts": (
                         GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS
                     ),
@@ -1748,7 +1753,13 @@ def health() -> dict[str, Any]:
                             "raised_paw_too_far_from_muzzle",
                             "obvious_hard_object_instead_of_raised_paw",
                         ],
-                        "advisory_only_pose_observations": [],
+                        "advisory_only_pose_observations": [
+                            "raised_foreleg_separator_topology_unreliable",
+                        ],
+                        "foreleg_topology_policy": (
+                            "public_guide_semantic_foreleg_separator_alignment_v1"
+                        ),
+                        "foreleg_topology_blocks_terminal_completion": False,
                         "blocking_pose_issues": sorted(
                             GROOMING_ADVISORY_BLOCKING_POSE_ISSUES
                         ),
@@ -1761,7 +1772,8 @@ def health() -> dict[str, Any]:
                         "action_retry_guidance_never_blocks_final_attempt": True,
                         "final_attempt_fail_closed": False,
                         "terminal_selection_policy": (
-                            "gross_pose_then_identity_lowest_risk_complete_chain_v2"
+                            "gross_pose_then_foreleg_topology_then_anatomy_"
+                            "priority_retry_then_identity_complete_chain_v3"
                         ),
                         "strict_then_relaxed_threshold_scale_by_attempt": list(
                             GROOMING_ADVISORY_CANONICAL_ACTION_THRESHOLD_SCALE_BY_ATTEMPT

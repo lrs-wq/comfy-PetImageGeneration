@@ -140,7 +140,7 @@ def action_candidate_degraded_selection_key(
     )
 
     if action != "eating":
-        return (
+        base_key = (
             int(palette_unacceptable),
             float(palette.get("penalty", 1000.0))
             if isinstance(palette, dict)
@@ -160,6 +160,24 @@ def action_candidate_degraded_selection_key(
             if isinstance(similarity, dict)
             else 1000.0,
             attempt,
+        )
+        if action != "grooming":
+            return base_key
+        topology = grooming_foreleg_topology_selection_evidence(record)
+        anatomy_retry = record.get("grooming_advisory_action_transfer")
+        anatomy_priority_retry = bool(
+            isinstance(anatomy_retry, dict)
+            and anatomy_retry.get("anatomy_priority_retry") is True
+        )
+        return (
+            int(topology.get("available") is not True),
+            int(
+                topology.get("available") is True
+                and topology.get("acceptable") is not True
+            ),
+            int(not anatomy_priority_retry),
+            float(topology.get("penalty") or 0.0),
+            *base_key,
         )
 
     quality_issues = {
@@ -215,6 +233,50 @@ def action_candidate_degraded_selection_key(
         else 1000.0,
         attempt,
     )
+
+
+def grooming_foreleg_topology_selection_evidence(
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve the non-blocking topology audit used by grooming ranking."""
+
+    minimum_gate = record.get("grooming_advisory_minimum_gate")
+    pose = (
+        minimum_gate.get("pose")
+        if isinstance(minimum_gate, dict)
+        and isinstance(minimum_gate.get("pose"), dict)
+        else None
+    )
+    topology = (
+        pose.get("topology")
+        if isinstance(pose, dict)
+        and isinstance(pose.get("topology"), dict)
+        else None
+    )
+    if isinstance(topology, dict):
+        return topology
+    pose_gate = record.get("grooming_pose_gate")
+    metrics = (
+        pose_gate.get("metrics")
+        if isinstance(pose_gate, dict)
+        and isinstance(pose_gate.get("metrics"), dict)
+        else None
+    )
+    topology = (
+        metrics.get("foreleg_topology")
+        if isinstance(metrics, dict)
+        and isinstance(metrics.get("foreleg_topology"), dict)
+        else None
+    )
+    if isinstance(topology, dict):
+        return topology
+    return {
+        "available": False,
+        "acceptable": True,
+        "issues": [],
+        "penalty": 0.0,
+        "blocking": False,
+    }
 
 
 def exhausted_action_candidate_recovery_policy(
@@ -586,6 +648,7 @@ def revalidate_cached_grooming_minimum_gate(
     identity_reference_path: Path,
     geometry_guide: Path,
     geometry_metadata: Path,
+    topology_guide: Path | None = None,
 ) -> dict[str, Any]:
     """Rebind and rerun a cached grooming contract against current-job inputs."""
 
@@ -600,6 +663,7 @@ def revalidate_cached_grooming_minimum_gate(
         identity_reference_path=identity_reference_path,
         geometry_guide=geometry_guide,
         geometry_metadata=geometry_metadata,
+        topology_guide=topology_guide,
         attempt=max(1, int(record.get("attempt") or 1)),
     )
     gate = json.loads(json.dumps(gate))
@@ -4070,6 +4134,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                         geometry_metadata=(
                                             grooming_pose_gate_metadata_path
                                         ),
+                                        topology_guide=(
+                                            qwen_grooming_guide_path
+                                        ),
                                     )
                                 )
                             except (OSError, ValueError, KeyError, RuntimeError) as exc:
@@ -4544,6 +4611,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     attempt_prompt = build_advisory_grooming_action_transfer_prompt(
                         pose,
                         profile_fur_lock=profile_fur_lock,
+                        anatomy_priority_retry=(
+                            attempt
+                            >= GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT
+                        ),
                     )
                     grooming_advisory_action_transfer_attempt = {
                         "policy": GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY,
@@ -4570,6 +4641,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         ),
                         "canonical_local_action_edit_mask_applied": False,
                         "full_canvas_action_redraw": True,
+                        "anatomy_priority_retry": bool(
+                            attempt
+                            >= GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT
+                        ),
+                        "guide_alignment_is_advisory": bool(
+                            attempt
+                            >= GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT
+                        ),
+                        "terminal_completion_blocked_by_topology": False,
                         "full_canvas_redraw_reason": (
                             "local_latent_lock_retained_original_planted_paw_"
                             "topology"
@@ -7037,6 +7117,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             ),
                             geometry_guide=grooming_pose_gate_guide_path,
                             geometry_metadata=grooming_pose_gate_metadata_path,
+                            topology_guide=qwen_grooming_guide_path,
                             attempt=attempt,
                         )
                     )
@@ -10745,6 +10826,18 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 grooming_advisory_minimum_gate_selected[action_key(pose)] = (
                     selected_minimum_gate
                 )
+                selected_topology = grooming_foreleg_topology_selection_evidence(
+                    best_attempt
+                )
+                selected_topology_by_action = get_job(job_id).get(
+                    "grooming_foreleg_topology_selected"
+                )
+                selected_topology_by_action = (
+                    json.loads(json.dumps(selected_topology_by_action))
+                    if isinstance(selected_topology_by_action, dict)
+                    else {}
+                )
+                selected_topology_by_action[action_key(pose)] = selected_topology
                 update_job(
                     job_id,
                     grooming_pose_gate_status=(
@@ -10769,6 +10862,19 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     grooming_advisory_minimum_gate_selected=(
                         grooming_advisory_minimum_gate_selected
                     ),
+                    grooming_foreleg_topology_policy=(
+                        selected_topology.get("policy")
+                    ),
+                    grooming_foreleg_topology_status=(
+                        "advisory_passed"
+                        if selected_topology.get("available") is True
+                        and selected_topology.get("acceptable") is True
+                        else "advisory_drift"
+                    ),
+                    grooming_foreleg_topology_selected=(
+                        selected_topology_by_action
+                    ),
+                    grooming_foreleg_topology_blocks_completion=False,
                 )
             selected_pose_provenance = pose_attempt_provenance(best_attempt)
             if not selected_pose_provenance["complete"]:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import cv2
 import numpy as np
@@ -47,8 +49,8 @@ class GroomingTerminalPawSamplingTests(unittest.TestCase):
         return image, mask, cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     def test_policy_uses_terminal_paw_bands_and_small_contact_tolerance(self) -> None:
-        self.assertEqual(gate.POLICY, "main_case_grooming_raised_paw_cv_v4")
-        self.assertEqual(gate.GATE_VERSION, "4.0")
+        self.assertEqual(gate.POLICY, "main_case_grooming_raised_paw_cv_v5")
+        self.assertEqual(gate.GATE_VERSION, "5.0")
         self.assertEqual(self.sampling["policy"], "terminal_paw_bands_v2")
         self.assertEqual(self.sampling["band_height_pixels"], 56)
         self.assertEqual(self.sampling["raised"], [40, 206, 160, 262])
@@ -56,6 +58,79 @@ class GroomingTerminalPawSamplingTests(unittest.TestCase):
         self.assertEqual(self.thresholds.paw_muzzle_gap_max, 0.040)
         self.assertEqual(self.thresholds.structural_blur_sigma, 4.0)
         self.assertEqual(self.thresholds.structural_edge_density_min, 0.015)
+
+    def test_semantic_separator_topology_is_advisory_and_distinguishes_boundary(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            guide_path = Path(temp_dir) / "public_grooming_guide.png"
+            guide = np.zeros((512, 512, 3), dtype=np.uint8)
+            guide[:] = (0, 255, 0)
+            cv2.ellipse(guide, (256, 270), (150, 210), 0, 0, 360, (150, 150, 150), -1)
+            cv2.ellipse(
+                guide,
+                (230, 270),
+                (28, 78),
+                0,
+                70,
+                290,
+                (0, 255, 0),
+                12,
+                lineType=cv2.LINE_AA,
+            )
+            self.assertTrue(cv2.imwrite(str(guide_path), guide))
+
+            guide_image, guide_mask, guide_bbox, _ = gate._load_guide(guide_path)
+            _, normalized_mask = gate._normalized_crop(
+                guide_image,
+                guide_mask,
+                guide_bbox,
+                self.thresholds,
+            )
+            separator, separator_audit = gate._semantic_foreleg_separator(
+                normalized_mask
+            )
+            self.assertIsNotNone(separator)
+            self.assertTrue(separator_audit["available"])
+
+            good = np.full(
+                (
+                    self.thresholds.normalized_height,
+                    self.thresholds.normalized_width,
+                    3,
+                ),
+                185,
+                dtype=np.uint8,
+            )
+            candidate_mask = np.ones(good.shape[:2], dtype=bool)
+            boundary = cv2.morphologyEx(
+                separator.astype(np.uint8),
+                cv2.MORPH_GRADIENT,
+                np.ones((3, 3), dtype=np.uint8),
+            )
+            good[boundary.astype(bool)] = 35
+            good_evidence = gate._foreleg_topology_evidence(
+                good,
+                candidate_mask,
+                guide_path,
+                self.thresholds,
+            )
+            missing_evidence = gate._foreleg_topology_evidence(
+                np.full_like(good, 185),
+                candidate_mask,
+                guide_path,
+                self.thresholds,
+            )
+
+            self.assertTrue(good_evidence["available"])
+            self.assertTrue(good_evidence["acceptable"])
+            self.assertFalse(good_evidence["blocking"])
+            self.assertFalse(missing_evidence["acceptable"])
+            self.assertIn(
+                "raised_foreleg_separator_topology_unreliable",
+                missing_evidence["issues"],
+            )
+            self.assertFalse(missing_evidence["blocking"])
 
     def test_global_pose_alignment_rejects_horizontal_subject(self) -> None:
         guide = np.zeros((256, 256), dtype=bool)

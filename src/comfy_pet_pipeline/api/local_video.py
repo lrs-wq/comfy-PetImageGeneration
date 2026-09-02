@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.52"
+API_VERSION = "2.26.53"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -480,7 +480,7 @@ GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY = (
 )
 GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY = (
     "canonical_identity_image1_plus_single_tone_geometry_image2_"
-    "four_step_full_canvas_action_redraw_raw_qwen_v25"
+    "four_step_full_canvas_action_redraw_raw_qwen_v26"
 )
 GROOMING_ADVISORY_ACTION_TRANSFER_STEPS = 4
 GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT = (
@@ -496,6 +496,7 @@ GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE = (
 GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = len(
     GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT
 )
+GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT = 4
 DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
     "canonical_identity_image1_plus_white_model_geometry_image2_then_"
     "pose_safe_uploaded_identity_refine_v3"
@@ -542,9 +543,9 @@ GROOMING_ADVISORY_TOTAL_ATTEMPTS = (
     + GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS
 )
 GROOMING_ADVISORY_MINIMUM_GATE_POLICY = (
-    "grooming_action_identity_minimum_contract_v10"
+    "grooming_action_identity_minimum_contract_v11"
 )
-GROOMING_ADVISORY_MINIMUM_GATE_VERSION = "10.0"
+GROOMING_ADVISORY_MINIMUM_GATE_VERSION = "11.0"
 GROOMING_ADVISORY_IDENTITY_PALETTE_L1_MAX = 0.48
 GROOMING_ADVISORY_IDENTITY_BLACK_FRACTION_DELTA_MAX = 0.20
 GROOMING_ADVISORY_IDENTITY_CHROMATIC_FRACTION_DELTA_MAX = 0.14
@@ -599,6 +600,7 @@ GROOMING_ADVISORY_ACTION_RETRY_WARNINGS = frozenset(
         "raised_foreleg_structural_edge_density_too_low",
         "continuous_raised_foreleg_edge_too_short",
         "raised_paw_too_far_from_muzzle",
+        "raised_foreleg_separator_topology_unreliable",
     }
 )
 GROOMING_ADVISORY_ACTION_RETRY_BEFORE_ATTEMPT = (

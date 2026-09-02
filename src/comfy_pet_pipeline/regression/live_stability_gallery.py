@@ -414,6 +414,51 @@ def validate_completed_job(
     return validated, issues
 
 
+def job_visual_diagnostics(job: dict[str, Any]) -> dict[str, Any]:
+    """Keep posture evidence in the gallery without turning it into assertions."""
+
+    scail_statuses = job.get("scail_video_temporal_identity_status")
+    scail_statuses = scail_statuses if isinstance(scail_statuses, dict) else {}
+    scail_attempts = job.get("scail_video_attempts")
+    grooming_scail_attempts = (
+        scail_attempts.get("grooming")
+        if isinstance(scail_attempts, dict)
+        and isinstance(scail_attempts.get("grooming"), list)
+        else []
+    )
+    selected_scail_attempt = next(
+        (
+            item.get("attempt")
+            for item in grooming_scail_attempts
+            if isinstance(item, dict) and item.get("selected") is True
+        ),
+        None,
+    )
+    return {
+        "qwen_first_frame_selected_attempt": job.get(
+            "qwen_first_frame_best_effort_attempt"
+        )
+        or job.get("action_candidate_gate_selected_attempt"),
+        "grooming_minimum_gate_status": job.get(
+            "grooming_advisory_minimum_gate_status"
+        ),
+        "grooming_foreleg_topology_status": job.get(
+            "grooming_foreleg_topology_status"
+        ),
+        "grooming_foreleg_topology_policy": job.get(
+            "grooming_foreleg_topology_policy"
+        ),
+        "grooming_foreleg_topology_blocks_completion": job.get(
+            "grooming_foreleg_topology_blocks_completion"
+        ),
+        "grooming_foreleg_topology_selected": job.get(
+            "grooming_foreleg_topology_selected"
+        ),
+        "scail_grooming_status": scail_statuses.get("grooming"),
+        "scail_grooming_selected_attempt": selected_scail_attempt,
+    }
+
+
 def write_report(report_dir: Path, report: dict[str, Any]) -> None:
     (report_dir / "report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
@@ -491,6 +536,27 @@ def render_live_sheet(report_dir: Path, results: list[dict[str, Any]]) -> None:
 
 
 def write_html(report_dir: Path, report: dict[str, Any]) -> None:
+    def diagnostic_summary(item: dict[str, Any]) -> str:
+        diagnostics = item.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            return ""
+        values = [
+            (
+                "first-frame",
+                diagnostics.get("qwen_first_frame_selected_attempt"),
+            ),
+            (
+                "foreleg",
+                diagnostics.get("grooming_foreleg_topology_status"),
+            ),
+            ("SCAIL", diagnostics.get("scail_grooming_status")),
+        ]
+        return " · ".join(
+            f"{label}={value}"
+            for label, value in values
+            if value is not None and value != ""
+        )
+
     rows = "\n".join(
         "<tr>"
         f"<td>{html.escape(str(item['id']))}</td>"
@@ -498,6 +564,7 @@ def write_html(report_dir: Path, report: dict[str, Any]) -> None:
         f"<td>{html.escape(str(item.get('job_id') or ''))}</td>"
         f"<td class=\"{'pass' if item.get('passed') else 'fail'}\">"
         f"{'PASS' if item.get('passed') else 'FAIL'}</td>"
+        f"<td>{html.escape(diagnostic_summary(item))}</td>"
         f"<td>{html.escape('; '.join(item.get('issues', [])))}</td>"
         "</tr>"
         for item in report.get("cases", [])
@@ -518,7 +585,8 @@ code{{background:#f2f3f5;padding:2px 5px}}
 <p>Only completion and readable per-action outputs are asserted. Visual quality is not graded.</p>
 <img src="live-gallery.png" alt="Live stability gallery">
 <table><thead><tr><th>Case</th><th>Actions</th><th>New job</th>
-<th>Result</th><th>Issue</th></tr></thead><tbody>{rows}</tbody></table>
+<th>Result</th><th>Diagnostic (non-blocking)</th><th>Issue</th></tr></thead>
+<tbody>{rows}</tbody></table>
 </html>"""
     (report_dir / "index.html").write_text(document, encoding="utf-8")
 
@@ -585,6 +653,7 @@ def run_live_gallery(
                 "status": "not_submitted",
                 "stage": None,
                 "outputs": [],
+                "diagnostics": {},
                 "issues": [],
                 "passed": False,
             }
@@ -634,6 +703,7 @@ def run_live_gallery(
                     status=job.get("status"),
                     stage=job.get("stage"),
                     progress=job.get("progress"),
+                    diagnostics=job_visual_diagnostics(job),
                 )
                 outputs, issues = validate_completed_job(
                     client, api_root, headers, case, job, report_dir

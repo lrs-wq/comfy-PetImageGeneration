@@ -157,6 +157,39 @@ class LiveStabilityGalleryContractTest(unittest.TestCase):
         self.assertEqual(outputs, [])
         self.assertIn("no primary animation output", issues[0])
 
+    def test_visual_diagnostics_keep_topology_without_becoming_a_gate(self) -> None:
+        diagnostics = live.job_visual_diagnostics(
+            {
+                "qwen_first_frame_best_effort_attempt": 4,
+                "grooming_advisory_minimum_gate_status": "degraded_passed",
+                "grooming_foreleg_topology_status": "advisory_drift",
+                "grooming_foreleg_topology_policy": "separator-v1",
+                "grooming_foreleg_topology_blocks_completion": False,
+                "grooming_foreleg_topology_selected": {
+                    "grooming": {"acceptable": False, "penalty": 42.0}
+                },
+                "scail_video_temporal_identity_status": {
+                    "grooming": "best_effort"
+                },
+                "scail_video_attempts": {
+                    "grooming": [
+                        {"attempt": 1, "selected": False},
+                        {"attempt": 2, "selected": True},
+                    ]
+                },
+            }
+        )
+
+        self.assertEqual(diagnostics["qwen_first_frame_selected_attempt"], 4)
+        self.assertEqual(
+            diagnostics["grooming_foreleg_topology_status"],
+            "advisory_drift",
+        )
+        self.assertFalse(
+            diagnostics["grooming_foreleg_topology_blocks_completion"]
+        )
+        self.assertEqual(diagnostics["scail_grooming_selected_attempt"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

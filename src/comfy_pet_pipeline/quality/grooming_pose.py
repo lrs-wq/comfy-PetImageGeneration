@@ -24,8 +24,8 @@ import cv2
 import numpy as np
 
 
-POLICY = "main_case_grooming_raised_paw_cv_v4"
-GATE_VERSION = "4.0"
+POLICY = "main_case_grooming_raised_paw_cv_v5"
+GATE_VERSION = "5.0"
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,14 @@ class GroomingPoseThresholds:
     global_bbox_log_aspect_delta_max: float = 0.55
     global_silhouette_iou_min: float = 0.18
     global_silhouette_iou_aspect_delta_min: float = 0.25
+    topology_blur_sigma: float = 1.5
+    topology_canny_low: int = 20
+    topology_canny_high: int = 40
+    topology_match_radius_px: int = 8
+    topology_orientation_cosine_min: float = 0.65
+    topology_boundary_coverage_min: float = 0.50
+    topology_mean_distance_max: float = 8.0
+    topology_mean_orientation_min: float = 0.60
 
 
 DEFAULT_FORELEG_ROI = (0.10, 0.43, 0.48, 0.77)
@@ -504,6 +512,296 @@ def _structural_foreleg_evidence(
     }
 
 
+def _semantic_foreleg_separator(
+    topology_mask: np.ndarray,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    """Find the public guide's identity-free raised-foreleg separator.
+
+    The Qwen geometry image contains one deliberate green, vertical open
+    channel between the raised foreleg and the torso.  Unlike fur edges, this
+    channel is stable semantic evidence for the shoulder-to-paw branch.  Only
+    enclosed, vertically elongated holes are eligible so eyes, toes, and the
+    exterior background cannot become topology authority.
+    """
+
+    background = (~topology_mask).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        background,
+        connectivity=8,
+    )
+    height, width = topology_mask.shape
+    candidates: list[tuple[int, int, int, int, int, int]] = []
+    for label in range(1, count):
+        left = int(stats[label, cv2.CC_STAT_LEFT])
+        top = int(stats[label, cv2.CC_STAT_TOP])
+        component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+        component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        touches_border = bool(
+            left <= 0
+            or top <= 0
+            or left + component_width >= width
+            or top + component_height >= height
+        )
+        if (
+            not touches_border
+            and area >= 100
+            and component_height >= int(round(height * 0.12))
+            and component_height >= int(round(component_width * 1.5))
+        ):
+            candidates.append(
+                (
+                    label,
+                    area,
+                    left,
+                    top,
+                    component_width,
+                    component_height,
+                )
+            )
+    if not candidates:
+        return None, {
+            "available": False,
+            "reason": "semantic_foreleg_separator_unavailable",
+            "candidate_component_count": 0,
+        }
+    label, area, left, top, component_width, component_height = max(
+        candidates,
+        key=lambda item: (item[1], item[5], -item[2]),
+    )
+    separator = labels == label
+    return separator, {
+        "available": True,
+        "candidate_component_count": len(candidates),
+        "area": area,
+        "bbox": [
+            left,
+            top,
+            left + component_width,
+            top + component_height,
+        ],
+    }
+
+
+def _foreleg_topology_evidence(
+    candidate_image: np.ndarray,
+    candidate_mask: np.ndarray,
+    topology_guide: Path | None,
+    thresholds: GroomingPoseThresholds,
+) -> dict[str, Any]:
+    """Measure the guide's semantic arm/torso separator without blocking output.
+
+    Fine tabby stripes previously made any dense chest ROI look like a valid
+    raised limb.  This audit instead registers the intentionally carved green
+    separator from the public action guide, then looks for a similarly oriented
+    low-frequency boundary in the generated cat.  Its verdict is advisory: it
+    orders retries and records drift, but it never changes terminal completion.
+    """
+
+    if topology_guide is None:
+        return {
+            "available": False,
+            "acceptable": True,
+            "reason": "topology_guide_not_supplied",
+            "issues": [],
+            "penalty": 0.0,
+            "blocking": False,
+        }
+    try:
+        guide_image, guide_mask, guide_bbox, guide_mask_method = _load_guide(
+            topology_guide
+        )
+        _, guide_mask_normalized = _normalized_crop(
+            guide_image,
+            guide_mask,
+            guide_bbox,
+            thresholds,
+        )
+    except GroomingPoseInputError as exc:
+        return {
+            "available": False,
+            "acceptable": True,
+            "reason": str(exc),
+            "issues": [],
+            "penalty": 0.0,
+            "blocking": False,
+            "guide": str(topology_guide),
+        }
+
+    separator, separator_audit = _semantic_foreleg_separator(
+        guide_mask_normalized
+    )
+    if separator is None:
+        return {
+            **separator_audit,
+            "acceptable": True,
+            "issues": [],
+            "penalty": 0.0,
+            "blocking": False,
+            "guide": str(topology_guide),
+            "guide_mask_method": guide_mask_method,
+        }
+
+    separator_u8 = separator.astype(np.uint8)
+    boundary = cv2.morphologyEx(
+        separator_u8,
+        cv2.MORPH_GRADIENT,
+        np.ones((3, 3), dtype=np.uint8),
+    ).astype(bool)
+    expected_gradient_x = cv2.Sobel(
+        separator_u8.astype(np.float32),
+        cv2.CV_32F,
+        1,
+        0,
+        ksize=3,
+    )
+    expected_gradient_y = cv2.Sobel(
+        separator_u8.astype(np.float32),
+        cv2.CV_32F,
+        0,
+        1,
+        ksize=3,
+    )
+    expected_norm = np.hypot(expected_gradient_x, expected_gradient_y)
+    boundary &= expected_norm > 1e-6
+    boundary_points = np.argwhere(boundary)
+    if boundary_points.size == 0:
+        return {
+            **separator_audit,
+            "available": False,
+            "acceptable": True,
+            "reason": "semantic_foreleg_separator_boundary_unavailable",
+            "issues": [],
+            "penalty": 0.0,
+            "blocking": False,
+            "guide": str(topology_guide),
+            "guide_mask_method": guide_mask_method,
+        }
+
+    gray = cv2.cvtColor(candidate_image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(
+        gray,
+        (0, 0),
+        thresholds.topology_blur_sigma,
+    )
+    candidate_gradient_x = cv2.Sobel(
+        blurred,
+        cv2.CV_32F,
+        1,
+        0,
+        ksize=3,
+    )
+    candidate_gradient_y = cv2.Sobel(
+        blurred,
+        cv2.CV_32F,
+        0,
+        1,
+        ksize=3,
+    )
+    candidate_gradient_norm = np.hypot(
+        candidate_gradient_x,
+        candidate_gradient_y,
+    )
+    candidate_edges = cv2.Canny(
+        blurred,
+        thresholds.topology_canny_low,
+        thresholds.topology_canny_high,
+    ).astype(bool)
+    candidate_edges &= candidate_mask
+
+    radius = max(1, int(thresholds.topology_match_radius_px))
+    matches: list[bool] = []
+    matched_distances: list[float] = []
+    matched_orientations: list[float] = []
+    for y_value, x_value in boundary_points:
+        y = int(y_value)
+        x = int(x_value)
+        y0 = max(0, y - radius)
+        y1 = min(candidate_edges.shape[0], y + radius + 1)
+        x0 = max(0, x - radius)
+        x1 = min(candidate_edges.shape[1], x + radius + 1)
+        local_y, local_x = np.where(candidate_edges[y0:y1, x0:x1])
+        if local_x.size == 0:
+            matches.append(False)
+            matched_distances.append(float(radius * 2))
+            matched_orientations.append(0.0)
+            continue
+        edge_y = local_y + y0
+        edge_x = local_x + x0
+        distances = np.hypot(edge_x - x, edge_y - y)
+        expected_x = float(expected_gradient_x[y, x])
+        expected_y = float(expected_gradient_y[y, x])
+        expected_length = float(expected_norm[y, x]) + 1e-6
+        candidate_lengths = candidate_gradient_norm[edge_y, edge_x] + 1e-6
+        orientations = np.abs(
+            (
+                candidate_gradient_x[edge_y, edge_x] * expected_x
+                + candidate_gradient_y[edge_y, edge_x] * expected_y
+            )
+            / (candidate_lengths * expected_length)
+        )
+        scores = distances + radius * (1.0 - orientations)
+        selected = int(np.argmin(scores))
+        distance = float(distances[selected])
+        orientation = float(orientations[selected])
+        matches.append(
+            bool(
+                distance <= radius
+                and orientation >= thresholds.topology_orientation_cosine_min
+            )
+        )
+        matched_distances.append(distance)
+        matched_orientations.append(orientation)
+
+    coverage = float(np.mean(matches))
+    mean_distance = float(np.mean(matched_distances))
+    mean_orientation = float(np.mean(matched_orientations))
+    issues: list[str] = []
+    if (
+        coverage < thresholds.topology_boundary_coverage_min
+        or mean_distance > thresholds.topology_mean_distance_max
+        or mean_orientation < thresholds.topology_mean_orientation_min
+    ):
+        issues.append("raised_foreleg_separator_topology_unreliable")
+    penalty = (
+        (1.0 - coverage) * 100.0
+        + mean_distance * 4.0
+        + (1.0 - mean_orientation) * 50.0
+        + 25.0 * len(issues)
+    )
+    return {
+        "policy": "public_guide_semantic_foreleg_separator_alignment_v1",
+        "available": True,
+        "acceptable": not issues,
+        "issues": issues,
+        "penalty": round(float(penalty), 6),
+        "blocking": False,
+        "guide": str(topology_guide),
+        "guide_mask_method": guide_mask_method,
+        "separator": separator_audit,
+        "boundary_point_count": int(boundary_points.shape[0]),
+        "boundary_coverage": round(coverage, 6),
+        "mean_match_distance_px": round(mean_distance, 6),
+        "mean_orientation_cosine": round(mean_orientation, 6),
+        "thresholds": {
+            "blur_sigma": thresholds.topology_blur_sigma,
+            "canny": [
+                thresholds.topology_canny_low,
+                thresholds.topology_canny_high,
+            ],
+            "match_radius_px": radius,
+            "orientation_cosine_min": (
+                thresholds.topology_orientation_cosine_min
+            ),
+            "boundary_coverage_min": (
+                thresholds.topology_boundary_coverage_min
+            ),
+            "mean_distance_max": thresholds.topology_mean_distance_max,
+            "mean_orientation_min": thresholds.topology_mean_orientation_min,
+        },
+    }
+
+
 def _continuous_edge_component(
     edge_roi: np.ndarray,
     roi_box: Sequence[int],
@@ -684,6 +982,7 @@ def evaluate_grooming_pose(
     geometry_guide: str | Path,
     *,
     geometry_metadata: str | Path | Mapping[str, Any] | None = None,
+    topology_guide: str | Path | None = None,
     thresholds: GroomingPoseThresholds | None = None,
 ) -> dict[str, Any]:
     """Return JSON-safe raised-paw grooming metrics and a fail-closed verdict."""
@@ -696,6 +995,7 @@ def evaluate_grooming_pose(
         "version": GATE_VERSION,
         "candidate": str(candidate_path),
         "geometry_guide": str(guide_path),
+        "topology_guide": str(topology_guide) if topology_guide is not None else None,
         "thresholds": asdict(active),
     }
     try:
@@ -737,6 +1037,13 @@ def evaluate_grooming_pose(
             "warnings": [],
             "penalty": 1000.0,
         }
+
+    topology = _foreleg_topology_evidence(
+        candidate_normalized,
+        candidate_mask_normalized,
+        Path(topology_guide) if topology_guide is not None else None,
+        active,
+    )
 
     foreleg_box = _roi_pixels(foreleg_roi, active)
     muzzle_box = _roi_pixels(muzzle_roi, active)
@@ -937,7 +1244,13 @@ def evaluate_grooming_pose(
         )
         / max(active.continuous_edge_span_min, 1e-6),
     ]
-    penalty = 25.0 * len(issues) + 25.0 * sum(shortfalls)
+    topology_warnings = [str(issue) for issue in topology.get("issues", [])]
+    warnings = list(dict.fromkeys([*warnings, *topology_warnings]))
+    penalty = (
+        25.0 * len(issues)
+        + 25.0 * sum(shortfalls)
+        + float(topology.get("penalty") or 0.0)
+    )
     return {
         **base,
         "available": True,
@@ -978,6 +1291,7 @@ def evaluate_grooming_pose(
             "continuous_edge": continuous,
             "paw_muzzle_contact": contact,
             "appearance_consistency": appearance,
+            "foreleg_topology": topology,
         },
     }
 

@@ -2265,6 +2265,90 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             ),
         )
 
+    def test_grooming_degraded_selection_prefers_topology_before_identity(
+        self,
+    ) -> None:
+        def candidate(
+            *,
+            attempt: int,
+            topology_penalty: float,
+            palette_penalty: float,
+            anatomy_priority_retry: bool,
+        ) -> dict[str, object]:
+            return {
+                "attempt": attempt,
+                "identity_palette": {
+                    "acceptable": True,
+                    "penalty": palette_penalty,
+                },
+                "similarity": {"acceptable": True, "penalty": 0.0},
+                "fur_silhouette": {"acceptable": True, "penalty": 0.0},
+                "quality": {"acceptable": True, "penalty": 0.0},
+                "chroma": {
+                    "acceptable": True,
+                    "transparent_edge_quality": {
+                        "acceptable": True,
+                        "penalty": 0.0,
+                    },
+                },
+                "grooming_advisory_action_transfer": {
+                    "anatomy_priority_retry": anatomy_priority_retry,
+                },
+                "grooming_advisory_minimum_gate": {
+                    "pose": {
+                        "topology": {
+                            "available": True,
+                            "acceptable": True,
+                            "penalty": topology_penalty,
+                            "blocking": False,
+                        }
+                    }
+                },
+            }
+
+        identity_closer_but_ambiguous = candidate(
+            attempt=1,
+            topology_penalty=40.0,
+            palette_penalty=1.0,
+            anatomy_priority_retry=False,
+        )
+        freer_anatomy_retry = candidate(
+            attempt=4,
+            topology_penalty=45.0,
+            palette_penalty=80.0,
+            anatomy_priority_retry=True,
+        )
+        self.assertLess(
+            pipeline.action_candidate_degraded_selection_key(
+                freer_anatomy_retry,
+                action="grooming",
+            ),
+            pipeline.action_candidate_degraded_selection_key(
+                identity_closer_but_ambiguous,
+                action="grooming",
+            ),
+        )
+
+        broken_freer_retry = candidate(
+            attempt=5,
+            topology_penalty=5.0,
+            palette_penalty=0.0,
+            anatomy_priority_retry=True,
+        )
+        broken_freer_retry["grooming_advisory_minimum_gate"]["pose"][
+            "topology"
+        ]["acceptable"] = False
+        self.assertLess(
+            pipeline.action_candidate_degraded_selection_key(
+                identity_closer_but_ambiguous,
+                action="grooming",
+            ),
+            pipeline.action_candidate_degraded_selection_key(
+                broken_freer_retry,
+                action="grooming",
+            ),
+        )
+
     def test_exhausted_action_candidate_uses_generated_completion_fallback(
         self,
     ) -> None:

@@ -796,6 +796,18 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         for forbidden_token in ("white maquette", "video frame"):
             self.assertNotIn(forbidden_token.lower(), prompt.lower())
 
+        anatomy_retry = pipeline.build_advisory_grooming_action_transfer_prompt(
+            pipeline.subject_replacement_pose_prompt("grooming"),
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+            anatomy_priority_retry=True,
+        )
+        self.assertIn("Anatomical plausibility has priority", anatomy_retry)
+        self.assertIn("freely move the head, shoulders", anatomy_retry)
+        self.assertIn("Show exactly four attached legs total", anatomy_retry)
+        self.assertIn("Remove its old ground paw completely", anatomy_retry)
+        self.assertIn("must not resemble extra front legs", anatomy_retry)
+        self.assertNotEqual(prompt, anatomy_retry)
+
         refine_prompt = pipeline.build_advisory_grooming_identity_refine_prompt(
             pipeline.subject_replacement_pose_prompt("grooming"),
             source_attempt=1,
@@ -1308,9 +1320,16 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         )
         self.assertEqual(
             minimum_contract["terminal_selection_policy"],
-            "gross_pose_then_identity_lowest_risk_complete_chain_v2",
+            "gross_pose_then_foreleg_topology_then_anatomy_priority_retry_"
+            "then_identity_complete_chain_v3",
         )
-        self.assertEqual(minimum_contract["advisory_only_pose_observations"], [])
+        self.assertEqual(
+            minimum_contract["advisory_only_pose_observations"],
+            ["raised_foreleg_separator_topology_unreliable"],
+        )
+        self.assertFalse(
+            minimum_contract["foreleg_topology_blocks_terminal_completion"]
+        )
         self.assertIn(
             "raised_paw_too_far_from_muzzle",
             minimum_contract["blocking_pose_issues"],
@@ -1354,6 +1373,40 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
                 for node in workflow.values()
             )
         )
+
+    def test_advisory_grooming_attempt4_uses_anatomy_priority_freedom(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="grooming",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=4,
+                advisory_grooming_minimum_acceptable=False,
+                action_chroma_acceptable_attempts={1, 2, 3},
+                identity_palette_guard=True,
+                uploaded_white_maquette=True,
+                visual_audits_blocking=False,
+            )
+
+        load_images = {
+            node["inputs"]["image"]
+            for node in workflow.values()
+            if node.get("class_type") == "LoadImage"
+        }
+        expected_prefix = "local_video_api/capture-grooming/"
+        self.assertEqual(
+            load_images,
+            {expected_prefix + "cartoon_reference.png", pose_input},
+        )
+        self.assertNotIn(uploaded_input, load_images)
+        prompt = workflow["6"]["inputs"]["prompt"]
+        self.assertIn("Anatomical plausibility has priority", prompt)
+        self.assertIn("freely move the head, shoulders", prompt)
+        self.assertIn("Show exactly four attached legs total", prompt)
+        self.assertIn("Remove its old ground paw completely", prompt)
+        self.assertEqual(workflow["14"]["inputs"]["steps"], 4)
 
     def test_advisory_grooming_hard_object_attempt3_restarts_from_clean_canonical(
         self,
