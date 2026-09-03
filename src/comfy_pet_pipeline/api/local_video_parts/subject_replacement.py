@@ -94,8 +94,8 @@ DRINKING_OUTPUT_SOURCE_SILHOUETTE_RETENTION_RATIO_MIN = 0.65
 DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN = 0.75
 DRINKING_SCAIL_BACKGROUND_DISTANCE_MIN = 24.0
 
-EATING_SCAIL_TEMPORAL_ACTION_POLICY = "eating_muzzle_motion_and_visible_energy_gate_v3"
-EATING_SCAIL_BEST_EFFORT_POLICY = "eating_muzzle_motion_best_of_five_v2"
+EATING_SCAIL_TEMPORAL_ACTION_POLICY = "eating_muzzle_motion_and_visible_energy_gate_v4"
+EATING_SCAIL_BEST_EFFORT_POLICY = "eating_local_action_motion_best_of_five_v3"
 EATING_SCAIL_MAX_ATTEMPTS = 5
 # A retry for insufficient eating motion must strengthen, never weaken, the
 # white-model pose signal.  Later attempts stay at the safe 1.35 effective
@@ -113,6 +113,9 @@ EATING_SCAIL_FIRST_FRAME_MAE_MAX_MIN = 3.0
 EATING_SCAIL_MUZZLE_MOTION_MIN_PX = 8.0
 EATING_SCAIL_MUZZLE_HEAD_LIFT_RETENTION_RATIO_MIN = 0.25
 EATING_SCAIL_MUZZLE_DARK_LUMA_MAX = 125
+EATING_SCAIL_FULL_DRIVER_HEAD_CORRIDOR_MAE_MIN = 28.0
+EATING_SCAIL_FULL_DRIVER_HEAD_CORRIDOR_CHANGED_FRACTION_MIN = 0.40
+EATING_SCAIL_FULL_DRIVER_HEAD_CORRIDOR_PIXEL_DELTA_MIN = 20.0
 
 GROOMING_SCAIL_IDENTITY_RETENTION_POLICY = (
     "grooming_reference_identity_vs_driver_appearance_gate_v1"
@@ -783,6 +786,40 @@ def _eating_muzzle_tracking_metadata(
 
     bowl_width = bowl_right - bowl_left
     corridor_margin = max(8.0, bowl_width * 0.12)
+    identity_bboxes = pose_metadata.get("identity_bbox_by_frame")
+    identity_tops: list[float] = []
+    if isinstance(identity_bboxes, list):
+        for bbox in identity_bboxes:
+            try:
+                _left, top, _right, bottom = (float(value) for value in bbox)
+            except (TypeError, ValueError):
+                continue
+            if 0.0 <= top < bottom <= canvas_height:
+                identity_tops.append(top)
+    if identity_tops:
+        return (
+            {
+                "tracking_mode": "full_driver_head_corridor_change_v1",
+                "reference_canvas_size": [canvas_width, canvas_height],
+                "head_motion_corridor_bbox": [
+                    max(0.0, bowl_left - corridor_margin - 8.0),
+                    max(0.0, min(identity_tops) - 8.0),
+                    min(canvas_width, bowl_right + corridor_margin + 8.0),
+                    bowl_top,
+                ],
+                "head_corridor_excursion_mae_minimum": (
+                    EATING_SCAIL_FULL_DRIVER_HEAD_CORRIDOR_MAE_MIN
+                ),
+                "head_corridor_changed_fraction_minimum": (
+                    EATING_SCAIL_FULL_DRIVER_HEAD_CORRIDOR_CHANGED_FRACTION_MIN
+                ),
+                "head_corridor_pixel_delta_minimum": (
+                    EATING_SCAIL_FULL_DRIVER_HEAD_CORRIDOR_PIXEL_DELTA_MIN
+                ),
+            },
+            "full_driver_head_corridor_change",
+        )
+
     head_lift_px = max(
         32.0,
         float(pose_metadata.get("identity_center_y_span") or 0.0),
@@ -810,6 +847,154 @@ def _eating_muzzle_tracking_metadata(
         },
         "full_driver_static_bowl_bbox",
     )
+
+
+def _eating_full_driver_head_corridor_motion_signature(
+    frames: list[np.ndarray],
+    pose_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Measure the prepared dog's full low-high-low head path above its bowl.
+
+    A full-driver result cannot be audited with a fixed crop immediately above
+    the bowl: once the dog raises its head, the real muzzle leaves that crop and
+    coat shadows can be mistaken for a pinned mouth.  The digest-bound driver
+    supplies per-frame identity boxes, so its highest head extent defines a
+    stable bowl-adjacent corridor.  We then require robust first-frame change
+    across that whole corridor rather than following the lowest dark pixel.
+    """
+
+    corridor_bbox = pose_metadata.get("head_motion_corridor_bbox")
+    canvas_size = pose_metadata.get("reference_canvas_size", [512, 512])
+    try:
+        corridor_left, corridor_top, corridor_right, corridor_bottom = (
+            float(value) for value in corridor_bbox
+        )
+        canvas_width, canvas_height = (float(value) for value in canvas_size)
+        excursion_minimum = float(
+            pose_metadata["head_corridor_excursion_mae_minimum"]
+        )
+        changed_fraction_minimum = float(
+            pose_metadata["head_corridor_changed_fraction_minimum"]
+        )
+        pixel_delta_minimum = float(
+            pose_metadata["head_corridor_pixel_delta_minimum"]
+        )
+    except (KeyError, TypeError, ValueError):
+        return {
+            "available": False,
+            "reason": "eating_head_corridor_metadata_unavailable",
+            "sample_count": 0,
+            "motion_ratio": 0.0,
+        }
+    if (
+        canvas_width <= 0
+        or canvas_height <= 0
+        or corridor_right <= corridor_left
+        or corridor_bottom <= corridor_top
+        or excursion_minimum <= 0
+        or not 0.0 < changed_fraction_minimum <= 1.0
+        or pixel_delta_minimum <= 0
+    ):
+        return {
+            "available": False,
+            "reason": "eating_head_corridor_metadata_invalid",
+            "sample_count": 0,
+            "motion_ratio": 0.0,
+        }
+
+    grayscale_rois: list[np.ndarray] = []
+    tracked_frame_indices: list[int] = []
+    roi_by_frame: list[list[int]] = []
+    reference_shape: tuple[int, int] | None = None
+    for frame_index, frame in enumerate(frames):
+        if not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] != 3:
+            continue
+        height, width = frame.shape[:2]
+        scale_x = float(width) / canvas_width
+        scale_y = float(height) / canvas_height
+        x0 = max(0, int(round(corridor_left * scale_x)))
+        y0 = max(0, int(round(corridor_top * scale_y)))
+        x1 = min(width, int(round(corridor_right * scale_x)))
+        y1 = min(height, int(round(corridor_bottom * scale_y)))
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            continue
+        gray = cv2.cvtColor(
+            np.asarray(frame[y0:y1, x0:x1], dtype=np.uint8),
+            cv2.COLOR_RGB2GRAY,
+        )
+        if reference_shape is None:
+            reference_shape = gray.shape
+        elif gray.shape != reference_shape:
+            gray = cv2.resize(
+                gray,
+                (reference_shape[1], reference_shape[0]),
+                interpolation=cv2.INTER_AREA,
+            )
+        grayscale_rois.append(gray.astype(np.float32))
+        tracked_frame_indices.append(frame_index)
+        roi_by_frame.append([x0, y0, x1, y1])
+
+    minimum_samples = max(5, min(9, len(frames)))
+    available = len(grayscale_rois) >= minimum_samples
+    if not available:
+        return {
+            "available": False,
+            "reason": "eating_head_corridor_frames_unavailable",
+            "sample_count": len(grayscale_rois),
+            "tracked_frame_indices": tracked_frame_indices,
+            "roi_by_sample": roi_by_frame,
+            "motion_ratio": 0.0,
+        }
+
+    first = grayscale_rois[0]
+    excursion_by_frame: list[float] = []
+    changed_fraction_by_frame: list[float] = []
+    for gray in grayscale_rois:
+        delta = np.abs(gray - first)
+        excursion_by_frame.append(float(np.mean(delta)))
+        changed_fraction_by_frame.append(
+            float(np.mean(delta >= pixel_delta_minimum))
+        )
+    excursion_p90 = float(np.percentile(excursion_by_frame, 90))
+    changed_fraction_p90 = float(
+        np.percentile(changed_fraction_by_frame, 90)
+    )
+    excursion_ratio = excursion_p90 / excursion_minimum
+    changed_fraction_ratio = changed_fraction_p90 / changed_fraction_minimum
+    motion_ratio = min(excursion_ratio, changed_fraction_ratio)
+    return {
+        "available": True,
+        "reason": None,
+        "tracking_policy": "full_driver_head_corridor_change_v1",
+        "sample_count": len(grayscale_rois),
+        "tracked_frame_indices": tracked_frame_indices,
+        "roi_by_sample": roi_by_frame,
+        "first_frame_excursion_mae_by_sample": [
+            round(value, 6) for value in excursion_by_frame
+        ],
+        "changed_pixel_fraction_by_sample": [
+            round(value, 6) for value in changed_fraction_by_frame
+        ],
+        "head_corridor_excursion_mae_p90": round(excursion_p90, 6),
+        "head_corridor_excursion_mae_minimum": round(excursion_minimum, 6),
+        "head_corridor_changed_fraction_p90": round(
+            changed_fraction_p90,
+            6,
+        ),
+        "head_corridor_changed_fraction_minimum": round(
+            changed_fraction_minimum,
+            6,
+        ),
+        "head_corridor_pixel_delta_minimum": round(pixel_delta_minimum, 6),
+        "head_corridor_excursion_ratio": round(excursion_ratio, 6),
+        "head_corridor_changed_fraction_ratio": round(
+            changed_fraction_ratio,
+            6,
+        ),
+        "motion_ratio": round(motion_ratio, 6),
+        "y_span_px": None,
+        "required_y_span_px": None,
+    }
 
 
 def _eating_muzzle_motion_signature(
@@ -974,7 +1159,16 @@ def eating_scail_video_motion_quality(
     tracking_metadata, tracking_source = _eating_muzzle_tracking_metadata(pose_metadata)
     muzzle_motion_required = tracking_metadata is not None
     muzzle_motion = (
-        _eating_muzzle_motion_signature(frames, tracking_metadata)
+        _eating_full_driver_head_corridor_motion_signature(
+            frames,
+            tracking_metadata,
+        )
+        if (
+            isinstance(tracking_metadata, dict)
+            and tracking_metadata.get("tracking_mode")
+            == "full_driver_head_corridor_change_v1"
+        )
+        else _eating_muzzle_motion_signature(frames, tracking_metadata)
         if tracking_metadata is not None
         else {
             "available": None,
@@ -987,6 +1181,9 @@ def eating_scail_video_motion_quality(
     if muzzle_motion_required:
         if muzzle_motion.get("available") is not True:
             issues.append("eating_muzzle_motion_unavailable")
+        elif muzzle_motion.get("motion_ratio") is not None:
+            if float(muzzle_motion["motion_ratio"]) < 1.0:
+                issues.append("eating_muzzle_motion_too_low")
         elif float(muzzle_motion["y_span_px"]) < float(muzzle_motion["required_y_span_px"]):
             issues.append("eating_muzzle_motion_too_low")
     return {
@@ -1042,15 +1239,21 @@ def eating_scail_best_effort_score(
     muzzle_ratio: float | None = None
     muzzle_motion = quality.get("muzzle_motion")
     if quality.get("muzzle_motion_required") is True and isinstance(muzzle_motion, dict):
-        muzzle_span = max(
-            0.0,
-            float(muzzle_motion.get("y_span_px") or 0.0),
-        )
-        muzzle_minimum = max(
-            1e-9,
-            float(muzzle_motion.get("required_y_span_px") or 0.0),
-        )
-        muzzle_ratio = muzzle_span / muzzle_minimum
+        if muzzle_motion.get("motion_ratio") is not None:
+            muzzle_ratio = max(
+                0.0,
+                float(muzzle_motion.get("motion_ratio") or 0.0),
+            )
+        else:
+            muzzle_span = max(
+                0.0,
+                float(muzzle_motion.get("y_span_px") or 0.0),
+            )
+            muzzle_minimum = max(
+                1e-9,
+                float(muzzle_motion.get("required_y_span_px") or 0.0),
+            )
+            muzzle_ratio = muzzle_span / muzzle_minimum
         motion_ratios.append(muzzle_ratio)
     return {
         "policy": EATING_SCAIL_BEST_EFFORT_POLICY,

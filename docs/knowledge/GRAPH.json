@@ -184,9 +184,9 @@
     {
       "id": "comfy.quality.eating_muzzle_motion_gate",
       "type": "business_rule",
-      "name": "吃饭 SCAIL 局部口鼻运动门",
+      "name": "吃饭 SCAIL 按动作来源分流的局部口鼻/头部运动门",
       "status": "active",
-      "tags": ["eating", "scail", "muzzle-tracking", "dark-central-component", "minimum-8px", "head-lift-retention-25-percent", "full-frame-energy-complement", "five-attempts", "best-effort-weakest-axis"],
+      "tags": ["eating", "scail", "source-aware-local-motion", "reference-dark-muzzle-component", "reference-minimum-8px", "head-lift-retention-25-percent", "full-driver-head-corridor", "mae-p90-minimum-28", "pixel-delta-20", "changed-fraction-p90-minimum-40-percent", "no-fixed-bowl-roi", "full-frame-energy-complement", "five-attempts", "best-effort-weakest-axis", "policy-v4"],
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"
     },
     {
@@ -220,6 +220,14 @@
       "status": "resolved",
       "tags": ["job-20260903T080503Z-27816943ad", "cat", "eating", "live-smoke", "nonuniform-canvas", "semantic-extraction", "bounded-canvas-required-error", "degraded-output", "semantic-temporal-evidence", "offline-replay-81-of-81-reliable", "support-min-0.870618", "alpha-retention-0.994301", "no-opaque-overhang", "v2.26.61"],
       "evidence": "/data/comfy-pet-pipeline/outputs/local_video_api/20260903T080503Z-27816943ad"
+    },
+    {
+      "id": "comfy.incident.v22661_full_driver_muzzle_tracker_false_negative",
+      "type": "incident",
+      "name": "v2.26.61 完整白膜犬吃饭固定碗边窗口误判真实抬头",
+      "status": "resolved",
+      "tags": ["job-20260903T091426Z-00aced427d", "dog", "eating", "live-smoke", "completed-with-degraded-output", "false-negative", "fixed-roi-35-310-205-364", "selected-attempt-4", "old-span-7.98114px", "real-head-lift", "full-driver-head-corridor", "replay-mae-p90-49.074680", "replay-changed-fraction-0.619048", "old-fixed-mouth-still-rejected", "v2.26.62"],
+      "evidence": "/data/comfy-pet-pipeline/outputs/local_video_api/20260903T091426Z-00aced427d"
     },
     {
       "id": "comfy.recovery.standing_adaptive_matte",
@@ -1231,6 +1239,18 @@
       "relation": "resolved_by",
       "to": "comfy.recovery.eating_static_bowl_temporal_matte",
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.incident.v22661_full_driver_muzzle_tracker_false_negative",
+      "relation": "resolved_by",
+      "to": "comfy.quality.eating_muzzle_motion_gate",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.recovery.eating_full_driver_motion",
+      "relation": "checked_by",
+      "to": "comfy.quality.eating_muzzle_motion_gate",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"
     },
     {
       "from": "comfy.module.pipeline",

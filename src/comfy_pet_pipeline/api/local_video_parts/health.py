@@ -841,6 +841,21 @@ def health() -> dict[str, Any]:
                     "pose_strength_cap": SCAIL_EATING_POSE_STRENGTH_MAX,
                     "retry_strength_direction": "non_decreasing",
                     "best_effort_policy": EATING_SCAIL_BEST_EFFORT_POLICY,
+                    "reference_muzzle_y_span_min_px": (
+                        EATING_SCAIL_MUZZLE_MOTION_MIN_PX
+                    ),
+                    "full_driver_head_corridor_policy": (
+                        "full_driver_head_corridor_change_v1"
+                    ),
+                    "full_driver_head_corridor_excursion_mae_p90_min": (
+                        EATING_SCAIL_FULL_DRIVER_HEAD_CORRIDOR_MAE_MIN
+                    ),
+                    "full_driver_head_corridor_changed_fraction_p90_min": (
+                        EATING_SCAIL_FULL_DRIVER_HEAD_CORRIDOR_CHANGED_FRACTION_MIN
+                    ),
+                    "full_driver_head_corridor_pixel_delta_min": (
+                        EATING_SCAIL_FULL_DRIVER_HEAD_CORRIDOR_PIXEL_DELTA_MIN
+                    ),
                     "selects_best_generated_attempt_on_exhaustion": True,
                     "original_upload_loop_on_exhaustion": False,
                     "required_before_transparent_extraction": True,

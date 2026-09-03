@@ -11,7 +11,7 @@
 
 ### 1.1 当前生产链路的完成优先边界
 
-本文件后续章节保留早期 DashScope/Wan 双动作实验结构；当前 `local-video-api v2.26.61` 的正式上传链路以 `src/comfy_pet_pipeline/api/local_video.py` 及 `local_video_parts/` 为准。正式链路先生成 canonical，再为每个动作固定生成五轮 Qwen 候选并进入 SCAIL；首帧历史缓存只写审计、不参与固定五轮的读取或计数。
+本文件后续章节保留早期 DashScope/Wan 双动作实验结构；当前 `local-video-api v2.26.62` 的正式上传链路以 `src/comfy_pet_pipeline/api/local_video.py` 及 `local_video_parts/` 为准。正式链路先生成 canonical，再为每个动作固定生成五轮 Qwen 候选并进入 SCAIL；首帧历史缓存只写审计、不参与固定五轮的读取或计数。
 
 犬类动作首帧采用“单图保材质、文字换动作”的条件职责。Image 1 是 approved photoreal canonical，也是 Qwen 唯一加载的身份、体积和毛发材质权威；动作说明负责低头进食、坐姿轻喘、喝水、跑步、睡眠或如厕几何。白膜动作图不再作为 Qwen Image 2，因为受控的实色白膜与轮廓导图都使模型整犬重建为平滑 CGI 材质；该摘要锁定白膜仍由 SCAIL 读取，负责 81 帧动作几何与时序。Qwen 保持四步 Lightning 和固定五轮，动作、绿幕、去重和身份门不变，必要时继续使用不改 alpha/姿态的宠物专属暖色 LAB 恢复。
 

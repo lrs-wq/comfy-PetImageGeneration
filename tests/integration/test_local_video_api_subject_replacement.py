@@ -1879,6 +1879,99 @@ class ToiletingScailTemporalIdentityArtifactTests(unittest.TestCase):
         )
         self.assertTrue(full_driver_moving["acceptable"], full_driver_moving)
 
+    def test_eating_full_driver_gate_tracks_the_complete_head_corridor(
+        self,
+    ) -> None:
+        pose_metadata = {
+            "policy": pipeline.DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
+            "driver_signal_only": False,
+            "driver_silhouette_preserved": True,
+            "full_white_driver_geometry": True,
+            "pose_canvas_size": [512, 512],
+            "identity_bbox_by_frame": [
+                [45, 58, 470, 450] for _index in range(13)
+            ],
+            "scene_prop_metadata": {
+                "prop_exclusion_bbox_union": [66, 303, 205, 424],
+            },
+        }
+
+        def frames(*, moving_head: bool) -> list[np.ndarray]:
+            result: list[np.ndarray] = []
+            for index in range(13):
+                frame = np.full((512, 512, 3), (220, 242, 228), dtype=np.uint8)
+                cv2.ellipse(
+                    frame,
+                    (315, 255),
+                    (165, 120),
+                    0,
+                    0,
+                    360,
+                    (188, 132, 72),
+                    -1,
+                )
+                # Whole-frame texture energy must not let a pinned low head pass.
+                patch_color = (30, 28, 26) if index % 2 else (238, 205, 160)
+                cv2.rectangle(frame, (315, 135), (430, 225), patch_color, -1)
+                phase = (1.0 - np.cos(2.0 * np.pi * index / 12.0)) / 2.0
+                head_y = 238 - (int(round(112.0 * phase)) if moving_head else 0)
+                cv2.ellipse(
+                    frame,
+                    (126, head_y),
+                    (62, 58),
+                    0,
+                    0,
+                    360,
+                    (196, 143, 75),
+                    -1,
+                )
+                cv2.ellipse(
+                    frame,
+                    (120, head_y + 47),
+                    (25, 11),
+                    0,
+                    0,
+                    360,
+                    (38, 33, 29),
+                    -1,
+                )
+                cv2.rectangle(
+                    frame,
+                    (66, 303),
+                    (205, 424),
+                    (205, 188, 162),
+                    -1,
+                )
+                result.append(frame)
+            return result
+
+        pinned = pipeline.eating_scail_video_motion_quality(
+            frames(moving_head=False),
+            pose_metadata=pose_metadata,
+        )
+        moving = pipeline.eating_scail_video_motion_quality(
+            frames(moving_head=True),
+            pose_metadata=pose_metadata,
+        )
+
+        self.assertGreaterEqual(
+            pinned["adjacent_grayscale_mae_mean"],
+            pinned["adjacent_grayscale_mae_minimum"],
+        )
+        self.assertEqual(
+            pinned["muzzle_tracking_source"],
+            "full_driver_head_corridor_change",
+        )
+        self.assertEqual(
+            pinned["muzzle_motion"]["tracking_policy"],
+            "full_driver_head_corridor_change_v1",
+        )
+        self.assertFalse(pinned["acceptable"], pinned)
+        self.assertIn("eating_muzzle_motion_too_low", pinned["issues"])
+        self.assertLess(pinned["muzzle_motion"]["motion_ratio"], 1.0)
+        self.assertTrue(moving["acceptable"], moving)
+        self.assertGreaterEqual(moving["muzzle_motion"]["motion_ratio"], 1.0)
+
     def test_drinking_motion_gate_requires_driver_silhouette_retention(
         self,
     ) -> None:
