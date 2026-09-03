@@ -2,7 +2,11 @@
 
 服务地址：`https://ai.hzzootech.com/api/local-video`
 
-当前候选主体替换版本为 `local-video-api v2.26.58`。上传任务采用 Qwen Image Edit 与 SCAIL-2 串行编排，单张 A10 GPU 通过异步队列执行。原始上传照只用于建立身份、审计和必要的身份回绘佐证，不能作为动作首帧、SCAIL 动作参考或最终降级输出。动作 Profile 仅提供动作几何与时序，不再向上传宠物注入外观身份词。接口字段、默认 Profile 和自动物种路由保持不变；中型犬/小型犬只由测试平台通过既有 `subject_profile` 字段显式选择。
+当前候选主体替换版本为 `local-video-api v2.26.59`。上传任务采用 Qwen Image Edit 与 SCAIL-2 串行编排，单张 A10 GPU 通过异步队列执行。原始上传照只用于建立身份、审计和必要的身份回绘佐证，不能作为动作首帧、SCAIL 动作参考或最终降级输出。动作 Profile 仅提供动作几何与时序，不再向上传宠物注入外观身份词。接口字段、默认 Profile 和自动物种路由保持不变；中型犬/小型犬只由测试平台通过既有 `subject_profile` 字段显式选择。
+
+`v2.26.59` 继续修复 `v2.26.58` 已去除切面但仍像平滑 CGI/塑料模型的犬类结果。受控复验确认有两个独立来源：犬 canonical 和 SCAIL 提示仍明确要求 stylized 3D；更关键的是，Qwen 动作编辑同时读取 photoreal canonical 与白膜/轮廓 Image 2 时，会重新合成整只犬的材质，五个固定 seed 都丢失摄影级毛束并倾向生成平滑胸腹或新白胸。相同模型、参数和 seed 去掉 Image 2，只让写实 canonical 加文字动作驱动时，站立首帧保持细毛、自阴影和真实体积并通过姿态门；进食五轮中四轮正确低头进食，第 `2/4` 轮同时通过绿幕、进食接触、去重和身份色盘门。白胸样本再用既有宠物专属 LAB 恢复把白色比例 `0.085412 → 0`、暖色 `0.885415 → 0.991460`，alpha 摘要逐像素一致。
+
+新版把犬 canonical、动作首帧和 SCAIL 提示统一为真实活体犬与摄影级毛发语义；canonical-first 犬动作的 Qwen 工作流只加载 Image 1，动作白膜不再进入 Qwen 条件，仍保留给 SCAIL 的逐帧动作几何和时序。六个犬动作继续固定四步 Lightning、真实生成五轮并按原动作/身份门选优；动作专属负面提示明确排除 cartoon、CGI、stylized 3D、plastic、faceted、smooth/textureless body。猫链路、固定五轮、完成优先、暖色色盘恢复和运行完整性边界均不变。部署前全量验证为 `585 passed, 4 skipped, 90 subtests`，历史 `6/6` 输入与 `16/16` 诊断合同全部匹配。
 
 `v2.26.58` 修复暖色犬被生成为低多边形、积木感模型的回归。`v2.26.57` 的默认金毛任务 `20260902T113839Z-dec1cf3d6c` 和原三视图精确复跑 `20260902T115351Z-20c5865423` 虽都完成，但 canonical 与动作首帧的犬体已呈现切面、硬边和大块平涂。同一输入、模型、参数与 seed 的受控 canonical 消融表明：保留“源色盘百分比 + 分区配额”长提示时，即使补充自然毛面要求仍会生成低多边形；去掉百分比和区域化表达，改为简洁的颜料约束后，`20260817 / 20261826 / 20262835` 三个固定 seed 均恢复为有连续毛发、柔和明暗和圆润解剖的自然 3D 犬。新版因此将暖色盘只定义为“色素而非几何”，canonical 与所有犬动作都追加自然犬毛表面合同，并在负面提示中明确禁止 faceted geometry、polygonal surface、flat-shaded panels、geometric coat segmentation、origami、voxel 与 paper-craft。色盘门、LAB 恢复、固定五轮和完成优先边界不变。
 

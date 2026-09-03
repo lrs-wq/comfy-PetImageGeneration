@@ -137,6 +137,8 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
                     parsed.negative_prompt,
                     scail_pipeline.DOG_ACTION_NEGATIVE_PROMPTS[action],
                 )
+                self.assertIn("photorealistic real living dog", parsed.prompt)
+                self.assertIn("hair-level microtexture", parsed.prompt)
 
     def test_dog_scail_cli_uses_action_specific_negative_prompt(self) -> None:
         with patch(
@@ -161,6 +163,8 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             scail_pipeline.DOG_EATING_NEGATIVE_PROMPT,
         )
         self.assertIn("tongue out", eating.negative_prompt)
+        self.assertIn("stylized 3D dog", eating.negative_prompt)
+        self.assertIn("faceted geometry", eating.negative_prompt)
 
     def test_dog_eating_driver_keeps_compressed_kibble_below_rim(self) -> None:
         profile = pipeline.load_subject_profile("dog_white_model_v1")
@@ -442,11 +446,14 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertIn("Preserve an adult as an adult", canonical)
         self.assertIn("front view is authoritative for the face", canonical)
         self.assertIn("NATURAL DOG COAT SURFACE", canonical)
-        self.assertIn("smooth organically curved anatomy", canonical)
-        self.assertIn("fine coherent strand detail", canonical)
-        self.assertIn("naturalistic semi-realistic 3D digital double", canonical)
+        self.assertIn("rounded anatomy fully covered", canonical)
+        self.assertIn("fine non-geometric hair breakup", canonical)
+        self.assertIn("photorealistic studio cutout", canonical)
+        self.assertIn("real living dog photographed", canonical)
+        self.assertNotIn("stylized 3D", canonical)
         self.assertIn("NATURAL DOG COAT SURFACE", action_prompt)
-        self.assertIn("naturalistic semi-realistic 3D material", action_prompt)
+        self.assertIn("photorealistic real living dog", action_prompt)
+        self.assertLess(len(action_prompt.split()), 370)
         self.assertIn("seated or upright", standing_pose)
         self.assertNotIn("stable upright", standing_pose)
         self.assertIn("mouth is visibly open", standing_pose)
@@ -456,9 +463,10 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertIn("readable dark mouth cavity", standing_rules)
         self.assertIn("uninterrupted green band below", standing_rules)
         self.assertIn("Never draw a floor", standing_rules)
-        self.assertIn("Face and age contract", action_prompt)
-        self.assertIn("Never make an adult dog look like a puppy", action_prompt)
-        self.assertIn("explicitly overrides only Image 1's still mouth state", action_prompt)
+        self.assertTrue(action_prompt.startswith("DOG ACTION TRANSFER"))
+        self.assertIn("Image 1 is the only identity and appearance", action_prompt)
+        self.assertIn("Image 2 supplies only action pose", action_prompt)
+        self.assertIn("Never make an adult a puppy", action_prompt)
         self.assertIn("Never paste the tongue onto a closed muzzle", action_prompt)
         standing_retry = pipeline.build_qwen_prompt(
             "",
@@ -469,8 +477,20 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
             species="dog",
         )
-        self.assertIn("FLOOR-ARTIFACT RETRY", standing_retry)
-        self.assertIn("nothing may continue downward", standing_retry)
+        self.assertEqual(action_prompt, standing_retry)
+        single_image_prompt = pipeline.build_qwen_prompt(
+            "",
+            standing_pose,
+            transparent_gif=True,
+            pose_reference_available=False,
+            profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
+            species="dog",
+        )
+        self.assertIn(
+            "The written action rules are the only pose authority",
+            single_image_prompt,
+        )
+        self.assertNotIn("Image 2", single_image_prompt)
         self.assertIn("pure #00FF00", scail_pipeline.DOG_EATING_PROMPT)
         self.assertIn("pure #00FF00", scail_pipeline.DOG_STANDING_PROMPT)
         self.assertIn("tongue gently extends", scail_pipeline.DOG_STANDING_PROMPT)
@@ -708,6 +728,44 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             pipeline.DOG_CARTOON_NEGATIVE,
         )
         self.assertIn("geometric coat segmentation", pipeline.DOG_CARTOON_NEGATIVE)
+        self.assertIn("smooth airbrushed body", pipeline.DOG_CARTOON_NEGATIVE)
+        self.assertIn("textureless torso", pipeline.DOG_CARTOON_NEGATIVE)
+        self.assertIn("carved grooves", pipeline.DOG_CARTOON_NEGATIVE)
+        self.assertLess(len(pipeline.DOG_ACTION_NEGATIVE.split()), 150)
+        self.assertIn("white chest panel", pipeline.DOG_ACTION_NEGATIVE)
+        self.assertIn("smooth airbrushed body", pipeline.DOG_ACTION_NEGATIVE)
+        self.assertIn("concentric combed bands", pipeline.DOG_ACTION_NEGATIVE)
+        self.assertIn("stylized 3D character", pipeline.DOG_ACTION_NEGATIVE)
+
+    def test_dog_action_palette_prompt_is_compact_and_retry_stable(self) -> None:
+        signature = {
+            "available": True,
+            "fractions": {
+                "black": 0.01,
+                "white": 0.11,
+                "gray": 0.01,
+                "warm_brown_or_orange": 0.86,
+                "red_or_pink": 0.01,
+                "yellow_or_gold": 0.0,
+            },
+            "dominant": ["white", "warm_brown_or_orange"],
+        }
+        prompt = pipeline.dog_action_identity_palette_prompt(signature)
+        retry_prompt = pipeline.dog_action_identity_palette_prompt(
+            signature,
+            retry=True,
+            previous_quality={
+                "acceptable": False,
+                "issues": ["warm_source_invented_discrete_white_patches"],
+            },
+        )
+
+        self.assertEqual(prompt, retry_prompt)
+        self.assertLess(len(prompt.split()), 70)
+        self.assertIn("one continuous natural warm", prompt)
+        self.assertIn("source-supported lighter tips", prompt)
+        self.assertIn("controls pigment only", prompt)
+        self.assertNotIn("%", prompt)
 
     def test_warm_canonical_palette_recovery_preserves_generated_geometry(
         self,
@@ -2076,7 +2134,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             ),
         )
 
-    def test_dog_eating_workflow_loads_white_model_as_geometry_only(self) -> None:
+    def test_dog_eating_workflow_uses_only_photoreal_canonical_image(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workflow, _uploaded_input, pose_input = self._capture_action_workflow(
                 Path(temporary),
@@ -2094,37 +2152,46 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             if node.get("class_type") == "LoadImage"
         }
         expected_canonical = "local_video_api/capture-eating/cartoon_reference.png"
-        self.assertEqual(
-            load_images,
-            {"1": expected_canonical, "17": pose_input},
-        )
-        self.assertIn(pose_input, load_images.values())
-        self.assertIn("image2", workflow["6"]["inputs"])
+        self.assertEqual(load_images, {"1": expected_canonical})
+        self.assertNotIn(pose_input, load_images.values())
+        self.assertNotIn("image2", workflow["6"]["inputs"])
         self.assertNotIn("image3", workflow["6"]["inputs"])
         self.assertTrue(
             workflow["6"]["inputs"]["prompt"].startswith(
-                "Image 1 is the only identity"
+                "DOG ACTION TRANSFER"
             )
         )
         self.assertIn(
-            "SOURCE COAT PALETTE LOCK",
+            "COAT PIGMENT:",
             workflow["6"]["inputs"]["prompt"],
         )
         self.assertIn(
-            "coordinate mask with zero color",
+            "The written action rules are the only pose authority",
             workflow["6"]["inputs"]["prompt"],
         )
-        self.assertEqual(workflow["7"]["inputs"]["prompt"], "")
+        self.assertIn(
+            "photorealistic real living dog",
+            workflow["6"]["inputs"]["prompt"],
+        )
+        self.assertTrue(
+            workflow["7"]["inputs"]["prompt"].startswith(
+                pipeline.DOG_ACTION_NEGATIVE
+            )
+        )
+        self.assertIn(
+            "muzzle hovering above bowl",
+            workflow["7"]["inputs"]["prompt"],
+        )
         self.assertEqual(
             workflow["14"]["inputs"]["steps"],
-            pipeline.DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS,
+            pipeline.DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS,
         )
         self.assertEqual(
             workflow["14"]["inputs"]["denoise"],
-            pipeline.DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
+            pipeline.DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE,
         )
 
-    def test_dog_eating_attempt4_uses_pose_safe_uploaded_identity_refine(
+    def test_dog_eating_attempt4_keeps_single_image_material_path(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2145,27 +2212,61 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             for node_id, node in workflow.items()
             if node.get("class_type") == "LoadImage"
         }
-        refine_input = (
-            "local_video_api/capture-eating/eating_identity_refine_source.png"
-        )
         expected_canonical = "local_video_api/capture-eating/cartoon_reference.png"
-        self.assertEqual(load_images["1"], refine_input)
-        self.assertEqual(
-            set(load_images.values()),
-            {refine_input, expected_canonical, uploaded_input},
-        )
+        self.assertEqual(load_images, {"1": expected_canonical})
+        self.assertNotIn(uploaded_input, load_images.values())
         self.assertNotIn(pose_input, load_images.values())
         prompt = workflow["6"]["inputs"]["prompt"]
-        self.assertIn("CRITICAL EATING IDENTITY REFINE", prompt)
-        self.assertIn("SOURCE COAT PALETTE LOCK", prompt)
-        self.assertIn("Previous output recolored the pet", prompt)
+        self.assertTrue(prompt.startswith("DOG ACTION TRANSFER"))
+        self.assertNotIn("CRITICAL EATING IDENTITY REFINE", prompt)
+        self.assertNotIn("Image 2", prompt)
+        self.assertIn("COAT PIGMENT:", prompt)
+        self.assertIn("photorealistic real living dog", prompt)
         self.assertEqual(
             workflow["14"]["inputs"]["steps"],
-            pipeline.EATING_CANONICAL_IDENTITY_REFINE_STEPS,
+            pipeline.DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS,
         )
         self.assertEqual(
             workflow["14"]["inputs"]["denoise"],
-            pipeline.EATING_CANONICAL_IDENTITY_REFINE_DENOISE,
+            pipeline.DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE,
+        )
+
+    def test_dog_standing_workflow_reserves_pose_guide_for_scail_only(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workflow, _uploaded_input, pose_input = self._capture_action_workflow(
+                Path(temporary),
+                action="standing",
+                action_identity_policy=(pipeline.POSE_IDENTITY_INPUT_POLICY_CANONICAL),
+                pose_attempt=1,
+                identity_palette_guard=True,
+                visual_audits_blocking=False,
+                species="dog",
+            )
+
+        load_images = {
+            node_id: node["inputs"]["image"]
+            for node_id, node in workflow.items()
+            if node.get("class_type") == "LoadImage"
+        }
+        self.assertEqual(
+            load_images,
+            {"1": "local_video_api/capture-standing/cartoon_reference.png"},
+        )
+        self.assertNotIn(pose_input, load_images.values())
+        self.assertNotIn("image2", workflow["6"]["inputs"])
+        self.assertIn(
+            "The written action rules are the only pose authority",
+            workflow["6"]["inputs"]["prompt"],
+        )
+        self.assertIn(
+            "photorealistic real living dog",
+            workflow["6"]["inputs"]["prompt"],
+        )
+        self.assertEqual(
+            workflow["7"]["inputs"]["prompt"],
+            pipeline.DOG_ACTION_NEGATIVE,
         )
 
     def test_strict_dog_eating_generation_reaches_fifth_distinct_candidate(
@@ -2184,11 +2285,11 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         expected_seed = 123 + pipeline.pose_seed_offset("eating", 1) + 4 * 1009
         self.assertEqual(workflow["14"]["inputs"]["seed"], expected_seed)
         self.assertIn(
-            "SOURCE COAT PALETTE LOCK",
+            "COAT PIGMENT:",
             workflow["6"]["inputs"]["prompt"],
         )
 
-    def test_dog_drinking_workflow_loads_white_model_as_geometry_only(self) -> None:
+    def test_dog_drinking_workflow_uses_only_photoreal_canonical_image(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workflow, _uploaded_input, pose_input = self._capture_action_workflow(
                 Path(temporary),
@@ -2206,33 +2307,33 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             if node.get("class_type") == "LoadImage"
         }
         expected_canonical = "local_video_api/capture-drinking/cartoon_reference.png"
-        self.assertEqual(
-            load_images,
-            {"1": expected_canonical, "17": pose_input},
-        )
-        self.assertIn(pose_input, load_images.values())
-        self.assertIn("image2", workflow["6"]["inputs"])
+        self.assertEqual(load_images, {"1": expected_canonical})
+        self.assertNotIn(pose_input, load_images.values())
+        self.assertNotIn("image2", workflow["6"]["inputs"])
         self.assertNotIn("image3", workflow["6"]["inputs"])
         self.assertTrue(
             workflow["6"]["inputs"]["prompt"].startswith(
-                "Image 1 is the only identity"
+                "DOG ACTION TRANSFER"
             )
         )
         self.assertIn(
-            "straight tail to a curled tail",
+            "The written action rules are the only pose authority",
             workflow["6"]["inputs"]["prompt"],
         )
-        self.assertEqual(workflow["7"]["inputs"]["prompt"], "")
+        self.assertEqual(
+            workflow["7"]["inputs"]["prompt"],
+            pipeline.DOG_ACTION_NEGATIVE,
+        )
         self.assertEqual(
             workflow["14"]["inputs"]["steps"],
-            pipeline.DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS,
+            pipeline.DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS,
         )
         self.assertEqual(
             workflow["14"]["inputs"]["denoise"],
-            pipeline.DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
+            pipeline.DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE,
         )
 
-    def test_dog_toileting_workflow_loads_white_model_as_geometry_only(self) -> None:
+    def test_dog_toileting_workflow_uses_only_photoreal_canonical_image(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workflow, _uploaded_input, pose_input = self._capture_action_workflow(
                 Path(temporary),
@@ -2250,30 +2351,30 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             if node.get("class_type") == "LoadImage"
         }
         expected_canonical = "local_video_api/capture-toileting/cartoon_reference.png"
-        self.assertEqual(
-            load_images,
-            {"1": expected_canonical, "17": pose_input},
-        )
-        self.assertIn(pose_input, load_images.values())
-        self.assertIn("image2", workflow["6"]["inputs"])
+        self.assertEqual(load_images, {"1": expected_canonical})
+        self.assertNotIn(pose_input, load_images.values())
+        self.assertNotIn("image2", workflow["6"]["inputs"])
         self.assertNotIn("image3", workflow["6"]["inputs"])
         self.assertTrue(
             workflow["6"]["inputs"]["prompt"].startswith(
-                "Image 1 is the only identity"
+                "DOG ACTION TRANSFER"
             )
         )
         self.assertIn(
-            "Place the tray UNDER the dog, never behind it",
+            "The written action rules are the only pose authority",
             workflow["6"]["inputs"]["prompt"],
         )
-        self.assertEqual(workflow["7"]["inputs"]["prompt"], "")
+        self.assertEqual(
+            workflow["7"]["inputs"]["prompt"],
+            pipeline.DOG_ACTION_NEGATIVE,
+        )
         self.assertEqual(
             workflow["14"]["inputs"]["steps"],
-            pipeline.DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS,
+            pipeline.DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS,
         )
         self.assertEqual(
             workflow["14"]["inputs"]["denoise"],
-            pipeline.DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE,
+            pipeline.DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE,
         )
 
     def test_production_eating_attempt4_refines_pose_safe_palette_drift(

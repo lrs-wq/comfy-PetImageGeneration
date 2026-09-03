@@ -1984,17 +1984,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             current_pose_index=None,
             current_pose=None,
         )
-        cartoon_negative_prompt = (
-            QWEN_NEGATIVE
-            + ", "
-            + (DOG_CARTOON_NEGATIVE if species == "dog" else CARTOON_NEGATIVE)
-            + ", "
-            + CHROMA_NEGATIVE
-        )
-        if profile_fur_negative:
-            cartoon_negative_prompt += ", " + profile_fur_negative
-        if source_palette_negative:
-            cartoon_negative_prompt += ", " + source_palette_negative
+        if species == "dog":
+            cartoon_negative_prompt = DOG_ACTION_NEGATIVE
+        else:
+            cartoon_negative_prompt = (
+                QWEN_NEGATIVE + ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
+            )
+            if profile_fur_negative:
+                cartoon_negative_prompt += ", " + profile_fur_negative
+            if source_palette_negative:
+                cartoon_negative_prompt += ", " + source_palette_negative
         cartoon_attempts: list[dict[str, Any]] = []
         cartoon_workflows: list[dict[str, Any]] = []
         selected_cartoon: dict[str, Any] | None = None
@@ -2017,8 +2016,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
             attempt_seed = base_seed + (attempt - 1) * 1009
             prompt_source = effective_prompt if profile["use_user_prompt"] else ""
+            canonical_palette_prompt_builder = (
+                dog_action_identity_palette_prompt
+                if species == "dog"
+                else identity_palette_prompt
+            )
             palette_lock = (
-                identity_palette_prompt(
+                canonical_palette_prompt_builder(
                     source_identity_palette,
                     retry=attempt > 1,
                 )
@@ -3770,55 +3774,83 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             pose_qwen_secondary_input_name = qwen_input_name
             pose_identity_input_name = qwen_input_name
             pose_geometry_input_name = pose_reference_input_name
-        prompt = build_qwen_prompt(
-            "" if transparent_gif else effective_prompt,
-            pose,
-            transparent_gif=transparent_gif,
-            pose_reference_available=pose_reference_input_name is not None,
-            profile_fur_lock=profile_fur_lock,
-            pose_identity_input_policy=effective_pose_identity_input_policy,
-            species=species,
-        )
         canonical_action_reference = bool(
             effective_pose_identity_input_policy
             == POSE_IDENTITY_INPUT_POLICY_CANONICAL
             and pose_reference_input_name is not None
         )
-        dog_eating_prompt_only_action_transfer_active = bool(
+        dog_photoreal_single_image_action_transfer_active = bool(
             canonical_action_reference
             and species == "dog"
+            and action_key(pose) in DOG_PHOTOREAL_SINGLE_IMAGE_ACTIONS
+        )
+        prompt = build_qwen_prompt(
+            "" if transparent_gif else effective_prompt,
+            pose,
+            transparent_gif=transparent_gif,
+            pose_reference_available=bool(
+                pose_reference_input_name is not None
+                and not dog_photoreal_single_image_action_transfer_active
+            ),
+            profile_fur_lock=profile_fur_lock,
+            pose_identity_input_policy=effective_pose_identity_input_policy,
+            species=species,
+        )
+        dog_eating_prompt_only_action_transfer_active = bool(
+            dog_photoreal_single_image_action_transfer_active
             and action_key(pose) == "eating"
         )
         dog_drinking_prompt_only_action_transfer_active = bool(
-            canonical_action_reference
-            and species == "dog"
+            dog_photoreal_single_image_action_transfer_active
             and action_key(pose) == "drinking"
         )
         dog_toileting_prompt_only_action_transfer_active = bool(
-            canonical_action_reference
-            and species == "dog"
+            dog_photoreal_single_image_action_transfer_active
             and action_key(pose) == "toileting"
         )
-        dog_prompt_only_action_transfer_active = bool(
-            dog_eating_prompt_only_action_transfer_active
-            or dog_drinking_prompt_only_action_transfer_active
-            or dog_toileting_prompt_only_action_transfer_active
+        # Keep the old local name while status consumers migrate.  Unlike the
+        # former path, Qwen receives no synthetic white-model Image 2; that second
+        # conditioning image was the measured source of smooth CGI coat material.
+        dog_prompt_only_action_transfer_active = (
+            dog_photoreal_single_image_action_transfer_active
         )
+        if dog_photoreal_single_image_action_transfer_active:
+            dog_single_image_status = {
+                "dog_photoreal_first_frame_policy": (
+                    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_POLICY
+                ),
+                "dog_photoreal_first_frame_action": action_key(pose),
+                "dog_photoreal_first_frame_prompt_only_action_geometry": True,
+                "dog_photoreal_first_frame_image1_role": (
+                    "approved_photoreal_canonical_identity_and_material_sampler"
+                ),
+                "dog_photoreal_first_frame_image2_role": None,
+                "dog_photoreal_first_frame_white_model_loaded_by_qwen": False,
+                "dog_photoreal_first_frame_secondary_reference_loaded_by_qwen": (
+                    False
+                ),
+                "dog_photoreal_first_frame_pose_guide_reserved_for_scail": True,
+                "dog_photoreal_first_frame_steps": (
+                    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS
+                ),
+                "dog_photoreal_first_frame_denoise": (
+                    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE
+                ),
+            }
+            update_job(job_id, **dog_single_image_status)
         if dog_eating_prompt_only_action_transfer_active:
             update_job(
                 job_id,
                 dog_eating_first_frame_policy=(
                     DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY
                 ),
-                dog_eating_first_frame_prompt_only_action_geometry=False,
+                dog_eating_first_frame_prompt_only_action_geometry=True,
                 dog_eating_first_frame_image1_role=(
-                    "approved_upload_anchored_canonical_identity_sampler"
+                    "approved_photoreal_canonical_identity_and_material_sampler"
                 ),
-                dog_eating_first_frame_image2_role=(
-                    "white_model_action_geometry_only"
-                ),
-                dog_eating_first_frame_white_model_loaded_by_qwen=True,
-                dog_eating_first_frame_secondary_reference_loaded_by_qwen=True,
+                dog_eating_first_frame_image2_role=None,
+                dog_eating_first_frame_white_model_loaded_by_qwen=False,
+                dog_eating_first_frame_secondary_reference_loaded_by_qwen=False,
                 dog_eating_first_frame_action_geometry_deferred_to_scail=False,
                 dog_eating_first_frame_steps=(
                     DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
@@ -3833,15 +3865,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 dog_drinking_first_frame_policy=(
                     DOG_DRINKING_PROMPT_ONLY_FIRST_FRAME_POLICY
                 ),
-                dog_drinking_first_frame_prompt_only_action_geometry=False,
+                dog_drinking_first_frame_prompt_only_action_geometry=True,
                 dog_drinking_first_frame_image1_role=(
-                    "approved_upload_anchored_canonical_identity_sampler"
+                    "approved_photoreal_canonical_identity_and_material_sampler"
                 ),
-                dog_drinking_first_frame_image2_role=(
-                    "white_model_action_geometry_only"
-                ),
-                dog_drinking_first_frame_white_model_loaded_by_qwen=True,
-                dog_drinking_first_frame_secondary_reference_loaded_by_qwen=True,
+                dog_drinking_first_frame_image2_role=None,
+                dog_drinking_first_frame_white_model_loaded_by_qwen=False,
+                dog_drinking_first_frame_secondary_reference_loaded_by_qwen=False,
                 dog_drinking_first_frame_action_geometry_deferred_to_scail=False,
                 dog_drinking_first_frame_steps=(
                     DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
@@ -3856,15 +3886,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 dog_toileting_first_frame_policy=(
                     DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY
                 ),
-                dog_toileting_first_frame_prompt_only_action_geometry=False,
+                dog_toileting_first_frame_prompt_only_action_geometry=True,
                 dog_toileting_first_frame_image1_role=(
-                    "approved_upload_anchored_canonical_identity_sampler"
+                    "approved_photoreal_canonical_identity_and_material_sampler"
                 ),
-                dog_toileting_first_frame_image2_role=(
-                    "white_model_action_geometry_only"
-                ),
-                dog_toileting_first_frame_white_model_loaded_by_qwen=True,
-                dog_toileting_first_frame_secondary_reference_loaded_by_qwen=True,
+                dog_toileting_first_frame_image2_role=None,
+                dog_toileting_first_frame_white_model_loaded_by_qwen=False,
+                dog_toileting_first_frame_secondary_reference_loaded_by_qwen=False,
                 dog_toileting_first_frame_action_geometry_deferred_to_scail=False,
                 dog_toileting_first_frame_steps=(
                     DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
@@ -3895,7 +3923,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 action_candidate_gate_job_blocking=False,
                 action_candidate_gate_returns_original_upload=False,
             )
-        negative_prompt = QWEN_NEGATIVE
+        negative_prompt = DOG_ACTION_NEGATIVE if species == "dog" else QWEN_NEGATIVE
         if transparent_gif:
             active_pose_profiles = pose_generation_profiles(pose, pose_profiles)
             if not GENERATION_VISUAL_AUDITS_BLOCKING:
@@ -3905,14 +3933,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         active_pose_profiles,
                         enabled=True,
                     )
-            negative_prompt += (
-                ", "
-                + (DOG_CARTOON_NEGATIVE if species == "dog" else CARTOON_NEGATIVE)
-                + ", "
-                + CHROMA_NEGATIVE
-            )
-            if profile_fur_negative:
-                negative_prompt += ", " + profile_fur_negative
+            if species != "dog":
+                negative_prompt += ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
+                if profile_fur_negative:
+                    negative_prompt += ", " + profile_fur_negative
             if action_key(pose) == "running":
                 negative_prompt += (
                     ", seated pose, sitting, crouched sitting, airborne leap, flying pose, extreme foreshortening, hidden hind leg, shortened hind leg, "
@@ -3999,6 +4023,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 )
                 else None
             )
+            pose_identity_palette_prompt_builder = (
+                dog_action_identity_palette_prompt
+                if species == "dog"
+                else identity_palette_prompt
+            )
+            pose_identity_palette_prompt_marker = (
+                "COAT PIGMENT:"
+                if species == "dog"
+                else "SOURCE COAT PALETTE LOCK"
+            )
             # Every generated action candidate must prove its identity palette;
             # visual-audit mode may change additional gates, never this floor.
             pose_identity_palette_gate_required = True
@@ -4006,9 +4040,14 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 identity_palette_negative_prompt(
                     pose_identity_palette_prompt_signature
                 )
-                if pose_identity_palette_prompt_signature is not None
+                if (
+                    species != "dog"
+                    and pose_identity_palette_prompt_signature is not None
+                )
                 else source_palette_negative
             )
+            if species == "dog":
+                pose_palette_negative = ""
             pose_negative_prompt = negative_prompt
             if pose_palette_negative:
                 pose_negative_prompt += ", " + pose_palette_negative
@@ -4604,13 +4643,16 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     pose,
                     transparent_gif=True,
                     quality_retry=profile["quality_retry"],
-                    pose_reference_available=pose_reference_input_name is not None,
+                    pose_reference_available=bool(
+                        pose_reference_input_name is not None
+                        and not dog_photoreal_single_image_action_transfer_active
+                    ),
                     profile_fur_lock=profile_fur_lock,
                     pose_identity_input_policy=(effective_pose_identity_input_policy),
                     species=species,
                 )
                 if pose_identity_palette_prompt_signature is not None:
-                    attempt_prompt += "\n\n" + identity_palette_prompt(
+                    attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
                         pose_identity_palette_prompt_signature,
                         retry=attempt > 1,
                         previous_quality=previous_pose_identity_palette_quality,
@@ -4719,71 +4761,47 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 dog_toileting_prompt_only_action_transfer_attempt: (
                     dict[str, Any] | None
                 ) = None
+                dog_photoreal_single_image_action_transfer_attempt: (
+                    dict[str, Any] | None
+                ) = None
                 if dog_prompt_only_action_transfer_active:
                     attempt_primary_input_name = qwen_input_name
-                    attempt_secondary_input_name = pose_reference_input_name
+                    attempt_secondary_input_name = None
                     attempt_tertiary_input_name = None
                     attempt_additional_reference_input_names = None
                     attempt_noise_mask_input_name = None
-                    attempt_geometry_input_name = pose_reference_input_name
-                    if dog_eating_prompt_only_action_transfer_active:
-                        attempt_prompt = (
-                            build_dog_eating_prompt_only_action_transfer_prompt(
-                                pose,
-                                profile_fur_lock=profile_fur_lock,
-                            )
-                        )
-                        dog_prompt_only_policy = (
-                            DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY
-                        )
-                    elif dog_drinking_prompt_only_action_transfer_active:
-                        attempt_prompt = (
-                            build_dog_drinking_prompt_only_action_transfer_prompt(
-                                pose,
-                                profile_fur_lock=profile_fur_lock,
-                            )
-                        )
-                        dog_prompt_only_policy = (
-                            DOG_DRINKING_PROMPT_ONLY_FIRST_FRAME_POLICY
-                        )
-                    else:
-                        attempt_prompt = (
-                            build_dog_toileting_prompt_only_action_transfer_prompt(
-                                pose,
-                                profile_fur_lock=profile_fur_lock,
-                            )
-                        )
-                        dog_prompt_only_policy = (
-                            DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY
-                        )
-                    dog_prompt_only_action_transfer_attempt = {
-                        "policy": dog_prompt_only_policy,
+                    attempt_geometry_input_name = None
+                    dog_photoreal_single_image_action_transfer_attempt = {
+                        "policy": DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_POLICY,
+                        "action": action_key(pose),
                         "image1_role": (
-                            "approved_upload_anchored_canonical_identity_sampler"
+                            "approved_photoreal_canonical_identity_and_material_"
+                            "sampler"
                         ),
-                        "image2_role": "white_model_action_geometry_only",
+                        "image2_role": None,
                         "image3_role": None,
-                        "prompt_only_action_geometry": False,
-                        "white_model_loaded_by_qwen": True,
-                        "secondary_reference_loaded_by_qwen": True,
+                        "prompt_only_action_geometry": True,
+                        "white_model_loaded_by_qwen": False,
+                        "secondary_reference_loaded_by_qwen": False,
                         "foreign_pose_image_loaded_by_qwen": False,
                         "uploaded_identity_views_consumed_via_canonical_only": True,
                         "full_canvas_action_redraw": True,
                         "action_geometry_deferred_to_scail": False,
+                        "pose_guide_reserved_for_scail": True,
                         "sampler_noise_mask_input_name": None,
                         "post_qwen_pixel_composite_enabled": False,
                     }
                     if dog_eating_prompt_only_action_transfer_active:
                         dog_eating_prompt_only_action_transfer_attempt = (
-                            dog_prompt_only_action_transfer_attempt
+                            dog_photoreal_single_image_action_transfer_attempt
                         )
                     elif dog_drinking_prompt_only_action_transfer_active:
                         dog_drinking_prompt_only_action_transfer_attempt = (
-                            dog_prompt_only_action_transfer_attempt
+                            dog_photoreal_single_image_action_transfer_attempt
                         )
-                    else:
+                    elif dog_toileting_prompt_only_action_transfer_active:
                         dog_toileting_prompt_only_action_transfer_attempt = (
-                            dog_prompt_only_action_transfer_attempt
+                            dog_photoreal_single_image_action_transfer_attempt
                         )
                 if advisory_grooming_action_transfer_active:
                     attempt_primary_input_name = qwen_input_name
@@ -4937,7 +4955,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         profile_fur_lock=profile_fur_lock,
                     )
                     if pose_identity_palette_prompt_signature is not None:
-                        attempt_prompt += "\n\n" + identity_palette_prompt(
+                        attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
                             pose_identity_palette_prompt_signature,
                             retry=True,
                             previous_quality=(
@@ -5172,7 +5190,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         )
                     )
                     if pose_identity_palette_prompt_signature is not None:
-                        attempt_prompt += "\n\n" + identity_palette_prompt(
+                        attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
                             pose_identity_palette_prompt_signature,
                             retry=True,
                             previous_quality=(
@@ -5534,7 +5552,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         pose_safe_candidate_used_as_sampler = True
                         recovery_source_sha256 = expected_refine_source_sha256
                     if pose_identity_palette_prompt_signature is not None:
-                        attempt_prompt += "\n\n" + identity_palette_prompt(
+                        attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
                             pose_identity_palette_prompt_signature,
                             retry=True,
                             previous_quality=(
@@ -5828,7 +5846,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         profile_fur_lock=profile_fur_lock,
                     )
                     if pose_identity_palette_prompt_signature is not None:
-                        attempt_prompt += "\n\n" + identity_palette_prompt(
+                        attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
                             pose_identity_palette_prompt_signature,
                             retry=True,
                             previous_quality=eating_identity_refine_source.get(
@@ -5971,13 +5989,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                 if dog_prompt_only_action_transfer_active:
                     effective_pose_denoise = (
-                        DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
-                        if dog_eating_prompt_only_action_transfer_active
-                        else (
-                            DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
-                            if dog_drinking_prompt_only_action_transfer_active
-                            else DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
-                        )
+                        DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE
                     )
                 if advisory_grooming_identity_refine_active:
                     effective_pose_denoise = (
@@ -6036,15 +6048,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     # drift in the same-seed grooming reproduction.
                     effective_pose_steps = GROOMING_ADVISORY_ACTION_TRANSFER_STEPS
                 if dog_prompt_only_action_transfer_active:
-                    effective_pose_steps = (
-                        DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
-                        if dog_eating_prompt_only_action_transfer_active
-                        else (
-                            DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
-                            if dog_drinking_prompt_only_action_transfer_active
-                            else DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
-                        )
-                    )
+                    effective_pose_steps = DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS
                 if advisory_grooming_identity_refine_active:
                     effective_pose_steps = max(
                         GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
@@ -6095,11 +6099,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 if (
                     dog_prompt_only_action_transfer_active
                     and pose_identity_palette_prompt_signature is not None
-                    and "SOURCE COAT PALETTE LOCK" not in attempt_prompt
+                    and pose_identity_palette_prompt_marker not in attempt_prompt
                 ):
-                    # The specialized dog branches replace the generic prompt.
-                    # Rebind the uploaded palette after that replacement.
-                    attempt_prompt += "\n\n" + identity_palette_prompt(
+                    # Keep the identity palette attached if a future specialized
+                    # written-action prompt replaces the generic dog prompt.
+                    attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
                         pose_identity_palette_prompt_signature,
                         retry=attempt > 1,
                         previous_quality=previous_pose_identity_palette_quality,
@@ -6109,10 +6113,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     attempt_prompt,
                     (
                         ""
-                        if (
-                            advisory_grooming_action_transfer_active
-                            or dog_prompt_only_action_transfer_active
-                        )
+                        if advisory_grooming_action_transfer_active
                         else pose_negative_prompt
                     ),
                     attempt_seed,
@@ -6978,6 +6979,10 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 if (
                     canonical_action_reference
                     and action_key(pose) == "eating"
+                    # Photoreal dog candidates use deterministic post-selection
+                    # LAB pigment recovery.  Feeding the draft and extra identity
+                    # images back through Qwen reintroduced the smooth CGI coat.
+                    and not dog_photoreal_single_image_action_transfer_active
                     # Attempt 4 can be the first candidate with strict mouth-to-food
                     # contact. Preserve it as geometry so attempt 5 can repair a
                     # conditionally safe identity drift instead of returning to a
@@ -7446,6 +7451,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     ),
                     "grooming_advisory_action_transfer": (
                         grooming_advisory_action_transfer_attempt
+                    ),
+                    "dog_photoreal_single_image_action_transfer": (
+                        dog_photoreal_single_image_action_transfer_attempt
                     ),
                     "dog_eating_prompt_only_action_transfer": (
                         dog_eating_prompt_only_action_transfer_attempt

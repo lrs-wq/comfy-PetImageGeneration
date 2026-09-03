@@ -1666,6 +1666,53 @@ def identity_palette_prompt(
     )
 
 
+def dog_action_identity_palette_prompt(
+    signature: dict[str, Any],
+    *,
+    retry: bool = False,
+    previous_quality: dict[str, Any] | None = None,
+) -> str:
+    """Return a stable compact pigment lock for dog action generation."""
+
+    _sync_local_video_runtime(globals(), {"dog_action_identity_palette_prompt"})
+    del retry, previous_quality
+    if not signature.get("available"):
+        return (
+            "COAT PIGMENT: copy Image 1's visible fur colors and markings exactly; "
+            "never recolor the dog or borrow the guide's palette."
+        )
+    fractions = signature.get("fractions") or {}
+    warm_fraction = float(fractions.get("warm_brown_or_orange", 0.0)) + float(
+        fractions.get("yellow_or_gold", 0.0)
+    )
+    if warm_fraction >= 0.65 and not identity_palette_is_achromatic(signature):
+        return (
+            "COAT PIGMENT: Image 1 has one continuous natural warm tan, golden, "
+            "brown, and cream fur material. Preserve source-supported lighter tips "
+            "and softly blended hair-by-hair variation. Never create white chest "
+            "panels, socks, blazes, tail patches, spots, dark blocks, stripes, "
+            "brindle, or separate color regions. Neutral-white lighting; this rule "
+            "controls pigment only, never fur texture or anatomy."
+        )
+    if identity_palette_is_achromatic(signature):
+        return (
+            "COAT PIGMENT: preserve Image 1's neutral black, gray, and white balance "
+            "and localized markings. Add no amber, brown, orange, or golden cast; "
+            "small pink skin accents stay localized and never spread into fur."
+        )
+    dominant = [
+        IDENTITY_PALETTE_PROMPT_LABELS[item]
+        for item in signature.get("dominant") or []
+        if item in IDENTITY_PALETTE_PROMPT_LABELS
+    ]
+    palette = ", ".join(dominant) or "the visible source colors"
+    return (
+        f"COAT PIGMENT: preserve Image 1's {palette} fur and each localized marking. "
+        "Blend colors naturally hair-by-hair; add no new dominant hue, stripe, spot, "
+        "patch, or guide-derived color."
+    )
+
+
 def warm_canonical_palette_recovery_eligibility(
     quality: dict[str, Any] | None,
 ) -> dict[str, Any]:

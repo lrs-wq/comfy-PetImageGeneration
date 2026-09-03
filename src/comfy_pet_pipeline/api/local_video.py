@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.58"
+API_VERSION = "2.26.59"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -501,24 +501,41 @@ GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS = len(
     GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT
 )
 GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT = 4
-DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
-    "canonical_identity_image1_plus_white_model_geometry_image2_then_"
-    "pose_safe_uploaded_identity_refine_v3"
+DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_POLICY = (
+    "photoreal_canonical_image1_plus_written_action_only_four_step_v1"
 )
-DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
-DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
+DOG_PHOTOREAL_SINGLE_IMAGE_ACTIONS = frozenset(
+    {"eating", "standing", "drinking", "running", "sleeping", "toileting"}
+)
+DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS = 4
+DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE = 1.0
+# Compatibility aliases retained for existing status consumers.  These actions
+# now use the same one-image material-preserving policy as every dog action.
+DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY = DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_POLICY
+DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = (
+    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS
+)
+DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = (
+    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE
+)
 DOG_DRINKING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
-    "canonical_identity_image1_plus_white_model_geometry_image2_"
-    "four_step_direct_drinking_action_v2"
+    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_POLICY
 )
-DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
-DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
+DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = (
+    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS
+)
+DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = (
+    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE
+)
 DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY = (
-    "canonical_identity_image1_plus_white_model_geometry_image2_"
-    "four_step_direct_toileting_action_v2"
+    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_POLICY
 )
-DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = 4
-DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = 1.0
+DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS = (
+    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS
+)
+DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE = (
+    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE
+)
 GROOMING_ADVISORY_IDENTITY_REFINE_POLICY = (
     "pose_locked_draft_image1_canonical_image2_face_image3_conditional_masked_v7"
 )
@@ -1581,11 +1598,11 @@ UPLOADED_IDENTITY_FUR_NEGATIVE = (
 )
 
 DOG_NATURAL_COAT_SURFACE_PROMPT = (
-    "NATURAL DOG COAT SURFACE - required: render smooth organically curved "
-    "anatomy covered by dense source-matched fur, with fine coherent strand "
-    "detail and soft continuous tonal shading across every major body region. "
-    "Coat-color constraints control pigment only and must preserve natural fur "
-    "texture, rounded surface form, and the uploaded dog's coat-length category."
+    "NATURAL DOG COAT SURFACE - required: keep rounded anatomy fully covered by "
+    "dense, irregular, overlapping source-matched strands. Show fine non-geometric "
+    "hair breakup and soft strand self-shadowing throughout the interior coat, not "
+    "only on the silhouette. Intermix pigments hair-by-hair. No bare, smooth, "
+    "airbrushed, faceted, carved, or flat-color body region."
 )
 
 CARTOON_NEGATIVE = (
@@ -1607,16 +1624,35 @@ CARTOON_NEGATIVE = (
 DOG_CARTOON_NEGATIVE = (
     "flat 2D drawing, anime, comic, watercolor, low-poly, faceted geometry, "
     "polygonal body surface, broad flat-shaded color panels, geometric coat "
-    "segmentation, origami dog, voxel dog, paper-craft dog, hard plastic toy, "
+    "segmentation, polygon seams, carved grooves, embossed parallel lines, "
+    "concentric combed bands, broad bare color regions, smooth airbrushed body, "
+    "hairless body surface, textureless torso, textureless limbs, vector color "
+    "fill, cel shading, toon shading, origami dog, voxel dog, paper-craft dog, "
+    "hard plastic toy, rubber mascot, clay render, wax render, "
     "generic dog, different breed, cat, feline, kitten, changed coat color, "
     "changed marking placement, changed face shape, changed eye color, changed "
     "ear shape, changed muzzle, shortened muzzle, shortened snout, rounded baby "
     "face, puppy when the source is adult, younger dog, enlarged head, oversized "
-    "eyes, enlarged irises, panting smile, tongue out, changed body proportions, "
+    "eyes, enlarged irises, changed body proportions, "
     "changed tail, invented "
     "stripes, invented spots, clothes, collar, harness, glasses, hat, shoes, "
     "jewelry, accessory, costume, deformed anatomy, extra limb, missing limb, "
     "duplicate subject, white border, halo, floor, shadow, text, logo, watermark"
+)
+DOG_ACTION_NEGATIVE = (
+    "different identity, different breed, puppy, baby face, short muzzle, enlarged "
+    "head, oversized eyes, changed ears, changed tail, changed coat color, white "
+    "chest panel, white socks, white blaze, invented spots, invented stripes, black "
+    "patches, gray patches, collar, harness, clothing, accessory, extra limb, missing "
+    "limb, fused limb, duplicate subject, cropped body, floor, shadow, reflection, "
+    "background gradient, background texture, green spill, stylized 3D character, "
+    "cartoon, CGI animation, low-poly, faceted geometry, "
+    "polygonal body, flat-shaded panels, geometric coat segmentation, smooth "
+    "airbrushed body, hairless surface, plastic toy, rubber mascot, clay render, wax "
+    "render, textureless torso, textureless limbs, vector fill, cel shading, toon "
+    "shading, origami, voxel, paper-craft, carved grooves, embossed parallel lines, "
+    "concentric combed bands, flat 2D drawing, anime, comic, watercolor, text, logo, "
+    "watermark"
 )
 
 QWEN_NEGATIVE = (
@@ -4331,101 +4367,55 @@ def build_dog_qwen_prompt(
     pose_reference_available: bool,
     profile_fur_lock: str,
 ) -> str:
-    """Build a dog-only action prompt with no feline appearance leakage."""
+    """Build a concise dog action prompt with no feline appearance leakage."""
 
-    background_prompt = (
-        CHROMA_BACKGROUND_PROMPT
-        if transparent_gif
-        else "Use a clean, simple, evenly lit background."
-    )
+    del quality_retry
     action = action_key(pose)
     action_rules = action_first_frame_rules(pose, species="dog")
     geometry_role = (
-        "Image 2 is the digest-bound appearance-free action geometry guide. It "
-        "controls only joint placement, pose, action prop placement, camera, "
-        "framing, subject scale and pure-green negative space. It never controls "
-        "identity, breed, face, coat, markings, natural body proportions, material "
-        "or lighting."
+        "Image 2 supplies only action pose, joint layout, allowed prop placement, "
+        "camera, framing, and subject scale; it supplies no identity or appearance."
         if pose_reference_available
-        else "Use the written action contract as the pose authority."
+        else "The written action rules are the only pose authority."
     )
-    retry = ""
-    if quality_retry >= 2:
-        retry = (
-            "VALIDATION RETRY: correct the action geometry, full-body framing, "
-            "identity, anatomy and green background while keeping Image 1 unchanged "
-            "as the sole appearance authority."
-        )
-        if action in {"standing", "drinking", "running", "sleeping", "toileting"}:
-            retry += (
-                " FLOOR-ARTIFACT RETRY: the previous matte reached a canvas edge. "
-                "Remove the entire floor, shadow and mirrored reflection. End every "
-                "paw, allowed action prop and the tail cleanly, then leave a broad "
-                "uninterrupted pure-green band beneath the lowest foreground pixel; "
-                "nothing may continue downward."
-            )
-    if quality_retry >= 3:
-        retry += (
-            " Keep at least 12% pure-green clearance on all sides. Remove every "
-            "floor, shadow, accessory, extra prop, duplicate limb and extra subject."
-        )
     foreground = {
         "eating": "the dog and exactly one shallow food bowl",
         "drinking": "the dog and exactly one shallow water bowl",
         "toileting": "the dog and exactly one clean rectangular pet toilet tray",
     }.get(action, "the dog")
-    fur_contract = profile_fur_lock.strip() or (
-        "Preserve Image 1's exact natural coat length, volume, strand direction, "
-        "genuine tufts and source-bounded outer silhouette."
+    coat_identity = (
+        "Match Image 1's exact coat length, volume, strand direction, and silhouette."
+        if profile_fur_lock.strip()
+        else "Match Image 1's exact natural coat length, volume, and silhouette."
     )
-    if action == "standing":
-        face_motion_contract = (
-            "This standing action explicitly overrides only Image 1's still mouth "
-            "state: show relaxed natural panting with visibly separated lips and "
-            "lower jaw, a readable dark mouth cavity, and one anatomically attached "
-            "pink tongue at a neutral mid-extension. Never paste the tongue onto a "
-            "closed muzzle or detach it from the mouth cavity."
+    expression_rule = ""
+    if action == "eating":
+        expression_rule = (
+            "Keep Image 1's mouth geometry except for slight food contact; no "
+            "panting smile or visible tongue."
         )
-    elif action == "drinking":
-        face_motion_contract = (
-            "Preserve Image 1's face and muzzle geometry while lowering the muzzle to "
-            "the water. Show only one tiny anatomically attached pink tongue tip at "
-            "the water surface; never add a panting smile, long tongue, splash or drool."
+    elif action not in {"standing", "drinking", "sleeping"}:
+        expression_rule = (
+            "Preserve Image 1's natural mouth and expression unless the action "
+            "rules explicitly require a change."
         )
-    elif action == "sleeping":
-        face_motion_contract = (
-            "Use a peaceful sleeping expression with naturally closed eyes and a "
-            "relaxed closed mouth. Never add a panting smile or visible tongue."
-        )
-    elif action == "eating":
-        face_motion_contract = (
-            "Preserve Image 1's exact closed- or open-mouth posture unless physical "
-            "muzzle contact with the food requires a small natural adjustment. Never "
-            "add a panting smile or visible tongue."
-        )
-    else:
-        face_motion_contract = (
-            "Preserve Image 1's exact natural mouth posture and expression. Never add "
-            "a panting smile or visible tongue unless the action contract requires it."
-        )
-    return f"""CRITICAL DOG ACTION TRANSFER CONTRACT:
-Image 1 is the approved canonical dog and the only identity and appearance authority. Preserve its exact apparent age, breed traits, head and muzzle silhouette, eyes, ears, nose, coat base colors, localized markings, natural coat length and volume, body proportions, paws, complete tail, and naturalistic semi-realistic 3D material.
-{geometry_role}
+    background_contract = (
+        f"Every pixel outside {foreground} is flat uniform pure #00FF00 green. "
+        "Leave at least 12% uninterrupted green on every edge and beneath the complete "
+        "foreground. It is a digital plate with no gradient, texture, floor, light, "
+        "reflection, or color spill."
+        if transparent_gif
+        else "Use one clean, simple, evenly lit background with no scenery or text."
+    )
+    return f"""DOG ACTION TRANSFER - follow these priorities.
 
-Repose the exact dog from Image 1 into Image 2's action layout without copying any white-model or guide appearance. Never turn the dog into a cat, feline, kitten, different breed, generic mascot, plastic toy, or white maquette. The dog remains completely natural and unclothed: no collar, harness, clothing, glasses, hat, shoes, jewelry, or accessory.
+1. IDENTITY: Image 1 is the only identity and appearance authority. Preserve this exact dog's age, breed, skull and cheeks, muzzle length and taper, natural eyes, ears, nose, coat colors and markings, coat length, body proportions, paws, and full tail. Never make an adult a puppy, enlarge the head or eyes, copy the white model's appearance, or add a collar, harness, clothing, or accessory.
 
-Required action: {qwen_first_frame_spec(pose)}
-Action rules: {action_rules}
+2. ACTION AND ANATOMY: {geometry_role} {action_rules} {expression_rule}
 
-Anatomy contract: exactly one complete dog with four anatomically attached legs, complete visible paws appropriate to the geometry, both ears, and one tail continuous from base to tip. No duplicate, fused, detached, hidden, humanlike, or extra limb. Preserve Image 1's body proportions while articulating them around Image 2's joints.
+3. NATURAL FUR: Render a photorealistic real living dog photographed with a high-resolution professional animal camera under soft neutral-white light. Show realistic eyes, moist nose, mouth, and physically plausible anatomy. {coat_identity} {DOG_NATURAL_COAT_SURFACE_PROMPT} Never invent a color or marking.
 
-Face and age contract: keep Image 1's exact skull width, forehead slope, cheek width, muzzle length, muzzle width and taper, eye diameter and spacing, ear scale, nose scale and apparent age. {face_motion_contract} Never make an adult dog look like a puppy, shorten or round the muzzle, or enlarge the head or eyes.
-
-Coat contract: {fur_contract} {DOG_NATURAL_COAT_SURFACE_PROMPT} Never import the white model's white coat, face, eyes, proportions, smooth material, or lighting. Do not invent colors or markings absent from Image 1.
-
-Output exactly one clean static 512x512 first frame. Every pixel outside {foreground} must be flat uniform pure #00FF00 green. Keep at least 12% green clearance on every edge and keep the complete foreground within 72% of canvas width and height. No floor, floor line, shadow, reflection, scenery, text, logo, watermark, border, or halo.
-{retry}
-{background_prompt}"""
+4. OUTPUT: Show one complete dog, both ears, four attached legs and paws, and one tail continuous from base to tip. {background_contract} No extra animal or limb, floor, shadow, scenery, text, logo, watermark, border, or halo.""".strip()
 
 
 def build_qwen_prompt(
@@ -6016,6 +6006,11 @@ identity_palette_is_achromatic = _local_video_identity_quality.identity_palette_
 
 
 identity_palette_prompt = _local_video_identity_quality.identity_palette_prompt
+
+
+dog_action_identity_palette_prompt = (
+    _local_video_identity_quality.dog_action_identity_palette_prompt
+)
 
 
 WARM_CANONICAL_PALETTE_RECOVERY_POLICY = (

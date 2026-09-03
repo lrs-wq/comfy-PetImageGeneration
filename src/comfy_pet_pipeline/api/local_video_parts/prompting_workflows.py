@@ -182,67 +182,53 @@ def action_first_frame_rules(pose: str, *, species: str = "cat") -> str:
     action = action_key(pose)
     if species == "dog" and action == "eating":
         return (
-            "Include exactly one small shallow matte food bowl containing only a "
-            "small, low, level layer of ordinary brown dry kibble fully below its "
-            "continuous rim. Keep the food surface shallow and planar: no heap, mound, "
-            "cone, pyramid, oversized pellets, fused mass, overfilled bowl, or food "
-            "outside the bowl. Keep all four dog legs anatomically attached and stable. "
-            "Lower the head until the dog's lower muzzle physically enters and overlaps "
-            "the low kibble layer and near rim; a gap between mouth and food is invalid. "
-            "Keep both ears, the upper face, body and complete tail readable. The bowl "
-            "is the only prop."
+            "Use exactly one small shallow matte food bowl with a small, low, level "
+            "layer of ordinary brown kibble fully below its continuous rim; no heap, "
+            "mound, cone, pyramid, oversized pellets, fused mass, overfill, or spill. "
+            "Keep all four legs attached. Lower the head until the lower muzzle enters "
+            "and overlaps the food and near rim, with no air gap. Keep both ears, body, "
+            "and complete tail readable. The bowl is the only prop."
         )
     if species == "dog" and action == "standing":
         return (
-            "No prop. Match Image 2's stable dog idle geometry exactly, including "
-            "its seated-or-upright torso state, leg placement, head angle, camera, "
-            "subject scale and tail layout. Keep every visible paw grounded and "
-            "every leg attached. "
-            "Show one complete natural dog with both ears and the tail from base to "
-            "tip; no pose redesign, extra limb, collar, harness, clothing or object. "
-            "This action explicitly requires relaxed panting even if Image 1 is a "
-            "closed-mouth still: keep the lips and lower jaw visibly separated, show "
-            "a readable dark mouth cavity, and attach one natural pink tongue inside "
-            "the mouth at a neutral mid-extension. Never paste a tongue onto a closed "
-            "muzzle or detach it from the mouth cavity. "
-            "The dog exists in a digital green void with no support surface: every "
-            "paw and the tail must end cleanly against pure green, with an "
-            "uninterrupted green band below them. Never draw a floor, contact shadow, "
-            "mirrored continuation, glossy patch or reflection beneath the dog."
+            "No prop. Use the required seated-or-upright torso state, joints, head "
+            "angle, camera, scale, framing, and tail. Ground every paw. This action "
+            "explicitly requires relaxed panting: separate the lips and lower jaw, "
+            "show a readable dark mouth cavity, and attach one natural pink tongue "
+            "inside it. Never paste the tongue onto a closed muzzle. End the paws and "
+            "tail over an uninterrupted green band below. Never draw a floor, shadow, "
+            "reflection, extra limb, or object."
         )
     if species == "dog" and action == "drinking":
         return (
-            "Include exactly one small shallow matte water bowl directly in front "
-            "of the dog. Match Image 2's low-head drinking geometry, bowl placement, "
-            "camera, scale and framing. Lower the muzzle naturally to the still water "
-            "and show exactly one tiny attached pink tongue tip touching the water; "
-            "no air gap, long tongue, splash, drool, food, extra bowl or extra prop. "
-            "Keep all four legs attached and the complete tail readable."
+            "Use exactly one small shallow matte water bowl. Use a natural low-head "
+            "drinking geometry, bowl placement, camera, scale, and framing. Lower the "
+            "muzzle to the water surface with one tiny attached pink tongue tip "
+            "touching it; no air gap, long tongue, splash, drool, food, or extra prop. "
+            "Keep four legs attached and the complete tail readable."
         )
     if species == "dog" and action == "running":
         return (
-            "No prop. Match Image 2's quadruped running contact phase, camera, scale "
-            "and framing. Show exactly four distinct anatomically attached legs, "
-            "each ending in one complete paw; keep the torso coherent and the full "
-            "tail connected from base to tip. Do not fuse or hide the far-side legs, "
-            "turn the dog into a two-legged leap, crop a paw, add a floor, or add a "
+            "No prop. Use a quadruped running contact phase with the required camera, scale, "
+            "and framing. Show four distinct attached legs, each with one complete "
+            "paw, a coherent torso, and the full connected tail. Do not fuse or hide "
+            "far-side legs, make a two-legged leap, crop a paw, add a floor, or add a "
             "second subject."
         )
     if species == "dog" and action == "sleeping":
         return (
-            "No prop. Match Image 2's compact curled sleeping geometry exactly. Keep "
-            "the head resting naturally by the front paws, eyes peacefully closed, "
-            "all legs anatomically attached and tucked with plausible occlusion, and "
-            "the tail continuous from base to tip beside the body. Do not add a bed, "
-            "cushion, blanket, floor, shadow, open alert eyes, or extra subject."
+            "No prop. Use compact curled sleeping geometry. Rest the head "
+            "by the front paws with eyes peacefully closed; keep all legs attached and "
+            "plausibly tucked, and the tail connected beside the body. No bed, cushion, "
+            "blanket, floor, shadow, alert eyes, or extra subject."
         )
     if species == "dog" and action == "toileting":
         return (
-            "Match Image 2's stable seated toilet geometry and keep exactly one clean "
+            "Use stable seated toilet geometry. Keep exactly one clean "
             "rectangular pet toilet tray with its grid insert fully visible beneath "
-            "the dog. The tray is the only prop. Keep all four legs attached, both "
-            "ears and the complete tail readable. Show no urine, feces, mess, extra "
-            "tray, litter box, floor continuation, shadow, clothing, or extra subject."
+            "the dog; it is the only prop. Keep four legs attached, both ears, and the "
+            "complete tail readable. No urine, feces, mess, extra tray, litter box, "
+            "floor, shadow, clothing, or extra subject."
         )
     if action == "running":
         return (
@@ -318,29 +304,26 @@ def build_cartoon_reference_prompt(
     species: str = "cat",
 ) -> str:
     _sync_local_video_runtime(globals(), {"build_cartoon_reference_prompt"})
-    creative_direction = (
-        base_prompt.strip() or "identity-faithful restrained stylized 3D digital double"
+    creative_direction = base_prompt.strip() or (
+        "identity-faithful photorealistic digital double"
+        if species == "dog"
+        else "identity-faithful restrained stylized 3D digital double"
     )
     palette_section = f"\n\n{palette_lock.strip()}" if palette_lock.strip() else ""
     if species == "dog":
-        fur_section = f"\n\n{fur_lock.strip()}" if fur_lock.strip() else ""
-        return f"""Use case: identity-preserving stylized 3D dog character design.
-BACKGROUND RULE — non-negotiable: every pixel outside the dog must be one perfectly flat uniform pure #00FF00 green. It is a blank solid-color field, never a poster or graphic: no decorative shape, icon, symbol, letter, number, outline, pattern, floor, shadow, gradient, scenery, text, logo, watermark, border, or halo. No green shape, reflection, marking, or outline may cross onto or appear inside the dog's silhouette.
+        coat_source = (
+            "Match the uploaded views' exact natural coat length, volume, strand "
+            "direction, and source-bounded silhouette."
+            if fur_lock.strip()
+            else "Match the source's exact natural coat length and silhouette."
+        )
+        return f"""The uploaded image or role-labeled view set is the only identity and appearance authority. Create a photorealistic studio cutout of this exact dog. Preserve its age, breed, head shape, muzzle length and taper, natural eyes, ears, nose, mouth, coat colors and markings, coat length, body proportions, legs, paws, and full tail. The front view is authoritative for the face and expression; side views control muzzle projection, body length, tail, and side markings. Never copy an action profile or white model.{palette_section}
 
-The uploaded identity image, or the role-labeled uploaded identity image set when multiple views are supplied, is the only identity and appearance authority. Create a canonical identity-faithful restrained semi-realistic stylized 3D digital double of this exact same dog. Never copy identity, breed, proportions, face, coat, color, markings, ears, eyes, muzzle, tail, material, or lighting from an action profile or white model.
+Render a real living dog photographed with a high-resolution professional animal camera under soft neutral-white studio light, with realistic eyes, moist nose, mouth, and anatomy. {coat_source} {DOG_NATURAL_COAT_SURFACE_PROMPT} Preserve an adult as an adult and a puppy as a puppy. Keep the source mouth state. No collar, harness, clothing, or accessory.
 
-User creative direction: {creative_direction}
-Apply it only to restrained rendering quality and expression. It cannot override identity, anatomy, full-body framing, natural coat, clothing, or background rules.
+Use one neutral stable standing pose at a slight three-quarter front angle. Show exactly one complete dog, both ears, four anatomically attached legs with grounded complete paws, and one tail continuous from base to tip. Keep at least 15% clear margin on every edge. Nothing may be cropped, fused, hidden, or outside the canvas.
 
-Identity lock: preserve the uploaded dog's exact apparent age, breed traits, skull width, forehead slope, cheek width, head-to-body ratio, muzzle length, muzzle width and taper, eye diameter and spacing, ear size and carriage, nose size and color, mouth posture, coat base colors, localized markings, natural coat length and volume, body proportions, leg length, paws, and complete tail. Preserve natural asymmetry and never invent markings. The front view is authoritative for the face and expression; side views are authoritative for muzzle projection, body length, tail and side-specific markings.{palette_section}{fur_section}
-
-{DOG_NATURAL_COAT_SURFACE_PROMPT}
-
-Target style: a polished naturalistic semi-realistic 3D digital double under neutral-white high-key character lighting. Identity outranks stylization. Preserve an adult as an adult and a puppy as a puppy; never shorten the muzzle, round the forehead, enlarge the eyes or head, add a panting smile, or otherwise make the dog younger, chibi, toy-like, feline, or generic. Preserve the uploaded front view's closed- or open-mouth state unless an action explicitly requires mouth motion. The dog is completely natural and unclothed: no collar, harness, glasses, bow, shirt, costume, shoes, jewelry, or accessory.
-
-Composition lock: one complete dog in a neutral stable upright four-paw pose at a slight three-quarter front angle. Show both ear tips, the full torso, exactly four anatomically attached legs and complete paws, and the tail continuously from base to tip. Keep at least 15% clear green margin on every edge and keep the dog within 68% of canvas width and height. Nothing may be cropped, fused, hidden behind the torso, or outside the canvas.
-
-{CHROMA_BACKGROUND_PROMPT} No floor, floor line, shadow, reflection, text, logo, or watermark."""
+Every pixel outside the dog is perfectly flat uniform pure #00FF00 green. The green is a digital plate with no gradient, texture, floor, light, reflection, or color spill. No floor, shadow, scenery, text, logo, watermark, border, or halo. User direction: {creative_direction}; it may improve photographic quality only."""
     fur_section = ""
     if fur_lock.strip():
         fur_section = f"""
@@ -529,8 +512,8 @@ def build_dog_eating_prompt_only_action_transfer_prompt(
         "identity meaning. Erase that synthetic surface instead of rendering it. "
         "Never copy Image 2's breed, skull, "
         "ears, muzzle, body proportions, tail, color, material, lighting, or "
-        "surface. Edit Image 1. Keep this exact dog and its restrained stylized 3D "
-        "identity unchanged. Preserve its exact apparent age and breed geometry: "
+        "surface. Edit Image 1. Keep this exact dog's photorealistic living-dog "
+        "appearance and natural fur unchanged. Preserve its exact apparent age and breed geometry: "
         "skull and cheek width, muzzle length/width/taper, ear topology/size/"
         "carriage, eyes, nose, coat colors and markings, natural coat length/"
         "volume, torso and leg proportions, paws, and the tail's exact thickness, "
@@ -577,9 +560,9 @@ def build_dog_drinking_prompt_only_action_transfer_prompt(
         "identity meaning. Erase that synthetic surface instead of rendering it. "
         "Never copy "
         "Image 2's breed, skull, ears, muzzle, body proportions, tail, color, "
-        "material, lighting, or surface. Edit Image 1. Keep this exact dog and its "
-        "restrained stylized 3D "
-        "identity unchanged. Preserve its exact apparent age and breed geometry: "
+        "material, lighting, or surface. Edit Image 1. Keep this exact dog's "
+        "photorealistic living-dog appearance and natural fur unchanged. Preserve "
+        "its exact apparent age and breed geometry: "
         "skull and cheek width, muzzle length/width/taper, ear topology/size/"
         "carriage, eyes, nose, coat colors and markings, natural coat length/"
         "volume, torso and leg proportions, paws, and the tail's exact thickness, "
@@ -625,9 +608,9 @@ def build_dog_toileting_prompt_only_action_transfer_prompt(
         "zero color, value, material, texture, lighting, marking, breed, or identity "
         "meaning. Erase that synthetic surface instead of rendering it. Never copy Image 2's "
         "breed, skull, ears, muzzle, body proportions, tail, color, material, "
-        "lighting, or surface. Edit Image 1. Keep this exact dog and its restrained "
-        "stylized 3D "
-        "identity unchanged. Preserve its exact apparent age and breed geometry: "
+        "lighting, or surface. Edit Image 1. Keep this exact dog's photorealistic "
+        "living-dog appearance and natural fur unchanged. Preserve its exact apparent "
+        "age and breed geometry: "
         "skull and cheek width, muzzle length/width/taper, ear topology/size/"
         "carriage, eyes, nose, coat colors and markings, natural coat length/"
         "volume, torso and leg proportions, paws, and the tail's exact thickness, "
@@ -883,12 +866,12 @@ def build_canonical_eating_identity_refine_prompt(
     )
     return f"""CRITICAL EATING IDENTITY REFINE - preserve the approved action, repaint only the pet identity:
 Image 1 is the normalized eating candidate from attempt {source_attempt} and is the sampler canvas. Its complete crouched body layout, head height and angle, lower-muzzle-to-kibble overlap, both planted front paws, attached rear legs, tail, single bowl, kibble placement, subject scale, framing, and pure-green negative space are authoritative. Preserve this exact action and prop geometry. Image 1's pet colors, markings, face details, fur texture, lighting, and rendering style are not authoritative and may contain a warm, cool, dark, pale, or otherwise off-model identity drift. In particular, any stronger, darker, wider, more numerous, or more extensive stripes in Image 1 are rejected artifacts rather than action geometry.
-Image 2 is the approved Qwen full-body canonical and is the target rendering and primary identity authority for every pet pixel. Repaint the entire pet from Image 2: exact head silhouette, eye color and spacing, ears, nose, source-faithful coat color and value balance, actual localized markings, body proportions, natural fur category and surface, paws, tail, restrained stylized 3D material, and neutral-white lighting. Do not copy any hue, value, marking, or lighting cast from Image 1 that is absent from Image 2 and Image 3.
+Image 2 is the approved Qwen full-body canonical and is the target rendering and primary identity authority for every pet pixel. Repaint the entire pet from Image 2: exact head silhouette, eye color and spacing, ears, nose, source-faithful coat color and value balance, actual localized markings, body proportions, natural fur category and surface, paws, tail, approved target material, and neutral-white lighting. Do not copy any hue, value, marking, or lighting cast from Image 1 that is absent from Image 2 and Image 3.
 Image 3 is the original uploaded front photograph of this same pet. It corroborates immutable real identity only: face proportions, eye color, nose, coat-value balance, actual marking placement, coat length and paw color. It has no eating-pose, bowl, crop, background, room lighting, photographic-material, or output-style authority. Image 1 remains the sole eating and bowl geometry authority; Image 2 remains the sole target-rendering authority. Do not copy the room, floor, shadow, or photographic background from Image 3.
 
 SPECIES AND FACE CONTRACT: the species, breed type, head silhouette and facial proportions from Images 2 and 3 are immutable. A cat must remain a cat and a dog must remain a dog. Preserve the exact pointed or folded ear topology, ear size and placement, eye spacing, cheek width, nose size, muzzle length and muzzle width. Never turn the pet into a bear, polar bear, ferret, otter, rodent or another breed; never invent round bear ears, an enlarged black nose, an oversized dark muzzle, a mask-like face, or a barrel-shaped substitute body.
 
-MARKING CORRECTION CONTRACT: use Image 3 to decide which real stripes, spots, patches and dark facial bands exist and how subtle they are; use Image 2 for their stylized rendering. Repaint over every amplified marking inherited from Image 1 while leaving its silhouette and eating geometry fixed. A faint source stripe must remain faint and localized, not become a high-contrast torso ring or repeated flank bar. If Images 2 and 3 do not corroborate a marking, remove it completely using the nearest genuine base-coat color. Never average Image 1's marking density or contrast into the result.
+MARKING CORRECTION CONTRACT: use Image 3 to decide which real stripes, spots, patches and dark facial bands exist and how subtle they are; use Image 2 for their approved rendering. Repaint over every amplified marking inherited from Image 1 while leaving its silhouette and eating geometry fixed. A faint source stripe must remain faint and localized, not become a high-contrast torso ring or repeated flank bar. If Images 2 and 3 do not corroborate a marking, remove it completely using the nearest genuine base-coat color. Never average Image 1's marking density or contrast into the result.
 
 ACTION FREEZE CONTRACT: keep exactly one small shallow light-beige matte bowl with brown kibble. Keep both complete front paws visibly planted beside the bowl. The lower muzzle and mouth must remain physically inside the kibble with 6 to 10 output pixels of visible overlap; the near rim or kibble may partly occlude the nose and lower muzzle. There must be no green, white, or background gap between mouth and food. Never raise the head, move the bowl away, turn eating into sniffing, let a paw hold food, add a second bowl, or let the bowl hide or replace a limb.
 

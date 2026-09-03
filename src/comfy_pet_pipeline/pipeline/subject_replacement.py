@@ -211,8 +211,10 @@ EATING_NEGATIVE_PROMPT = (
 )
 
 DOG_EATING_PROMPT = (
-    "A complete full-body restrained stylized 3D dog matching the supplied "
-    "reference as the only identity and appearance authority. Preserve the exact "
+    "A complete full-body photorealistic real living dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve photographic "
+    "fur strands, irregular clumping, hair-level microtexture and strand self-shadowing "
+    "in every frame. Preserve the exact "
     "breed traits, apparent age, skull width, forehead slope, cheek width, exact "
     "muzzle length, width and taper, eye size, color and spacing, "
     "ear shape and carriage, nose, coat colors, localized markings, natural coat "
@@ -235,8 +237,10 @@ DOG_EATING_PROMPT = (
 )
 
 DOG_STANDING_PROMPT = (
-    "A complete full-body restrained stylized 3D dog matching the supplied "
-    "reference as the only identity and appearance authority. Preserve the exact "
+    "A complete full-body photorealistic real living dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve photographic "
+    "fur strands, irregular clumping, hair-level microtexture and strand self-shadowing "
+    "in every frame. Preserve the exact "
     "breed traits, apparent age, face, muzzle, eyes, ears, nose, coat colors and "
     "markings, natural coat length and volume, body proportions, paws, and complete "
     "tail. Use the neutral-white dog anatomy driver only for the standing action's "
@@ -258,8 +262,10 @@ DOG_STANDING_PROMPT = (
 )
 
 DOG_DRINKING_PROMPT = (
-    "A complete full-body restrained stylized 3D dog matching the supplied "
-    "reference as the only identity and appearance authority. Preserve the exact "
+    "A complete full-body photorealistic real living dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve photographic "
+    "fur strands, irregular clumping, hair-level microtexture and strand self-shadowing "
+    "in every frame. Preserve the exact "
     "breed traits, apparent age, face and muzzle geometry, eyes, ears, nose, coat "
     "colors and localized markings, natural coat length and volume, body "
     "proportions, paws, and complete tail. The prepared pose video is synthesized "
@@ -277,8 +283,10 @@ DOG_DRINKING_PROMPT = (
 )
 
 DOG_RUNNING_PROMPT = (
-    "A complete full-body restrained stylized 3D dog matching the supplied "
-    "reference as the only identity and appearance authority. Preserve the exact "
+    "A complete full-body photorealistic real living dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve photographic "
+    "fur strands, irregular clumping, hair-level microtexture and strand self-shadowing "
+    "in every frame. Preserve the exact "
     "breed traits, apparent age, face, muzzle, eyes, ears, nose, coat colors and "
     "localized markings, natural coat length and volume, body proportions, paws, "
     "and complete tail. Use the neutral-white dog anatomy driver only for the "
@@ -293,8 +301,10 @@ DOG_RUNNING_PROMPT = (
 )
 
 DOG_SLEEPING_PROMPT = (
-    "A complete full-body restrained stylized 3D dog matching the supplied "
-    "reference as the only identity and appearance authority. Preserve the exact "
+    "A complete full-body photorealistic real living dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve photographic "
+    "fur strands, irregular clumping, hair-level microtexture and strand self-shadowing "
+    "in every frame. Preserve the exact "
     "breed traits, apparent age, face and muzzle geometry, eyes, ears, nose, coat "
     "colors and localized markings, natural coat length and volume, body "
     "proportions, paws, and complete tail. Use the neutral-white dog anatomy driver "
@@ -309,8 +319,10 @@ DOG_SLEEPING_PROMPT = (
 )
 
 DOG_TOILETING_PROMPT = (
-    "A complete full-body restrained stylized 3D dog matching the supplied "
-    "reference as the only identity and appearance authority. Preserve the exact "
+    "A complete full-body photorealistic real living dog matching the supplied "
+    "reference as the only identity and appearance authority. Preserve photographic "
+    "fur strands, irregular clumping, hair-level microtexture and strand self-shadowing "
+    "in every frame. Preserve the exact "
     "breed traits, apparent age, face, muzzle, eyes, ears, nose, coat colors and "
     "localized markings, natural coat length and volume, body proportions, paws, "
     "and complete tail. Use the neutral-white dog anatomy driver only for the stable "
@@ -332,7 +344,11 @@ DOG_NEGATIVE_PROMPT = (
     "white-model identity, white-model face, white-model coat, changed face, changed "
     "muzzle, shortened muzzle, shortened snout, rounded baby face, puppy when source "
     "is adult, younger dog, enlarged head, oversized eyes, enlarged irises, panting "
-    "smile, tongue out, changed ears, changed eye color, changed coat color, changed markings, "
+    "smile, tongue out, stylized 3D dog, cartoon dog, CGI animation, plastic toy, "
+    "rubber mascot, clay render, wax render, low-poly, faceted geometry, polygonal "
+    "body, flat-shaded panels, geometric coat segmentation, smooth airbrushed body, "
+    "hairless surface, textureless torso, textureless limbs, changed ears, changed "
+    "eye color, changed coat color, changed markings, "
     "changed coat length, changed body proportions, extra limb, missing limb, "
     "duplicated limb, detached paw, fused legs, kibble heap, kibble mound, food cone, "
     "food pyramid, oversized kibble, overfilled bowl, overflowing food, fused food "
