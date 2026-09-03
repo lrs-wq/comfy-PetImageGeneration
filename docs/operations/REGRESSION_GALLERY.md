@@ -124,6 +124,14 @@ Git 只保存 [`tests/regression/historical_gallery.json`](../../tests/regressio
 
 live 报告同时显示每个动作的非阻断诊断：首帧选中轮次、最低门状态、舔毛前肢拓扑状态/策略/选中证据、拓扑是否阻断完成，以及 SCAIL 舔毛身份审核状态和选中轮次。吃饭链路还记录全帧运动、局部口鼻跨度、口鼻追踪来源，以及静态食盆可靠帧、时序恢复和 alpha 核心保留率。这些字段仅用于定位选择原因；图集的 PASS 仍只取决于 `completed` 和主媒体可读。
 
+### v2.26.60 首次强制 smoke 的发现
+
+提交 `8e83806` 部署为 `v2.26.60` 后，默认报告 `/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260903T080450Z-8e83806658/report.json` 按完成性合同为 `2/2`：猫任务 `20260903T080503Z-27816943ad` 与狗任务 `20260903T082634Z-4c444cd38c` 都到达 `completed`，四个请求行为均只执行一次且主媒体可读。但猫 eating 的透明化在自适应策略选择 semantic 后报 `Static-bowl recovery requires a bounded uniform canvas`，最终用选中动作首帧制作降级循环；因此该报告只证明运行完整性，不能作为食盆画质修复通过证据。
+
+狗任务没有降级。eating 首轮 SCAIL 以全帧邻帧 MAE `0.637884`、首帧 excursion `8.351826` 和口鼻纵向跨度 `20.146591 px ≥ 9 px` 通过；透明食盆恢复 `81/81` 帧可靠，alpha `220` 下核心最低保留率 `0.999439`，且 `unsupported_guidance_forced_opaque=false`。`v2.26.61` 针对猫任务暴露的分支遗漏，使 eating 在非均匀画布下改用跨帧 U2Net/chroma alpha 建立相同的时序证据；必须重新运行默认矩阵，不能把本次 `2/2` 记作最终修复验收。
+
+用该猫任务已生成的同一 SCAIL MP4 与同一 `tm_identity_mask.mp4` 在 `v2.26.61` 离线重放透明化后，提取方法保持 `rembg_u2net_guided_by_pose_mask`，时序食盆证据源为 `semantic_guided_alpha`；`81/81` 帧支持率均高于 `55%`，最低 `0.870618`，第 `36` 帧作为代表，保护核心为 `10352` 像素。最终 alpha `220` 下核心最低保留率 `0.994301`，GIF 为 `512×512 / 100` 帧、APNG 无错误；抽检源/透明结果的第 `0/25/36/50/80` 帧，碗体连续完整且没有引导外扩造成的碗下白块。
+
 ### v2.26.60 历史异常离线回放
 
 犬任务 `20260903T055308Z-7ca587d08e` 的吃饭参考红色食盆框为 `[66,303,205,424]`，宽高比 `1.149 < 1.40`，确认食盆分割已吞进下口鼻。新版准备路径以 `reference_bowl_mask_occludes_muzzle` 转入完整白膜恢复；诊断运行 `dog-mouth-fix-replay-20260903` 生成 `81` 帧完整低—高—低几何、静态食盆框 `[58,364,182,411]`，身份中心纵向跨度 `15 px`、高度跨度 `30 px`。旧主视频经过新版输出门回放时，全帧邻帧 MAE 为 `0.503358`，首帧 excursion 为 `5.43438`，但口鼻纵向跨度只有 `0.599152 px`，因此明确命中 `eating_muzzle_motion_too_low`；轻微画面变化不再掩盖固定嘴部。

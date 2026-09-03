@@ -31,6 +31,7 @@ from src.comfy_pet_pipeline.pipeline.subject_replacement import (
     _eating_static_bowl_supported_core,
     _eating_static_bowl_temporal_reference,
     _merge_reference_aligned_static_prop,
+    _recover_eating_static_bowl_from_frame_evidence,
     _reference_guided_uniform_background_mask,
     clean_transparent_edge_halo,
     encode_static_mask_video,
@@ -395,6 +396,51 @@ class TransparentVideoCliTests(unittest.TestCase):
         self.assertEqual(int(output_alpha[86, 48]), 0)
         self.assertGreater(
             recovery["static_prop_temporal_reference_added_pixels"],
+            500,
+        )
+
+    def test_eating_static_bowl_recovers_from_semantic_alpha_when_canvas_is_not_uniform(
+        self,
+    ) -> None:
+        static_prop = np.zeros((96, 96), dtype=np.uint8)
+        cv2.rectangle(static_prop, (16, 56), (80, 90), 1, -1)
+        semantic_frames: list[tuple[np.ndarray, np.ndarray]] = []
+        guidances: list[np.ndarray] = []
+        for index in range(8):
+            rgb = np.zeros((96, 96, 3), dtype=np.uint8)
+            alpha = np.zeros((96, 96), dtype=np.uint8)
+            cv2.ellipse(rgb, (48, 34), (24, 30), 0, 0, 360, (190, 142, 82), -1)
+            cv2.ellipse(alpha, (48, 34), (24, 30), 0, 0, 360, 255, -1)
+            if index not in {3, 4}:
+                cv2.rectangle(rgb, (20, 60), (76, 82), (176, 181, 173), -1)
+                cv2.rectangle(alpha, (20, 60), (76, 82), 255, -1)
+            semantic_frames.append((rgb, alpha))
+            guidances.append(static_prop.astype(bool))
+
+        (
+            recovered_frames,
+            protected_cores,
+            temporal_metrics,
+            support_metrics,
+            recovery_metrics,
+        ) = _recover_eating_static_bowl_from_frame_evidence(
+            semantic_frames,
+            guidances,
+            support_source="semantic_guided_alpha",
+        )
+
+        self.assertEqual(temporal_metrics["support_source"], "semantic_guided_alpha")
+        self.assertEqual(temporal_metrics["reliable_frame_count"], 6)
+        self.assertEqual(len(protected_cores), len(semantic_frames))
+        self.assertLess(
+            support_metrics[3]["static_prop_bounded_support_ratio"],
+            EATING_STATIC_BOWL_GUIDANCE_SUPPORT_RATIO_MIN,
+        )
+        self.assertGreaterEqual(int(recovered_frames[3][1][70, 48]), 220)
+        self.assertEqual(tuple(recovered_frames[3][0][70, 48]), (176, 181, 173))
+        self.assertEqual(int(recovered_frames[3][1][88, 48]), 0)
+        self.assertGreater(
+            recovery_metrics[3]["static_prop_temporal_reference_added_pixels"],
             500,
         )
 

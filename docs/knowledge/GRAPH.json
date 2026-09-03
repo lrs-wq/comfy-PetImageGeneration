@@ -194,7 +194,7 @@
       "type": "business_rule",
       "name": "吃饭静态食盆时序证据恢复与 alpha 核心保护",
       "status": "active",
-      "tags": ["cat", "dog", "eating", "transparent", "static-bowl", "bounded-canvas-evidence", "support-ratio-55-percent", "reliable-frames-25-percent", "temporal-majority-support", "protected-alpha-core", "retention-97-percent", "unsupported-guidance-transparent"],
+      "tags": ["cat", "dog", "eating", "transparent", "static-bowl", "bounded-canvas-evidence", "semantic-or-chroma-alpha-fallback", "nonuniform-canvas", "support-ratio-55-percent", "reliable-frames-25-percent", "temporal-majority-support", "protected-alpha-core", "retention-97-percent", "unsupported-guidance-transparent", "policy-v2"],
       "evidence": "src/comfy_pet_pipeline/pipeline/subject_replacement.py"
     },
     {
@@ -212,6 +212,14 @@
       "status": "resolved",
       "tags": ["job-20260903T053156Z-51a505bf26", "cat", "eating", "internal-alpha-loss", "bowl-missing-frames-25-36", "temporal-bowl-recovery", "alpha-retention-0.998478", "unsupported-guidance-not-opaque", "v2.26.60"],
       "evidence": "/data/comfy-pet-pipeline/outputs/local_video_api/20260903T053156Z-51a505bf26"
+    },
+    {
+      "id": "comfy.incident.v22660_nonuniform_eating_bowl_recovery",
+      "type": "incident",
+      "name": "v2.26.60 猫吃饭非均匀画布触发静态食盆恢复降级",
+      "status": "resolved",
+      "tags": ["job-20260903T080503Z-27816943ad", "cat", "eating", "live-smoke", "nonuniform-canvas", "semantic-extraction", "bounded-canvas-required-error", "degraded-output", "semantic-temporal-evidence", "offline-replay-81-of-81-reliable", "support-min-0.870618", "alpha-retention-0.994301", "no-opaque-overhang", "v2.26.61"],
+      "evidence": "/data/comfy-pet-pipeline/outputs/local_video_api/20260903T080503Z-27816943ad"
     },
     {
       "id": "comfy.recovery.standing_adaptive_matte",
@@ -1217,6 +1225,12 @@
       "relation": "resolved_by",
       "to": "comfy.recovery.eating_static_bowl_temporal_matte",
       "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.incident.v22660_nonuniform_eating_bowl_recovery",
+      "relation": "resolved_by",
+      "to": "comfy.recovery.eating_static_bowl_temporal_matte",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
     {
       "from": "comfy.module.pipeline",

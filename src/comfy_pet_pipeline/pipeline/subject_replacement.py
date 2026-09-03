@@ -7028,7 +7028,7 @@ EATING_STATIC_BOWL_BOUNDED_SUPPORT_ALPHA_THRESHOLD = 128
 EATING_STATIC_BOWL_GUIDANCE_SUPPORT_RATIO_MIN = 0.55
 EATING_STATIC_BOWL_RELIABLE_FRAME_FRACTION_MIN = 0.25
 EATING_STATIC_BOWL_TEMPORAL_RECOVERY_POLICY = (
-    "eating_temporal_evidence_supported_static_bowl_recovery_v1"
+    "eating_temporal_evidence_supported_static_bowl_recovery_v2"
 )
 
 
@@ -7336,6 +7336,67 @@ def _eating_static_bowl_temporal_reference(
         canonical_core,
         metrics,
         frame_support_metrics,
+    )
+
+
+def _recover_eating_static_bowl_from_frame_evidence(
+    frames: list[tuple[np.ndarray, np.ndarray]],
+    static_prop_guidances: list[np.ndarray],
+    *,
+    support_source: str,
+) -> tuple[
+    list[tuple[np.ndarray, np.ndarray]],
+    list[np.ndarray],
+    dict[str, Any],
+    list[dict[str, float]],
+    list[dict[str, float]],
+]:
+    """Recover a static eating bowl from any evidence-backed alpha source."""
+
+    if not support_source.strip():
+        raise ValueError("Eating static-bowl support source is required")
+    (
+        temporal_rgb,
+        temporal_alpha,
+        temporal_core,
+        temporal_metrics,
+        support_metrics,
+    ) = _eating_static_bowl_temporal_reference(
+        frames,
+        static_prop_guidances,
+    )
+    temporal_metrics = {
+        **temporal_metrics,
+        "support_source": support_source,
+    }
+    recovered_frames: list[tuple[np.ndarray, np.ndarray]] = []
+    recovery_metrics: list[dict[str, float]] = []
+    for (rgb, alpha), static_prop_guidance, frame_support_metrics in zip(
+        frames,
+        static_prop_guidances,
+        support_metrics,
+        strict=True,
+    ):
+        recovered_rgb, recovered_alpha, frame_recovery_metrics = (
+            _merge_reference_aligned_static_prop(
+                rgb,
+                alpha,
+                rgb,
+                alpha,
+                static_prop_guidance,
+                temporal_reference_rgb=temporal_rgb,
+                temporal_reference_alpha=temporal_alpha,
+            )
+        )
+        frame_recovery_metrics.update(frame_support_metrics)
+        recovered_frames.append((recovered_rgb, recovered_alpha))
+        recovery_metrics.append(frame_recovery_metrics)
+    return (
+        recovered_frames,
+        [temporal_core.copy() for _ in frames],
+        temporal_metrics,
+        support_metrics,
+        recovery_metrics,
     )
 
 
@@ -7849,15 +7910,22 @@ def build_unstabilized_transparent_gif(
                     reference_aligned_extraction_strategy
                     == REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY
                 ):
-                    raise RuntimeError(
-                        "Static-bowl recovery requires a bounded uniform canvas"
+                    if normalized_action == "drinking":
+                        raise RuntimeError(
+                            "Static-bowl recovery requires a bounded uniform canvas"
+                        )
+                    # Eating can establish the same bounded recovery envelope
+                    # from U2Net/chroma alpha across time.  A non-uniform SCAIL
+                    # canvas therefore stays on semantic extraction; the broad
+                    # red guide is still only a search boundary and never an
+                    # opaque fill instruction.
+                else:
+                    # Keep U2Net's cleaner animal edge, then recover only the
+                    # bowl from the bounded-canvas matte. Applying the bounded
+                    # matte to the whole pale animal creates a noisy silhouette.
+                    reference_aligned_extraction_strategy = (
+                        REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY
                     )
-                # Keep U2Net's cleaner animal edge, then recover only the bowl
-                # from the bounded-canvas matte. Applying the bounded matte to
-                # the whole pale animal creates a noisy silhouette.
-                reference_aligned_extraction_strategy = (
-                    REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY
-                )
 
         chroma_masks: list[tuple[np.ndarray, np.ndarray]] = []
         chroma_usable = True
@@ -7938,6 +8006,9 @@ def build_unstabilized_transparent_gif(
                 ) = _eating_static_bowl_temporal_reference(
                     reference_aligned_bounded_frames,
                     eating_static_prop_guidances,
+                )
+                eating_static_prop_temporal_metrics["support_source"] = (
+                    "bounded_uniform_canvas_alpha"
                 )
                 eating_static_prop_supported_cores = [
                     eating_static_prop_temporal_core.copy()
@@ -8500,6 +8571,43 @@ def build_unstabilized_transparent_gif(
                         ),
                     }
                 )
+
+        if (
+            normalized_action == "eating"
+            and static_prop_recovery_required
+            and eating_static_prop_temporal_metrics is None
+        ):
+            eating_static_prop_guidances = []
+            for index in range(len(extracted_frames)):
+                _identity_guidance, static_prop_guidance = (
+                    normalized_guidance_roles(index)
+                )
+                if static_prop_guidance is None:
+                    raise RuntimeError(
+                        "Eating temporal recovery requires static bowl "
+                        "guidance in every frame"
+                    )
+                eating_static_prop_guidances.append(static_prop_guidance)
+            if extraction_method == "chroma_key":
+                eating_support_source = "chroma_key_alpha"
+            elif (
+                extraction_method
+                == REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY
+            ):
+                eating_support_source = "bounded_uniform_canvas_alpha"
+            else:
+                eating_support_source = "semantic_guided_alpha"
+            (
+                extracted_frames,
+                eating_static_prop_supported_cores,
+                eating_static_prop_temporal_metrics,
+                eating_static_prop_support_metrics,
+                static_prop_recovery_metrics,
+            ) = _recover_eating_static_bowl_from_frame_evidence(
+                extracted_frames,
+                eating_static_prop_guidances,
+                support_source=eating_support_source,
+            )
 
         interior_repair_metrics: list[dict[str, Any]] = []
         pre_cleanup_repaired_frames: list[tuple[np.ndarray, np.ndarray]] = []
