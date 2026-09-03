@@ -395,7 +395,7 @@
       "type": "incident",
       "name": "v2.26.57 暖色犬低多边形毛面回归",
       "path": "/data/comfy-pet-pipeline/outputs/local_video_api/20260902T113839Z-dec1cf3d6c",
-      "status": "resolved_pending_online_verification",
+      "status": "resolved_verified_online",
       "tags": ["v2.26.57", "dog", "golden-retriever", "canonical", "action-keyframe", "low-poly", "faceted", "flat-shaded", "quantified-warm-palette-prompt", "controlled-ablation", "v2.26.58"],
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
@@ -412,7 +412,7 @@
       "type": "incident",
       "name": "v2.26.58 犬动作平滑 CGI 材质回归",
       "path": "/data/comfy-pet-pipeline/outputs/local_video_api/20260903T025117Z-5f15b5f050",
-      "status": "fix_implemented_pending_online_verification",
+      "status": "resolved_verified_online",
       "tags": ["v2.26.58", "dog", "golden-retriever", "smooth-surface", "plastic", "cgi", "two-image-qwen", "white-model-conditioning", "controlled-ablation", "v2.26.59"],
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
@@ -423,6 +423,15 @@
       "status": "active",
       "tags": ["v2.26.59", "dog", "photoreal-canonical", "single-image-qwen", "written-action", "white-model-scail-only", "material-preservation", "four-step-lightning", "five-attempts", "warm-lab-recovery"],
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
+    },
+    {
+      "id": "comfy.verification.v22659_golden_two_action_live_ebbc987",
+      "type": "verification",
+      "name": "v2.26.59 金毛写实双动作生产验收",
+      "path": "/data/comfy-pet-pipeline/outputs/regression_gallery/live/20260903T040438Z-ebbc987b86/report.json",
+      "status": "passed",
+      "tags": ["commit-ebbc987", "api-v2.26.59", "job-20260903T040446Z-6021b80b4f", "live-1-of-1", "golden-retriever", "eating", "standing", "five-attempts-each", "selected-attempts-5-and-4", "canonical-image1-only", "no-image2-qwen-conditioning", "no-degraded-actions", "two-readable-512x512-100f-outputs", "manual-frame-review-no-faceted-or-textureless-surface", "no-style-lora"],
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
     },
     {
       "id": "comfy.action.cat_default",
@@ -1072,6 +1081,12 @@
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
     {
+      "from": "comfy.incident.v22657_blocky_dog_surface",
+      "relation": "verified_by",
+      "to": "comfy.verification.v22659_golden_two_action_live_ebbc987",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
       "from": "comfy.module.pipeline",
       "relation": "governed_by",
       "to": "comfy.quality.dog_natural_surface_prompt",
@@ -1084,6 +1099,12 @@
       "evidence": "docs/api/LOCAL_VIDEO_API.md"
     },
     {
+      "from": "comfy.incident.v22658_smooth_cgi_dog_surface",
+      "relation": "verified_by",
+      "to": "comfy.verification.v22659_golden_two_action_live_ebbc987",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
       "from": "comfy.quality.dog_photoreal_single_image_action",
       "relation": "complements",
       "to": "comfy.quality.dog_natural_surface_prompt",
@@ -1094,6 +1115,24 @@
       "relation": "governed_by",
       "to": "comfy.quality.dog_photoreal_single_image_action",
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
+    },
+    {
+      "from": "comfy.verification.v22659_golden_two_action_live_ebbc987",
+      "relation": "verifies",
+      "to": "comfy.quality.dog_natural_surface_prompt",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.verification.v22659_golden_two_action_live_ebbc987",
+      "relation": "verifies",
+      "to": "comfy.quality.dog_photoreal_single_image_action",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.verification.v22659_golden_two_action_live_ebbc987",
+      "relation": "exercises",
+      "to": "comfy.api.local_video",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
     }
   ]
 }
