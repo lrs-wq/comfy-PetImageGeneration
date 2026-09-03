@@ -391,6 +391,23 @@
       "evidence": "docs/operations/REGRESSION_GALLERY.md"
     },
     {
+      "id": "comfy.incident.v22657_blocky_dog_surface",
+      "type": "incident",
+      "name": "v2.26.57 暖色犬低多边形毛面回归",
+      "path": "/data/comfy-pet-pipeline/outputs/local_video_api/20260902T113839Z-dec1cf3d6c",
+      "status": "resolved_pending_online_verification",
+      "tags": ["v2.26.57", "dog", "golden-retriever", "canonical", "action-keyframe", "low-poly", "faceted", "flat-shaded", "quantified-warm-palette-prompt", "controlled-ablation", "v2.26.58"],
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "id": "comfy.quality.dog_natural_surface_prompt",
+      "type": "business_rule",
+      "name": "犬类自然毛面与色素非几何提示合同",
+      "status": "active",
+      "tags": ["v2.26.58", "dog", "canonical", "all-actions", "natural-fur", "rounded-anatomy", "no-palette-percentages", "no-region-quotas", "no-low-poly", "no-faceted-geometry", "no-flat-shading"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/prompting_workflows.py"
+    },
+    {
       "id": "comfy.action.cat_default",
       "type": "business_rule",
       "name": "猫默认动作：eating 与 grooming",
@@ -1030,6 +1047,18 @@
       "relation": "governed_by",
       "to": "comfy.decision.generated_visual_completion_first",
       "evidence": "docs/knowledge/DECISIONS/0003-generated-visual-completion-first.md"
+    },
+    {
+      "from": "comfy.incident.v22657_blocky_dog_surface",
+      "relation": "resolved_by",
+      "to": "comfy.quality.dog_natural_surface_prompt",
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "governed_by",
+      "to": "comfy.quality.dog_natural_surface_prompt",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/prompting_workflows.py"
     }
   ]
 }

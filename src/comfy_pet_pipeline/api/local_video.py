@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.57"
+API_VERSION = "2.26.58"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -1580,6 +1580,14 @@ UPLOADED_IDENTITY_FUR_NEGATIVE = (
     "silhouette, changing back contour, fur crawling, texture crawling"
 )
 
+DOG_NATURAL_COAT_SURFACE_PROMPT = (
+    "NATURAL DOG COAT SURFACE - required: render smooth organically curved "
+    "anatomy covered by dense source-matched fur, with fine coherent strand "
+    "detail and soft continuous tonal shading across every major body region. "
+    "Coat-color constraints control pigment only and must preserve natural fur "
+    "texture, rounded surface form, and the uploaded dog's coat-length category."
+)
+
 CARTOON_NEGATIVE = (
     "flat 2D drawing, hand-drawn line art, anime, comic, watercolor, low-poly, hard plastic toy, flat fur, "
     "artificially puffed-up fur, raised guard hairs, bristled hair, spiky fur, needle-like fur, "
@@ -1597,7 +1605,9 @@ CARTOON_NEGATIVE = (
     "oversized ears, disproportionately enlarged inner-ear panels, altered facial proportions"
 )
 DOG_CARTOON_NEGATIVE = (
-    "flat 2D drawing, anime, comic, watercolor, low-poly, hard plastic toy, "
+    "flat 2D drawing, anime, comic, watercolor, low-poly, faceted geometry, "
+    "polygonal body surface, broad flat-shaded color panels, geometric coat "
+    "segmentation, origami dog, voxel dog, paper-craft dog, hard plastic toy, "
     "generic dog, different breed, cat, feline, kitten, changed coat color, "
     "changed marking placement, changed face shape, changed eye color, changed "
     "ear shape, changed muzzle, shortened muzzle, shortened snout, rounded baby "
@@ -4399,7 +4409,7 @@ def build_dog_qwen_prompt(
             "a panting smile or visible tongue unless the action contract requires it."
         )
     return f"""CRITICAL DOG ACTION TRANSFER CONTRACT:
-Image 1 is the approved canonical dog and the only identity and appearance authority. Preserve its exact apparent age, breed traits, head and muzzle silhouette, eyes, ears, nose, coat base colors, localized markings, natural coat length and volume, body proportions, paws, complete tail, and restrained stylized 3D material.
+Image 1 is the approved canonical dog and the only identity and appearance authority. Preserve its exact apparent age, breed traits, head and muzzle silhouette, eyes, ears, nose, coat base colors, localized markings, natural coat length and volume, body proportions, paws, complete tail, and naturalistic semi-realistic 3D material.
 {geometry_role}
 
 Repose the exact dog from Image 1 into Image 2's action layout without copying any white-model or guide appearance. Never turn the dog into a cat, feline, kitten, different breed, generic mascot, plastic toy, or white maquette. The dog remains completely natural and unclothed: no collar, harness, clothing, glasses, hat, shoes, jewelry, or accessory.
@@ -4411,7 +4421,7 @@ Anatomy contract: exactly one complete dog with four anatomically attached legs,
 
 Face and age contract: keep Image 1's exact skull width, forehead slope, cheek width, muzzle length, muzzle width and taper, eye diameter and spacing, ear scale, nose scale and apparent age. {face_motion_contract} Never make an adult dog look like a puppy, shorten or round the muzzle, or enlarge the head or eyes.
 
-Coat contract: {fur_contract} Never import the white model's white coat, face, eyes, proportions, smooth material, or lighting. Do not invent colors or markings absent from Image 1.
+Coat contract: {fur_contract} {DOG_NATURAL_COAT_SURFACE_PROMPT} Never import the white model's white coat, face, eyes, proportions, smooth material, or lighting. Do not invent colors or markings absent from Image 1.
 
 Output exactly one clean static 512x512 first frame. Every pixel outside {foreground} must be flat uniform pure #00FF00 green. Keep at least 12% green clearance on every edge and keep the complete foreground within 72% of canvas width and height. No floor, floor line, shadow, reflection, scenery, text, logo, watermark, border, or halo.
 {retry}

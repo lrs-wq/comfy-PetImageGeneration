@@ -441,6 +441,12 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertIn("muzzle length", canonical)
         self.assertIn("Preserve an adult as an adult", canonical)
         self.assertIn("front view is authoritative for the face", canonical)
+        self.assertIn("NATURAL DOG COAT SURFACE", canonical)
+        self.assertIn("smooth organically curved anatomy", canonical)
+        self.assertIn("fine coherent strand detail", canonical)
+        self.assertIn("naturalistic semi-realistic 3D digital double", canonical)
+        self.assertIn("NATURAL DOG COAT SURFACE", action_prompt)
+        self.assertIn("naturalistic semi-realistic 3D material", action_prompt)
         self.assertIn("seated or upright", standing_pose)
         self.assertNotIn("stable upright", standing_pose)
         self.assertIn("mouth is visibly open", standing_pose)
@@ -677,11 +683,31 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             }
         )
 
-        self.assertIn("warm brown/orange/ginger/tan/golden/cream 84.4%", prompt)
-        self.assertIn("one continuous base coat", prompt)
-        self.assertIn("never reinterpret", prompt)
-        self.assertIn("new discrete white spots", prompt)
+        self.assertIn(
+            "one natural warm brown/orange/ginger/tan/golden/cream",
+            prompt,
+        )
+        self.assertIn("smoothly blended color variation", prompt)
+        self.assertIn("fine strand detail", prompt)
+        self.assertIn("new white chest panels", prompt)
         self.assertIn("different white-marked breed", prompt)
+        self.assertIn(
+            "without dividing the body into separate color regions",
+            prompt,
+        )
+        self.assertNotIn("approximately", prompt)
+        self.assertNotIn("84.4%", prompt)
+
+    def test_dog_negative_prompt_rejects_faceted_and_segmented_surfaces(
+        self,
+    ) -> None:
+        self.assertIn("faceted geometry", pipeline.DOG_CARTOON_NEGATIVE)
+        self.assertIn("polygonal body surface", pipeline.DOG_CARTOON_NEGATIVE)
+        self.assertIn(
+            "broad flat-shaded color panels",
+            pipeline.DOG_CARTOON_NEGATIVE,
+        )
+        self.assertIn("geometric coat segmentation", pipeline.DOG_CARTOON_NEGATIVE)
 
     def test_warm_canonical_palette_recovery_preserves_generated_geometry(
         self,

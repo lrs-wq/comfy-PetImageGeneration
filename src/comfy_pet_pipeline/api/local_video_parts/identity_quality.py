@@ -1626,25 +1626,22 @@ def identity_palette_prompt(
             "markings or expand them into large invented black patches."
         )
     else:
-        percentage_palette = ", ".join(
-            f"{IDENTITY_PALETTE_PROMPT_LABELS[item]} "
-            f"{float(fractions.get(item, 0.0)) * 100.0:.1f}%"
-            for item in dominant
-        )
-        rule = (
-            "The visible source coat palette is continuous, not a list of new "
-            f"marking colors, and is approximately {percentage_palette or palette}."
-        )
+        rule = f"The visible source coat palette is predominantly {palette}."
         if warm_fur_family >= 0.65:
-            rule += (
-                " Treat the dominant warm brown/orange/ginger/tan/golden/cream "
-                "family as one continuous base coat. Near-white or pale pixels may "
-                "be photographic highlights or naturally lighter fur tips; preserve "
-                "their exact source placement and proportion, but never reinterpret "
-                "them as new discrete white spots, white body patches, a piebald "
-                "pattern, or a different white-marked breed. Likewise, do not turn "
-                "shadows into gray, black, brindle, tiger, stripe, or spotted coat "
-                "markings."
+            rule = (
+                "The uploaded pet's dominant coat is one natural warm brown/orange/"
+                "ginger/tan/golden/cream fur material with the same smoothly blended "
+                "color variation and fine strand detail visible in the source. Pale "
+                "pixels are photographic highlights, naturally lighter fur tips, or "
+                "source-confirmed pale markings; keep them softly blended and only "
+                "where the upload supports them, never turn them into new white chest "
+                "panels, socks, blazes, tail patches, spots, or a different white-"
+                "marked breed. Dark pixels outside the eyes, nose, and mouth are soft "
+                "natural shading unless the upload clearly shows a marking; keep the "
+                "torso, legs, and tail free of invented black, gray, brindle, tiger, "
+                "stripes, spots, bars, or patches. Use neutral-white lighting and "
+                "preserve the source palette without dividing the body into separate "
+                "color regions."
             )
     if absent_chromatic:
         rule += (
@@ -1652,10 +1649,19 @@ def identity_palette_prompt(
             + ", ".join(absent_chromatic)
             + "."
         )
+    spatial_rule = (
+        "Match the source's overall color balance and localized markings as "
+        "natural, softly blended fur."
+        if warm_fur_family >= 0.65 and not source_is_achromatic
+        else (
+            "Preserve the exact spatial placement and proportion of every source "
+            "color region."
+        )
+    )
     return (
         "SOURCE COAT PALETTE LOCK - higher priority than style and LoRA: "
-        f"{rule} Preserve the exact spatial placement and proportion of every source "
-        "color region. Never add calico, tortoiseshell, tabby, stripe, spot, patch, "
+        f"{rule} {spatial_rule} Never add calico, tortoiseshell, tabby, stripe, "
+        "spot, patch, "
         f"or warm highlight that is absent from the uploaded pet.{retry_rule}"
     )
 
