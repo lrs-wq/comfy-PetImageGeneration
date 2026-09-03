@@ -4,6 +4,7 @@
 - 日期：2026-09-01
 - 负责人：项目负责人
 - 影响节点：`comfy.project`、`comfy.module.pipeline`、`comfy.runtime.data`、`comfy.api.local-video`
+- 修订：live smoke 的运行时机和默认动作矩阵已由 `0006-post-change-cat-dog-two-action-smoke.md` 覆盖；本 ADR 的 completion-only 判定仍有效。
 
 ## 背景
 

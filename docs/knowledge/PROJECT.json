@@ -31,6 +31,17 @@
     "bash ops/scripts/verify-change.sh",
     ".venv/bin/python ops/scripts/run-live-stability-gallery.py --suite smoke"
   ],
+  "verification_policy": {
+    "required_after_every_repository_modification": true,
+    "mandatory_live_smoke_matrix": {
+      "cat": ["eating", "grooming"],
+      "dog": ["eating", "standing"]
+    },
+    "one_job_per_species": true,
+    "one_execution_per_action": true,
+    "attempt_both_species_if_one_fails": true,
+    "explicit_cases_are_supplementary": true
+  },
   "source_docs": [
     "README.md",
     "docs/api/SIMPLE_PET_GIF_API.md",

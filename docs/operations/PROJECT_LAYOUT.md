@@ -52,4 +52,4 @@ flowchart LR
 2. 不在 import 时启动生成任务；端到端生成只能由 `tests/e2e/` 或显式 API 请求触发。
 3. 新的凭据只增加到 `/etc/comfy-pet-pipeline/`，并在 `ops/env/` 增加无值示例。
 4. 运行服务统一使用 `src.comfy_pet_pipeline...` 入口，避免兼容文件成为新的依赖。
-5. 每次仓库修改后运行 `bash ops/scripts/verify-change.sh`；历史语料只能按清单 SHA 从 `/data` 读取，不复制到源码树。影响运行链路的服务修改在重启后再运行 live smoke 图集。
+5. 每次仓库修改后先运行 `bash ops/scripts/verify-change.sh`，再在队列为空时运行 `.venv/bin/python ops/scripts/run-live-stability-gallery.py --suite smoke`；默认必须各提交一次猫 `eating + grooming` 和狗 `eating + standing`。历史语料只能按清单 SHA 从 `/data` 读取，不复制到源码树。

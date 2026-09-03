@@ -261,7 +261,7 @@
       "name": "历史输入与线上完成性稳定图集（6案例/16输入/15姿态）",
       "path": "src/comfy_pet_pipeline/regression",
       "status": "active",
-      "tags": ["historical-inputs", "6-canaries", "16-input-views", "15-pose-keyframes", "completion-only", "live-canary", "smoke-2-cases", "latest-commit-45082ff", "quality-non-blocking"],
+      "tags": ["historical-inputs", "6-canaries", "16-input-views", "15-pose-keyframes", "completion-only", "live-canary", "after-every-change", "smoke-2-cases-4-actions", "cat-eating-grooming", "dog-eating-standing", "attempt-both-species-on-failure", "quality-non-blocking"],
       "evidence": "docs/operations/REGRESSION_GALLERY.md"
     },
     {
@@ -501,6 +501,14 @@
       "status": "accepted",
       "tags": ["grooming", "foreleg-topology", "anatomy-freedom", "attempts-4-5", "five-attempts", "no-cache-read", "no-sixth-attempt", "completion-first"],
       "evidence": "docs/knowledge/DECISIONS/0005-grooming-foreleg-topology-advisory.md"
+    },
+    {
+      "id": "comfy.decision.post_change_cat_dog_two_action_smoke",
+      "type": "decision",
+      "name": "每次修改后猫狗双行为线上自测",
+      "status": "accepted",
+      "tags": ["verification", "after-every-change", "live-smoke", "exactly-one-cat-job", "exactly-one-dog-job", "cat-eating-grooming", "dog-eating-standing", "four-actions-once", "attempt-both-species-on-failure", "explicit-cases-supplementary", "completion-only"],
+      "evidence": "docs/knowledge/DECISIONS/0006-post-change-cat-dog-two-action-smoke.md"
     }
   ],
   "edges": [
@@ -815,6 +823,24 @@
       "relation": "governed_by",
       "to": "comfy.decision.completion_only_regression",
       "evidence": "docs/knowledge/DECISIONS/0002-historical-regression-gallery.md"
+    },
+    {
+      "from": "comfy.verification.historical_stability_gallery",
+      "relation": "governed_by",
+      "to": "comfy.decision.post_change_cat_dog_two_action_smoke",
+      "evidence": "docs/knowledge/DECISIONS/0006-post-change-cat-dog-two-action-smoke.md"
+    },
+    {
+      "from": "comfy.decision.completion_only_regression",
+      "relation": "partially_superseded_by",
+      "to": "comfy.decision.post_change_cat_dog_two_action_smoke",
+      "evidence": "docs/knowledge/DECISIONS/0006-post-change-cat-dog-two-action-smoke.md"
+    },
+    {
+      "from": "comfy.project",
+      "relation": "governed_by",
+      "to": "comfy.decision.post_change_cat_dog_two_action_smoke",
+      "evidence": "AGENTS.md"
     },
     {
       "from": "comfy.verification.historical_stability_gallery",

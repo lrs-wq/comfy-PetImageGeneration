@@ -77,33 +77,60 @@ class LiveStabilityGalleryContractTest(unittest.TestCase):
             "canary_cases": [
                 {
                     "id": "cat",
+                    "species": "cat",
                     "actions": ["eating", "grooming"],
-                    "smoke_actions": ["grooming"],
+                    "smoke_actions": ["eating", "grooming"],
                 },
                 {
                     "id": "dog",
-                    "actions": ["eating"],
+                    "species": "dog",
+                    "actions": ["eating", "standing"],
+                    "smoke_actions": ["eating", "standing"],
                 },
                 {
                     "id": "full-only",
                     "actions": ["standing"],
-                    "smoke_actions": ["standing"],
                 },
             ]
         }
 
     def test_smoke_and_explicit_case_selection(self) -> None:
         smoke = live.select_cases(self.manifest, suite="smoke")
-        self.assertEqual([item["id"] for item in smoke], ["cat", "full-only"])
-        self.assertEqual(smoke[0]["selected_actions"], ["grooming"])
+        self.assertEqual([item["id"] for item in smoke], ["cat", "dog"])
+        self.assertEqual(smoke[0]["selected_actions"], ["eating", "grooming"])
+        self.assertEqual(smoke[1]["selected_actions"], ["eating", "standing"])
 
         explicit = live.select_cases(
             self.manifest,
             suite="smoke",
-            requested_ids=["dog"],
+            requested_ids=["full-only"],
         )
-        self.assertEqual([item["id"] for item in explicit], ["dog"])
-        self.assertEqual(explicit[0]["selected_actions"], ["eating"])
+        self.assertEqual([item["id"] for item in explicit], ["full-only"])
+        self.assertEqual(explicit[0]["selected_actions"], ["standing"])
+
+    def test_default_smoke_rejects_incomplete_species_action_matrix(self) -> None:
+        self.manifest["canary_cases"][0]["smoke_actions"] = ["grooming"]
+        with self.assertRaisesRegex(
+            live.StabilityError,
+            "must select each required action exactly once",
+        ):
+            live.select_cases(self.manifest, suite="smoke")
+
+    def test_default_smoke_attempts_both_species_after_one_fails(self) -> None:
+        self.assertFalse(
+            live.stop_after_failed_case(
+                suite="smoke",
+                requested_ids=None,
+                keep_going=False,
+            )
+        )
+        self.assertTrue(
+            live.stop_after_failed_case(
+                suite="smoke",
+                requested_ids=["cat"],
+                keep_going=False,
+            )
+        )
 
     def test_completion_contract_ignores_visual_quality_fields(self) -> None:
         session = Mock()

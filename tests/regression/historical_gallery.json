@@ -578,6 +578,7 @@
         "grooming"
       ],
       "smoke_actions": [
+        "eating",
         "grooming"
       ],
       "views": {
@@ -672,6 +673,7 @@
         "standing"
       ],
       "smoke_actions": [
+        "eating",
         "standing"
       ],
       "views": {

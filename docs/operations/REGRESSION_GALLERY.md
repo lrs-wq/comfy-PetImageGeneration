@@ -30,7 +30,7 @@ bash ops/scripts/verify-change.sh
 
 质量样例显示 `MATCH` 或 `DRIFT`，都不会让命令失败。只有代码测试、导入、语料完整性或输入合同失败才会阻断。服务器仓库的 pre-commit hook 调用同一命令，未提交修改也必须显式运行一次。
 
-### 服务重启后：真实完成性 canary
+### 每次仓库修改后：真实完成性 canary
 
 确认没有在线任务后运行：
 
@@ -42,12 +42,12 @@ bash ops/scripts/verify-change.sh
 
 | canary | 输入覆盖 | 动作 |
 | --- | --- | --- |
-| `orange-tabby-duplicate-three-view` | 猫，三视图字段但三个文件相同 | `grooming` |
-| `golden-retriever-outdoor` | 犬，户外复杂背景、两个不同视角 | `standing` |
+| `orange-tabby-duplicate-three-view` | 猫，三视图字段但三个文件相同 | `eating / grooming` |
+| `golden-retriever-outdoor` | 犬，户外复杂背景、两个不同视角 | `eating / standing` |
 
-脚本在提交前检查 API、worker、ComfyUI、模型和当前活动任务。发现已有 `queued/running` 任务会拒绝运行；仅在明确接受排队影响时使用 `--allow-busy`。
+该默认矩阵在每次仓库修改后都必须执行：恰好一组猫、两种行为各一次；恰好一组狗、两种行为各一次。脚本会在提交前硬校验 `cat = eating + grooming`、`dog = eating + standing`，缺物种、缺行为、重复行为或额外默认案例都会直接失败。第一组失败时默认仍继续提交第二个物种，保证猫狗都被实际尝试，最终报告仍按任一失败返回非零。pre-commit 只运行快速门禁，不能替代这次真实 GPU 自测。
 
-修改提示词、工作流、模型调用、队列、任务状态、输出发布或 GPU 生成链路时，服务安全重启后必须跑 smoke。修改动作专属路径时可显式运行对应历史案例；显式案例会使用清单中的完整动作集合：
+脚本在提交前检查 API、worker、ComfyUI、模型和当前活动任务。发现已有 `queued/running` 任务会拒绝运行；应等待队列清空后重跑，不以显式 `--case` 规避默认矩阵。修改动作专属路径时仍可追加对应历史案例；显式案例会使用清单中的完整动作集合：
 
 ```bash
 .venv/bin/python ops/scripts/run-live-stability-gallery.py \
@@ -160,6 +160,6 @@ eating 与 standing 主 APNG 都可读取、`512×512 / 100` 帧，SHA-256 分�
 2. 在清单新增来源相对路径与 SHA-256；不记录用户身份、提示词或敏感字段。
 3. 为新 canary 写清物种、视图、完整动作；只有适合每次 smoke 的小集合才增加 `smoke_actions`。
 4. 需要替换媒体时提升 `corpus_root` 版本，不覆盖旧版本文件。
-5. 运行 `--materialize-only`、`bash ops/scripts/verify-change.sh` 和 live dry-run；服务修改还要完成 live smoke。
+5. 运行 `--materialize-only`、`bash ops/scripts/verify-change.sh` 和 live dry-run；每次仓库修改都必须完成猫狗双行为 live smoke。
 
 非阻断质量样例可以保留，方便定位行为变化，但不需要为画面差异更新基线来“修绿”稳定性测试。

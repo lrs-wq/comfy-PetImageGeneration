@@ -43,6 +43,10 @@ PRIMARY_OUTPUT_TYPES = (
     "transparent_gif",
     "subject_replacement_video",
 )
+REQUIRED_POST_CHANGE_SMOKE_ACTIONS = {
+    "cat": ("eating", "grooming"),
+    "dog": ("eating", "standing"),
+}
 
 
 class StabilityError(RuntimeError):
@@ -100,6 +104,53 @@ def create_report_directory(report_root: Path) -> Path:
     raise StabilityError(f"Could not allocate a report directory below {report_root}")
 
 
+def validate_default_smoke_matrix(cases: list[dict[str, Any]]) -> None:
+    expected_species = set(REQUIRED_POST_CHANGE_SMOKE_ACTIONS)
+    if len(cases) != len(expected_species):
+        raise StabilityError(
+            "Default smoke must select exactly one cat case and one dog case."
+        )
+
+    seen_species: set[str] = set()
+    for case in cases:
+        species = str(case.get("species") or "").strip().lower()
+        if species not in expected_species:
+            raise StabilityError(
+                f"Default smoke selected unsupported species {species!r}."
+            )
+        if species in seen_species:
+            raise StabilityError(
+                f"Default smoke selected more than one {species} case."
+            )
+        expected_actions = list(REQUIRED_POST_CHANGE_SMOKE_ACTIONS[species])
+        selected_actions = [
+            str(action) for action in case.get("selected_actions", [])
+        ]
+        if selected_actions != expected_actions:
+            raise StabilityError(
+                f"Default smoke {species} case must select each required action "
+                f"exactly once: expected={expected_actions}, actual={selected_actions}."
+            )
+        seen_species.add(species)
+
+    missing_species = expected_species - seen_species
+    if missing_species:
+        raise StabilityError(
+            "Default smoke is missing required species: "
+            + ", ".join(sorted(missing_species))
+        )
+
+
+def stop_after_failed_case(
+    *,
+    suite: str,
+    requested_ids: list[str] | None,
+    keep_going: bool,
+) -> bool:
+    mandatory_default_matrix = suite == "smoke" and not requested_ids
+    return not keep_going and not mandatory_default_matrix
+
+
 def select_cases(
     manifest: dict[str, Any],
     *,
@@ -136,6 +187,8 @@ def select_cases(
                 f"Canary {item.get('id')} has an invalid action selection: {actions}"
             )
         result.append(dict(item) | {"selected_actions": actions})
+    if suite == "smoke" and not requested_ids:
+        validate_default_smoke_matrix(result)
     return result
 
 
@@ -715,7 +768,11 @@ def run_live_gallery(
                 result["issues"].append(str(exc))
                 result["passed"] = False
             write_report(report_dir, report)
-            if not result["passed"] and not keep_going:
+            if not result["passed"] and stop_after_failed_case(
+                suite=suite,
+                requested_ids=requested_ids,
+                keep_going=keep_going,
+            ):
                 break
     finally:
         if owned_session:
