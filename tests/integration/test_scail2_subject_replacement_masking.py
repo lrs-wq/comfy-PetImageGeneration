@@ -256,6 +256,36 @@ class EatingScenePropMaskTests(unittest.TestCase):
         return reference, colored
 
     @staticmethod
+    def _golden_aligned_reference_with_warm_decoy() -> tuple[Image.Image, Image.Image]:
+        reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(reference)
+        coat = (196, 143, 75, 255)
+        draw.ellipse((35, 105, 430, 405), fill=coat)
+        draw.ellipse((65, 175, 215, 325), fill=(207, 154, 86, 255))
+        draw.rounded_rectangle(
+            (66, 303, 205, 424),
+            radius=24,
+            fill=(202, 184, 157, 255),
+        )
+        # The muzzle visibly occludes the bowl but the old geometric splitter
+        # paints this whole overlap red in the semantic mask.
+        draw.ellipse((92, 340, 151, 370), fill=(42, 36, 31, 255))
+        # This reproduces the narrow golden-fur island selected by the old
+        # warm-only heuristic.  It is near the old rim but far from centre.
+        draw.rectangle((66, 282, 74, 302), fill=(211, 111, 73, 255))
+
+        colored = Image.new("RGB", (512, 512), (255, 255, 255))
+        mask_draw = ImageDraw.Draw(colored)
+        mask_draw.ellipse((35, 105, 430, 405), fill=(0, 0, 255))
+        mask_draw.ellipse((65, 175, 215, 325), fill=(0, 0, 255))
+        mask_draw.rounded_rectangle(
+            (66, 303, 205, 424),
+            radius=24,
+            fill=(255, 0, 0),
+        )
+        return reference, colored
+
+    @staticmethod
     def _drinking_reference() -> tuple[Image.Image, Image.Image]:
         reference = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
         draw = ImageDraw.Draw(reference)
@@ -430,6 +460,8 @@ class EatingScenePropMaskTests(unittest.TestCase):
             "full_subject_silhouette_per_frame",
         )
         self.assertTrue(metadata["scene_prop_separated"])
+        self.assertTrue(metadata["static_bowl_mask"])
+        self.assertTrue(metadata["static_bowl_rgb"])
         self.assertEqual(len(metadata["identity_bbox_by_frame"]), len(poses))
         self.assertFalse(
             np.array_equal(
@@ -919,7 +951,7 @@ class EatingScenePropMaskTests(unittest.TestCase):
         self.assertLessEqual(metadata["reference_muzzle_bowl_gap_px"], 8)
         self.assertEqual(
             metadata["reference_muzzle_method"],
-            "warm_face_component_above_bowl_v1",
+            "central_warm_muzzle_component_above_bowl_v2",
         )
         self.assertEqual(metadata["reference_muzzle_bowl_gap_px"], 6)
         self.assertEqual(metadata["target_muzzle_food_overlap_px"], 8.0)
@@ -996,6 +1028,62 @@ class EatingScenePropMaskTests(unittest.TestCase):
         self.assertTrue(np.all(allowed))
         high_pose = np.asarray(poses[high_index].convert("RGB"), dtype=np.uint8)
         self.assertFalse(np.any(np.all(high_pose == (225, 25, 25), axis=2)))
+
+    def test_reference_aligned_eating_routes_occluded_muzzle_to_full_driver_recovery(
+        self,
+    ) -> None:
+        reference, reference_mask = self._golden_aligned_reference_with_warm_decoy()
+        with self.assertRaisesRegex(
+            ValueError,
+            "reference_bowl_mask_occludes_muzzle",
+        ):
+            scail.make_eating_reference_aligned_pose_frames(
+                self._geometry_frames(static_contact_paw=True),
+                reference,
+                reference_mask,
+                (512, 512),
+            )
+
+        poses, masks, metadata = scail.make_dog_eating_reference_full_driver_recovery_pose_frames(
+            self._geometry_frames(full_body_motion=True),
+            (512, 512),
+            fallback_reason=(
+                "eating_reference_motion_unreliable: reference_bowl_mask_occludes_muzzle"
+            ),
+        )
+        self.assertEqual(
+            metadata["policy"],
+            scail.DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
+        )
+        self.assertTrue(metadata["fallback_used"])
+        self.assertFalse(metadata["driver_signal_only"])
+        self.assertTrue(metadata["driver_silhouette_preserved"])
+        self.assertTrue(metadata["full_white_driver_geometry"])
+        self.assertTrue(metadata["static_bowl_mask"])
+        self.assertTrue(metadata["static_bowl_rgb"])
+        self.assertEqual(metadata["pose_canvas_size"], [512, 512])
+        first_pose = np.asarray(poses[0], dtype=np.uint8)
+        first_mask = np.asarray(masks[0], dtype=np.uint8)
+        first_red = np.all(first_mask == (255, 0, 0), axis=2)
+        first_blue = np.all(first_mask == (0, 0, 255), axis=2)
+        self.assertTrue(np.any(first_red))
+        self.assertTrue(
+            any(
+                not np.array_equal(first_pose, np.asarray(pose, dtype=np.uint8))
+                for pose in poses[1:]
+            )
+        )
+        self.assertTrue(
+            any(
+                not np.array_equal(first_blue, np.all(np.asarray(mask) == (0, 0, 255), axis=2))
+                for mask in masks[1:]
+            )
+        )
+        for mask in masks[1:]:
+            red = np.all(np.asarray(mask, dtype=np.uint8) == (255, 0, 0), axis=2)
+            intersection = int(np.count_nonzero(first_red & red))
+            union = int(np.count_nonzero(first_red | red))
+            self.assertGreaterEqual(intersection / float(union), 0.995)
 
     def test_reference_aligned_drinking_locks_tail_and_body_geometry(self) -> None:
         reference, reference_mask = self._drinking_reference()

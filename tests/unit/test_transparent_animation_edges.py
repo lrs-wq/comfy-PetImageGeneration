@@ -19,14 +19,20 @@ from src.comfy_pet_pipeline.media.transparent_animation import (
 from src.comfy_pet_pipeline.pipeline.subject_replacement import (
     DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN,
     DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS,
+    EATING_STATIC_BOWL_ALPHA_RETENTION_MIN,
+    EATING_STATIC_BOWL_ALPHA_THRESHOLD,
+    EATING_STATIC_BOWL_GUIDANCE_SUPPORT_RATIO_MIN,
     REFERENCE_ALIGNED_ADAPTIVE_EXTRACTION_POLICY,
     REFERENCE_ALIGNED_BOUNDED_CANVAS_EXTRACTION_STRATEGY,
     REFERENCE_ALIGNED_HYBRID_EXTRACTION_STRATEGY,
     REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY,
     REFERENCE_ALIGNED_UNIFORM_BACKGROUND_POLICY,
     _canvas_border_color_distance_p999,
+    _eating_static_bowl_supported_core,
+    _eating_static_bowl_temporal_reference,
     _merge_reference_aligned_static_prop,
     _reference_guided_uniform_background_mask,
+    clean_transparent_edge_halo,
     encode_static_mask_video,
     reference_aligned_transparent_extraction_strategy,
     transparent_guidance_area_ratio_minimum,
@@ -312,6 +318,86 @@ class TransparentVideoCliTests(unittest.TestCase):
             int(output_rgb[100, 24, 2]),
         )
 
+    def test_eating_static_bowl_recovery_rejects_unsupported_guide_overhang(self):
+        rgb = np.full((128, 128, 3), (238, 240, 238), dtype=np.uint8)
+        identity = np.zeros((128, 128), dtype=np.uint8)
+        static_prop = np.zeros((128, 128), dtype=np.uint8)
+        cv2.ellipse(rgb, (64, 52), (25, 38), 0, 0, 360, (205, 155, 92), -1)
+        cv2.ellipse(identity, (64, 52), (25, 38), 0, 0, 360, 1, -1)
+        cv2.rectangle(rgb, (16, 82), (112, 108), (170, 180, 176), -1)
+        cv2.rectangle(static_prop, (16, 78), (112, 118), 1, -1)
+        guidance = (identity | static_prop).astype(bool)
+
+        _output_rgb, bounded_alpha, metrics = _reference_guided_uniform_background_mask(
+            rgb,
+            guidance,
+            frame_index=0,
+            guidance_component_coverage_required_min=0.45,
+            guidance_area_ratio_required_min=0.55,
+            guidance_component_area_fraction_required_min=0.005,
+            static_prop_guidance=static_prop.astype(bool),
+            force_static_prop_guidance=False,
+        )
+        supported_core, support_metrics = _eating_static_bowl_supported_core(
+            bounded_alpha,
+            static_prop.astype(bool),
+        )
+
+        self.assertGreaterEqual(int(bounded_alpha[96, 24]), 128)
+        self.assertEqual(int(bounded_alpha[116, 24]), 0)
+        self.assertFalse(metrics["static_prop_guidance_forced"])
+        self.assertGreater(
+            support_metrics["static_prop_bounded_support_ratio"],
+            EATING_STATIC_BOWL_GUIDANCE_SUPPORT_RATIO_MIN,
+        )
+        self.assertTrue(supported_core[96, 24])
+        self.assertFalse(supported_core[116, 24])
+
+    def test_eating_static_bowl_temporal_reference_restores_missing_frame_without_overhang(
+        self,
+    ) -> None:
+        static_prop = np.zeros((96, 96), dtype=np.uint8)
+        cv2.rectangle(static_prop, (18, 58), (78, 88), 1, -1)
+        bounded_frames: list[tuple[np.ndarray, np.ndarray]] = []
+        guidances: list[np.ndarray] = []
+        for index in range(5):
+            rgb = np.zeros((96, 96, 3), dtype=np.uint8)
+            alpha = np.zeros((96, 96), dtype=np.uint8)
+            if index != 2:
+                cv2.rectangle(rgb, (20, 60), (76, 80), (172, 180, 176), -1)
+                cv2.rectangle(alpha, (20, 60), (76, 80), 255, -1)
+            bounded_frames.append((rgb, alpha))
+            guidances.append(static_prop.astype(bool))
+
+        canonical_rgb, canonical_alpha, core, metrics, frame_metrics = (
+            _eating_static_bowl_temporal_reference(
+                bounded_frames,
+                guidances,
+            )
+        )
+        output_rgb, output_alpha, recovery = _merge_reference_aligned_static_prop(
+            np.zeros((96, 96, 3), dtype=np.uint8),
+            np.zeros((96, 96), dtype=np.uint8),
+            *bounded_frames[2],
+            static_prop.astype(bool),
+            temporal_reference_rgb=canonical_rgb,
+            temporal_reference_alpha=canonical_alpha,
+        )
+
+        self.assertEqual(metrics["reliable_frame_count"], 4)
+        self.assertLess(
+            frame_metrics[2]["static_prop_bounded_support_ratio"],
+            EATING_STATIC_BOWL_GUIDANCE_SUPPORT_RATIO_MIN,
+        )
+        self.assertTrue(core[68, 48])
+        self.assertGreaterEqual(int(output_alpha[68, 48]), 220)
+        self.assertEqual(tuple(output_rgb[68, 48]), (172, 180, 176))
+        self.assertEqual(int(output_alpha[86, 48]), 0)
+        self.assertGreater(
+            recovery["static_prop_temporal_reference_added_pixels"],
+            500,
+        )
+
     def test_drinking_static_bowl_recovery_does_not_replace_animal_matte(self):
         rgb = np.zeros((96, 96, 3), dtype=np.uint8)
         alpha = np.zeros((96, 96), dtype=np.uint8)
@@ -353,6 +439,51 @@ class TransparentVideoCliTests(unittest.TestCase):
             float(DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS),
         )
         self.assertGreater(metrics["static_prop_recovered_pixels"], 300)
+
+    def test_eating_static_bowl_core_survives_local_edge_cleanup(self):
+        rgb = np.zeros((128, 128, 3), dtype=np.uint8)
+        alpha = np.zeros((128, 128), dtype=np.uint8)
+        cv2.circle(rgb, (38, 48), 28, (196, 145, 82), -1)
+        cv2.circle(alpha, (38, 48), 28, 255, -1)
+        cv2.circle(rgb, (38, 48), 28, (28, 27, 25), 5)
+
+        bowl_alpha = np.zeros_like(alpha)
+        cv2.rectangle(bowl_alpha, (75, 78), (120, 108), 255, -1)
+        bowl_alpha = cv2.GaussianBlur(
+            bowl_alpha,
+            (0, 0),
+            sigmaX=1.2,
+            sigmaY=1.2,
+        )
+        alpha = np.maximum(alpha, bowl_alpha)
+        cv2.rectangle(rgb, (75, 78), (120, 108), (205, 190, 168), -1)
+        protected_core = np.zeros_like(alpha, dtype=bool)
+        protected_core[83:104, 80:116] = True
+
+        _cleaned_rgb, cleaned_alpha, metrics = clean_transparent_edge_halo(
+            rgb,
+            alpha,
+            action="eating",
+            protected_alpha_core=protected_core,
+            minimum_candidate_pixels=8,
+            minimum_candidate_fraction=0.001,
+            minimum_component_pixels=2,
+        )
+
+        self.assertTrue(np.array_equal(cleaned_alpha[protected_core], alpha[protected_core]))
+        self.assertGreaterEqual(
+            float(
+                np.count_nonzero(
+                    cleaned_alpha[protected_core] >= EATING_STATIC_BOWL_ALPHA_THRESHOLD
+                )
+            )
+            / float(np.count_nonzero(protected_core)),
+            EATING_STATIC_BOWL_ALPHA_RETENTION_MIN,
+        )
+        self.assertGreaterEqual(
+            int(metrics.get("protected_alpha_core_pixels", 0)),
+            int(np.count_nonzero(protected_core)),
+        )
 
     @unittest.skipUnless(importlib.util.find_spec("av"), "PyAV is not installed")
     def test_static_reference_mask_normalizes_black_background_losslessly(self):

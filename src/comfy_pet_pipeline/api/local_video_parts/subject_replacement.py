@@ -63,6 +63,9 @@ TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = 0.70
 DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY = (
     "drinking_full_driver_subject_and_bowl_adaptive_matte_v1"
 )
+EATING_TRANSPARENT_STATIC_BOWL_GUIDANCE_POLICY = (
+    "eating_subject_and_static_bowl_adaptive_matte_v2"
+)
 STANDING_TRANSPARENT_ADAPTIVE_MATTE_POLICY = (
     "standing_driver_pose_mask_adaptive_canvas_matte_v1"
 )
@@ -91,8 +94,8 @@ DRINKING_OUTPUT_SOURCE_SILHOUETTE_RETENTION_RATIO_MIN = 0.65
 DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN = 0.75
 DRINKING_SCAIL_BACKGROUND_DISTANCE_MIN = 24.0
 
-EATING_SCAIL_TEMPORAL_ACTION_POLICY = "eating_visible_motion_energy_gate_v2"
-EATING_SCAIL_BEST_EFFORT_POLICY = "eating_motion_energy_best_of_five_v1"
+EATING_SCAIL_TEMPORAL_ACTION_POLICY = "eating_muzzle_motion_and_visible_energy_gate_v3"
+EATING_SCAIL_BEST_EFFORT_POLICY = "eating_muzzle_motion_best_of_five_v2"
 EATING_SCAIL_MAX_ATTEMPTS = 5
 # A retry for insufficient eating motion must strengthen, never weaken, the
 # white-model pose signal.  Later attempts stay at the safe 1.35 effective
@@ -107,6 +110,9 @@ EATING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (
 )
 EATING_SCAIL_ADJACENT_MAE_MIN = 0.55
 EATING_SCAIL_FIRST_FRAME_MAE_MAX_MIN = 3.0
+EATING_SCAIL_MUZZLE_MOTION_MIN_PX = 8.0
+EATING_SCAIL_MUZZLE_HEAD_LIFT_RETENTION_RATIO_MIN = 0.25
+EATING_SCAIL_MUZZLE_DARK_LUMA_MAX = 125
 
 GROOMING_SCAIL_IDENTITY_RETENTION_POLICY = (
     "grooming_reference_identity_vs_driver_appearance_gate_v1"
@@ -136,8 +142,10 @@ def select_transparent_guidance_policy(
     Reusing the narrower white-model pose mask for that reference compares two
     different silhouettes and can reject an otherwise correct SCAIL video. A
     full-driver drinking mask already binds the animated dog and static bowl,
-    so it also enables adaptive subject-plus-prop extraction. Other actions and
-    legacy narrow references keep their frame-varying driver guidance.
+    so it also enables adaptive subject-plus-prop extraction. Eating masks
+    explicitly separate the animated animal and static bowl; retaining both
+    roles prevents a disconnected pale bowl from disappearing. Other actions
+    and legacy narrow references keep their frame-varying driver guidance.
     """
 
     normalized_action = str(action or "").strip().lower()
@@ -159,6 +167,19 @@ def select_transparent_guidance_policy(
         ),
     }
     pose_metadata = manifest.get("pose_metadata")
+    if (
+        normalized_action == "eating"
+        and isinstance(pose_metadata, dict)
+        and pose_metadata.get("scene_prop_separated") is True
+        and pose_metadata.get("static_bowl_mask") is True
+        and pose_metadata.get("static_bowl_rgb") is True
+    ):
+        return {
+            **default,
+            "policy": EATING_TRANSPARENT_STATIC_BOWL_GUIDANCE_POLICY,
+            "reference_aligned_uniform_background": True,
+            "static_prop_required": True,
+        }
     if (
         normalized_action == "drinking"
         and isinstance(pose_metadata, dict)
@@ -722,8 +743,216 @@ def drinking_scail_video_motion_quality(
     }
 
 
+def _eating_muzzle_tracking_metadata(
+    pose_metadata: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Resolve a mouth tracker for both reference-nod and full-driver poses."""
+
+    if not isinstance(pose_metadata, dict):
+        return None, "pose_metadata_unavailable"
+    if (
+        pose_metadata.get("policy") == "reference_space_head_nod_food_overlap_v2"
+        and pose_metadata.get("driver_signal_only") is True
+    ):
+        return pose_metadata, "reference_muzzle_anchor"
+    if not (
+        pose_metadata.get("driver_signal_only") is False
+        and pose_metadata.get("full_white_driver_geometry") is True
+    ):
+        return None, "not_required_for_non_eating_motion_pose"
+
+    scene_prop_metadata = pose_metadata.get("scene_prop_metadata")
+    prop_bbox = (
+        scene_prop_metadata.get("prop_exclusion_bbox_union")
+        if isinstance(scene_prop_metadata, dict)
+        else None
+    )
+    canvas_size = pose_metadata.get("pose_canvas_size", [512, 512])
+    try:
+        bowl_left, bowl_top, bowl_right, bowl_bottom = (float(value) for value in prop_bbox)
+        canvas_width, canvas_height = (float(value) for value in canvas_size)
+    except (TypeError, ValueError):
+        return None, "full_driver_static_bowl_geometry_unavailable"
+    if (
+        canvas_width <= 0
+        or canvas_height <= 0
+        or bowl_right <= bowl_left
+        or bowl_bottom <= bowl_top
+    ):
+        return None, "full_driver_static_bowl_geometry_invalid"
+
+    bowl_width = bowl_right - bowl_left
+    corridor_margin = max(8.0, bowl_width * 0.12)
+    head_lift_px = max(
+        32.0,
+        float(pose_metadata.get("identity_center_y_span") or 0.0),
+    )
+    return (
+        {
+            "reference_canvas_size": [canvas_width, canvas_height],
+            "reference_muzzle_anchor": [
+                (bowl_left + bowl_right) / 2.0,
+                bowl_top - 4.0,
+            ],
+            "reference_bowl_bbox": [
+                bowl_left,
+                bowl_top,
+                bowl_right,
+                bowl_bottom,
+            ],
+            "muzzle_motion_corridor_bbox": [
+                max(0.0, bowl_left - corridor_margin),
+                max(0.0, bowl_top - head_lift_px - 18.0),
+                min(canvas_width, bowl_right + corridor_margin),
+                bowl_bottom,
+            ],
+            "head_lift_px_max": head_lift_px,
+        },
+        "full_driver_static_bowl_bbox",
+    )
+
+
+def _eating_muzzle_motion_signature(
+    frames: list[np.ndarray],
+    pose_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Track the lowest central dark muzzle component above the static bowl."""
+
+    anchor = pose_metadata.get("reference_muzzle_anchor")
+    bowl_bbox = pose_metadata.get("reference_bowl_bbox")
+    corridor_bbox = pose_metadata.get("muzzle_motion_corridor_bbox")
+    canvas_size = pose_metadata.get("reference_canvas_size", [512, 512])
+    try:
+        anchor_x, anchor_y = (float(value) for value in anchor)
+        bowl_left, bowl_top, bowl_right, _bowl_bottom = (float(value) for value in bowl_bbox)
+        corridor_left, _corridor_top, corridor_right, _corridor_bottom = (
+            float(value) for value in corridor_bbox
+        )
+        canvas_width, canvas_height = (float(value) for value in canvas_size)
+        head_lift_px = float(pose_metadata["head_lift_px_max"])
+    except (KeyError, TypeError, ValueError):
+        return {
+            "available": False,
+            "reason": "eating_muzzle_geometry_metadata_unavailable",
+            "sample_count": 0,
+            "y_span_px": 0.0,
+            "required_y_span_px": EATING_SCAIL_MUZZLE_MOTION_MIN_PX,
+        }
+    if (
+        canvas_width <= 0
+        or canvas_height <= 0
+        or bowl_right <= bowl_left
+        or corridor_right <= corridor_left
+    ):
+        return {
+            "available": False,
+            "reason": "eating_muzzle_geometry_metadata_invalid",
+            "sample_count": 0,
+            "y_span_px": 0.0,
+            "required_y_span_px": EATING_SCAIL_MUZZLE_MOTION_MIN_PX,
+        }
+
+    required_y_span = max(
+        EATING_SCAIL_MUZZLE_MOTION_MIN_PX,
+        min(
+            18.0,
+            head_lift_px * EATING_SCAIL_MUZZLE_HEAD_LIFT_RETENTION_RATIO_MIN,
+        ),
+    )
+    y_positions: list[float] = []
+    tracked_frame_indices: list[int] = []
+    roi_by_frame: list[list[int]] = []
+    for frame_index, frame in enumerate(frames):
+        if not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] != 3:
+            continue
+        height, width = frame.shape[:2]
+        scale_x = float(width) / canvas_width
+        scale_y = float(height) / canvas_height
+        x0 = max(
+            0,
+            int(round((corridor_left - 8.0) * scale_x)),
+        )
+        x1 = min(
+            width,
+            int(round((corridor_right + 8.0) * scale_x)),
+        )
+        y0 = max(
+            0,
+            int(round((anchor_y - head_lift_px - 18.0) * scale_y)),
+        )
+        y1 = min(height, int(round(bowl_top * scale_y)))
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            continue
+        roi = np.asarray(frame[y0:y1, x0:x1], dtype=np.uint8)
+        gray = cv2.cvtColor(roi, cv2.COLOR_RGB2GRAY)
+        dark = gray <= EATING_SCAIL_MUZZLE_DARK_LUMA_MAX
+        dark = cv2.morphologyEx(
+            dark.astype(np.uint8),
+            cv2.MORPH_CLOSE,
+            np.ones((3, 3), dtype=np.uint8),
+            iterations=1,
+        )
+        count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            dark,
+            connectivity=8,
+        )
+        components: list[tuple[int, int, float, int]] = []
+        scaled_anchor_x = anchor_x * scale_x - float(x0)
+        for label in range(1, count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+            component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            component_bottom = int(stats[label, cv2.CC_STAT_TOP]) + component_height
+            center_x = float(centroids[label][0])
+            if (
+                area >= 8
+                and component_width >= 3
+                and component_height >= 2
+                and abs(center_x - scaled_anchor_x)
+                <= max(18.0, (corridor_right - corridor_left) * scale_x * 0.55)
+            ):
+                components.append(
+                    (
+                        component_bottom,
+                        area,
+                        -abs(center_x - scaled_anchor_x),
+                        label,
+                    )
+                )
+        if not components:
+            continue
+        _bottom, _area, _center_distance, selected_label = max(components)
+        y_positions.append(float(centroids[selected_label][1]) + float(y0))
+        tracked_frame_indices.append(frame_index)
+        roi_by_frame.append([x0, y0, x1, y1])
+
+    minimum_samples = max(5, min(9, len(frames)))
+    available = len(y_positions) >= minimum_samples
+    if available:
+        values = np.asarray(y_positions, dtype=np.float32)
+        if values.size >= 10:
+            y_span = float(np.percentile(values, 90) - np.percentile(values, 10))
+        else:
+            y_span = float(values.max() - values.min())
+    else:
+        y_span = 0.0
+    return {
+        "available": available,
+        "reason": None if available else "eating_muzzle_component_unavailable",
+        "sample_count": len(y_positions),
+        "tracked_frame_indices": tracked_frame_indices,
+        "centroid_y_by_sample": [round(value, 4) for value in y_positions],
+        "roi_by_sample": roi_by_frame,
+        "y_span_px": round(y_span, 6),
+        "required_y_span_px": round(required_y_span, 6),
+        "dark_luma_max": EATING_SCAIL_MUZZLE_DARK_LUMA_MAX,
+    }
+
+
 def eating_scail_video_motion_quality(
     frames: list[np.ndarray],
+    *,
+    pose_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Reject an eating result whose prepared head-nod did not survive SCAIL."""
 
@@ -742,15 +971,40 @@ def eating_scail_video_motion_quality(
         issues.append("eating_motion_energy_too_low")
     if excursion < EATING_SCAIL_FIRST_FRAME_MAE_MAX_MIN:
         issues.append("eating_action_excursion_too_low")
+    tracking_metadata, tracking_source = _eating_muzzle_tracking_metadata(pose_metadata)
+    muzzle_motion_required = tracking_metadata is not None
+    muzzle_motion = (
+        _eating_muzzle_motion_signature(frames, tracking_metadata)
+        if tracking_metadata is not None
+        else {
+            "available": None,
+            "reason": tracking_source,
+            "sample_count": 0,
+            "y_span_px": None,
+            "required_y_span_px": None,
+        }
+    )
+    if muzzle_motion_required:
+        if muzzle_motion.get("available") is not True:
+            issues.append("eating_muzzle_motion_unavailable")
+        elif float(muzzle_motion["y_span_px"]) < float(muzzle_motion["required_y_span_px"]):
+            issues.append("eating_muzzle_motion_too_low")
     return {
         **quality,
         "policy": EATING_SCAIL_TEMPORAL_ACTION_POLICY,
+        "available": bool(
+            int(quality["frame_count"]) >= 9
+            and (not muzzle_motion_required or muzzle_motion.get("available") is True)
+        ),
         "acceptable": not issues,
         "issues": issues,
         "adjacent_grayscale_mae_minimum": EATING_SCAIL_ADJACENT_MAE_MIN,
         "first_frame_grayscale_mae_max_minimum": (
             EATING_SCAIL_FIRST_FRAME_MAE_MAX_MIN
         ),
+        "muzzle_motion_required": muzzle_motion_required,
+        "muzzle_tracking_source": tracking_source,
+        "muzzle_motion": muzzle_motion,
     }
 
 
@@ -784,11 +1038,26 @@ def eating_scail_best_effort_score(
     )
     adjacent_ratio = adjacent / adjacent_minimum
     excursion_ratio = excursion / excursion_minimum
+    motion_ratios = [adjacent_ratio, excursion_ratio]
+    muzzle_ratio: float | None = None
+    muzzle_motion = quality.get("muzzle_motion")
+    if quality.get("muzzle_motion_required") is True and isinstance(muzzle_motion, dict):
+        muzzle_span = max(
+            0.0,
+            float(muzzle_motion.get("y_span_px") or 0.0),
+        )
+        muzzle_minimum = max(
+            1e-9,
+            float(muzzle_motion.get("required_y_span_px") or 0.0),
+        )
+        muzzle_ratio = muzzle_span / muzzle_minimum
+        motion_ratios.append(muzzle_ratio)
     return {
         "policy": EATING_SCAIL_BEST_EFFORT_POLICY,
-        "score": round(min(adjacent_ratio, excursion_ratio), 6),
+        "score": round(min(motion_ratios), 6),
         "adjacent_motion_ratio": round(adjacent_ratio, 6),
         "action_excursion_ratio": round(excursion_ratio, 6),
+        "muzzle_motion_ratio": (round(muzzle_ratio, 6) if muzzle_ratio is not None else None),
     }
 
 
@@ -1278,7 +1547,11 @@ def evaluate_drinking_prepared_pose_motion(
     }
 
 
-def evaluate_eating_scail_video_motion(video_path: Path) -> dict[str, Any]:
+def evaluate_eating_scail_video_motion(
+    video_path: Path,
+    *,
+    pose_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Decode and enforce the dog eating motion contract."""
 
     _sync_local_video_runtime(
@@ -1295,11 +1568,38 @@ def evaluate_eating_scail_video_motion(video_path: Path) -> dict[str, Any]:
             frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
     finally:
         capture.release()
-    quality = eating_scail_video_motion_quality(frames)
+    quality = eating_scail_video_motion_quality(
+        frames,
+        pose_metadata=pose_metadata,
+    )
     return {
         **quality,
         "video_path": str(video_path),
         "video_sha256": file_sha256(video_path) if video_path.is_file() else None,
+    }
+
+
+def evaluate_eating_prepared_pose_motion(
+    prepared_pose_video_path: Path,
+    *,
+    pose_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Fail before SCAIL when the synthesized dog muzzle is already pinned."""
+
+    quality = evaluate_eating_scail_video_motion(
+        prepared_pose_video_path,
+        pose_metadata=pose_metadata,
+    )
+    retained_issues = [
+        str(issue) for issue in quality.get("issues", []) if issue != "eating_motion_energy_too_low"
+    ]
+    return {
+        **quality,
+        "policy": "eating_prepared_muzzle_motion_gate_v1",
+        "acceptable": not retained_issues,
+        "issues": retained_issues,
+        "whole_frame_adjacent_energy_blocking": False,
+        "validation_scope": "prepared_reference_muzzle_motion_before_scail",
     }
 
 
@@ -3584,6 +3884,7 @@ def run_subject_replacement_job(job_id: str) -> None:
         )
         bowl_motion_contract_issues: list[str] = []
         drinking_pre_scail_motion_quality: dict[str, Any] | None = None
+        eating_pre_scail_motion_quality: dict[str, Any] | None = None
         drinking_bowl_area_retention_ratio: float | None = None
         if dog_bowl_motion_contract:
             if not isinstance(pose_metadata, dict):
@@ -3751,6 +4052,25 @@ def run_subject_replacement_job(job_id: str) -> None:
                                     "issues", []
                                 )
                             )
+                if (
+                    action == "eating"
+                    and pose_metadata.get("policy") == "reference_space_head_nod_food_overlap_v2"
+                ):
+                    try:
+                        eating_pre_scail_motion_quality = evaluate_eating_prepared_pose_motion(
+                            Path(manifest["input_files"]["pose_video"]),
+                            pose_metadata=pose_metadata,
+                        )
+                    except Exception as exc:
+                        bowl_motion_contract_issues.append(
+                            f"eating_prepared_muzzle_motion_quality_unavailable: {str(exc)[:500]}"
+                        )
+                    else:
+                        if eating_pre_scail_motion_quality.get("acceptable") is not True:
+                            bowl_motion_contract_issues.extend(
+                                str(issue)
+                                for issue in eating_pre_scail_motion_quality.get("issues", [])
+                            )
         manifest["final_action_gate"] = {
             "required_by_candidate_gate": action in final_gate_required_actions,
             "pre_scail_motion_contract_required": dog_bowl_motion_contract,
@@ -3758,6 +4078,9 @@ def run_subject_replacement_job(job_id: str) -> None:
             "issues": bowl_motion_contract_issues,
             "drinking_source_to_prepared_pose_quality": (
                 drinking_pre_scail_motion_quality
+            ),
+            "eating_prepared_muzzle_motion_quality": (
+                eating_pre_scail_motion_quality
             ),
             "drinking_bowl_area_retention_ratio": (
                 round(drinking_bowl_area_retention_ratio, 6)
@@ -3968,7 +4291,7 @@ def run_subject_replacement_job(job_id: str) -> None:
                         )
                         if dog_drinking_motion_gate
                         else (
-                            "eating_visible_motion_energy_too_low"
+                            "eating_muzzle_or_visible_motion_too_low"
                             if dog_eating_motion_gate
                             else "grooming_reference_identity_retention_too_low"
                         )
@@ -4017,8 +4340,13 @@ def run_subject_replacement_job(job_id: str) -> None:
                     )
                 )
             elif dog_eating_motion_gate:
-                temporal_identity_quality = (
-                    evaluate_eating_scail_video_motion(attempt_target)
+                temporal_identity_quality = evaluate_eating_scail_video_motion(
+                    attempt_target,
+                    pose_metadata=(
+                        pose_metadata
+                        if isinstance(pose_metadata, dict)
+                        else None
+                    ),
                 )
             elif grooming_identity_gate:
                 temporal_identity_quality = (

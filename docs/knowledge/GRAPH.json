@@ -176,10 +176,42 @@
     {
       "id": "comfy.recovery.eating_full_driver_motion",
       "type": "business_rule",
-      "name": "犬吃饭缺口参考的完整白膜动作恢复",
+      "name": "犬吃饭缺口或食盆吞口鼻参考的完整白膜动作恢复",
       "status": "active",
-      "tags": ["dog", "eating", "no-face-muzzle-anchor", "selected-qwen-identity", "digest-bound-white-driver", "full-body-motion", "fixed-bowl", "static-fallback-forbidden", "action-motion-degraded-gif"],
+      "tags": ["dog", "eating", "no-face-muzzle-anchor", "reference-bowl-mask-occludes-muzzle", "bowl-aspect-ratio-below-1.40", "selected-qwen-identity", "digest-bound-white-driver", "81-frame-full-body-motion", "fixed-bowl", "static-fallback-forbidden", "action-motion-degraded-gif"],
       "evidence": "src/comfy_pet_pipeline/pipeline/subject_replacement.py"
+    },
+    {
+      "id": "comfy.quality.eating_muzzle_motion_gate",
+      "type": "business_rule",
+      "name": "吃饭 SCAIL 局部口鼻运动门",
+      "status": "active",
+      "tags": ["eating", "scail", "muzzle-tracking", "dark-central-component", "minimum-8px", "head-lift-retention-25-percent", "full-frame-energy-complement", "five-attempts", "best-effort-weakest-axis"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"
+    },
+    {
+      "id": "comfy.recovery.eating_static_bowl_temporal_matte",
+      "type": "business_rule",
+      "name": "吃饭静态食盆时序证据恢复与 alpha 核心保护",
+      "status": "active",
+      "tags": ["cat", "dog", "eating", "transparent", "static-bowl", "bounded-canvas-evidence", "support-ratio-55-percent", "reliable-frames-25-percent", "temporal-majority-support", "protected-alpha-core", "retention-97-percent", "unsupported-guidance-transparent"],
+      "evidence": "src/comfy_pet_pipeline/pipeline/subject_replacement.py"
+    },
+    {
+      "id": "comfy.incident.v22659_dog_eating_fixed_mouth",
+      "type": "incident",
+      "name": "v2.26.59 犬吃饭口鼻被食盆分割吞入并固定",
+      "status": "resolved",
+      "tags": ["job-20260903T055308Z-7ca587d08e", "dog", "eating", "fixed-mouth", "reference-bowl-bbox-66-303-205-424", "bowl-aspect-1.149", "old-muzzle-span-0.599152px", "v2.26.60"],
+      "evidence": "/data/comfy-pet-pipeline/outputs/local_video_api/20260903T055308Z-7ca587d08e"
+    },
+    {
+      "id": "comfy.incident.v22659_cat_eating_internal_blur",
+      "type": "incident",
+      "name": "v2.26.59 猫吃饭食盆内部虚化并跨帧消失",
+      "status": "resolved",
+      "tags": ["job-20260903T053156Z-51a505bf26", "cat", "eating", "internal-alpha-loss", "bowl-missing-frames-25-36", "temporal-bowl-recovery", "alpha-retention-0.998478", "unsupported-guidance-not-opaque", "v2.26.60"],
+      "evidence": "/data/comfy-pet-pipeline/outputs/local_video_api/20260903T053156Z-51a505bf26"
     },
     {
       "id": "comfy.recovery.standing_adaptive_matte",
@@ -509,6 +541,14 @@
       "status": "accepted",
       "tags": ["verification", "after-every-change", "live-smoke", "exactly-one-cat-job", "exactly-one-dog-job", "cat-eating-grooming", "dog-eating-standing", "four-actions-once", "attempt-both-species-on-failure", "explicit-cases-supplementary", "completion-only"],
       "evidence": "docs/knowledge/DECISIONS/0006-post-change-cat-dog-two-action-smoke.md"
+    },
+    {
+      "id": "comfy.decision.eating_mouth_motion_static_bowl_evidence",
+      "type": "decision",
+      "name": "吃饭口鼻运动与静态食盆必须由局部证据闭环",
+      "status": "accepted",
+      "tags": ["eating", "dog-muzzle-motion", "full-driver-recovery", "static-bowl", "temporal-evidence", "protected-alpha-core", "no-unsupported-opaque-fill", "post-change-cat-dog-smoke"],
+      "evidence": "docs/knowledge/DECISIONS/0007-eating-mouth-motion-and-static-bowl-evidence.md"
     }
   ],
   "edges": [
@@ -1159,6 +1199,60 @@
       "relation": "exercises",
       "to": "comfy.api.local_video",
       "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.incident.v22659_dog_eating_fixed_mouth",
+      "relation": "resolved_by",
+      "to": "comfy.recovery.eating_full_driver_motion",
+      "evidence": "docs/knowledge/DECISIONS/0007-eating-mouth-motion-and-static-bowl-evidence.md"
+    },
+    {
+      "from": "comfy.incident.v22659_dog_eating_fixed_mouth",
+      "relation": "resolved_by",
+      "to": "comfy.quality.eating_muzzle_motion_gate",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.incident.v22659_cat_eating_internal_blur",
+      "relation": "resolved_by",
+      "to": "comfy.recovery.eating_static_bowl_temporal_matte",
+      "evidence": "docs/operations/REGRESSION_GALLERY.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "checked_by",
+      "to": "comfy.quality.eating_muzzle_motion_gate",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"
+    },
+    {
+      "from": "comfy.module.transparent_animation",
+      "relation": "recovers_with",
+      "to": "comfy.recovery.eating_static_bowl_temporal_matte",
+      "evidence": "src/comfy_pet_pipeline/pipeline/subject_replacement.py"
+    },
+    {
+      "from": "comfy.recovery.eating_full_driver_motion",
+      "relation": "governed_by",
+      "to": "comfy.decision.eating_mouth_motion_static_bowl_evidence",
+      "evidence": "docs/knowledge/DECISIONS/0007-eating-mouth-motion-and-static-bowl-evidence.md"
+    },
+    {
+      "from": "comfy.quality.eating_muzzle_motion_gate",
+      "relation": "governed_by",
+      "to": "comfy.decision.eating_mouth_motion_static_bowl_evidence",
+      "evidence": "docs/knowledge/DECISIONS/0007-eating-mouth-motion-and-static-bowl-evidence.md"
+    },
+    {
+      "from": "comfy.recovery.eating_static_bowl_temporal_matte",
+      "relation": "governed_by",
+      "to": "comfy.decision.eating_mouth_motion_static_bowl_evidence",
+      "evidence": "docs/knowledge/DECISIONS/0007-eating-mouth-motion-and-static-bowl-evidence.md"
+    },
+    {
+      "from": "comfy.decision.eating_mouth_motion_static_bowl_evidence",
+      "relation": "verified_under",
+      "to": "comfy.decision.post_change_cat_dog_two_action_smoke",
+      "evidence": "docs/knowledge/DECISIONS/0006-post-change-cat-dog-two-action-smoke.md"
     }
   ]
 }

@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.59"
+API_VERSION = "2.26.60"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -7052,6 +7052,9 @@ eating_scail_video_motion_quality = (
 evaluate_eating_scail_video_motion = (
     _local_video_subject_replacement.evaluate_eating_scail_video_motion
 )
+evaluate_eating_prepared_pose_motion = (
+    _local_video_subject_replacement.evaluate_eating_prepared_pose_motion
+)
 eating_scail_best_effort_score = (
     _local_video_subject_replacement.eating_scail_best_effort_score
 )
@@ -7084,6 +7087,9 @@ TOILETING_TRANSPARENT_REFERENCE_MIN_ASPECT_RATIO = (
 )
 DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY = (
     _local_video_subject_replacement.DRINKING_TRANSPARENT_FULL_DRIVER_GUIDANCE_POLICY
+)
+EATING_TRANSPARENT_STATIC_BOWL_GUIDANCE_POLICY = (
+    _local_video_subject_replacement.EATING_TRANSPARENT_STATIC_BOWL_GUIDANCE_POLICY
 )
 STANDING_TRANSPARENT_ADAPTIVE_MATTE_POLICY = (
     _local_video_subject_replacement.STANDING_TRANSPARENT_ADAPTIVE_MATTE_POLICY

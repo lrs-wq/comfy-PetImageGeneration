@@ -1825,6 +1825,9 @@ def make_full_eating_pose_and_mask_frames(
             "driver_rgb_preserved": True,
             "driver_silhouette_preserved": True,
             "pose_geometry_scope": "full_subject_silhouette_per_frame",
+            "pose_canvas_size": [canvas_size[0], canvas_size[1]],
+            "static_bowl_mask": True,
+            "static_bowl_rgb": True,
             "identity_bbox_by_frame": identity_bboxes,
             "identity_center_y_span": round(
                 max(identity_centers_y) - min(identity_centers_y),
@@ -3364,7 +3367,7 @@ def make_eating_reference_aligned_pose_frames(
     colored_reference_mask = np.asarray(
         reference_mask.convert("RGB"),
         dtype=np.uint8,
-    )
+    ).copy()
     reference_subject = np.all(
         colored_reference_mask == (0, 0, 255),
         axis=2,
@@ -3381,21 +3384,34 @@ def make_eating_reference_aligned_pose_frames(
         raise ValueError(
             "eating_reference_motion_unreliable: reference_bowl_too_small"
         )
-    subject_left, subject_top, subject_right, subject_bottom = binary_bbox(
-        reference_subject
-    )
     bowl_left, bowl_top, bowl_right, bowl_bottom = binary_bbox(reference_bowl)
+    bowl_width = bowl_right - bowl_left
+    bowl_height = bowl_bottom - bowl_top
+    if bowl_width / float(max(1, bowl_height)) < 1.40:
+        # A shallow eating bowl cannot legitimately be taller than it is wide.
+        # Generated references sometimes connect the warm muzzle or tail to the
+        # food and the prop splitter then paints that whole vertical union red.
+        # A single low-head reference does not contain the hidden lower muzzle,
+        # so trimming that union and lifting the visible pixels creates a flat
+        # white tear.  Fail into the existing animated full-driver recovery,
+        # which contains complete mouth geometry in every phase.
+        raise ValueError(
+            "eating_reference_motion_unreliable: "
+            "reference_bowl_mask_occludes_muzzle: "
+            f"bbox={[bowl_left, bowl_top, bowl_right, bowl_bottom]}"
+        )
+
+    subject_left, subject_top, subject_right, subject_bottom = binary_bbox(reference_subject)
     subject_width = subject_right - subject_left
     subject_height = subject_bottom - subject_top
-    bowl_width = bowl_right - bowl_left
 
     # Anchor the target motion to a real face/muzzle feature, not to the lowest
     # blue pixel in the bowl's central strip.  The latter can be chest fur, a
-    # planted forepaw, or a leaked food pixel.  Eating references from the
-    # protected profile have a small natural warm nose/muzzle patch.  Select a
-    # compact red-balanced connected component immediately above the bowl and
-    # track that component through the warp.  Disconnected chest/paw pixels do
-    # not participate in either the anchor or the contact validation.
+    # planted forepaw, or a leaked food pixel.  Prefer a central dark nose
+    # component; only fall back to a warm muzzle patch when no valid dark
+    # component exists.  Golden coats can contain tiny warm ear/fur islands
+    # immediately above the bowl, so every candidate must also be wide enough
+    # and close to the bowl centre before it can control the deformation.
     reference_rgb = reference_rgba[..., :3]
     red = reference_rgb[..., 0].astype(np.int16)
     green = reference_rgb[..., 1].astype(np.int16)
@@ -3420,7 +3436,10 @@ def make_eating_reference_aligned_pose_frames(
         & (row_indices >= face_search_y0)
         & (row_indices < bowl_top)
     )
-    face_seed_candidates = (
+    luma = cv2.cvtColor(reference_rgb, cv2.COLOR_RGB2GRAY)
+    chroma = reference_rgb.max(axis=2).astype(np.int16) - reference_rgb.min(axis=2).astype(np.int16)
+    dark_face_seed_candidates = reference_subject & face_search & (luma <= 110) & (chroma <= 110)
+    warm_face_seed_candidates = (
         reference_subject
         & face_search
         & (red >= 90)
@@ -3428,54 +3447,81 @@ def make_eating_reference_aligned_pose_frames(
         & (red - blue >= 8)
         & (np.abs(green - blue) <= 25)
     )
-    face_count, face_labels, face_stats, face_centroids = (
-        cv2.connectedComponentsWithStats(
-            face_seed_candidates.astype(np.uint8),
-            connectivity=8,
-        )
-    )
-    face_components: list[tuple[int, int, float, int]] = []
     minimum_face_pixels = max(
         12,
         int(round(np.count_nonzero(reference_subject) * 0.00015)),
     )
-    for label in range(1, face_count):
-        area = int(face_stats[label, cv2.CC_STAT_AREA])
-        component_y = int(face_stats[label, cv2.CC_STAT_TOP])
-        component_width = int(face_stats[label, cv2.CC_STAT_WIDTH])
-        component_height = int(face_stats[label, cv2.CC_STAT_HEIGHT])
-        component_bottom = component_y + component_height
-        component_gap = bowl_top - component_bottom
-        center_x = float(face_centroids[label][0])
-        if (
-            area >= minimum_face_pixels
-            and 0 <= component_gap <= 8
-            and 3 <= component_width <= int(round(bowl_width * 0.55))
-            and 2 <= component_height <= int(round(bowl_width * 0.35))
-            and bowl_left - bowl_width * 0.10
-            <= center_x
-            <= bowl_right + bowl_width * 0.10
-        ):
-            face_components.append(
-                (
-                    component_bottom,
-                    area,
-                    -abs(center_x - (bowl_left + bowl_right) / 2.0),
-                    label,
+    minimum_face_width = max(8, int(round(bowl_width * 0.08)))
+    bowl_center_x = (bowl_left + bowl_right) / 2.0
+    reference_muzzle_method = ""
+
+    def validated_face_components(
+        candidates: np.ndarray,
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        list[tuple[float, int, int, int]],
+    ]:
+        count, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            candidates.astype(np.uint8),
+            connectivity=8,
+        )
+        components: list[tuple[float, int, int, int]] = []
+        for label in range(1, count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            component_y = int(stats[label, cv2.CC_STAT_TOP])
+            component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+            component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            component_bottom = component_y + component_height
+            component_gap = bowl_top - component_bottom
+            center_x = float(centroids[label][0])
+            center_distance = abs(center_x - bowl_center_x)
+            if (
+                area >= minimum_face_pixels
+                and 0 <= component_gap <= 10
+                and minimum_face_width <= component_width <= int(round(bowl_width * 0.65))
+                and 2 <= component_height <= int(round(bowl_width * 0.35))
+                and center_distance <= bowl_width * 0.32
+            ):
+                # Centrality is the strongest discriminator between a nose and
+                # a small coat/ear island.  Bottom proximity and area break ties.
+                components.append(
+                    (-center_distance, component_bottom, area, label)
                 )
-            )
-    if not face_components:
+        return labels, centroids, components
+
+    face_labels: np.ndarray | None = None
+    face_centroids: np.ndarray | None = None
+    face_components: list[tuple[float, int, int, int]] = []
+    for candidate_mask, candidate_method in (
+        (
+            dark_face_seed_candidates,
+            "dark_central_muzzle_component_above_bowl_v2",
+        ),
+        (
+            warm_face_seed_candidates,
+            "central_warm_muzzle_component_above_bowl_v2",
+        ),
+    ):
+        labels, centroids, components = validated_face_components(candidate_mask)
+        if components:
+            face_labels = labels
+            face_centroids = centroids
+            face_components = components
+            reference_muzzle_method = candidate_method
+            break
+    if face_labels is None or face_centroids is None or not face_components:
         raise ValueError(
             "eating_reference_motion_unreliable: no_face_muzzle_anchor"
         )
-    _face_bottom_rank, _face_area_rank, _face_center_rank, face_label = max(
+    _face_center_rank, _face_bottom_rank, _face_area_rank, face_label = max(
         face_components
     )
     reference_face_seed = face_labels == face_label
-    face_seed_left, face_seed_top, face_seed_right, face_seed_bottom = (
-        binary_bbox(reference_face_seed)
-    )
     muzzle_x = int(round(float(face_centroids[face_label][0])))
+    face_seed_left, face_seed_top, face_seed_right, face_seed_bottom = binary_bbox(
+        reference_face_seed
+    )
     muzzle_y = face_seed_bottom - 1
     reference_muzzle_gap = bowl_top - face_seed_bottom
 
@@ -3495,17 +3541,28 @@ def make_eating_reference_aligned_pose_frames(
     # follows the scalar eating nod.
     head_weight[row_grid > bowl_bottom + int(round(subject_height * 0.08))] = 0.0
 
-    # Below the muzzle, freeze both lower lateral regions on the full remap grid.
-    # This keeps the two planted front paws and their surrounding silhouette
-    # pixel-identical while allowing only a narrow central mouth corridor to
-    # enter the food.  The bowl remains a separate static red SCAIL object.
+    # Below the muzzle, taper deformation across both lower lateral regions.
+    # The old one-row hard cutoff made a visible horizontal tear through the
+    # head/neck when a mis-sized corridor clipped the real muzzle.  A wider
+    # muzzle-relative corridor plus a short vertical fade preserves planted
+    # paws without introducing a discontinuity.  The bowl remains static.
     freeze_y0 = min(face_seed_bottom, bowl_top)
-    corridor_x0 = max(subject_left, face_seed_left - 4)
-    corridor_x1 = min(subject_right, face_seed_right + 4)
-    lower_lateral_freeze = (row_grid >= freeze_y0) & (
+    corridor_margin = max(10, int(round(bowl_width * 0.06)))
+    corridor_x0 = max(subject_left, face_seed_left - corridor_margin)
+    corridor_x1 = min(subject_right, face_seed_right + corridor_margin)
+    freeze_transition_px = max(
+        6,
+        min(14, int(round(subject_height * 0.04))),
+    )
+    lower_lateral_region = (row_grid >= freeze_y0) & (
         (column_grid < corridor_x0) | (column_grid >= corridor_x1)
     )
-    head_weight[lower_lateral_freeze] = 0.0
+    freeze_progress = np.clip(
+        (row_grid.astype(np.float32) - float(freeze_y0)) / float(freeze_transition_px),
+        0.0,
+        1.0,
+    )
+    head_weight[lower_lateral_region] *= 1.0 - freeze_progress[lower_lateral_region]
 
     # A valid reference may already touch the rim or leave a small 1-8 px gap.
     # Merely reducing that gap to zero still leaves the cat hovering above its
@@ -3680,8 +3737,9 @@ def make_eating_reference_aligned_pose_frames(
             subject_right,
             subject_bottom,
         ],
+        "reference_canvas_size": [canvas_size[0], canvas_size[1]],
         "reference_bowl_bbox": [bowl_left, bowl_top, bowl_right, bowl_bottom],
-        "reference_muzzle_method": "warm_face_component_above_bowl_v1",
+        "reference_muzzle_method": reference_muzzle_method,
         "reference_face_search_bbox": [
             face_search_x0,
             face_search_y0,
@@ -3733,9 +3791,21 @@ def make_eating_reference_aligned_pose_frames(
             corridor_x1,
             bowl_bottom,
         ],
+        "muzzle_motion_corridor_margin_px": corridor_margin,
+        "lower_lateral_freeze_transition_px": freeze_transition_px,
         "lower_lateral_freeze_bboxes": [
-            [subject_left, freeze_y0, corridor_x0, subject_bottom],
-            [corridor_x1, freeze_y0, subject_right, subject_bottom],
+            [
+                subject_left,
+                freeze_y0 + freeze_transition_px,
+                corridor_x0,
+                subject_bottom,
+            ],
+            [
+                corridor_x1,
+                freeze_y0 + freeze_transition_px,
+                subject_right,
+                subject_bottom,
+            ],
         ],
         "head_deformation_center": [
             round(head_center_x, 4),
@@ -6226,6 +6296,8 @@ def _continuous_dark_edge_candidates(
 def _remove_eating_contact_shadow(
     rgb: np.ndarray,
     alpha: np.ndarray,
+    *,
+    protected_alpha_core: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Remove only a thin neutral shadow attached below the detected bowl."""
     unchanged = {
@@ -6322,6 +6394,11 @@ def _remove_eating_contact_shadow(
         & (alpha > 0)
         & (luma < 104.0)
     )
+    if protected_alpha_core is not None:
+        protected = np.asarray(protected_alpha_core, dtype=bool)
+        if protected.shape != alpha.shape:
+            raise ValueError("Protected eating alpha core must match alpha dimensions.")
+        removal &= ~protected
     cleaned_alpha = alpha.copy()
     cleaned_alpha[removal] = 0
     return cleaned_alpha, {
@@ -6349,6 +6426,7 @@ def clean_transparent_edge_halo(
     maximum_residual_candidate_fraction: float = 0.12,
     maximum_residual_candidate_pixel_fraction: float = 0.008,
     adjust_alpha: bool = True,
+    protected_alpha_core: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Remove painted dark contours without erasing authentic dark pets.
 
@@ -6363,6 +6441,11 @@ def clean_transparent_edge_halo(
         raise ValueError("Transparent edge RGB must have shape HxWx3.")
     if alpha.ndim != 2 or alpha.shape != rgb.shape[:2]:
         raise ValueError("Transparent edge alpha must match RGB dimensions.")
+    protected_core = np.zeros(alpha.shape, dtype=bool)
+    if protected_alpha_core is not None:
+        protected_core = np.asarray(protected_alpha_core, dtype=bool)
+        if protected_core.shape != alpha.shape:
+            raise ValueError("Protected alpha core must match transparent edge dimensions.")
 
     contact_shadow = {
         "policy": "eating_bowl_contact_shadow_v1",
@@ -6376,6 +6459,7 @@ def clean_transparent_edge_halo(
         working_alpha, contact_shadow = _remove_eating_contact_shadow(
             rgb,
             working_alpha,
+            protected_alpha_core=protected_core,
         )
 
     reconstructed, core, known = _inward_edge_reconstruction(
@@ -6398,6 +6482,9 @@ def clean_transparent_edge_halo(
             "replaced_pixels": 0,
             "candidate_fraction": 0.0,
             "low_alpha_candidate_pixels": 0,
+            "protected_alpha_core_pixels": int(
+                np.count_nonzero(protected_core)
+            ),
             "alpha_adjusted_pixels": int(
                 np.count_nonzero(working_alpha != alpha)
             ),
@@ -6414,6 +6501,16 @@ def clean_transparent_edge_halo(
         minimum_opaque_luma_delta=minimum_opaque_luma_delta,
         minimum_component_pixels=minimum_component_pixels,
     )
+    candidates &= ~protected_core
+    candidate_pixels_after_protection = int(np.count_nonzero(candidates))
+    before = {
+        **before,
+        "candidate_pixels": candidate_pixels_after_protection,
+        "candidate_fraction": candidate_pixels_after_protection
+        / float(max(1, int(before["band_pixels"]))),
+        "low_alpha_candidate_pixels": int(np.count_nonzero(candidates & (working_alpha < 64))),
+        "protected_alpha_core_pixels": int(np.count_nonzero(protected_core)),
+    }
     candidate_pixels = int(before["candidate_pixels"])
     candidate_fraction = float(before["candidate_fraction"])
     rgb_applied = bool(
@@ -6440,14 +6537,27 @@ def clean_transparent_edge_halo(
                 eroded_alpha[candidates],
             )
             cleaned_alpha[candidates & (working_alpha < 96)] = 0
-            cleaned_alpha = cv2.GaussianBlur(
+            blurred_alpha = cv2.GaussianBlur(
                 cleaned_alpha,
                 (0, 0),
                 sigmaX=0.55,
                 sigmaY=0.55,
             )
+            blur_band = cv2.dilate(
+                candidates.astype(np.uint8),
+                np.ones((3, 3), dtype=np.uint8),
+                iterations=1,
+            ).astype(bool)
+            blur_band &= ~protected_core
+            cleaned_alpha[blur_band] = blurred_alpha[blur_band]
             cleaned_alpha[cleaned_alpha < 3] = 0
             cleaned_alpha[cleaned_alpha > 252] = 255
+
+    if np.any(protected_core):
+        cleaned_alpha[protected_core] = np.maximum(
+            cleaned_alpha[protected_core],
+            alpha[protected_core],
+        )
 
     cleaned_rgb[(cleaned_alpha == 0) & (alpha > 0)] = 0
     after_reconstruction, after_core, after_known = _inward_edge_reconstruction(
@@ -6493,6 +6603,9 @@ def clean_transparent_edge_halo(
         "candidate_fraction": candidate_fraction,
         "low_alpha_candidate_pixels": int(
             before["low_alpha_candidate_pixels"]
+        ),
+        "protected_alpha_core_pixels": int(
+            np.count_nonzero(protected_core)
         ),
         "alpha_adjusted_pixels": alpha_adjusted_pixels,
         "contact_shadow": contact_shadow,
@@ -6908,6 +7021,15 @@ DRINKING_STATIC_BOWL_ALPHA_RETENTION_POLICY = (
 )
 DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN = 0.90
 DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS = 6
+EATING_STATIC_BOWL_ALPHA_RETENTION_POLICY = "eating_static_bowl_opaque_core_retention_gate_v1"
+EATING_STATIC_BOWL_ALPHA_RETENTION_MIN = 0.97
+EATING_STATIC_BOWL_ALPHA_THRESHOLD = 220
+EATING_STATIC_BOWL_BOUNDED_SUPPORT_ALPHA_THRESHOLD = 128
+EATING_STATIC_BOWL_GUIDANCE_SUPPORT_RATIO_MIN = 0.55
+EATING_STATIC_BOWL_RELIABLE_FRAME_FRACTION_MIN = 0.25
+EATING_STATIC_BOWL_TEMPORAL_RECOVERY_POLICY = (
+    "eating_temporal_evidence_supported_static_bowl_recovery_v1"
+)
 
 
 def _canvas_border_color_distance_p999(
@@ -6989,6 +7111,8 @@ def _merge_reference_aligned_static_prop(
     static_prop_guidance: np.ndarray,
     *,
     dilation_radius: int = DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS,
+    temporal_reference_rgb: np.ndarray | None = None,
+    temporal_reference_alpha: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
     """Recover only the validated static prop around its guidance footprint."""
 
@@ -7002,6 +7126,14 @@ def _merge_reference_aligned_static_prop(
         raise ValueError("Static prop recovery requires matching alpha masks")
     if dilation_radius < 0:
         raise ValueError("Static prop recovery dilation radius cannot be negative")
+    if (temporal_reference_rgb is None) != (temporal_reference_alpha is None):
+        raise ValueError("Static prop temporal recovery requires both RGB and alpha")
+    if temporal_reference_rgb is not None and (
+        temporal_reference_rgb.shape != bounded_rgb.shape
+        or temporal_reference_alpha is None
+        or temporal_reference_alpha.shape != bounded_alpha.shape
+    ):
+        raise ValueError("Static prop temporal reference dimensions do not match")
 
     static_prop = static_prop_guidance.astype(bool)
     static_prop_pixels = int(np.count_nonzero(static_prop))
@@ -7020,13 +7152,27 @@ def _merge_reference_aligned_static_prop(
     else:
         envelope = static_prop
 
-    recovered_support = envelope & (bounded_alpha > alpha)
+    effective_bounded_rgb = bounded_rgb
+    effective_bounded_alpha = bounded_alpha
+    temporal_reference_additions = np.zeros_like(alpha, dtype=bool)
+    if temporal_reference_rgb is not None and temporal_reference_alpha is not None:
+        temporal_reference_additions = temporal_reference_alpha > bounded_alpha
+        effective_bounded_rgb = bounded_rgb.copy()
+        effective_bounded_alpha = np.maximum(
+            bounded_alpha,
+            temporal_reference_alpha,
+        ).astype(np.uint8)
+        effective_bounded_rgb[temporal_reference_additions] = temporal_reference_rgb[
+            temporal_reference_additions
+        ]
+
+    recovered_support = envelope & (effective_bounded_alpha > alpha)
     output_rgb = rgb.copy()
     output_alpha = alpha.copy()
-    output_rgb[recovered_support] = bounded_rgb[recovered_support]
+    output_rgb[recovered_support] = effective_bounded_rgb[recovered_support]
     output_alpha[envelope] = np.maximum(
         output_alpha[envelope],
-        bounded_alpha[envelope],
+        effective_bounded_alpha[envelope],
     )
     output_rgb[output_alpha == 0] = 0
 
@@ -7051,7 +7197,146 @@ def _merge_reference_aligned_static_prop(
             np.count_nonzero(envelope)
         ),
         "static_prop_recovery_dilation_radius": float(dilation_radius),
+        "static_prop_temporal_reference_added_pixels": float(
+            np.count_nonzero(temporal_reference_additions & envelope)
+        ),
     }
+
+
+def _eating_static_bowl_supported_core(
+    bounded_alpha: np.ndarray,
+    static_prop_guidance: np.ndarray,
+) -> tuple[np.ndarray, dict[str, float]]:
+    """Limit an eating bowl to canvas-supported pixels inside its broad guide."""
+
+    if bounded_alpha.shape != static_prop_guidance.shape:
+        raise ValueError("Eating bowl support requires matching alpha and guidance")
+    static_prop = static_prop_guidance.astype(bool)
+    static_prop_pixels = int(np.count_nonzero(static_prop))
+    if static_prop_pixels < 64:
+        raise RuntimeError("Eating static-bowl guidance is empty or too small")
+    supported = static_prop & (bounded_alpha >= EATING_STATIC_BOWL_BOUNDED_SUPPORT_ALPHA_THRESHOLD)
+    supported_pixels = int(np.count_nonzero(supported))
+    support_ratio = supported_pixels / float(static_prop_pixels)
+    core = cv2.erode(
+        supported.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    ).astype(bool)
+    if int(np.count_nonzero(core)) < 64:
+        core = supported
+    return core, {
+        "static_prop_guidance_pixels": float(static_prop_pixels),
+        "static_prop_bounded_support_pixels": float(supported_pixels),
+        "static_prop_bounded_support_ratio": support_ratio,
+        "static_prop_bounded_support_ratio_minimum": (
+            EATING_STATIC_BOWL_GUIDANCE_SUPPORT_RATIO_MIN
+        ),
+        "static_prop_supported_core_pixels": float(np.count_nonzero(core)),
+        "static_prop_bounded_support_alpha_threshold": float(
+            EATING_STATIC_BOWL_BOUNDED_SUPPORT_ALPHA_THRESHOLD
+        ),
+    }
+
+
+def _eating_static_bowl_temporal_reference(
+    bounded_frames: list[tuple[np.ndarray, np.ndarray]],
+    static_prop_guidances: list[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any], list[dict[str, float]]]:
+    """Recover missing eating-bowl frames from one evidence-backed good frame."""
+
+    if not bounded_frames or len(bounded_frames) != len(static_prop_guidances):
+        raise ValueError("Eating bowl temporal recovery requires aligned frame lists")
+    frame_support_metrics: list[dict[str, float]] = []
+    supported_masks: list[np.ndarray] = []
+    support_ratios: list[float] = []
+    guidance_union = np.zeros_like(static_prop_guidances[0], dtype=bool)
+    for (_rgb, alpha), guidance in zip(
+        bounded_frames,
+        static_prop_guidances,
+        strict=True,
+    ):
+        core, metrics = _eating_static_bowl_supported_core(alpha, guidance)
+        supported = guidance.astype(bool) & (
+            alpha >= EATING_STATIC_BOWL_BOUNDED_SUPPORT_ALPHA_THRESHOLD
+        )
+        guidance_union |= guidance.astype(bool)
+        supported_masks.append(supported)
+        support_ratios.append(metrics["static_prop_bounded_support_ratio"])
+        frame_support_metrics.append(
+            {
+                **metrics,
+                "static_prop_supported_core_pixels": float(np.count_nonzero(core)),
+            }
+        )
+
+    reliable_indices = [
+        index
+        for index, ratio in enumerate(support_ratios)
+        if ratio >= EATING_STATIC_BOWL_GUIDANCE_SUPPORT_RATIO_MIN
+    ]
+    minimum_reliable_frames = max(
+        3,
+        int(np.ceil(len(bounded_frames) * EATING_STATIC_BOWL_RELIABLE_FRAME_FRACTION_MIN)),
+    )
+    if len(reliable_indices) < minimum_reliable_frames:
+        raise RuntimeError(
+            "Eating static-bowl temporal recovery has too few reliable frames: "
+            f"reliable={len(reliable_indices)}, required={minimum_reliable_frames}"
+        )
+
+    support_votes = np.zeros_like(guidance_union, dtype=np.uint16)
+    for index in reliable_indices:
+        support_votes += supported_masks[index].astype(np.uint16)
+    canonical_support = support_votes >= int(np.ceil(len(reliable_indices) * 0.50))
+    canonical_core = cv2.erode(
+        canonical_support.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    ).astype(bool)
+    if int(np.count_nonzero(canonical_core)) < 64:
+        raise RuntimeError("Eating static-bowl temporal support core is too small")
+
+    representative_index = max(
+        reliable_indices,
+        key=lambda index: (support_ratios[index], -index),
+    )
+    representative_rgb, representative_alpha = bounded_frames[representative_index]
+    canonical_envelope = cv2.dilate(
+        canonical_support.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    ).astype(bool)
+    canonical_envelope &= guidance_union
+    canonical_alpha = np.where(
+        canonical_envelope,
+        representative_alpha,
+        0,
+    ).astype(np.uint8)
+    canonical_rgb = representative_rgb.copy()
+    canonical_rgb[canonical_alpha == 0] = 0
+    metrics: dict[str, Any] = {
+        "policy": EATING_STATIC_BOWL_TEMPORAL_RECOVERY_POLICY,
+        "frame_count": len(bounded_frames),
+        "reliable_frame_count": len(reliable_indices),
+        "reliable_frame_fraction": len(reliable_indices) / float(len(bounded_frames)),
+        "reliable_frame_fraction_minimum": (EATING_STATIC_BOWL_RELIABLE_FRAME_FRACTION_MIN),
+        "representative_frame_index": representative_index,
+        "bounded_support_ratio_min": min(support_ratios),
+        "bounded_support_ratio_median": float(np.median(support_ratios)),
+        "bounded_support_ratio_max": max(support_ratios),
+        "canonical_support_pixels": int(np.count_nonzero(canonical_support)),
+        "canonical_core_pixels": int(np.count_nonzero(canonical_core)),
+        "canonical_alpha_pixels": int(np.count_nonzero(canonical_alpha)),
+        "unsupported_guidance_forced_opaque": False,
+    }
+    return (
+        canonical_rgb,
+        canonical_alpha,
+        canonical_core,
+        metrics,
+        frame_support_metrics,
+    )
 
 
 def _reference_guided_uniform_background_mask(
@@ -7063,6 +7348,7 @@ def _reference_guided_uniform_background_mask(
     guidance_area_ratio_required_min: float,
     guidance_component_area_fraction_required_min: float,
     static_prop_guidance: np.ndarray | None = None,
+    force_static_prop_guidance: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
     """Extract a complete subject+prop matte from a low-variation canvas.
 
@@ -7143,13 +7429,15 @@ def _reference_guided_uniform_background_mask(
         0.0,
         255.0,
     ).astype(np.uint8)
-    static_prop_recovered = static_prop & (alpha < 64)
-    if np.any(static_prop):
+    static_prop_recovered = static_prop & (alpha < 64) & force_static_prop_guidance
+    if np.any(static_prop) and force_static_prop_guidance:
         # The validated toileting reference already separates the immutable
         # tray as the red SCAIL object.  A pale generated tray can be nearly the
         # same colour as a cyan/gray canvas and is therefore invisible to a
-        # distance-only matte.  Preserve that fixed prop role explicitly while
-        # leaving the animal to semantic/canvas extraction.
+        # distance-only matte. Preserve that exact fixed prop role explicitly.
+        # Eating guides come from a generated driver and can overhang the real
+        # bowl, so their caller disables this override and keeps only pixels
+        # supported by the bounded-canvas foreground.
         alpha[static_prop] = 255
 
     hard = (alpha >= 16).astype(np.uint8)
@@ -7325,6 +7613,9 @@ def _reference_guided_uniform_background_mask(
             np.count_nonzero(static_prop_recovered)
         ),
         "static_prop_guidance_preserved": bool(np.any(static_prop)),
+        "static_prop_guidance_forced": bool(
+            np.any(static_prop) and force_static_prop_guidance
+        ),
     }
 
 
@@ -7520,8 +7811,8 @@ def build_unstabilized_transparent_gif(
 
         reference_aligned_border_distance_p999_values: list[float] = []
         reference_aligned_extraction_strategy: str | None = None
-        drinking_static_prop_recovery_required = bool(
-            normalized_action == "drinking"
+        static_prop_recovery_required = bool(
+            normalized_action in {"drinking", "eating"}
             and reference_aligned_uniform_background
         )
         if reference_aligned_uniform_background:
@@ -7553,14 +7844,13 @@ def build_unstabilized_transparent_gif(
                     max(reference_aligned_border_distance_p999_values)
                 )
             )
-            if drinking_static_prop_recovery_required:
+            if static_prop_recovery_required:
                 if (
                     reference_aligned_extraction_strategy
                     == REFERENCE_ALIGNED_SEMANTIC_EXTRACTION_STRATEGY
                 ):
                     raise RuntimeError(
-                        "Drinking static bowl recovery requires a bounded "
-                        "uniform canvas"
+                        "Static-bowl recovery requires a bounded uniform canvas"
                     )
                 # Keep U2Net's cleaner animal edge, then recover only the bowl
                 # from the bounded-canvas matte. Applying the bounded matte to
@@ -7589,6 +7879,12 @@ def build_unstabilized_transparent_gif(
         ) = None
         reference_aligned_bounded_metrics: list[dict[str, float]] = []
         static_prop_recovery_metrics: list[dict[str, float]] = []
+        eating_static_prop_supported_cores: list[np.ndarray] = []
+        eating_static_prop_support_metrics: list[dict[str, float]] = []
+        eating_static_prop_guidances: list[np.ndarray] = []
+        eating_static_prop_temporal_rgb: np.ndarray | None = None
+        eating_static_prop_temporal_alpha: np.ndarray | None = None
+        eating_static_prop_temporal_metrics: dict[str, Any] | None = None
         if (
             not chroma_usable
             and reference_aligned_extraction_strategy
@@ -7619,12 +7915,40 @@ def build_unstabilized_transparent_gif(
                             guidance_component_area_fraction_required_min
                         ),
                         static_prop_guidance=static_prop_guidance,
+                        force_static_prop_guidance=(normalized_action != "eating"),
                     )
                 )
+                if normalized_action == "eating":
+                    if static_prop_guidance is None:
+                        raise RuntimeError(
+                            "Eating bounded-canvas extraction requires static bowl guidance"
+                        )
+                    eating_static_prop_guidances.append(static_prop_guidance)
                 reference_aligned_bounded_frames.append(
                     (bounded_rgb, bounded_alpha)
                 )
                 reference_aligned_bounded_metrics.append(bounded_metrics)
+            if normalized_action == "eating":
+                (
+                    eating_static_prop_temporal_rgb,
+                    eating_static_prop_temporal_alpha,
+                    eating_static_prop_temporal_core,
+                    eating_static_prop_temporal_metrics,
+                    eating_static_prop_support_metrics,
+                ) = _eating_static_bowl_temporal_reference(
+                    reference_aligned_bounded_frames,
+                    eating_static_prop_guidances,
+                )
+                eating_static_prop_supported_cores = [
+                    eating_static_prop_temporal_core.copy()
+                    for _ in reference_aligned_bounded_frames
+                ]
+                for bounded_metrics, support_metrics in zip(
+                    reference_aligned_bounded_metrics,
+                    eating_static_prop_support_metrics,
+                    strict=True,
+                ):
+                    bounded_metrics.update(support_metrics)
 
         extraction_method = "chroma_key"
         extracted_frames: list[tuple[np.ndarray, np.ndarray]]
@@ -7662,6 +7986,7 @@ def build_unstabilized_transparent_gif(
                             guidance_component_area_fraction_required_min
                         ),
                         static_prop_guidance=static_prop_guidance,
+                        force_static_prop_guidance=(normalized_action != "eating"),
                     )
                 )
                 extracted_frames.append((extracted_rgb, extracted_alpha))
@@ -7916,14 +8241,14 @@ def build_unstabilized_transparent_gif(
                     bounded_rgb, bounded_alpha = (
                         reference_aligned_bounded_frames[index]
                     )
-                    if drinking_static_prop_recovery_required:
+                    if static_prop_recovery_required:
                         _guidance, static_prop_guidance = (
                             normalized_guidance_roles(index)
                         )
                         if static_prop_guidance is None:
                             raise RuntimeError(
-                                "Drinking transparent extraction requires "
-                                "static bowl guidance"
+                                "Static-bowl transparent extraction requires "
+                                "prop guidance"
                             )
                         rgb, alpha, recovery_metrics = (
                             _merge_reference_aligned_static_prop(
@@ -7932,8 +8257,22 @@ def build_unstabilized_transparent_gif(
                                 bounded_rgb,
                                 bounded_alpha,
                                 static_prop_guidance,
+                                temporal_reference_rgb=(
+                                    eating_static_prop_temporal_rgb
+                                    if normalized_action == "eating"
+                                    else None
+                                ),
+                                temporal_reference_alpha=(
+                                    eating_static_prop_temporal_alpha
+                                    if normalized_action == "eating"
+                                    else None
+                                ),
                             )
                         )
+                        if normalized_action == "eating":
+                            recovery_metrics.update(
+                                eating_static_prop_support_metrics[index]
+                            )
                         static_prop_recovery_metrics.append(
                             recovery_metrics
                         )
@@ -8184,11 +8523,41 @@ def build_unstabilized_transparent_gif(
         edge_cleanup_metrics: list[dict[str, Any]] = []
         cleaned_extracted_frames: list[tuple[np.ndarray, np.ndarray]] = []
         for frame_index, (rgb, alpha) in enumerate(extracted_frames):
+            _identity_guidance, static_prop_guidance = (
+                normalized_guidance_roles(frame_index)
+            )
+            protected_static_prop_core: np.ndarray | None = None
+            if static_prop_recovery_required:
+                if static_prop_guidance is None:
+                    raise RuntimeError(
+                        "Static-bowl transparent extraction requires prop "
+                        "guidance in every frame"
+                    )
+                if (
+                    normalized_action == "eating"
+                    and len(eating_static_prop_supported_cores)
+                    == len(extracted_frames)
+                ):
+                    protected_static_prop_core = (
+                        eating_static_prop_supported_cores[frame_index]
+                    )
+                else:
+                    protected_static_prop_core = cv2.erode(
+                        static_prop_guidance.astype(np.uint8),
+                        cv2.getStructuringElement(
+                            cv2.MORPH_ELLIPSE,
+                            (5, 5),
+                        ),
+                        iterations=1,
+                    ).astype(bool)
+                if int(np.count_nonzero(protected_static_prop_core)) < 64:
+                    protected_static_prop_core = static_prop_guidance
             cleaned_rgb, cleaned_alpha, cleanup_metrics = (
                 clean_transparent_edge_halo(
                     rgb,
                     alpha,
                     action=action,
+                    protected_alpha_core=protected_static_prop_core,
                 )
             )
             cleanup_metrics["cleanup_pass_count"] = 1
@@ -8210,6 +8579,7 @@ def build_unstabilized_transparent_gif(
                         cleaned_rgb,
                         cleaned_alpha,
                         action=action,
+                        protected_alpha_core=protected_static_prop_core,
                     )
                 )
                 if float(second_metrics.get("penalty", 500.0)) < float(
@@ -8275,37 +8645,60 @@ def build_unstabilized_transparent_gif(
             edge_cleanup_metrics.append(cleanup_metrics)
         extracted_frames = cleaned_extracted_frames
 
-        drinking_static_prop_alpha_retentions: list[float] = []
-        if drinking_static_prop_recovery_required:
+        static_prop_alpha_retentions: list[float] = []
+        static_prop_alpha_threshold = (
+            EATING_STATIC_BOWL_ALPHA_THRESHOLD if normalized_action == "eating" else 128
+        )
+        static_prop_alpha_retention_minimum = (
+            EATING_STATIC_BOWL_ALPHA_RETENTION_MIN
+            if normalized_action == "eating"
+            else DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN
+        )
+        static_prop_alpha_retention_policy = (
+            EATING_STATIC_BOWL_ALPHA_RETENTION_POLICY
+            if normalized_action == "eating"
+            else DRINKING_STATIC_BOWL_ALPHA_RETENTION_POLICY
+        )
+        if static_prop_recovery_required:
             for index, (_rgb, alpha) in enumerate(extracted_frames):
                 _guidance, static_prop_guidance = normalized_guidance_roles(
                     index
                 )
                 if static_prop_guidance is None:
                     raise RuntimeError(
-                        "Drinking transparent extraction requires static bowl "
-                        "guidance in every frame"
+                        "Static-bowl transparent extraction requires prop guidance in every frame"
+                    )
+                static_prop_measurement = static_prop_guidance
+                if (
+                    normalized_action == "eating"
+                    and len(eating_static_prop_supported_cores)
+                    == len(extracted_frames)
+                ):
+                    static_prop_measurement = (
+                        eating_static_prop_supported_cores[index]
                     )
                 static_prop_pixels = int(
-                    np.count_nonzero(static_prop_guidance)
+                    np.count_nonzero(static_prop_measurement)
                 )
                 if static_prop_pixels < 64:
                     raise RuntimeError(
-                        "Drinking transparent extraction static bowl guidance "
+                        "Static-bowl transparent extraction guidance core "
                         f"is empty at frame {index}"
                     )
                 retention = float(
                     np.count_nonzero(
-                        (alpha >= 128) & static_prop_guidance
+                        (alpha >= static_prop_alpha_threshold)
+                        & static_prop_measurement
                     )
                 ) / float(static_prop_pixels)
-                drinking_static_prop_alpha_retentions.append(retention)
-                if retention < DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN:
+                static_prop_alpha_retentions.append(retention)
+                if retention < static_prop_alpha_retention_minimum:
                     raise RuntimeError(
-                        "Drinking transparent extraction lost the static bowl "
+                        f"{normalized_action.capitalize()} transparent "
+                        "extraction lost or softened the static bowl "
                         f"at frame {index}: alpha_retention={retention:.4f}, "
                         "required="
-                        f"{DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN:.4f}"
+                        f"{static_prop_alpha_retention_minimum:.4f}"
                     )
 
         sampled_indices = [
@@ -8514,6 +8907,46 @@ def build_unstabilized_transparent_gif(
             )
             white_mp4_target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(white_temporary, white_mp4_target)
+        static_bowl_retention_metrics = {
+            "policy": static_prop_alpha_retention_policy,
+            "required": static_prop_recovery_required,
+            "acceptable": (
+                min(static_prop_alpha_retentions, default=0.0)
+                >= static_prop_alpha_retention_minimum
+                if static_prop_recovery_required
+                else None
+            ),
+            "alpha_retention_min": min(
+                static_prop_alpha_retentions,
+                default=None,
+            ),
+            "alpha_retention_required_min": (static_prop_alpha_retention_minimum),
+            "alpha_threshold": static_prop_alpha_threshold,
+            "input_alpha_retention_min": min(
+                (
+                    item["static_prop_input_retention_ratio"]
+                    for item in static_prop_recovery_metrics
+                ),
+                default=None,
+            ),
+            "recovered_pixels_total": int(
+                sum(item["static_prop_recovered_pixels"] for item in static_prop_recovery_metrics)
+            ),
+            "recovery_dilation_radius": (DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS),
+            "bounded_guidance_support_ratio_min": min(
+                (
+                    item["static_prop_bounded_support_ratio"]
+                    for item in eating_static_prop_support_metrics
+                ),
+                default=None,
+            ),
+            "reliable_frame_support_ratio_minimum": (
+                EATING_STATIC_BOWL_GUIDANCE_SUPPORT_RATIO_MIN
+                if normalized_action == "eating"
+                else None
+            ),
+            "temporal_recovery": eating_static_prop_temporal_metrics,
+        }
         return {
             "mode": "per_frame_foreground_extraction_no_spatial_stabilization",
             "extraction_method": extraction_method,
@@ -8563,40 +8996,19 @@ def build_unstabilized_transparent_gif(
                     default=None,
                 ),
             },
+            "static_bowl_retention": static_bowl_retention_metrics,
             "drinking_static_bowl_retention": {
-                "policy": DRINKING_STATIC_BOWL_ALPHA_RETENTION_POLICY,
-                "required": drinking_static_prop_recovery_required,
-                "acceptable": (
-                    min(
-                        drinking_static_prop_alpha_retentions,
-                        default=0.0,
-                    )
-                    >= DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN
-                    if drinking_static_prop_recovery_required
-                    else None
+                **static_bowl_retention_metrics,
+                "required": bool(
+                    static_prop_recovery_required
+                    and normalized_action == "drinking"
                 ),
-                "alpha_retention_min": min(
-                    drinking_static_prop_alpha_retentions,
-                    default=None,
-                ),
-                "alpha_retention_required_min": (
-                    DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN
-                ),
-                "input_alpha_retention_min": min(
-                    (
-                        item["static_prop_input_retention_ratio"]
-                        for item in static_prop_recovery_metrics
-                    ),
-                    default=None,
-                ),
-                "recovered_pixels_total": int(
-                    sum(
-                        item["static_prop_recovered_pixels"]
-                        for item in static_prop_recovery_metrics
-                    )
-                ),
-                "recovery_dilation_radius": (
-                    DRINKING_STATIC_BOWL_RECOVERY_DILATION_RADIUS
+            },
+            "eating_static_bowl_retention": {
+                **static_bowl_retention_metrics,
+                "required": bool(
+                    static_prop_recovery_required
+                    and normalized_action == "eating"
                 ),
             },
             "interior_alpha_repair": {
@@ -8820,15 +9232,26 @@ def build_unstabilized_transparent_gif(
                     normalized_action == "toileting"
                 ),
                 "drinking_bowl_retention_required": (
-                    drinking_static_prop_recovery_required
+                    static_prop_recovery_required and normalized_action == "drinking"
                 ),
                 "drinking_bowl_alpha_retention_min": min(
-                    drinking_static_prop_alpha_retentions,
+                    static_prop_alpha_retentions,
                     default=None,
                 ),
                 "drinking_bowl_alpha_retention_required_min": (
                     DRINKING_STATIC_BOWL_ALPHA_RETENTION_MIN
                 ),
+                "eating_bowl_retention_required": (
+                    static_prop_recovery_required and normalized_action == "eating"
+                ),
+                "eating_bowl_alpha_retention_min": min(
+                    static_prop_alpha_retentions,
+                    default=None,
+                ),
+                "eating_bowl_alpha_retention_required_min": (
+                    EATING_STATIC_BOWL_ALPHA_RETENTION_MIN
+                ),
+                "eating_bowl_alpha_threshold": (EATING_STATIC_BOWL_ALPHA_THRESHOLD),
                 "semantic_core_retention_min": min(
                     (
                         item["semantic_core_retention"]

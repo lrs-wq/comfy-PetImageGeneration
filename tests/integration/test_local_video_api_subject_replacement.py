@@ -1595,6 +1595,27 @@ class TransparentGuidanceSelectionTests(unittest.TestCase):
         self.assertTrue(plan["reference_aligned_uniform_background"])
         self.assertTrue(plan["static_prop_required"])
 
+    def test_eating_uses_animal_and_static_bowl_guidance(self) -> None:
+        plan = pipeline.select_transparent_guidance_policy(
+            "eating",
+            {
+                "pose_metadata": {
+                    "scene_prop_separated": True,
+                    "static_bowl_mask": True,
+                    "static_bowl_rgb": True,
+                }
+            },
+        )
+
+        self.assertEqual(
+            plan["policy"],
+            pipeline.EATING_TRANSPARENT_STATIC_BOWL_GUIDANCE_POLICY,
+        )
+        self.assertEqual(plan["source_key"], "pose_mask_video")
+        self.assertFalse(plan["static_reference_mask"])
+        self.assertTrue(plan["reference_aligned_uniform_background"])
+        self.assertTrue(plan["static_prop_required"])
+
     def test_borderline_real_tray_reference_uses_static_reference_mask(self) -> None:
         plan = pipeline.select_transparent_guidance_policy(
             "toileting",
@@ -1754,6 +1775,109 @@ class ToiletingScailTemporalIdentityArtifactTests(unittest.TestCase):
         self.assertFalse(static_quality["acceptable"], static_quality)
         self.assertIn("drinking_motion_energy_too_low", static_quality["issues"])
         self.assertTrue(moving_quality["acceptable"], moving_quality)
+
+    def test_eating_motion_gate_rejects_blink_only_static_muzzle(self) -> None:
+        pose_metadata = {
+            "policy": "reference_space_head_nod_food_overlap_v2",
+            "driver_signal_only": True,
+            "reference_canvas_size": [512, 512],
+            "reference_muzzle_anchor": [120, 292],
+            "reference_bowl_bbox": [66, 303, 205, 424],
+            "muzzle_motion_corridor_bbox": [80, 303, 165, 424],
+            "head_lift_px_max": 36.0,
+        }
+
+        def frames(*, moving_muzzle: bool) -> list[np.ndarray]:
+            result: list[np.ndarray] = []
+            for index in range(13):
+                frame = np.full((512, 512, 3), 255, dtype=np.uint8)
+                cv2.ellipse(
+                    frame,
+                    (235, 260),
+                    (190, 145),
+                    0,
+                    0,
+                    360,
+                    (196, 143, 75),
+                    -1,
+                )
+                # Large remote texture changes make the legacy whole-frame
+                # energy check pass even when the actual mouth is pinned.
+                patch_color = (45, 40, 35) if index % 2 else (220, 190, 145)
+                cv2.rectangle(frame, (300, 155), (405, 235), patch_color, -1)
+                nose_y = 292
+                if moving_muzzle:
+                    phase = (1.0 - np.cos(2.0 * np.pi * index / 12.0)) / 2.0
+                    nose_y -= int(round(20.0 * phase))
+                cv2.ellipse(
+                    frame,
+                    (120, nose_y),
+                    (28, 9),
+                    0,
+                    0,
+                    360,
+                    (38, 33, 29),
+                    -1,
+                )
+                cv2.rectangle(
+                    frame,
+                    (66, 303),
+                    (205, 424),
+                    (205, 188, 162),
+                    -1,
+                )
+                result.append(frame)
+            return result
+
+        blink_only = pipeline.eating_scail_video_motion_quality(
+            frames(moving_muzzle=False),
+            pose_metadata=pose_metadata,
+        )
+        moving = pipeline.eating_scail_video_motion_quality(
+            frames(moving_muzzle=True),
+            pose_metadata=pose_metadata,
+        )
+
+        self.assertGreaterEqual(
+            blink_only["adjacent_grayscale_mae_mean"],
+            blink_only["adjacent_grayscale_mae_minimum"],
+        )
+        self.assertFalse(blink_only["acceptable"], blink_only)
+        self.assertIn("eating_muzzle_motion_too_low", blink_only["issues"])
+        self.assertTrue(moving["acceptable"], moving)
+        self.assertGreaterEqual(
+            moving["muzzle_motion"]["y_span_px"],
+            moving["muzzle_motion"]["required_y_span_px"],
+        )
+
+        full_driver_metadata = {
+            "policy": pipeline.DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
+            "driver_signal_only": False,
+            "driver_silhouette_preserved": True,
+            "full_white_driver_geometry": True,
+            "pose_canvas_size": [512, 512],
+            "scene_prop_metadata": {
+                "prop_exclusion_bbox_union": [66, 303, 205, 424],
+            },
+        }
+        full_driver_static = pipeline.eating_scail_video_motion_quality(
+            frames(moving_muzzle=False),
+            pose_metadata=full_driver_metadata,
+        )
+        full_driver_moving = pipeline.eating_scail_video_motion_quality(
+            frames(moving_muzzle=True),
+            pose_metadata=full_driver_metadata,
+        )
+        self.assertEqual(
+            full_driver_static["muzzle_tracking_source"],
+            "full_driver_static_bowl_bbox",
+        )
+        self.assertFalse(full_driver_static["acceptable"], full_driver_static)
+        self.assertIn(
+            "eating_muzzle_motion_too_low",
+            full_driver_static["issues"],
+        )
+        self.assertTrue(full_driver_moving["acceptable"], full_driver_moving)
 
     def test_drinking_motion_gate_requires_driver_silhouette_retention(
         self,
