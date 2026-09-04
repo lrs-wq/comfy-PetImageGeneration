@@ -490,6 +490,31 @@
       "evidence": "docs/operations/REGRESSION_GALLERY.md"
     },
     {
+      "id": "comfy.incident.v22663_subdued_mixed_canonical_identity_drift",
+      "type": "incident",
+      "name": "v2.26.63 低饱和混合被毛 canonical 橘化与条纹放大",
+      "path": "/data/comfy-pet-pipeline/outputs/local_video_api/20260904T072357Z-695c863a03",
+      "status": "resolved_offline_pending_live",
+      "tags": ["v2.26.63", "cat", "canonical", "subdued-mixed-coat", "orange-recolor", "stripe-amplification", "eye-and-nose-drift", "shared-identity-root", "v2.26.64"],
+      "evidence": "docs/api/LOCAL_VIDEO_API.md"
+    },
+    {
+      "id": "comfy.quality.subdued_mixed_canonical_identity_gate",
+      "type": "business_rule",
+      "name": "低饱和混合被毛 canonical 身份门",
+      "status": "active",
+      "tags": ["canonical", "identity", "source-palette-guard-v4", "saturated-warm", "localized-red-pink-head-accent", "source-present-stripe-amplification", "fail-closed"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
+    },
+    {
+      "id": "comfy.recovery.subdued_mixed_canonical_source_matte",
+      "type": "business_rule",
+      "name": "低饱和混合被毛 canonical 源主体安全抠图轻重绘",
+      "status": "active",
+      "tags": ["canonical", "identity", "final-attempt", "source-safe-matte", "denoise-0.70", "minimum-8-steps", "no-user-lora", "same-gate-revalidation", "uploaded-identity-terminal-anchor"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
+    },
+    {
       "id": "comfy.action.cat_default",
       "type": "business_rule",
       "name": "猫默认动作：eating 与 grooming",
@@ -581,6 +606,14 @@
       "status": "accepted",
       "tags": ["execution-decoupling", "species-action-scope", "qwen", "scail", "continue-siblings", "aggregate-failures", "per-action-recovery", "no-order-workaround"],
       "evidence": "docs/knowledge/DECISIONS/0008-species-action-stage-isolation.md"
+    },
+    {
+      "id": "comfy.decision.canonical_identity_safe_anchor",
+      "type": "decision",
+      "name": "Canonical 必须使用身份安全锚点",
+      "status": "accepted",
+      "tags": ["canonical", "identity-first", "subdued-mixed-coat", "source-safe-matte", "low-denoise", "uploaded-identity-fallback", "partial-completion-first-exception", "actions-remain-generated"],
+      "evidence": "docs/knowledge/DECISIONS/0009-canonical-identity-safe-anchor.md"
     }
   ],
   "edges": [
@@ -1330,6 +1363,54 @@
     },
     {
       "from": "comfy.decision.species_action_stage_isolation",
+      "relation": "verified_under",
+      "to": "comfy.decision.post_change_cat_dog_two_action_smoke",
+      "evidence": "docs/knowledge/DECISIONS/0006-post-change-cat-dog-two-action-smoke.md"
+    },
+    {
+      "from": "comfy.incident.v22663_subdued_mixed_canonical_identity_drift",
+      "relation": "resolved_by",
+      "to": "comfy.quality.subdued_mixed_canonical_identity_gate",
+      "evidence": "docs/knowledge/DECISIONS/0009-canonical-identity-safe-anchor.md"
+    },
+    {
+      "from": "comfy.incident.v22663_subdued_mixed_canonical_identity_drift",
+      "relation": "resolved_by",
+      "to": "comfy.recovery.subdued_mixed_canonical_source_matte",
+      "evidence": "docs/knowledge/DECISIONS/0009-canonical-identity-safe-anchor.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "checked_by",
+      "to": "comfy.quality.subdued_mixed_canonical_identity_gate",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "recovers_with",
+      "to": "comfy.recovery.subdued_mixed_canonical_source_matte",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/job_runner.py"
+    },
+    {
+      "from": "comfy.quality.subdued_mixed_canonical_identity_gate",
+      "relation": "governed_by",
+      "to": "comfy.decision.canonical_identity_safe_anchor",
+      "evidence": "docs/knowledge/DECISIONS/0009-canonical-identity-safe-anchor.md"
+    },
+    {
+      "from": "comfy.recovery.subdued_mixed_canonical_source_matte",
+      "relation": "governed_by",
+      "to": "comfy.decision.canonical_identity_safe_anchor",
+      "evidence": "docs/knowledge/DECISIONS/0009-canonical-identity-safe-anchor.md"
+    },
+    {
+      "from": "comfy.decision.canonical_identity_safe_anchor",
+      "relation": "partially_supersedes",
+      "to": "comfy.decision.generated_visual_completion_first",
+      "evidence": "docs/knowledge/DECISIONS/0009-canonical-identity-safe-anchor.md"
+    },
+    {
+      "from": "comfy.decision.canonical_identity_safe_anchor",
       "relation": "verified_under",
       "to": "comfy.decision.post_change_cat_dog_two_action_smoke",
       "evidence": "docs/knowledge/DECISIONS/0006-post-change-cat-dog-two-action-smoke.md"

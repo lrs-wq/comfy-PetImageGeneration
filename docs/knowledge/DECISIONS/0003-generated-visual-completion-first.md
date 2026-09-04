@@ -1,10 +1,11 @@
 # 0003：生成视觉门耗尽后完成优先
 
-- 状态：accepted
+- 状态：accepted（canonical 身份不安全终态回退由 0009 部分取代；动作完成优先仍有效）
 - 日期：2026-09-01
 - 负责人：项目负责人
 - 取代：0001 中“身份视觉门耗尽后任务失败”的部分
 - 影响节点：`comfy.module.pipeline`、`comfy.module.quality`、`comfy.api.local_video`
+- 部分取代：`0009-canonical-identity-safe-anchor.md` 规定 canonical 不得在全部生成候选身份不安全时继续采用生成图
 
 ## 背景
 

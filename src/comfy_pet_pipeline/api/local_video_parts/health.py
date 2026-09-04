@@ -157,10 +157,19 @@ def health() -> dict[str, Any]:
         "canonical_raw_palette_retained_for_audit": True,
         "canonical_identity_palette_gate": {
             "enabled": True,
-            "fail_closed_for_generated_candidates": False,
+            "fail_closed_for_generated_candidates": True,
             "retry_all_canonical_profiles": True,
-            "terminal_recovery": "best_generated_semantic_matte",
+            "terminal_recovery": (
+                "uploaded_identity_safe_matte_when_all_generated_identity_unsafe"
+            ),
             "terminal_recovery_must_pass_same_palette_gate": False,
+            "identity_unsafe_generated_candidate_used_as_canonical": False,
+            "subdued_mixed_coat_final_retry": {
+                "policy": CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_POLICY,
+                "input": "uploaded_identity_safe_matte",
+                "denoise": CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_DENOISE,
+                "user_loras_enabled": False,
+            },
         },
         "canonical_chroma_despill": (
             "alpha_boundary_plus_source_palette_guarded_interior_v1"
@@ -1139,10 +1148,48 @@ def health() -> dict[str, Any]:
                 "canonical_identity_palette_gate": {
                     "enabled": True,
                     "policy": IDENTITY_PALETTE_POLICY,
-                    "fail_closed_for_generated_candidates": False,
+                    "fail_closed_for_generated_candidates": True,
                     "retry_all_canonical_profiles": True,
-                    "terminal_recovery": "best_generated_semantic_matte",
+                    "terminal_recovery": (
+                        "uploaded_identity_safe_matte_when_all_generated_identity_unsafe"
+                    ),
                     "terminal_recovery_must_pass_same_palette_gate": False,
+                    "identity_unsafe_generated_candidate_used_as_canonical": False,
+                    "subdued_mixed_coat_saturation_guard": {
+                        "source_achromatic_min": (
+                            IDENTITY_SUBDUED_MIXED_COAT_ACHROMATIC_MIN
+                        ),
+                        "source_achromatic_max": (
+                            IDENTITY_SUBDUED_MIXED_COAT_ACHROMATIC_MAX
+                        ),
+                        "source_warm_min": IDENTITY_SUBDUED_MIXED_COAT_WARM_MIN,
+                        "source_saturated_warm_max": (
+                            IDENTITY_SUBDUED_MIXED_COAT_SOURCE_SATURATED_WARM_MAX
+                        ),
+                        "candidate_saturated_warm_min": (
+                            IDENTITY_SUBDUED_MIXED_COAT_CANDIDATE_SATURATED_WARM_MIN
+                        ),
+                        "saturated_warm_delta_min": (
+                            IDENTITY_SUBDUED_MIXED_COAT_SATURATED_WARM_DELTA_MIN
+                        ),
+                        "achromatic_loss_required": False,
+                        "source_red_or_pink_max": (
+                            IDENTITY_SUBDUED_MIXED_COAT_SOURCE_RED_OR_PINK_MAX
+                        ),
+                        "candidate_red_or_pink_min": (
+                            IDENTITY_SUBDUED_MIXED_COAT_CANDIDATE_RED_OR_PINK_MIN
+                        ),
+                        "red_or_pink_delta_min": (
+                            IDENTITY_SUBDUED_MIXED_COAT_RED_OR_PINK_DELTA_MIN
+                        ),
+                    },
+                    "subdued_mixed_coat_final_retry": {
+                        "policy": CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_POLICY,
+                        "input": "uploaded_identity_safe_matte",
+                        "denoise": CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_DENOISE,
+                        "user_loras_enabled": False,
+                        "eye_color_lock": True,
+                    },
                     "bidirectional_drift": {
                         "policy": IDENTITY_PALETTE_BIDIRECTIONAL_DRIFT_POLICY,
                         "warm_coat_source_min": IDENTITY_WARM_COAT_SOURCE_MIN,
@@ -1192,6 +1239,9 @@ def health() -> dict[str, Any]:
                         "source_stripe_area_max": (
                             IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX
                         ),
+                        "source_stripe_area_max_scope": (
+                            "source_absent_invention_only"
+                        ),
                         "source_stripe_evidence": {
                             "component_min": (
                                 IDENTITY_SOURCE_PRESENT_STRIPE_COMPONENT_MIN
@@ -1219,6 +1269,7 @@ def health() -> dict[str, Any]:
                             ),
                         },
                         "source_present_amplification": {
+                            "ignores_source_absent_area_cap": True,
                             "stripe_component_delta_min": (
                                 IDENTITY_AMPLIFIED_STRIPE_COMPONENT_DELTA_MIN
                             ),

@@ -361,7 +361,7 @@ class ImageProfileTests(unittest.TestCase):
         self.assertTrue(current["identity_palette_guard"])
         self.assertEqual(
             current["identity_palette_policy"],
-            "source_palette_guard_v3",
+            "source_palette_guard_v4",
         )
         self.assertFalse(multipose_v1["identity_palette_guard"])
         self.assertIsNone(multipose_v1["identity_palette_policy"])
@@ -394,7 +394,7 @@ class ImageProfileTests(unittest.TestCase):
         self.assertTrue(public["identity_palette_guard"])
         self.assertEqual(
             public["identity_palette_policy"],
-            "source_palette_guard_v3",
+            "source_palette_guard_v4",
         )
         self.assertEqual(
             [preset["id"] for preset in public["pose_presets"]],
@@ -604,11 +604,15 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         warm: float,
         warm_category: float | None = None,
         saturated_warm: float = 0.0,
+        red_or_pink: float = 0.0,
+        red_or_pink_body: float = 0.0,
+        red_or_pink_localized_to_head: bool = False,
     ) -> dict[str, object]:
         fractions = {category: 0.0 for category in pipeline.IDENTITY_PALETTE_CATEGORIES}
         fractions["warm_brown_or_orange"] = (
             warm if warm_category is None else warm_category
         )
+        fractions["red_or_pink"] = red_or_pink
         fractions["achromatic_dark"] = achromatic / 2.0
         fractions["achromatic_light"] = achromatic / 2.0
         return {
@@ -618,6 +622,8 @@ class IdentityPaletteGuardTests(unittest.TestCase):
             "warm_fraction": warm,
             "saturated_warm_fraction": saturated_warm,
             "dominant": [],
+            "red_or_pink_body_fraction": red_or_pink_body,
+            "red_or_pink_localized_to_head": red_or_pink_localized_to_head,
         }
 
     @staticmethod
@@ -908,6 +914,39 @@ class IdentityPaletteGuardTests(unittest.TestCase):
             pipeline.IDENTITY_AMPLIFIED_STRIPE_AREA_DELTA_MIN,
         )
 
+    def test_source_present_stripe_gate_is_not_limited_by_absent_source_cap(
+        self,
+    ) -> None:
+        source = self.golden_task_palette(candidate=False)
+        source["marking_spatial_signature"] = {
+            "available": True,
+            "stripe_component_count": 6,
+            "stripe_area_fraction": 0.023131,
+            "dark_contrast_fraction": 0.067536,
+        }
+        candidate = {
+            **source,
+            "fractions": dict(source["fractions"]),
+            "marking_spatial_signature": {
+                "available": True,
+                "stripe_component_count": 22,
+                "stripe_area_fraction": 0.119303,
+                "dark_contrast_fraction": 0.187731,
+            },
+        }
+
+        quality = pipeline.identity_palette_quality(source, candidate)
+
+        self.assertFalse(quality["acceptable"], quality)
+        self.assertIn("invented_stripe_pattern", quality["issues"])
+        spatial = quality["marking_spatial_quality"]
+        self.assertTrue(spatial["source_stripe_evidence_present"])
+        self.assertTrue(spatial["stripe_source_scope_eligible"])
+        self.assertGreater(
+            spatial["source_stripe_area_fraction"],
+            pipeline.IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX,
+        )
+
     def test_bowl_crop_uses_upper_body_source_stripe_confirmation(self) -> None:
         primary_quality = {
             "available": True,
@@ -1084,7 +1123,7 @@ class IdentityPaletteGuardTests(unittest.TestCase):
 
         self.assertNotIn("Previous output recolored the pet", prompt)
 
-    def test_all_rejected_canonical_retries_keep_generated_completion_fallback(
+    def test_all_rejected_canonical_retries_require_uploaded_identity_anchor(
         self,
     ) -> None:
         attempts = [
@@ -1107,7 +1146,7 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         )
 
         self.assertEqual(len(recovery_profiles), 3)
-        self.assertFalse(
+        self.assertTrue(
             pipeline.canonical_generated_attempts_require_uploaded_fallback(
                 attempts,
                 identity_palette_required=True,
@@ -1115,6 +1154,17 @@ class IdentityPaletteGuardTests(unittest.TestCase):
         )
         attempts[-1]["identity_palette"] = {"acceptable": True, "issues": []}
         self.assertFalse(
+            pipeline.canonical_generated_attempts_require_uploaded_fallback(
+                attempts,
+                identity_palette_required=True,
+            )
+        )
+        attempts[-1]["chroma"] = {
+            "identity_chroma_spill_cleanup": {
+                "regeneration_required": True,
+            }
+        }
+        self.assertTrue(
             pipeline.canonical_generated_attempts_require_uploaded_fallback(
                 attempts,
                 identity_palette_required=True,
@@ -1466,6 +1516,161 @@ class IdentityPaletteGuardTests(unittest.TestCase):
             "achromatic_source_recolored_with_warm_fur",
             quality["issues"],
         )
+
+    def test_subdued_mixed_coat_rejects_severe_saturated_orange_recolor(
+        self,
+    ) -> None:
+        source = self.palette(
+            achromatic=0.550291,
+            warm=0.449709,
+            warm_category=0.448723,
+            saturated_warm=0.034598,
+        )
+        candidate = self.palette(
+            achromatic=0.387716,
+            warm=0.593650,
+            warm_category=0.592000,
+            saturated_warm=0.417900,
+        )
+
+        quality = pipeline.identity_palette_quality(source, candidate)
+        prompt = pipeline.identity_palette_prompt(source)
+        negative = pipeline.identity_palette_negative_prompt(source)
+
+        self.assertTrue(pipeline.identity_palette_is_subdued_mixed_coat(source))
+        self.assertFalse(quality["acceptable"], quality)
+        self.assertTrue(
+            quality["subdued_mixed_coat_recolored_saturated_warm"]
+        )
+        self.assertIn(
+            "subdued_mixed_coat_recolored_saturated_warm",
+            quality["issues"],
+        )
+        self.assertIn("subdued mixed neutral-and-warm coat", prompt)
+        self.assertIn("not a bright orange, ginger, or golden base coat", prompt)
+        self.assertIn("narrow natural face", prompt)
+        self.assertIn("bright orange recolor", negative)
+        self.assertIn("kitten mascot face", negative)
+        self.assertIn("red iris", negative)
+
+    def test_subdued_mixed_coat_rejects_saturation_even_if_dark_stripes_remain(
+        self,
+    ) -> None:
+        source = self.palette(
+            achromatic=0.550291,
+            warm=0.449709,
+            warm_category=0.448723,
+            saturated_warm=0.034598,
+        )
+        candidate = self.palette(
+            achromatic=0.501603,
+            warm=0.498302,
+            warm_category=0.489065,
+            saturated_warm=0.400787,
+        )
+
+        quality = pipeline.identity_palette_quality(source, candidate)
+
+        self.assertFalse(quality["acceptable"], quality)
+        self.assertIn(
+            "subdued_mixed_coat_recolored_saturated_warm",
+            quality["issues"],
+        )
+
+    def test_subdued_mixed_coat_rejects_new_red_head_identity_accent(
+        self,
+    ) -> None:
+        source = self.palette(
+            achromatic=0.550291,
+            warm=0.449709,
+            warm_category=0.448723,
+            saturated_warm=0.034598,
+            red_or_pink=0.000032,
+        )
+        red_eye_candidate = self.palette(
+            achromatic=0.501876,
+            warm=0.497693,
+            warm_category=0.485278,
+            saturated_warm=0.044614,
+            red_or_pink=0.009627,
+            red_or_pink_body=0.000398,
+            red_or_pink_localized_to_head=True,
+        )
+        faithful_candidate = self.palette(
+            achromatic=0.458317,
+            warm=0.541255,
+            warm_category=0.534351,
+            saturated_warm=0.077784,
+            red_or_pink=0.005120,
+            red_or_pink_body=0.0,
+            red_or_pink_localized_to_head=True,
+        )
+
+        red_eye_quality = pipeline.identity_palette_quality(
+            source,
+            red_eye_candidate,
+        )
+        faithful_quality = pipeline.identity_palette_quality(
+            source,
+            faithful_candidate,
+        )
+
+        self.assertFalse(red_eye_quality["acceptable"], red_eye_quality)
+        self.assertIn(
+            "subdued_mixed_coat_invented_red_or_pink_head_accent",
+            red_eye_quality["issues"],
+        )
+        self.assertTrue(faithful_quality["acceptable"], faithful_quality)
+
+    def test_subdued_mixed_coat_source_matte_recovery_is_final_attempt_only(
+        self,
+    ) -> None:
+        source = self.palette(
+            achromatic=0.550291,
+            warm=0.449709,
+            warm_category=0.448723,
+            saturated_warm=0.034598,
+        )
+
+        self.assertFalse(
+            pipeline.canonical_subdued_mixed_coat_recovery_required(
+                source,
+                attempt=2,
+                attempt_count=3,
+                identity_palette_gate_required=True,
+            )
+        )
+        self.assertTrue(
+            pipeline.canonical_subdued_mixed_coat_recovery_required(
+                source,
+                attempt=3,
+                attempt_count=3,
+                identity_palette_gate_required=True,
+            )
+        )
+        self.assertFalse(
+            pipeline.canonical_subdued_mixed_coat_recovery_required(
+                source,
+                attempt=3,
+                attempt_count=3,
+                identity_palette_gate_required=False,
+            )
+        )
+
+    def test_subdued_mixed_coat_retry_names_the_failed_regions(self) -> None:
+        guidance = pipeline.identity_palette_retry_guidance(
+            {
+                "available": True,
+                "acceptable": False,
+                "issues": [
+                    "subdued_mixed_coat_recolored_saturated_warm",
+                ],
+            }
+        )
+
+        self.assertIn("not a bright orange or ginger coat", guidance)
+        self.assertIn("face, neck, torso, legs, and tail", guidance)
+        self.assertIn("replace the dark nose with a pink nose", guidance)
 
     def test_achromatic_prompt_keeps_pink_skin_accents_small(self) -> None:
         source = self.palette(achromatic=0.91, warm=0.088)

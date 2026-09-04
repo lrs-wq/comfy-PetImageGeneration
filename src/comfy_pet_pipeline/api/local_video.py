@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.63"
+API_VERSION = "2.26.64"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -371,10 +371,23 @@ CANONICAL_ACTION_ACHROMATIC_BALANCE_L1_MAX = 0.40
 # unaffected.
 CANONICAL_ACTION_LIGHT_IDENTITY_BLACK_FRACTION_MAX = 0.05
 CANONICAL_ACTION_DARK_FEATURE_EXPANSION_MAX = 0.06
-IDENTITY_PALETTE_POLICY = "source_palette_guard_v3"
+IDENTITY_PALETTE_POLICY = "source_palette_guard_v4"
 IDENTITY_PALETTE_BIDIRECTIONAL_DRIFT_POLICY = (
     "warm_achromatic_bidirectional_identity_drift_v1"
 )
+IDENTITY_SUBDUED_MIXED_COAT_ACHROMATIC_MIN = 0.30
+IDENTITY_SUBDUED_MIXED_COAT_ACHROMATIC_MAX = 0.72
+IDENTITY_SUBDUED_MIXED_COAT_WARM_MIN = 0.20
+IDENTITY_SUBDUED_MIXED_COAT_SOURCE_SATURATED_WARM_MAX = 0.15
+IDENTITY_SUBDUED_MIXED_COAT_CANDIDATE_SATURATED_WARM_MIN = 0.30
+IDENTITY_SUBDUED_MIXED_COAT_SATURATED_WARM_DELTA_MIN = 0.18
+IDENTITY_SUBDUED_MIXED_COAT_SOURCE_RED_OR_PINK_MAX = 0.003
+IDENTITY_SUBDUED_MIXED_COAT_CANDIDATE_RED_OR_PINK_MIN = 0.008
+IDENTITY_SUBDUED_MIXED_COAT_RED_OR_PINK_DELTA_MIN = 0.006
+CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_POLICY = (
+    "source_safe_matte_low_denoise_without_user_lora_v1"
+)
+CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_DENOISE = 0.70
 IDENTITY_WARM_COAT_SOURCE_MIN = 0.30
 IDENTITY_WARM_COAT_LOSS_DELTA_MIN = 0.20
 IDENTITY_ACHROMATIC_EXPANSION_DELTA_MIN = 0.15
@@ -6003,6 +6016,16 @@ neutralize_uploaded_identity_chroma_spill = (
 
 
 identity_palette_is_achromatic = _local_video_identity_quality.identity_palette_is_achromatic
+
+
+identity_palette_is_subdued_mixed_coat = (
+    _local_video_identity_quality.identity_palette_is_subdued_mixed_coat
+)
+
+
+canonical_subdued_mixed_coat_recovery_required = (
+    _local_video_job_runner.canonical_subdued_mixed_coat_recovery_required
+)
 
 
 identity_palette_prompt = _local_video_identity_quality.identity_palette_prompt

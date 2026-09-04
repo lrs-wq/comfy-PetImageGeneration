@@ -9,6 +9,27 @@ from . import action_execution as _action_execution
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
+def canonical_subdued_mixed_coat_recovery_required(
+    source_palette: dict[str, Any] | None,
+    *,
+    attempt: int,
+    attempt_count: int,
+    identity_palette_gate_required: bool,
+) -> bool:
+    """Reserve the source-matte recovery profile for the final canonical try."""
+    _sync_local_video_runtime(
+        globals(),
+        {"canonical_subdued_mixed_coat_recovery_required"},
+    )
+    return bool(
+        identity_palette_gate_required
+        and attempt_count > 0
+        and attempt == attempt_count
+        and isinstance(source_palette, dict)
+        and identity_palette_is_subdued_mixed_coat(source_palette)
+    )
+
+
 def bounded_strict_first_frame_profiles(
     profiles: list[dict[str, Any]],
     *,
@@ -2001,6 +2022,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
         cartoon_attempts: list[dict[str, Any]] = []
         cartoon_workflows: list[dict[str, Any]] = []
         selected_cartoon: dict[str, Any] | None = None
+        previous_canonical_identity_palette_quality: dict[str, Any] | None = None
         canonical_profiles = (
             recovery_profiles
             if (
@@ -2019,7 +2041,119 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     recovery_attempt=attempt,
                 )
             attempt_seed = base_seed + (attempt - 1) * 1009
-            prompt_source = effective_prompt if profile["use_user_prompt"] else ""
+            attempt_profile_name = str(profile["name"])
+            attempt_qwen_input_name = qwen_input_name
+            attempt_user_lora = profile["user_lora"]
+            attempt_user_lora_strength = profile["user_lora_strength"]
+            attempt_user_lora_mode = profile["user_lora_mode"]
+            attempt_user_loras = profile["user_loras"]
+            attempt_user_lora_strength_scale = float(
+                profile["user_lora_strength_scale"]
+            )
+            attempt_steps = int(profile["steps"])
+            attempt_cfg = float(profile["cfg"])
+            attempt_denoise = float(profile["denoise"])
+            attempt_use_user_prompt = bool(profile["use_user_prompt"])
+            subdued_mixed_recovery: dict[str, Any] | None = None
+            if canonical_subdued_mixed_coat_recovery_required(
+                source_identity_palette,
+                attempt=attempt,
+                attempt_count=len(canonical_profiles),
+                identity_palette_gate_required=(
+                    canonical_identity_palette_gate_required
+                ),
+            ):
+                recovery_green = (
+                    job_dir / "cartoon_reference_subdued_mixed_source_green.png"
+                )
+                recovery_cutout = (
+                    job_dir / "cartoon_reference_subdued_mixed_source_cutout.png"
+                )
+                recovery_semantic = (
+                    job_dir / "cartoon_reference_subdued_mixed_source_semantic.png"
+                )
+                recovery_comfy_name = "canonical_subdued_mixed_source_green.png"
+                recovery_comfy_path = comfy_input_dir / recovery_comfy_name
+                try:
+                    recovery_chroma = semantic_background_recovery(
+                        Path(identity_source_path),
+                        recovery_green,
+                        recovery_cutout,
+                        recovery_semantic,
+                        validate_canonical_interior=False,
+                        enforce_visual_quality=False,
+                    )
+                    shutil.copy2(recovery_green, recovery_comfy_path)
+                    recovery_green_sha256 = file_sha256(recovery_green)
+                    recovery_comfy_sha256 = file_sha256(recovery_comfy_path)
+                    if recovery_green_sha256 != recovery_comfy_sha256:
+                        raise RuntimeError(
+                            "Subdued mixed-coat identity matte copy failed its "
+                            "digest check."
+                        )
+                    attempt_qwen_input_name = (
+                        comfy_relative_dir / recovery_comfy_name
+                    ).as_posix()
+                    attempt_user_lora = None
+                    attempt_user_lora_strength = 0.0
+                    attempt_user_lora_mode = "stack"
+                    attempt_user_loras = []
+                    attempt_user_lora_strength_scale = 0.0
+                    attempt_steps = max(8, attempt_steps)
+                    attempt_cfg = 1.0
+                    attempt_denoise = (
+                        CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_DENOISE
+                    )
+                    attempt_profile_name = (
+                        f"{attempt_profile_name}_subdued_mixed_identity_recovery"
+                    )
+                    subdued_mixed_recovery = {
+                        "applied": True,
+                        "policy": CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_POLICY,
+                        "source": str(identity_source_path),
+                        "source_green": recovery_green.name,
+                        "source_cutout": recovery_cutout.name,
+                        "source_semantic": recovery_semantic.name,
+                        "comfy_input": attempt_qwen_input_name,
+                        "source_green_sha256": recovery_green_sha256,
+                        "comfy_input_sha256": recovery_comfy_sha256,
+                        "denoise": attempt_denoise,
+                        "user_loras_enabled": False,
+                        "chroma": recovery_chroma,
+                    }
+                    update_job(
+                        job_id,
+                        canonical_subdued_mixed_coat_recovery=(
+                            subdued_mixed_recovery
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001 - retain normal final retry
+                    subdued_mixed_recovery = {
+                        "applied": False,
+                        "policy": CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_POLICY,
+                        "source": str(identity_source_path),
+                        "error": f"{type(exc).__name__}: {str(exc)[:1000]}",
+                    }
+                    update_job(
+                        job_id,
+                        canonical_subdued_mixed_coat_recovery=(
+                            subdued_mixed_recovery
+                        ),
+                    )
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_reference_input_recovery",
+                            "attempt": attempt,
+                            "reason": "subdued_mixed_coat_identity_drift",
+                            "strategy": (
+                                CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_POLICY
+                            ),
+                            "result": "preparation_failed_normal_retry_retained",
+                            "error": subdued_mixed_recovery["error"],
+                        },
+                    )
+            prompt_source = effective_prompt if attempt_use_user_prompt else ""
             canonical_palette_prompt_builder = (
                 dog_action_identity_palette_prompt
                 if species == "dog"
@@ -2029,6 +2163,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 canonical_palette_prompt_builder(
                     source_identity_palette,
                     retry=attempt > 1,
+                    previous_quality=(
+                        previous_canonical_identity_palette_quality
+                    ),
                 )
                 if source_identity_palette is not None
                 else ""
@@ -2048,18 +2185,18 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 f"local_video_api/{job_id}/qwen_cartoon_reference_attempt_{attempt:02d}"
             )
             cartoon_workflow = qwen_workflow(
-                qwen_input_name,
+                attempt_qwen_input_name,
                 cartoon_reference_prompt,
                 cartoon_negative_prompt,
                 attempt_seed,
                 cartoon_prefix,
-                user_lora=profile["user_lora"],
-                user_lora_strength=profile["user_lora_strength"],
-                user_lora_mode=profile["user_lora_mode"],
-                user_loras=profile["user_loras"],
-                steps=profile["steps"],
-                cfg=profile["cfg"],
-                denoise=profile["denoise"],
+                user_lora=attempt_user_lora,
+                user_lora_strength=attempt_user_lora_strength,
+                user_lora_mode=attempt_user_lora_mode,
+                user_loras=attempt_user_loras,
+                steps=attempt_steps,
+                cfg=attempt_cfg,
+                denoise=attempt_denoise,
                 suppress_builtin_style=suppress_builtin_style,
                 additional_reference_input_names=(
                     canonical_identity_reference_input_names
@@ -2262,25 +2399,27 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
             )
             record = {
                 "attempt": attempt,
-                "profile": profile["name"],
+                "profile": attempt_profile_name,
                 "seed": attempt_seed,
                 "keyframe": attempt_reference.name,
                 "cutout": attempt_cutout.name if chroma_metrics["acceptable"] else None,
                 "settings": {
-                    "steps": profile["steps"],
-                    "cfg": profile["cfg"],
-                    "denoise": profile["denoise"],
-                    "user_lora": profile["user_lora"],
-                    "user_lora_strength": profile["user_lora_strength"],
-                    "user_loras": profile["user_loras"],
+                    "steps": attempt_steps,
+                    "cfg": attempt_cfg,
+                    "denoise": attempt_denoise,
+                    "user_lora": attempt_user_lora,
+                    "user_lora_strength": attempt_user_lora_strength,
+                    "user_loras": attempt_user_loras,
                     "user_lora_strength_scale": round(
                         canonical_lora_scale
-                        * float(profile["user_lora_strength_scale"]),
+                        * attempt_user_lora_strength_scale,
                         6,
                     ),
-                    "user_lora_mode": profile["user_lora_mode"],
-                    "use_user_prompt": profile["use_user_prompt"],
+                    "user_lora_mode": attempt_user_lora_mode,
+                    "use_user_prompt": attempt_use_user_prompt,
+                    "qwen_input": attempt_qwen_input_name,
                 },
+                "subdued_mixed_coat_recovery": subdued_mixed_recovery,
                 "chroma": chroma_metrics,
                 "quality": cartoon_quality,
                 "identity_palette": palette_quality,
@@ -2313,8 +2452,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "stage": "cartoon_reference",
                             "attempt": attempt,
                             "reason": "unclean_chroma_background",
-                            "strategy": "safe_qwen_retry",
-                            "profile": profile["name"],
+                            "strategy": (
+                                CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_POLICY
+                                if (
+                                    subdued_mixed_recovery is not None
+                                    and subdued_mixed_recovery.get("applied") is True
+                                )
+                                else "safe_qwen_retry"
+                            ),
+                            "profile": attempt_profile_name,
                             "result": "accepted",
                             "chroma": chroma_metrics,
                             "quality": cartoon_quality,
@@ -2322,6 +2468,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         },
                     )
                 break
+            previous_canonical_identity_palette_quality = palette_quality
             if palette_quality is not None and not palette_quality["acceptable"]:
                 rejection_reason = "canonical_identity_palette_drift"
             elif not chroma_metrics["acceptable"]:
@@ -2336,7 +2483,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 background_removal_error = "Generated image did not contain a clean removable green background."
                 record.update(
                     {
-                        "profile": f"{profile['name']}_raw_image",
+                        "profile": f"{attempt_profile_name}_raw_image",
                         "cutout": None,
                         "transparent": False,
                         "background_removal_failed": True,
@@ -2358,7 +2505,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         "attempt": attempt,
                         "reason": rejection_reason,
                         "strategy": "return_raw_image",
-                        "profile": profile["name"],
+                        "profile": attempt_profile_name,
                         "result": "returned_opaque_original",
                         "chroma": chroma_metrics,
                         "quality": cartoon_quality,
@@ -2377,8 +2524,15 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     "stage": "cartoon_reference",
                     "attempt": attempt,
                     "reason": rejection_reason,
-                    "strategy": "safe_qwen_retry",
-                    "profile": profile["name"],
+                    "strategy": (
+                        CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_POLICY
+                        if (
+                            subdued_mixed_recovery is not None
+                            and subdued_mixed_recovery.get("applied") is True
+                        )
+                        else "safe_qwen_retry"
+                    ),
+                    "profile": attempt_profile_name,
                     "result": "rejected",
                     "chroma": chroma_metrics,
                     "quality": cartoon_quality,
@@ -2389,7 +2543,7 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                 "%s cartoon reference attempt %s (%s) failed checks: chroma=%s quality=%s identity_palette=%s",
                 job_id,
                 attempt,
-                profile["name"],
+                attempt_profile_name,
                 chroma_metrics["issues"],
                 cartoon_quality["issues"] if cartoon_quality else None,
                 palette_quality["issues"] if palette_quality else None,
@@ -2403,26 +2557,13 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     and source_identity_palette.get("available")
                 ),
             )
-            identity_safe_generated_attempts = [
-                record
-                for record in cartoon_attempts
-                if isinstance(record.get("identity_palette"), dict)
-                and record["identity_palette"].get("acceptable") is True
-                and not bool(
-                    (
-                        record.get("chroma", {}).get(
-                            "identity_chroma_spill_cleanup",
-                            {},
-                        )
-                        if isinstance(record.get("chroma"), dict)
-                        else {}
-                    ).get("regeneration_required")
+            fallback_uses_uploaded_identity = (
+                canonical_generated_attempts_require_uploaded_fallback(
+                    cartoon_attempts,
+                    identity_palette_required=bool(
+                        canonical_identity_palette_gate_required
+                    ),
                 )
-            ]
-            fallback_uses_uploaded_identity = bool(
-                canonical_identity_palette_gate_required
-                and not identity_safe_generated_attempts
-                and not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
             )
             fallback_source = (
                 Path(identity_source_path)
@@ -2496,7 +2637,36 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             ),
                         )
                     elif fallback_uses_uploaded_identity:
-                        raise
+                        generated_semantic_fallback_error = (
+                            f"{type(exc).__name__}: {str(exc)[:1000]}"
+                        )
+                        chroma_metrics = semantic_background_recovery(
+                            fallback_source,
+                            fallback_green,
+                            fallback_cutout,
+                            fallback_semantic,
+                            validate_canonical_interior=False,
+                            enforce_visual_quality=False,
+                        )
+                        completion_first_canonical_fallback = True
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "cartoon_reference_semantic_recovery",
+                                "attempt": fallback_record["attempt"],
+                                "reason": "uploaded_identity_strict_matte_invalid",
+                                "strategy": (
+                                    "use_uploaded_identity_semantic_matte_without_"
+                                    "visual_block"
+                                ),
+                                "source": fallback_source.name,
+                                "result": "accepted_identity_safe_fallback",
+                                "strict_error": generated_semantic_fallback_error,
+                                "policy": (
+                                    GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                                ),
+                            },
+                        )
                     else:
                         generated_semantic_fallback_error = (
                             f"{type(exc).__name__}: {str(exc)[:1000]}"
@@ -2775,7 +2945,11 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     )
                 )
                 fallback_recovery_strategy = (
-                    "use_best_generated_semantic_matte_without_visual_block"
+                    (
+                        "use_uploaded_identity_semantic_matte_without_visual_block"
+                        if fallback_uses_uploaded_identity
+                        else "use_best_generated_semantic_matte_without_visual_block"
+                    )
                     if completion_first_canonical_fallback
                     else (
                         "use_uploaded_identity_after_generated_matte_failure"

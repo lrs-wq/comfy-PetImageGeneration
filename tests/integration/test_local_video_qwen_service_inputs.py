@@ -625,16 +625,50 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
         self.assertTrue(guard["canonical_raw_palette_retained_for_audit"])
         canonical_palette_gate = guard["canonical_identity_palette_gate"]
         self.assertTrue(canonical_palette_gate["enabled"])
-        self.assertFalse(
+        self.assertTrue(
             canonical_palette_gate["fail_closed_for_generated_candidates"]
         )
         self.assertEqual(
             canonical_palette_gate["terminal_recovery"],
-            "best_generated_semantic_matte",
+            "uploaded_identity_safe_matte_when_all_generated_identity_unsafe",
         )
         self.assertFalse(
             canonical_palette_gate["terminal_recovery_must_pass_same_palette_gate"]
         )
+        self.assertFalse(
+            canonical_palette_gate[
+                "identity_unsafe_generated_candidate_used_as_canonical"
+            ]
+        )
+        mixed_coat = canonical_palette_gate[
+            "subdued_mixed_coat_saturation_guard"
+        ]
+        self.assertEqual(
+            mixed_coat["source_achromatic_min"],
+            pipeline.IDENTITY_SUBDUED_MIXED_COAT_ACHROMATIC_MIN,
+        )
+        self.assertEqual(
+            mixed_coat["candidate_saturated_warm_min"],
+            pipeline.IDENTITY_SUBDUED_MIXED_COAT_CANDIDATE_SATURATED_WARM_MIN,
+        )
+        self.assertFalse(mixed_coat["achromatic_loss_required"])
+        self.assertEqual(
+            mixed_coat["candidate_red_or_pink_min"],
+            pipeline.IDENTITY_SUBDUED_MIXED_COAT_CANDIDATE_RED_OR_PINK_MIN,
+        )
+        mixed_recovery = canonical_palette_gate[
+            "subdued_mixed_coat_final_retry"
+        ]
+        self.assertEqual(
+            mixed_recovery["policy"],
+            pipeline.CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_POLICY,
+        )
+        self.assertEqual(
+            mixed_recovery["denoise"],
+            pipeline.CANONICAL_SUBDUED_MIXED_COAT_RECOVERY_DENOISE,
+        )
+        self.assertFalse(mixed_recovery["user_loras_enabled"])
+        self.assertTrue(mixed_recovery["eye_color_lock"])
         spatial_marking_gate = canonical_palette_gate["spatial_marking_gate"]
         self.assertEqual(
             spatial_marking_gate["policy"],
@@ -649,6 +683,11 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
                 "stripe_area_delta_min"
             ],
             pipeline.IDENTITY_AMPLIFIED_STRIPE_AREA_DELTA_MIN,
+        )
+        self.assertTrue(
+            spatial_marking_gate["source_present_amplification"][
+                "ignores_source_absent_area_cap"
+            ]
         )
         self.assertEqual(
             spatial_marking_gate["bowl_primary_upper_cross_crop_policy"],

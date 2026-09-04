@@ -1386,6 +1386,26 @@ def identity_palette_is_achromatic(signature: dict[str, Any]) -> bool:
     return bool(achromatic >= 0.72 and (warm <= 0.12 or low_saturation_lighting))
 
 
+def identity_palette_is_subdued_mixed_coat(signature: dict[str, Any]) -> bool:
+    """Recognize neutral-and-warm coats whose warmth is visibly low-saturation."""
+    _sync_local_video_runtime(
+        globals(),
+        {"identity_palette_is_subdued_mixed_coat"},
+    )
+
+    achromatic = float(signature.get("achromatic_fraction", 0.0))
+    warm = float(signature.get("warm_fraction", 0.0))
+    saturated_warm = float(signature.get("saturated_warm_fraction", 0.0))
+    return bool(
+        IDENTITY_SUBDUED_MIXED_COAT_ACHROMATIC_MIN
+        <= achromatic
+        < IDENTITY_SUBDUED_MIXED_COAT_ACHROMATIC_MAX
+        and warm >= IDENTITY_SUBDUED_MIXED_COAT_WARM_MIN
+        and saturated_warm
+        <= IDENTITY_SUBDUED_MIXED_COAT_SOURCE_SATURATED_WARM_MAX
+    )
+
+
 def identity_palette_stripe_amplification_refine_eligibility(
     quality: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -1526,11 +1546,26 @@ def identity_palette_retry_guidance(
         )
     if issues & {
         "achromatic_source_recolored_with_warm_fur",
+        "subdued_mixed_coat_recolored_saturated_warm",
+        "subdued_mixed_coat_invented_red_or_pink_head_accent",
         "canonical_action_warm_expansion_drift",
     } or any(issue.startswith("new_dominant_") for issue in issues):
         guidance.append(
             "Remove every new dominant hue and lighting cast; the bowl or action "
             "reference may not transfer its color into the pet."
+        )
+    if issues & {
+        "subdued_mixed_coat_recolored_saturated_warm",
+        "subdued_mixed_coat_invented_red_or_pink_head_accent",
+    }:
+        guidance.append(
+            "The upload has a subdued mixed gray, dark, taupe, and low-saturation "
+            "brown coat, not a bright orange or ginger coat. Restore the neutral "
+            "face, neck, torso, legs, and tail regions; keep tan warmth muted and "
+            "confined to the exact source-supported regions. Do not increase orange "
+            "saturation, spread ginger across the body, enlarge the pale muzzle or "
+            "chest, replace the dark nose with a pink nose, or recolor the source "
+            "irises red, pink, magenta, neon, or any other fantasy color."
         )
     if issues & {
         "warm_source_invented_discrete_white_patches",
@@ -1590,6 +1625,9 @@ def identity_palette_prompt(
         )
     ]
     source_is_achromatic = identity_palette_is_achromatic(signature)
+    source_is_subdued_mixed_coat = identity_palette_is_subdued_mixed_coat(
+        signature
+    )
     if source_is_achromatic:
         achromatic_dominant = [
             item for item in dominant if item in {"black", "white", "gray"}
@@ -1624,6 +1662,21 @@ def identity_palette_prompt(
             "brighter neutral white in the stylized render, but every dark marking "
             "must keep its placement and approximate area. Never erase the dark "
             "markings or expand them into large invented black patches."
+        )
+    elif source_is_subdued_mixed_coat:
+        rule = (
+            "The upload has a subdued mixed neutral-and-warm coat. Its gray and dark "
+            "regions are genuine coat identity, while its taupe, muted brown, and tan "
+            "regions remain low-saturation; they are not a bright orange, ginger, or "
+            "golden base coat. Preserve the neutral face, neck, torso, legs, and tail "
+            "areas and keep every warm region in exactly the same location and muted "
+            "intensity. Saturated orange is at most a tiny source-localized accent and "
+            "must never spread across the face, chest, torso, legs, or tail. Preserve "
+            "the source's narrow natural face, restrained eye size, ear proportions, "
+            "dark nose, exact source iris hue with normal dark pupils, and subtle "
+            "localized bands; never redesign it as a generic orange tabby, kitten, "
+            "or mascot. Never recolor any iris red, pink, magenta, neon, glowing, or "
+            "fantasy-colored."
         )
     else:
         rule = f"The visible source coat palette is predominantly {palette}."
@@ -1699,6 +1752,13 @@ def dog_action_identity_palette_prompt(
             "COAT PIGMENT: preserve Image 1's neutral black, gray, and white balance "
             "and localized markings. Add no amber, brown, orange, or golden cast; "
             "small pink skin accents stay localized and never spread into fur."
+        )
+    if identity_palette_is_subdued_mixed_coat(signature):
+        return (
+            "COAT PIGMENT: preserve Image 1's subdued mixed neutral gray, dark, "
+            "taupe, muted brown, and tan coat with every region in its source "
+            "location. Do not turn low-saturation warmth into a bright orange or "
+            "ginger base coat, spread it across the body, or amplify subtle bands."
         )
     dominant = [
         IDENTITY_PALETTE_PROMPT_LABELS[item]
@@ -2299,6 +2359,27 @@ def identity_palette_negative_prompt(signature: dict[str, Any]) -> str:
                 "large invented black and white patches",
             ]
         )
+    if identity_palette_is_subdued_mixed_coat(signature):
+        negative.extend(
+            [
+                "bright orange recolor",
+                "ginger base coat",
+                "orange face and neck",
+                "orange torso, legs, or tail",
+                "high-saturation orange tabby",
+                "enlarged pale muzzle or chest",
+                "pink replacement nose",
+                "kitten mascot face",
+                "red iris",
+                "crimson iris",
+                "magenta eye",
+                "pink eye",
+                "neon eye",
+                "glowing eye",
+                "fantasy eye color",
+                "black cartoon outline",
+            ]
+        )
     warm_fur_family = float(
         fractions.get("warm_brown_or_orange", 0.0)
     ) + float(fractions.get("yellow_or_gold", 0.0))
@@ -2474,6 +2555,29 @@ def identity_palette_quality(
         broad_warm_drift or saturated_warm_drift
     ):
         issues.append("achromatic_source_recolored_with_warm_fur")
+    subdued_mixed_coat_recolored_saturated_warm = bool(
+        identity_palette_is_subdued_mixed_coat(source)
+        and candidate_saturated_warm
+        >= IDENTITY_SUBDUED_MIXED_COAT_CANDIDATE_SATURATED_WARM_MIN
+        and candidate_saturated_warm - source_saturated_warm
+        >= IDENTITY_SUBDUED_MIXED_COAT_SATURATED_WARM_DELTA_MIN
+    )
+    if subdued_mixed_coat_recolored_saturated_warm:
+        issues.append("subdued_mixed_coat_recolored_saturated_warm")
+    source_red_or_pink = float(source_fractions.get("red_or_pink", 0.0))
+    candidate_red_or_pink = float(candidate_fractions.get("red_or_pink", 0.0))
+    subdued_mixed_coat_invented_red_or_pink_head_accent = bool(
+        identity_palette_is_subdued_mixed_coat(source)
+        and source_red_or_pink
+        <= IDENTITY_SUBDUED_MIXED_COAT_SOURCE_RED_OR_PINK_MAX
+        and candidate_red_or_pink
+        >= IDENTITY_SUBDUED_MIXED_COAT_CANDIDATE_RED_OR_PINK_MIN
+        and candidate_red_or_pink - source_red_or_pink
+        >= IDENTITY_SUBDUED_MIXED_COAT_RED_OR_PINK_DELTA_MIN
+        and bool(candidate.get("red_or_pink_localized_to_head"))
+    )
+    if subdued_mixed_coat_invented_red_or_pink_head_accent:
+        issues.append("subdued_mixed_coat_invented_red_or_pink_head_accent")
     warm_coat_fraction_lost = bool(
         source_coat_warm >= IDENTITY_WARM_COAT_SOURCE_MIN
         and source_coat_warm - candidate_coat_warm
@@ -2563,9 +2667,13 @@ def identity_palette_quality(
         stripe_dark_contrast_delta_min = (
             IDENTITY_NEW_STRIPE_DARK_CONTRAST_DELTA_MIN
         )
+    stripe_source_scope_eligible = bool(
+        source_stripe_evidence_present
+        or source_stripe_area <= IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX
+    )
     invented_stripe_pattern = bool(
         marking_spatial_available
-        and source_stripe_area <= IDENTITY_NEW_STRIPE_SOURCE_AREA_MAX
+        and stripe_source_scope_eligible
         and stripe_component_delta >= stripe_component_delta_min
         and stripe_area_delta >= stripe_area_delta_min
         and dark_contrast_delta >= stripe_dark_contrast_delta_min
@@ -2587,6 +2695,7 @@ def identity_palette_quality(
             else None
         ),
         "stripe_gate_mode": stripe_gate_mode,
+        "stripe_source_scope_eligible": stripe_source_scope_eligible,
         "source_stripe_evidence_present": source_stripe_evidence_present,
         "source_stripe_component_count": source_stripe_count,
         "candidate_stripe_component_count": candidate_stripe_count,
@@ -2743,6 +2852,38 @@ def identity_palette_quality(
         "achromatic_dark_marking_expanded": achromatic_dark_marking_expanded,
         "broad_warm_drift": broad_warm_drift,
         "saturated_warm_drift": saturated_warm_drift,
+        "subdued_mixed_coat_source": identity_palette_is_subdued_mixed_coat(
+            source
+        ),
+        "subdued_mixed_coat_recolored_saturated_warm": (
+            subdued_mixed_coat_recolored_saturated_warm
+        ),
+        "subdued_mixed_coat_invented_red_or_pink_head_accent": (
+            subdued_mixed_coat_invented_red_or_pink_head_accent
+        ),
+        "subdued_mixed_coat_thresholds": {
+            "source_achromatic_min": IDENTITY_SUBDUED_MIXED_COAT_ACHROMATIC_MIN,
+            "source_achromatic_max": IDENTITY_SUBDUED_MIXED_COAT_ACHROMATIC_MAX,
+            "source_warm_min": IDENTITY_SUBDUED_MIXED_COAT_WARM_MIN,
+            "source_saturated_warm_max": (
+                IDENTITY_SUBDUED_MIXED_COAT_SOURCE_SATURATED_WARM_MAX
+            ),
+            "candidate_saturated_warm_min": (
+                IDENTITY_SUBDUED_MIXED_COAT_CANDIDATE_SATURATED_WARM_MIN
+            ),
+            "saturated_warm_delta_min": (
+                IDENTITY_SUBDUED_MIXED_COAT_SATURATED_WARM_DELTA_MIN
+            ),
+            "source_red_or_pink_max": (
+                IDENTITY_SUBDUED_MIXED_COAT_SOURCE_RED_OR_PINK_MAX
+            ),
+            "candidate_red_or_pink_min": (
+                IDENTITY_SUBDUED_MIXED_COAT_CANDIDATE_RED_OR_PINK_MIN
+            ),
+            "red_or_pink_delta_min": (
+                IDENTITY_SUBDUED_MIXED_COAT_RED_OR_PINK_DELTA_MIN
+            ),
+        },
     }
 
 
@@ -4689,6 +4830,8 @@ def bowl_aware_identity_palette_quality(
             }
     bowl_contamination_issues = {
         "achromatic_source_recolored_with_warm_fur",
+        "subdued_mixed_coat_recolored_saturated_warm",
+        "subdued_mixed_coat_invented_red_or_pink_head_accent",
         "new_dominant_warm_brown_or_orange",
         "new_dominant_yellow_or_gold",
         "new_dominant_red_or_pink",
@@ -4939,7 +5082,7 @@ def canonical_generated_attempts_require_uploaded_fallback(
     *,
     identity_palette_required: bool,
 ) -> bool:
-    """Return whether legacy strict mode must replace generated output with upload."""
+    """Keep a source-faithful canonical when every generated anchor drifted."""
 
     _sync_local_video_runtime(
         globals(),
@@ -4947,11 +5090,19 @@ def canonical_generated_attempts_require_uploaded_fallback(
     )
     if not identity_palette_required:
         return False
-    if GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED:
-        return False
     return not any(
         isinstance(record.get("identity_palette"), dict)
         and record["identity_palette"].get("acceptable") is True
+        and not bool(
+            (
+                record.get("chroma", {}).get(
+                    "identity_chroma_spill_cleanup",
+                    {},
+                )
+                if isinstance(record.get("chroma"), dict)
+                else {}
+            ).get("regeneration_required")
+        )
         for record in attempts
     )
 
