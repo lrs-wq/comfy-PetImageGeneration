@@ -86,6 +86,14 @@
       "evidence": "docs/architecture/PET_TWO_ACTION_PIPELINE.md"
     },
     {
+      "id": "comfy.execution.species_action_stage_isolation",
+      "type": "business_rule",
+      "name": "猫狗动作按 species:action:stage 隔离执行",
+      "status": "active",
+      "tags": ["cat", "dog", "action-isolation", "stage-barrier", "deep-copy-config", "continue-siblings", "aggregate-failures", "cancellation-propagates", "request-order-stable"],
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/action_execution.py"
+    },
+    {
       "id": "comfy.module.quality",
       "type": "module",
       "name": "毛发、轮廓与姿态质量门",
@@ -565,6 +573,14 @@
       "status": "accepted",
       "tags": ["eating", "dog-muzzle-motion", "full-driver-recovery", "static-bowl", "temporal-evidence", "protected-alpha-core", "no-unsupported-opaque-fill", "post-change-cat-dog-smoke"],
       "evidence": "docs/knowledge/DECISIONS/0007-eating-mouth-motion-and-static-bowl-evidence.md"
+    },
+    {
+      "id": "comfy.decision.species_action_stage_isolation",
+      "type": "decision",
+      "name": "猫狗与双动作按阶段隔离执行",
+      "status": "accepted",
+      "tags": ["execution-decoupling", "species-action-scope", "qwen", "scail", "continue-siblings", "aggregate-failures", "per-action-recovery", "no-order-workaround"],
+      "evidence": "docs/knowledge/DECISIONS/0008-species-action-stage-isolation.md"
     }
   ],
   "edges": [
@@ -1284,6 +1300,36 @@
     },
     {
       "from": "comfy.decision.eating_mouth_motion_static_bowl_evidence",
+      "relation": "verified_under",
+      "to": "comfy.decision.post_change_cat_dog_two_action_smoke",
+      "evidence": "docs/knowledge/DECISIONS/0006-post-change-cat-dog-two-action-smoke.md"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "governed_by",
+      "to": "comfy.execution.species_action_stage_isolation",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/action_execution.py"
+    },
+    {
+      "from": "comfy.action.cat_default",
+      "relation": "isolated_by",
+      "to": "comfy.execution.species_action_stage_isolation",
+      "evidence": "tests/unit/test_action_execution_isolation.py"
+    },
+    {
+      "from": "comfy.action.dog_default",
+      "relation": "isolated_by",
+      "to": "comfy.execution.species_action_stage_isolation",
+      "evidence": "tests/unit/test_action_execution_isolation.py"
+    },
+    {
+      "from": "comfy.execution.species_action_stage_isolation",
+      "relation": "governed_by",
+      "to": "comfy.decision.species_action_stage_isolation",
+      "evidence": "docs/knowledge/DECISIONS/0008-species-action-stage-isolation.md"
+    },
+    {
+      "from": "comfy.decision.species_action_stage_isolation",
       "relation": "verified_under",
       "to": "comfy.decision.post_change_cat_dog_two_action_smoke",
       "evidence": "docs/knowledge/DECISIONS/0006-post-change-cat-dog-two-action-smoke.md"

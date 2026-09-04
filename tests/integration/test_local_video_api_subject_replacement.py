@@ -917,6 +917,7 @@ class SubjectReplacementEffectiveConfigTests(unittest.TestCase):
                     ("wait", "waiting_for_gpu"),
                     ("revalidate", "preparing_subject_replacement"),
                     ("scail", "preparing_subject_replacement"),
+                    ("wait", "preparing_subject_replacement"),
                 ],
             )
             self.assertEqual(progress_updates, [35.0, 36.0, 38.0])
@@ -961,6 +962,124 @@ class SubjectReplacementEffectiveConfigTests(unittest.TestCase):
             self.assertEqual(
                 final_job["uploaded_identity_excluded_actions"],
                 [],
+            )
+
+    def test_scail_exception_in_one_action_does_not_skip_its_sibling(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            job_id = "test-scail-action-stage-barrier"
+            (root / job_id).mkdir()
+            eating_reference = root / "qwen-eating.png"
+            grooming_reference = root / "qwen-grooming.png"
+            eating_driver = root / "eating-driver.mp4"
+            grooming_driver = root / "grooming-driver.mp4"
+            for path, payload in (
+                (eating_reference, b"qwen-eating"),
+                (grooming_reference, b"qwen-grooming"),
+                (eating_driver, b"eating-driver"),
+                (grooming_driver, b"grooming-driver"),
+            ):
+                path.write_bytes(payload)
+            actions = ["eating", "grooming"]
+            expected_pose_policies = {
+                "eating": pipeline.FULL_DRIVER_EATING_POSE_POLICY,
+            }
+            jobs = {
+                job_id: {
+                    "job_id": job_id,
+                    "actions": actions,
+                    "species": "cat",
+                    "subject_source": "qwen_generated_upload",
+                    "subject_reference_paths": {
+                        "eating": str(eating_reference),
+                        "grooming": str(grooming_reference),
+                    },
+                    "expected_pose_policies": expected_pose_policies,
+                    "reference_generation_completed": True,
+                    "effective_subject_config": {
+                        "profile_id": "sleek_tabby_cat_v1",
+                        "frames": 81,
+                        "fps": 16.0,
+                        "steps": 6,
+                        "upload_validation": _qwen_upload_validation(
+                            tuple(actions),
+                            expected_pose_policies,
+                        ),
+                        "actions": {
+                            "eating": {
+                                "reference": str(eating_reference),
+                                "driving_animation": str(eating_driver),
+                                "driving_animation_sha256": pipeline.file_sha256(
+                                    eating_driver
+                                ),
+                                "pose_strength": 1.1,
+                                "effective_seed": 123,
+                            },
+                            "grooming": {
+                                "reference": str(grooming_reference),
+                                "driving_animation": str(grooming_driver),
+                                "driving_animation_sha256": pipeline.file_sha256(
+                                    grooming_driver
+                                ),
+                                "pose_strength": 0.9,
+                                "effective_seed": 456,
+                            },
+                        },
+                    },
+                    "outputs": [],
+                    "subject_replacement_results": [],
+                }
+            }
+            attempted_actions: list[str] = []
+
+            def fail_action_prepare(
+                _job_id: str,
+                command: list[str],
+                **_kwargs: object,
+            ) -> None:
+                action = command[command.index("--action") + 1]
+                attempted_actions.append(action)
+                raise RuntimeError(f"forced-{action}-prepare-failure")
+
+            with (
+                patch.multiple(
+                    pipeline,
+                    OUTPUT_ROOT=root,
+                    JOBS=jobs,
+                    SCAIL_EXPERIMENT_ROOT=root / "scail-experiments",
+                ),
+                patch.object(
+                    pipeline,
+                    "revalidate_uploaded_qwen_references_before_scail",
+                ),
+                patch.object(pipeline, "require_subject_replacement_assets"),
+                patch.object(pipeline, "wait_comfy_idle"),
+                patch.object(pipeline, "free_comfy_models"),
+                patch.object(
+                    pipeline,
+                    "run_cancelable_process",
+                    side_effect=fail_action_prepare,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "forced-eating-prepare-failure.*forced-grooming-prepare-failure",
+                ):
+                    pipeline.run_subject_replacement_job(job_id)
+
+            self.assertEqual(attempted_actions, actions)
+            self.assertEqual(
+                list(jobs[job_id]["subject_replacement_action_failures"]),
+                actions,
+            )
+            self.assertEqual(
+                [
+                    scope["isolation_key"]
+                    for scope in jobs[job_id][
+                        "subject_replacement_execution_plan"
+                    ]
+                ],
+                ["cat:eating", "cat:grooming"],
             )
 
     def test_mixed_upload_uses_qwen_identity_for_both_actions(self) -> None:
@@ -1253,7 +1372,7 @@ class SubjectReplacementEffectiveConfigTests(unittest.TestCase):
             )
             self.assertEqual(
                 jobs[job_id]["subject_replacement_failure_isolation_policy"],
-                "per_action_reference_and_output_isolation_v2",
+                "per_species_action_stage_barrier_v3",
             )
             self.assertTrue(
                 jobs[job_id]["subject_replacement_results"][0]["degraded"]

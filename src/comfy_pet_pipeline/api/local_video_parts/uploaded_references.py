@@ -5,6 +5,7 @@ from __future__ import annotations
 # The extracted functions resolve the facade dependencies after runtime sync.
 # ruff: noqa: F821
 
+from . import action_execution as _action_execution
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
@@ -161,7 +162,7 @@ def prepare_uploaded_subject_qwen_references(
     """Create a Qwen full-body canonical and normalized action keyframes."""
     _sync_local_video_runtime(
         globals(),
-        {"prepare_uploaded_subject_qwen_references"},
+        {"prepare_uploaded_subject_qwen_references", "_action_execution"},
     )
     raise_if_cancelled(job_id)
     with JOBS_LOCK:
@@ -356,8 +357,16 @@ def prepare_uploaded_subject_qwen_references(
     pose_reference_policies: dict[str, str] = {}
     pose_reference_guide_styles: dict[str, str] = {}
     pose_reference_metadata: dict[str, Any] = {}
-    for action in actions:
-        action_config = effective_subject_config["actions"][action]
+    guide_execution_scopes = _action_execution.build_action_execution_scopes(
+        species=species,
+        requested_actions=actions,
+    )
+    for action_scope in guide_execution_scopes:
+        action = action_scope.action
+        action_config = _action_execution.isolated_action_config(
+            effective_subject_config,
+            action,
+        )
         source_reference = Path(action_config["driving_animation"])
         if not source_reference.is_file():
             raise FileNotFoundError(
@@ -1623,6 +1632,9 @@ def prepare_uploaded_subject_qwen_references(
         qwen_reference_degraded_actions=degraded_reference_actions,
         qwen_first_frame_best_effort_references=best_effort_action_references,
         qwen_reference_failure_isolation_policy=(
+            "per_species_action_stage_barrier_v3"
+        ),
+        qwen_reference_degraded_fallback_policy=(
             "per_action_identity_anchored_fallback_continue_siblings_v1"
             if degraded_reference_actions
             else "per_action_quality_isolation_ready_v1"

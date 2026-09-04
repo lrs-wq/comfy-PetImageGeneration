@@ -437,6 +437,87 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             self.assertNotIn("standing", gif_actions)
             self.assertNotIn("eating", gif_actions)
 
+    def test_terminal_recovery_preserves_each_existing_actions_own_timing(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_root = Path(temporary)
+            job_id = "existing-action-timing-isolation"
+            job_dir = output_root / job_id
+            job_dir.mkdir()
+            _write_transparent_identity(job_dir / "input_identity_source.png")
+            _write_transparent_identity(job_dir / "pose_01_qwen_cutout.png")
+            _write_transparent_identity(job_dir / "pose_02_qwen_cutout.png")
+            job = _accepted_job(
+                job_id,
+                ["eating", "standing"],
+                status="running",
+            )
+            job["effective_subject_config"] = {
+                "frames": 81,
+                "fps": 16,
+                "actions": {
+                    "eating": {
+                        "output_playback_rate": 0.5,
+                        "output_playback_policy": (
+                            "restore_original_eating_source_tempo_v1"
+                        ),
+                    },
+                    "standing": {},
+                },
+            }
+            _mark_generated_candidates_selected(
+                job_dir,
+                job,
+                ["eating", "standing"],
+            )
+            jobs = {job_id: job}
+
+            with patch.multiple(
+                pipeline,
+                **_fallback_patches(
+                    output_root,
+                    jobs,
+                    queue.Queue(maxsize=8),
+                ),
+            ):
+                for index, action in enumerate(job["actions"], start=1):
+                    pipeline.recover_subject_replacement_action_with_fallback(
+                        job_id,
+                        jobs[job_id],
+                        action=action,
+                        pose_index=index,
+                        error=RuntimeError(f"forced {action} fallback"),
+                    )
+                # Exercise the branch that reconstructs results from already
+                # published sibling outputs.  No prior result may carry timing
+                # across actions for it.
+                jobs[job_id]["subject_replacement_results"] = []
+                recovered = pipeline.recover_subject_replacement_job_with_fallback(
+                    job_id,
+                    RuntimeError("forced terminal recovery after publication"),
+                )
+
+            self.assertTrue(recovered)
+            results = {
+                result["action"]: result
+                for result in jobs[job_id]["subject_replacement_results"]
+            }
+            self.assertEqual(
+                results["eating"]["output_playback"]["transparent_gif"]["fps"],
+                2,
+            )
+            self.assertEqual(
+                results["standing"]["output_playback"]["transparent_gif"]["fps"],
+                4,
+            )
+            self.assertTrue(
+                results["eating"]["preserved_during_terminal_recovery"]
+            )
+            self.assertTrue(
+                results["standing"]["preserved_during_terminal_recovery"]
+            )
+
     def test_worker_exception_recovers_each_action_from_generated_candidates(
         self,
     ) -> None:

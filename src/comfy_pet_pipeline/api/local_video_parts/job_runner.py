@@ -5,6 +5,7 @@ from __future__ import annotations
 # The extracted functions resolve the facade dependencies after runtime sync.
 # ruff: noqa: F821
 
+from . import action_execution as _action_execution
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
@@ -1329,7 +1330,10 @@ def resolve_action_identity_palette_reference(
 
 
 def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
-    _sync_local_video_runtime(globals(), {"run_job"})
+    _sync_local_video_runtime(
+        globals(),
+        {"run_job", "_action_execution"},
+    )
     raise_if_cancelled(job_id)
     with JOBS_LOCK:
         job = dict(JOBS[job_id])
@@ -3510,2898 +3514,2887 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
     pose_effective_lora_policies: dict[str, str] = {}
     fur_surface_gate_short_circuit: dict[str, Any] | None = None
     reference_generation_degraded_actions: dict[str, dict[str, Any]] = {}
-    for index, pose in enumerate(poses, start=1):
-        raise_if_cancelled(job_id)
+    reference_action_failures: list[_action_execution.ActionStageFailure] = []
+    if force_qwen_reference:
+        reference_action_scopes = _action_execution.build_action_execution_scopes(
+            species=species,
+            requested_actions=[action_key(pose) for pose in poses],
+        )
         update_job(
             job_id,
-            stage="generating_cartoon_keyframes"
-            if transparent_gif
-            else "generating_keyframes",
-            progress=round(
-                (18 if transparent_gif else 5) + 17 * (index - 1) / len(poses), 1
+            qwen_reference_execution_plan=[
+                scope.public() for scope in reference_action_scopes
+            ],
+            qwen_reference_failure_isolation_policy=(
+                "per_species_action_stage_barrier_v3"
             ),
-            current_pose_index=index,
-            current_pose=pose,
+            qwen_reference_action_failures={},
         )
-        pose_reference_input_name = None
-        configured_pose_references = job.get("pose_reference_inputs")
-        if isinstance(configured_pose_references, dict):
-            configured_reference = configured_pose_references.get(action_key(pose))
-            if isinstance(configured_reference, str) and configured_reference.strip():
-                pose_reference_input_name = configured_reference.strip()
-        effective_pose_identity_input_policy = str(
-            configured_pose_identity_input_policies.get(
-                action_key(pose),
-                pose_identity_input_policy,
+    else:
+        reference_action_scopes = tuple(
+            _action_execution.ActionExecutionScope(
+                species=species,
+                action=action_key(pose) or f"pose_{index:02d}",
+                request_index=index,
+                execution_index=index,
             )
-        ).strip()
-        if (
-            effective_pose_identity_input_policy
-            == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
-            and action_key(pose) not in {"eating", "grooming"}
-        ):
-            raise RuntimeError(
-                "Main_case geometry-first identity supports only eating and grooming; "
-                f"refusing pose {pose!r}."
-            )
-        if (
-            effective_pose_identity_input_policy
-            == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
-            and action_key(pose) != "grooming"
-        ):
-            raise RuntimeError(
-                "Canonical-identity geometry-first input supports only grooming; "
-                f"refusing pose {pose!r}."
-            )
-        require_eating_mouth_contact = bool(
-            force_qwen_reference and action_key(pose) == "eating"
+            for index, pose in enumerate(poses, start=1)
         )
-        strict_first_frame_required = bool(
-            force_qwen_reference
-            and job.get("qwen_first_frame_validated_required", True)
+
+    def record_isolated_reference_failure(
+        failure: _action_execution.ActionStageFailure,
+        error: Exception,
+    ) -> None:
+        LOGGER.error(
+            "%s isolated Qwen reference %s failed; sibling actions will continue: %s",
+            job_id,
+            failure.scope.isolation_key,
+            error,
+            exc_info=(type(error), error, error.__traceback__),
         )
-        first_frame_retry_waves = {
-            str(key): int(value)
-            for key, value in dict(
-                get_job(job_id).get("qwen_first_frame_retry_waves") or {}
-            ).items()
-        }
-        first_frame_retry_wave = max(
-            0,
-            int(first_frame_retry_waves.get(action_key(pose), 0)),
-        )
-        pose_qwen_input_name = qwen_input_name
-        pose_qwen_secondary_input_name = pose_reference_input_name
-        pose_identity_input_name = qwen_input_name
-        pose_geometry_input_name = pose_reference_input_name
-        if force_qwen_reference and pose_reference_input_name is not None:
-            pose_reference_input_sha256s = job.get("pose_reference_input_sha256s")
-            expected_pose_reference_sha = (
-                pose_reference_input_sha256s.get(action_key(pose))
-                if isinstance(pose_reference_input_sha256s, dict)
-                else None
-            )
-            pose_reference_path = COMFY_INPUT / pose_reference_input_name
-            if not expected_pose_reference_sha:
-                raise RuntimeError(
-                    f"Frozen action guide lacks its persisted digest for pose {pose!r}."
-                )
-            if not pose_reference_path.is_file() or file_sha256(
-                pose_reference_path
-            ) != str(expected_pose_reference_sha):
-                raise RuntimeError(
-                    "Frozen action guide is missing or its digest changed for "
-                    f"pose {pose!r}."
-                )
-        qwen_guided_identity_policy = effective_pose_identity_input_policy in {
-            POSE_IDENTITY_INPUT_POLICY_CANONICAL,
-            POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
-            POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
-        }
-        grooming_pose_gate_required = bool(
-            GENERATION_VISUAL_AUDITS_BLOCKING
-            and force_qwen_reference
-            and action_key(pose) == "grooming"
-            and qwen_guided_identity_policy
-        )
-        advisory_grooming_minimum_gate_required = bool(
-            not GENERATION_VISUAL_AUDITS_BLOCKING
-            and force_qwen_reference
-            and action_key(pose) == "grooming"
-            and qwen_guided_identity_policy
-        )
-        pose_effective_subject_config = job.get("effective_subject_config")
-        pose_action_config = (
-            pose_effective_subject_config.get("actions", {}).get(action_key(pose))
-            if isinstance(pose_effective_subject_config, dict)
-            else None
-        )
-        pose_fur_surface_gate = (
-            pose_action_config.get("fur_surface_gate")
-            if isinstance(pose_action_config, dict)
-            else None
-        )
-        fur_surface_gate_required = bool(
-            GENERATION_VISUAL_AUDITS_BLOCKING
-            and force_qwen_reference
-            and action_key(pose) in {"eating", "grooming"}
-            and qwen_guided_identity_policy
-            and isinstance(pose_effective_subject_config, dict)
-            and pose_effective_subject_config.get("profile_id") == "sleek_tabby_cat_v1"
-            and isinstance(pose_fur_surface_gate, dict)
-            and pose_fur_surface_gate.get("enabled") is True
-        )
-        if advisory_grooming_minimum_gate_required:
-            update_job(
-                job_id,
-                grooming_pose_gate_status="minimum_contract_running",
-                grooming_pose_gate_fail_closed=False,
-                grooming_pose_gate_blocking=False,
-                grooming_advisory_minimum_gate_policy=(
-                    GROOMING_ADVISORY_MINIMUM_GATE_POLICY
-                ),
-                grooming_advisory_minimum_gate_version=(
-                    GROOMING_ADVISORY_MINIMUM_GATE_VERSION
-                ),
-                grooming_advisory_minimum_gate_status="running",
-                grooming_advisory_minimum_gate_blocking=False,
-                grooming_advisory_minimum_gate_terminal_policy=(
-                    "retry_then_identity_first_lowest_risk_degraded_pass_v1"
-                ),
-                grooming_advisory_minimum_gate_max_attempts=(
-                    GROOMING_ADVISORY_TOTAL_ATTEMPTS
-                ),
-                grooming_advisory_action_draft_max_attempts=(
-                    GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
-                ),
-                grooming_advisory_identity_refine_max_attempts=(
-                    GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS
-                ),
-            )
-        fur_surface_rejection_streak = 0
-        if fur_surface_gate_required:
-            assert isinstance(pose_effective_subject_config, dict)
-            # Reject mutable/missing profile inputs before spending a Qwen or
-            # SCAIL GPU call. Candidate evaluation repeats this verification.
-            resolve_main_case_fur_surface_baseline(
-                pose_effective_subject_config,
-                action_key(pose),
-            )
-            fur_surface_gate_status_by_action[action_key(pose)] = "running"
-            update_job(
-                job_id,
-                fur_surface_gate_policy=FUR_SURFACE_GATE_POLICY,
-                fur_surface_gate_version=FUR_SURFACE_GATE_VERSION,
-                fur_surface_gate_threshold_version=(FUR_SURFACE_THRESHOLD_VERSION),
-                fur_surface_gate_thresholds=fur_surface_thresholds_payload(),
-                fur_surface_gate_scope=("sleek_tabby_main_case_guided_qwen_candidates"),
-                fur_surface_gate_reliable_inputs=[
-                    "alpha_cutout",
-                    "rembg_alpha_cutout",
-                ],
-                fur_surface_gate_fail_closed=True,
-                fur_surface_gate_max_consecutive_rejections=(
-                    FUR_SURFACE_GATE_MAX_REJECTIONS
-                ),
-                fur_surface_gate_retry_policy=(FUR_SURFACE_GATE_RETRY_POLICY),
-                fur_surface_gate_preserves_configured_eating_bowl_recovery=(True),
-                fur_surface_gate_configured_eating_bowl_recovery_attempts=(
-                    QWEN_BOWL_POSE_EXTRA_ATTEMPTS
-                ),
-                fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
-                fur_surface_gate_final_quality={
-                    "scope": "qwen_action_reference_pre_scail",
-                    "status": "running",
-                    "actions": dict(fur_surface_gate_selected_metrics),
-                    "final_video_frame_audit": False,
-                },
-            )
-        grooming_pose_gate_guide_path: Path | None = None
-        grooming_pose_gate_metadata_path: Path | None = None
-        grooming_completion_mask_path: Path | None = None
-        if (
-            grooming_pose_gate_required
-            or advisory_grooming_minimum_gate_required
-        ):
-            if pose_reference_input_name is None:
-                raise RuntimeError(
-                    "Main_case grooming pose gate requires its frozen geometry guide."
-                )
-            qwen_grooming_guide_path = COMFY_INPUT / pose_reference_input_name
-            (
-                grooming_pose_gate_guide_path,
-                grooming_pose_gate_metadata_path,
-                grooming_completion_mask_path,
-            ) = resolve_main_case_grooming_pose_gate_metadata(
-                job,
-                qwen_grooming_guide_path,
-            )
-            if grooming_pose_gate_required:
-                update_job(
-                    job_id,
-                    grooming_pose_gate_policy=GROOMING_POSE_GATE_POLICY,
-                    grooming_pose_gate_version=GROOMING_POSE_GATE_VERSION,
-                    grooming_pose_gate_scope=(
-                        "main_case_guided_grooming_qwen_candidates"
-                    ),
-                    grooming_pose_gate_fail_closed=True,
-                    grooming_pose_gate_input="rembg_alpha_cutout",
-                    grooming_pose_gate_geometry_input=(
-                        "public_open_channel_generation_plus_private_cv_gate_and_"
-                        "non_qwen_completion_mask"
-                    ),
-                    grooming_pose_gate_status="running",
-                )
-        if (
-            effective_pose_identity_input_policy
-            == POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD
-        ):
-            if pose_reference_input_name is None:
-                raise RuntimeError(
-                    "Direct uploaded-photo action identity requires the frozen "
-                    f"profile Image 2 for pose {pose!r}."
-                )
-            pose_qwen_input_name = uploaded_qwen_input_name
-            pose_identity_input_name = uploaded_qwen_input_name
-        elif (
-            effective_pose_identity_input_policy
-            == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
-        ):
-            if pose_reference_input_name is None:
-                raise RuntimeError(
-                    "Main_case geometry-first uploaded identity requires the frozen "
-                    f"driver-derived geometry guide for pose {pose!r}."
-                )
-            if not QWEN_STYLE_LORA:
-                raise RuntimeError(
-                    "Main_case geometry-first uploaded identity requires the dedicated "
-                    "QWEN_STYLE_LORA; refusing to fall back to photography models."
-                )
-            pose_qwen_input_name = pose_reference_input_name
-            pose_qwen_secondary_input_name = uploaded_qwen_input_name
-            pose_identity_input_name = pose_qwen_secondary_input_name
-            pose_geometry_input_name = pose_reference_input_name
-        elif (
-            effective_pose_identity_input_policy
-            == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
-        ):
-            if pose_reference_input_name is None:
-                raise RuntimeError(
-                    "Canonical-identity grooming geometry-first input requires "
-                    "its frozen driver-derived guide."
-                )
-            pose_qwen_input_name = pose_reference_input_name
-            pose_qwen_secondary_input_name = qwen_input_name
-            pose_identity_input_name = qwen_input_name
-            pose_geometry_input_name = pose_reference_input_name
-        canonical_action_reference = bool(
-            effective_pose_identity_input_policy
-            == POSE_IDENTITY_INPUT_POLICY_CANONICAL
-            and pose_reference_input_name is not None
-        )
-        dog_photoreal_single_image_action_transfer_active = bool(
-            canonical_action_reference
-            and species == "dog"
-            and action_key(pose) in DOG_PHOTOREAL_SINGLE_IMAGE_ACTIONS
-        )
-        prompt = build_qwen_prompt(
-            "" if transparent_gif else effective_prompt,
-            pose,
-            transparent_gif=transparent_gif,
-            pose_reference_available=bool(
-                pose_reference_input_name is not None
-                and not dog_photoreal_single_image_action_transfer_active
+        update_job(
+            job_id,
+            qwen_reference_action_failures=(
+                _action_execution.failures_by_action(reference_action_failures)
             ),
-            profile_fur_lock=profile_fur_lock,
-            pose_identity_input_policy=effective_pose_identity_input_policy,
-            species=species,
+            qwen_reference_failure_isolation_policy=(
+                "per_species_action_stage_barrier_v3"
+            ),
         )
-        dog_eating_prompt_only_action_transfer_active = bool(
-            dog_photoreal_single_image_action_transfer_active
-            and action_key(pose) == "eating"
+        append_recovery_event(
+            job_id,
+            {
+                "stage": "qwen_action_reference",
+                "reason": f"{failure.error_type}: {failure.error}",
+                "strategy": "isolate_failed_action_and_continue_siblings",
+                "result": "sibling_actions_continued",
+                **failure.scope.public(),
+            },
         )
-        dog_drinking_prompt_only_action_transfer_active = bool(
-            dog_photoreal_single_image_action_transfer_active
-            and action_key(pose) == "drinking"
-        )
-        dog_toileting_prompt_only_action_transfer_active = bool(
-            dog_photoreal_single_image_action_transfer_active
-            and action_key(pose) == "toileting"
-        )
-        # Keep the old local name while status consumers migrate.  Unlike the
-        # former path, Qwen receives no synthetic white-model Image 2; that second
-        # conditioning image was the measured source of smooth CGI coat material.
-        dog_prompt_only_action_transfer_active = (
-            dog_photoreal_single_image_action_transfer_active
-        )
-        if dog_photoreal_single_image_action_transfer_active:
-            dog_single_image_status = {
-                "dog_photoreal_first_frame_policy": (
-                    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_POLICY
-                ),
-                "dog_photoreal_first_frame_action": action_key(pose),
-                "dog_photoreal_first_frame_prompt_only_action_geometry": True,
-                "dog_photoreal_first_frame_image1_role": (
-                    "approved_photoreal_canonical_identity_and_material_sampler"
-                ),
-                "dog_photoreal_first_frame_image2_role": None,
-                "dog_photoreal_first_frame_white_model_loaded_by_qwen": False,
-                "dog_photoreal_first_frame_secondary_reference_loaded_by_qwen": (
-                    False
-                ),
-                "dog_photoreal_first_frame_pose_guide_reserved_for_scail": True,
-                "dog_photoreal_first_frame_steps": (
-                    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS
-                ),
-                "dog_photoreal_first_frame_denoise": (
-                    DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE
-                ),
-            }
-            update_job(job_id, **dog_single_image_status)
-        if dog_eating_prompt_only_action_transfer_active:
+        try:
+            wait_comfy_idle(timeout=120, job_id=job_id)
+            free_comfy_models()
+        except JobCancelled:
+            raise
+        except Exception:  # noqa: BLE001 - sibling isolation cleanup is best effort
+            LOGGER.exception(
+                "%s cleanup after isolated Qwen reference %s failure also failed",
+                job_id,
+                failure.scope.isolation_key,
+            )
+
+    for index, pose in enumerate(poses, start=1):
+        action_scope = reference_action_scopes[index - 1]
+        with _action_execution.isolate_action_stage(
+            scope=action_scope,
+            stage="qwen_action_reference",
+            failures=reference_action_failures,
+            fatal_exceptions=(JobCancelled,),
+            on_failure=record_isolated_reference_failure,
+            enabled=force_qwen_reference,
+        ):
+            raise_if_cancelled(job_id)
             update_job(
                 job_id,
-                dog_eating_first_frame_policy=(
-                    DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY
+                stage="generating_cartoon_keyframes"
+                if transparent_gif
+                else "generating_keyframes",
+                progress=round(
+                    (18 if transparent_gif else 5) + 17 * (index - 1) / len(poses), 1
                 ),
-                dog_eating_first_frame_prompt_only_action_geometry=True,
-                dog_eating_first_frame_image1_role=(
-                    "approved_photoreal_canonical_identity_and_material_sampler"
-                ),
-                dog_eating_first_frame_image2_role=None,
-                dog_eating_first_frame_white_model_loaded_by_qwen=False,
-                dog_eating_first_frame_secondary_reference_loaded_by_qwen=False,
-                dog_eating_first_frame_action_geometry_deferred_to_scail=False,
-                dog_eating_first_frame_steps=(
-                    DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
-                ),
-                dog_eating_first_frame_denoise=(
-                    DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
-                ),
+                current_pose_index=index,
+                current_pose=pose,
             )
-        if dog_drinking_prompt_only_action_transfer_active:
-            update_job(
-                job_id,
-                dog_drinking_first_frame_policy=(
-                    DOG_DRINKING_PROMPT_ONLY_FIRST_FRAME_POLICY
-                ),
-                dog_drinking_first_frame_prompt_only_action_geometry=True,
-                dog_drinking_first_frame_image1_role=(
-                    "approved_photoreal_canonical_identity_and_material_sampler"
-                ),
-                dog_drinking_first_frame_image2_role=None,
-                dog_drinking_first_frame_white_model_loaded_by_qwen=False,
-                dog_drinking_first_frame_secondary_reference_loaded_by_qwen=False,
-                dog_drinking_first_frame_action_geometry_deferred_to_scail=False,
-                dog_drinking_first_frame_steps=(
-                    DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
-                ),
-                dog_drinking_first_frame_denoise=(
-                    DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
-                ),
-            )
-        if dog_toileting_prompt_only_action_transfer_active:
-            update_job(
-                job_id,
-                dog_toileting_first_frame_policy=(
-                    DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY
-                ),
-                dog_toileting_first_frame_prompt_only_action_geometry=True,
-                dog_toileting_first_frame_image1_role=(
-                    "approved_photoreal_canonical_identity_and_material_sampler"
-                ),
-                dog_toileting_first_frame_image2_role=None,
-                dog_toileting_first_frame_white_model_loaded_by_qwen=False,
-                dog_toileting_first_frame_secondary_reference_loaded_by_qwen=False,
-                dog_toileting_first_frame_action_geometry_deferred_to_scail=False,
-                dog_toileting_first_frame_steps=(
-                    DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
-                ),
-                dog_toileting_first_frame_denoise=(
-                    DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
-                ),
-            )
-        advisory_action_candidate_gate_required = bool(
-            not GENERATION_VISUAL_AUDITS_BLOCKING
-            and GENERATION_ACTION_CANDIDATE_GATES_ENABLED
-            and force_qwen_reference
-            and canonical_action_reference
-            and action_key(pose) != "grooming"
-        )
-        action_candidate_audits_required = bool(
-            GENERATION_VISUAL_AUDITS_BLOCKING
-            or advisory_action_candidate_gate_required
-        )
-        if advisory_action_candidate_gate_required:
-            update_job(
-                job_id,
-                action_candidate_gate_policy=(
-                    GENERATION_ACTION_CANDIDATE_GATE_POLICY
-                ),
-                action_candidate_gate_status="running",
-                action_candidate_gate_action=action_key(pose),
-                action_candidate_gate_job_blocking=False,
-                action_candidate_gate_returns_original_upload=False,
-            )
-        negative_prompt = DOG_ACTION_NEGATIVE if species == "dog" else QWEN_NEGATIVE
-        if transparent_gif:
-            active_pose_profiles = pose_generation_profiles(pose, pose_profiles)
-            if not GENERATION_VISUAL_AUDITS_BLOCKING:
-                if advisory_grooming_minimum_gate_required:
-                    active_pose_profiles = advisory_grooming_generation_profiles(
-                        pose,
-                        active_pose_profiles,
-                        enabled=True,
-                    )
-            if species != "dog":
-                negative_prompt += ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
-                if profile_fur_negative:
-                    negative_prompt += ", " + profile_fur_negative
-            if action_key(pose) == "running":
-                negative_prompt += (
-                    ", seated pose, sitting, crouched sitting, airborne leap, flying pose, extreme foreshortening, hidden hind leg, shortened hind leg, "
-                    "fused legs, overlapping legs, detached paw, paw fragment, disconnected limb"
+            pose_reference_input_name = None
+            configured_pose_references = job.get("pose_reference_inputs")
+            if isinstance(configured_pose_references, dict):
+                configured_reference = configured_pose_references.get(action_key(pose))
+                if isinstance(configured_reference, str) and configured_reference.strip():
+                    pose_reference_input_name = configured_reference.strip()
+            effective_pose_identity_input_policy = str(
+                configured_pose_identity_input_policies.get(
+                    action_key(pose),
+                    pose_identity_input_policy,
                 )
-            elif action_key(pose) == "eating":
-                negative_prompt += (
-                    ", food held in paw, paw holding kibble, raised front paw, paw-to-mouth gesture, "
-                    "humanlike eating, anthropomorphic hand gesture, kibble outside bowl, "
-                    "open mouth holding food, empty bowl, sniffing bowl, looking at bowl, "
-                    "watching food, nose above kibble, muzzle hovering above bowl, visible air gap, "
-                    "green gap between mouth and food, fully unobstructed nose"
-                )
-            elif action_key(pose) == "grooming":
-                negative_prompt += (
-                    ", neutral seated pose, both front paws planted, missing raised foreleg, "
-                    "hidden raised foreleg, viewer-right raised foreleg, mirrored grooming pose, "
-                    "detached rigid prop, strap, zipper, cord, pen, pencil, stick, pendant, black hanging object, "
-                    "microphone, flashlight, battery, lipstick, bottle, capsule, handle, "
-                    "green internal mark, gray guide material, black seam, dark seam, dark contour line, "
-                    "continuous ink stroke, guide-shaped stripe, outlined foreleg, invented dark stripe, "
-                    "sleeve, hoodie, hood, jacket, sweater, shirt, cuff, fabric fold, garment seam, "
-                    "elephant, elephant head, elephant ears, trunk, tusk, dog head, non-cat species, hybrid animal, "
-                    "pedestal, plinth, display stand, display base, circular platform, stage, floor disc"
-                )
-        keyframe = job_dir / f"pose_{index:02d}_keyframe.png"
-        if transparent_gif:
-            bowl_action = action_uses_bowl(pose)
-            pose_fur_reference_path: Path | None = None
-            effective_subject_config = job.get("effective_subject_config")
+            ).strip()
             if (
-                action_candidate_audits_required
-                and action_key(pose) == "eating"
-                and isinstance(effective_subject_config, dict)
+                effective_pose_identity_input_policy
+                == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
+                and action_key(pose) not in {"eating", "grooming"}
             ):
-                action_config = effective_subject_config.get("actions", {}).get(
-                    "eating"
-                )
-                fur_gate = (
-                    action_config.get("fur_silhouette_gate")
-                    if isinstance(action_config, dict)
-                    else None
-                )
-                if isinstance(fur_gate, dict) and fur_gate.get("enabled"):
-                    pose_fur_reference_path = Path(str(fur_gate.get("reference") or ""))
-                    if not pose_fur_reference_path.is_file():
-                        raise FileNotFoundError(
-                            "Frozen eating fur-silhouette reference is missing: "
-                            f"{pose_fur_reference_path}"
-                        )
-                    expected_fur_reference_sha = str(
-                        fur_gate.get("reference_sha256") or ""
-                    ).strip()
-                    if (
-                        expected_fur_reference_sha
-                        and file_sha256(pose_fur_reference_path)
-                        != expected_fur_reference_sha
-                    ):
-                        raise RuntimeError(
-                            "Frozen eating fur-silhouette reference digest changed."
-                        )
-            pose_palette_bottom_exclusion = (
-                BOWL_IDENTITY_PALETTE_BOTTOM_EXCLUSION if bowl_action else 0.0
-            )
-            pose_palette_reference_path = resolve_action_identity_palette_reference(
-                uploaded_reference_job=bool(
-                    force_qwen_reference and upload_integrity is not None
-                ),
-                identity_input_policy=effective_pose_identity_input_policy,
-                uploaded_identity_source=identity_source_path,
-                canonical_reference=canonical_similarity_reference,
-            )
-            grooming_identity_contract_reference_path = (
-                canonical_similarity_reference or pose_palette_reference_path
-            )
-            pose_identity_palette_prompt_signature = (
-                identity_palette_signature(
-                    pose_palette_reference_path,
-                    exclude_bottom_fraction=0.0,
-                )
-                if (
-                    identity_palette_guidance_enabled
-                    and pose_palette_reference_path is not None
-                )
-                else None
-            )
-            pose_identity_palette_prompt_builder = (
-                dog_action_identity_palette_prompt
-                if species == "dog"
-                else identity_palette_prompt
-            )
-            pose_identity_palette_prompt_marker = (
-                "COAT PIGMENT:"
-                if species == "dog"
-                else "SOURCE COAT PALETTE LOCK"
-            )
-            # Every generated action candidate must prove its identity palette;
-            # visual-audit mode may change additional gates, never this floor.
-            pose_identity_palette_gate_required = True
-            pose_palette_negative = (
-                identity_palette_negative_prompt(
-                    pose_identity_palette_prompt_signature
-                )
-                if (
-                    species != "dog"
-                    and pose_identity_palette_prompt_signature is not None
-                )
-                else source_palette_negative
-            )
-            if species == "dog":
-                pose_palette_negative = ""
-            pose_negative_prompt = negative_prompt
-            if pose_palette_negative:
-                pose_negative_prompt += ", " + pose_palette_negative
-            pose_reference_identity_palette = (
-                identity_palette_signature(
-                    pose_palette_reference_path,
-                    exclude_bottom_fraction=pose_palette_bottom_exclusion,
-                )
-                if (
-                    pose_identity_palette_gate_required
-                    and pose_palette_reference_path is not None
-                )
-                else None
-            )
-            pose_reference_upper_body_identity_palette = (
-                identity_palette_signature(
-                    pose_palette_reference_path,
-                    exclude_bottom_fraction=(
-                        BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
-                    ),
-                )
-                if (
-                    bowl_action
-                    and pose_identity_palette_gate_required
-                    and pose_palette_reference_path is not None
-                )
-                else None
-            )
-            advisory_grooming_identity_palette_reference = (
-                identity_palette_signature(
-                    pose_palette_reference_path,
-                    exclude_bottom_fraction=0.0,
-                )
-                if (
-                    advisory_grooming_minimum_gate_required
-                    and pose_palette_reference_path is not None
-                )
-                else None
-            )
-            attempts: list[dict[str, Any]] = []
-            best_attempt: dict[str, Any] | None = None
-            best_action_candidate_degraded_attempt: dict[str, Any] | None = None
-            best_strict_first_frame_attempt: dict[str, Any] | None = None
-            best_advisory_grooming_degraded_attempt: dict[str, Any] | None = None
-            best_raw_attempt: dict[str, Any] | None = None
-            best_semantic_source: dict[str, Any] | None = None
-            grooming_foreleg_repair_source: dict[str, Any] | None = None
-            grooming_full_pose_refine_source: dict[str, Any] | None = None
-            grooming_advisory_identity_refine_source: dict[str, Any] | None = None
-            eating_identity_refine_source: dict[str, Any] | None = None
-            eating_contact_repair_source: dict[str, Any] | None = None
-            previous_pose_identity_palette_quality: dict[str, Any] | None = None
-            previous_advisory_grooming_minimum_issues: list[str] = []
-            canonical_grooming_completion_capable = bool(
-                canonical_action_reference and action_key(pose) == "grooming"
-            )
-            active_pose_profiles = canonical_grooming_generation_profiles(
-                pose,
-                active_pose_profiles,
-                enabled=(
-                    GENERATION_VISUAL_AUDITS_BLOCKING
-                    and canonical_grooming_completion_capable
-                ),
-            )
-            active_pose_profiles = action_candidate_generation_profiles(
-                pose,
-                active_pose_profiles,
-            )
-            if len(active_pose_profiles) != QWEN_ACTION_CANDIDATE_ATTEMPTS:
                 raise RuntimeError(
-                    "Action candidate profile budget is not exactly five."
+                    "Main_case geometry-first identity supports only eating and grooming; "
+                    f"refusing pose {pose!r}."
                 )
-            update_job(
-                job_id,
-                action_candidate_selection_policy=(
-                    GENERATION_ACTION_CANDIDATE_GATE_POLICY
-                ),
-                action_candidate_attempt_budget=QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                action_candidate_selection_requires_identity=True,
-                action_candidate_original_upload_fallback=False,
-            )
-            grooming_geometry_canonical_reference = bool(
+            if (
                 effective_pose_identity_input_policy
                 == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
-                and pose_reference_input_name is not None
+                and action_key(pose) != "grooming"
+            ):
+                raise RuntimeError(
+                    "Canonical-identity geometry-first input supports only grooming; "
+                    f"refusing pose {pose!r}."
+                )
+            require_eating_mouth_contact = bool(
+                force_qwen_reference and action_key(pose) == "eating"
             )
-            geometry_first_action_reference = bool(
-                effective_pose_identity_input_policy
-                in {
-                    POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
-                    POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
-                }
+            strict_first_frame_required = bool(
+                force_qwen_reference
+                and job.get("qwen_first_frame_validated_required", True)
             )
-            advisory_grooming_action_transfer_active = bool(
-                not GENERATION_VISUAL_AUDITS_BLOCKING
-                and canonical_grooming_completion_capable
+            first_frame_retry_waves = {
+                str(key): int(value)
+                for key, value in dict(
+                    get_job(job_id).get("qwen_first_frame_retry_waves") or {}
+                ).items()
+            }
+            first_frame_retry_wave = max(
+                0,
+                int(first_frame_retry_waves.get(action_key(pose), 0)),
             )
-            advisory_grooming_action_canvas_audit: dict[str, Any] | None = None
-            advisory_grooming_action_canvas_path: Path | None = None
-            advisory_grooming_action_input_name: str | None = None
-            advisory_grooming_action_geometry_guide_path: Path | None = None
-            advisory_grooming_face_identity_path: Path | None = None
-            advisory_grooming_face_identity_input_name: str | None = None
-            advisory_grooming_face_identity_audit: dict[str, Any] | None = None
-            advisory_grooming_local_action_edit_mask_path: Path | None = None
-            advisory_grooming_local_action_edit_input_name: str | None = None
-            advisory_grooming_local_action_edit_audit: dict[str, Any] | None = None
-            advisory_grooming_white_frame0_audit: dict[str, Any] | None = None
-            advisory_grooming_normalized_white_depth = False
-            if advisory_grooming_action_transfer_active:
-                canonical_action_identity_reference = COMFY_INPUT / qwen_input_name
-                if not canonical_action_identity_reference.is_file():
+            pose_qwen_input_name = qwen_input_name
+            pose_qwen_secondary_input_name = pose_reference_input_name
+            pose_identity_input_name = qwen_input_name
+            pose_geometry_input_name = pose_reference_input_name
+            if force_qwen_reference and pose_reference_input_name is not None:
+                pose_reference_input_sha256s = job.get("pose_reference_input_sha256s")
+                expected_pose_reference_sha = (
+                    pose_reference_input_sha256s.get(action_key(pose))
+                    if isinstance(pose_reference_input_sha256s, dict)
+                    else None
+                )
+                pose_reference_path = COMFY_INPUT / pose_reference_input_name
+                if not expected_pose_reference_sha:
                     raise RuntimeError(
-                        "Advisory grooming action transfer lacks its canonical Image 1."
+                        f"Frozen action guide lacks its persisted digest for pose {pose!r}."
                     )
+                if not pose_reference_path.is_file() or file_sha256(
+                    pose_reference_path
+                ) != str(expected_pose_reference_sha):
+                    raise RuntimeError(
+                        "Frozen action guide is missing or its digest changed for "
+                        f"pose {pose!r}."
+                    )
+            qwen_guided_identity_policy = effective_pose_identity_input_policy in {
+                POSE_IDENTITY_INPUT_POLICY_CANONICAL,
+                POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+                POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
+            }
+            grooming_pose_gate_required = bool(
+                GENERATION_VISUAL_AUDITS_BLOCKING
+                and force_qwen_reference
+                and action_key(pose) == "grooming"
+                and qwen_guided_identity_policy
+            )
+            advisory_grooming_minimum_gate_required = bool(
+                not GENERATION_VISUAL_AUDITS_BLOCKING
+                and force_qwen_reference
+                and action_key(pose) == "grooming"
+                and qwen_guided_identity_policy
+            )
+            stored_pose_effective_subject_config = job.get(
+                "effective_subject_config"
+            )
+            pose_effective_subject_config = (
+                _action_execution.isolated_effective_action_config(
+                    stored_pose_effective_subject_config,
+                    action_scope.action,
+                )
+                if (
+                    force_qwen_reference
+                    and isinstance(stored_pose_effective_subject_config, dict)
+                )
+                else stored_pose_effective_subject_config
+            )
+            pose_action_config = (
+                pose_effective_subject_config.get("actions", {}).get(action_key(pose))
+                if isinstance(pose_effective_subject_config, dict)
+                else None
+            )
+            pose_fur_surface_gate = (
+                pose_action_config.get("fur_surface_gate")
+                if isinstance(pose_action_config, dict)
+                else None
+            )
+            fur_surface_gate_required = bool(
+                GENERATION_VISUAL_AUDITS_BLOCKING
+                and force_qwen_reference
+                and action_key(pose) in {"eating", "grooming"}
+                and qwen_guided_identity_policy
+                and isinstance(pose_effective_subject_config, dict)
+                and pose_effective_subject_config.get("profile_id") == "sleek_tabby_cat_v1"
+                and isinstance(pose_fur_surface_gate, dict)
+                and pose_fur_surface_gate.get("enabled") is True
+            )
+            if advisory_grooming_minimum_gate_required:
+                update_job(
+                    job_id,
+                    grooming_pose_gate_status="minimum_contract_running",
+                    grooming_pose_gate_fail_closed=False,
+                    grooming_pose_gate_blocking=False,
+                    grooming_advisory_minimum_gate_policy=(
+                        GROOMING_ADVISORY_MINIMUM_GATE_POLICY
+                    ),
+                    grooming_advisory_minimum_gate_version=(
+                        GROOMING_ADVISORY_MINIMUM_GATE_VERSION
+                    ),
+                    grooming_advisory_minimum_gate_status="running",
+                    grooming_advisory_minimum_gate_blocking=False,
+                    grooming_advisory_minimum_gate_terminal_policy=(
+                        "retry_then_identity_first_lowest_risk_degraded_pass_v1"
+                    ),
+                    grooming_advisory_minimum_gate_max_attempts=(
+                        GROOMING_ADVISORY_TOTAL_ATTEMPTS
+                    ),
+                    grooming_advisory_action_draft_max_attempts=(
+                        GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                    ),
+                    grooming_advisory_identity_refine_max_attempts=(
+                        GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS
+                    ),
+                )
+            fur_surface_rejection_streak = 0
+            if fur_surface_gate_required:
+                assert isinstance(pose_effective_subject_config, dict)
+                # Reject mutable/missing profile inputs before spending a Qwen or
+                # SCAIL GPU call. Candidate evaluation repeats this verification.
+                resolve_main_case_fur_surface_baseline(
+                    pose_effective_subject_config,
+                    action_key(pose),
+                )
+                fur_surface_gate_status_by_action[action_key(pose)] = "running"
+                update_job(
+                    job_id,
+                    fur_surface_gate_policy=FUR_SURFACE_GATE_POLICY,
+                    fur_surface_gate_version=FUR_SURFACE_GATE_VERSION,
+                    fur_surface_gate_threshold_version=(FUR_SURFACE_THRESHOLD_VERSION),
+                    fur_surface_gate_thresholds=fur_surface_thresholds_payload(),
+                    fur_surface_gate_scope=("sleek_tabby_main_case_guided_qwen_candidates"),
+                    fur_surface_gate_reliable_inputs=[
+                        "alpha_cutout",
+                        "rembg_alpha_cutout",
+                    ],
+                    fur_surface_gate_fail_closed=True,
+                    fur_surface_gate_max_consecutive_rejections=(
+                        FUR_SURFACE_GATE_MAX_REJECTIONS
+                    ),
+                    fur_surface_gate_retry_policy=(FUR_SURFACE_GATE_RETRY_POLICY),
+                    fur_surface_gate_preserves_configured_eating_bowl_recovery=(True),
+                    fur_surface_gate_configured_eating_bowl_recovery_attempts=(
+                        QWEN_BOWL_POSE_EXTRA_ATTEMPTS
+                    ),
+                    fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
+                    fur_surface_gate_final_quality={
+                        "scope": "qwen_action_reference_pre_scail",
+                        "status": "running",
+                        "actions": dict(fur_surface_gate_selected_metrics),
+                        "final_video_frame_audit": False,
+                    },
+                )
+            grooming_pose_gate_guide_path: Path | None = None
+            grooming_pose_gate_metadata_path: Path | None = None
+            grooming_completion_mask_path: Path | None = None
+            if (
+                grooming_pose_gate_required
+                or advisory_grooming_minimum_gate_required
+            ):
                 if pose_reference_input_name is None:
                     raise RuntimeError(
-                        "Advisory grooming action transfer lacks its appearance-free "
-                        "Image 2 geometry guide."
+                        "Main_case grooming pose gate requires its frozen geometry guide."
+                    )
+                qwen_grooming_guide_path = COMFY_INPUT / pose_reference_input_name
+                (
+                    grooming_pose_gate_guide_path,
+                    grooming_pose_gate_metadata_path,
+                    grooming_completion_mask_path,
+                ) = resolve_main_case_grooming_pose_gate_metadata(
+                    job,
+                    qwen_grooming_guide_path,
+                )
+                if grooming_pose_gate_required:
+                    update_job(
+                        job_id,
+                        grooming_pose_gate_policy=GROOMING_POSE_GATE_POLICY,
+                        grooming_pose_gate_version=GROOMING_POSE_GATE_VERSION,
+                        grooming_pose_gate_scope=(
+                            "main_case_guided_grooming_qwen_candidates"
+                        ),
+                        grooming_pose_gate_fail_closed=True,
+                        grooming_pose_gate_input="rembg_alpha_cutout",
+                        grooming_pose_gate_geometry_input=(
+                            "public_open_channel_generation_plus_private_cv_gate_and_"
+                            "non_qwen_completion_mask"
+                        ),
+                        grooming_pose_gate_status="running",
+                    )
+            if (
+                effective_pose_identity_input_policy
+                == POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD
+            ):
+                if pose_reference_input_name is None:
+                    raise RuntimeError(
+                        "Direct uploaded-photo action identity requires the frozen "
+                        f"profile Image 2 for pose {pose!r}."
+                    )
+                pose_qwen_input_name = uploaded_qwen_input_name
+                pose_identity_input_name = uploaded_qwen_input_name
+            elif (
+                effective_pose_identity_input_policy
+                == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
+            ):
+                if pose_reference_input_name is None:
+                    raise RuntimeError(
+                        "Main_case geometry-first uploaded identity requires the frozen "
+                        f"driver-derived geometry guide for pose {pose!r}."
+                    )
+                if not QWEN_STYLE_LORA:
+                    raise RuntimeError(
+                        "Main_case geometry-first uploaded identity requires the dedicated "
+                        "QWEN_STYLE_LORA; refusing to fall back to photography models."
+                    )
+                pose_qwen_input_name = pose_reference_input_name
+                pose_qwen_secondary_input_name = uploaded_qwen_input_name
+                pose_identity_input_name = pose_qwen_secondary_input_name
+                pose_geometry_input_name = pose_reference_input_name
+            elif (
+                effective_pose_identity_input_policy
+                == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
+            ):
+                if pose_reference_input_name is None:
+                    raise RuntimeError(
+                        "Canonical-identity grooming geometry-first input requires "
+                        "its frozen driver-derived guide."
+                    )
+                pose_qwen_input_name = pose_reference_input_name
+                pose_qwen_secondary_input_name = qwen_input_name
+                pose_identity_input_name = qwen_input_name
+                pose_geometry_input_name = pose_reference_input_name
+            canonical_action_reference = bool(
+                effective_pose_identity_input_policy
+                == POSE_IDENTITY_INPUT_POLICY_CANONICAL
+                and pose_reference_input_name is not None
+            )
+            dog_photoreal_single_image_action_transfer_active = bool(
+                canonical_action_reference
+                and species == "dog"
+                and action_key(pose) in DOG_PHOTOREAL_SINGLE_IMAGE_ACTIONS
+            )
+            prompt = build_qwen_prompt(
+                "" if transparent_gif else effective_prompt,
+                pose,
+                transparent_gif=transparent_gif,
+                pose_reference_available=bool(
+                    pose_reference_input_name is not None
+                    and not dog_photoreal_single_image_action_transfer_active
+                ),
+                profile_fur_lock=profile_fur_lock,
+                pose_identity_input_policy=effective_pose_identity_input_policy,
+                species=species,
+            )
+            dog_eating_prompt_only_action_transfer_active = bool(
+                dog_photoreal_single_image_action_transfer_active
+                and action_key(pose) == "eating"
+            )
+            dog_drinking_prompt_only_action_transfer_active = bool(
+                dog_photoreal_single_image_action_transfer_active
+                and action_key(pose) == "drinking"
+            )
+            dog_toileting_prompt_only_action_transfer_active = bool(
+                dog_photoreal_single_image_action_transfer_active
+                and action_key(pose) == "toileting"
+            )
+            # Keep the old local name while status consumers migrate.  Unlike the
+            # former path, Qwen receives no synthetic white-model Image 2; that second
+            # conditioning image was the measured source of smooth CGI coat material.
+            dog_prompt_only_action_transfer_active = (
+                dog_photoreal_single_image_action_transfer_active
+            )
+            if dog_photoreal_single_image_action_transfer_active:
+                dog_single_image_status = {
+                    "dog_photoreal_first_frame_policy": (
+                        DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_POLICY
+                    ),
+                    "dog_photoreal_first_frame_action": action_key(pose),
+                    "dog_photoreal_first_frame_prompt_only_action_geometry": True,
+                    "dog_photoreal_first_frame_image1_role": (
+                        "approved_photoreal_canonical_identity_and_material_sampler"
+                    ),
+                    "dog_photoreal_first_frame_image2_role": None,
+                    "dog_photoreal_first_frame_white_model_loaded_by_qwen": False,
+                    "dog_photoreal_first_frame_secondary_reference_loaded_by_qwen": (
+                        False
+                    ),
+                    "dog_photoreal_first_frame_pose_guide_reserved_for_scail": True,
+                    "dog_photoreal_first_frame_steps": (
+                        DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS
+                    ),
+                    "dog_photoreal_first_frame_denoise": (
+                        DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE
+                    ),
+                }
+                update_job(job_id, **dog_single_image_status)
+            if dog_eating_prompt_only_action_transfer_active:
+                update_job(
+                    job_id,
+                    dog_eating_first_frame_policy=(
+                        DOG_EATING_PROMPT_ONLY_FIRST_FRAME_POLICY
+                    ),
+                    dog_eating_first_frame_prompt_only_action_geometry=True,
+                    dog_eating_first_frame_image1_role=(
+                        "approved_photoreal_canonical_identity_and_material_sampler"
+                    ),
+                    dog_eating_first_frame_image2_role=None,
+                    dog_eating_first_frame_white_model_loaded_by_qwen=False,
+                    dog_eating_first_frame_secondary_reference_loaded_by_qwen=False,
+                    dog_eating_first_frame_action_geometry_deferred_to_scail=False,
+                    dog_eating_first_frame_steps=(
+                        DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
+                    ),
+                    dog_eating_first_frame_denoise=(
+                        DOG_EATING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
+                    ),
+                )
+            if dog_drinking_prompt_only_action_transfer_active:
+                update_job(
+                    job_id,
+                    dog_drinking_first_frame_policy=(
+                        DOG_DRINKING_PROMPT_ONLY_FIRST_FRAME_POLICY
+                    ),
+                    dog_drinking_first_frame_prompt_only_action_geometry=True,
+                    dog_drinking_first_frame_image1_role=(
+                        "approved_photoreal_canonical_identity_and_material_sampler"
+                    ),
+                    dog_drinking_first_frame_image2_role=None,
+                    dog_drinking_first_frame_white_model_loaded_by_qwen=False,
+                    dog_drinking_first_frame_secondary_reference_loaded_by_qwen=False,
+                    dog_drinking_first_frame_action_geometry_deferred_to_scail=False,
+                    dog_drinking_first_frame_steps=(
+                        DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
+                    ),
+                    dog_drinking_first_frame_denoise=(
+                        DOG_DRINKING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
+                    ),
+                )
+            if dog_toileting_prompt_only_action_transfer_active:
+                update_job(
+                    job_id,
+                    dog_toileting_first_frame_policy=(
+                        DOG_TOILETING_PROMPT_ONLY_FIRST_FRAME_POLICY
+                    ),
+                    dog_toileting_first_frame_prompt_only_action_geometry=True,
+                    dog_toileting_first_frame_image1_role=(
+                        "approved_photoreal_canonical_identity_and_material_sampler"
+                    ),
+                    dog_toileting_first_frame_image2_role=None,
+                    dog_toileting_first_frame_white_model_loaded_by_qwen=False,
+                    dog_toileting_first_frame_secondary_reference_loaded_by_qwen=False,
+                    dog_toileting_first_frame_action_geometry_deferred_to_scail=False,
+                    dog_toileting_first_frame_steps=(
+                        DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_STEPS
+                    ),
+                    dog_toileting_first_frame_denoise=(
+                        DOG_TOILETING_PROMPT_ONLY_ACTION_TRANSFER_DENOISE
+                    ),
+                )
+            advisory_action_candidate_gate_required = bool(
+                not GENERATION_VISUAL_AUDITS_BLOCKING
+                and GENERATION_ACTION_CANDIDATE_GATES_ENABLED
+                and force_qwen_reference
+                and canonical_action_reference
+                and action_key(pose) != "grooming"
+            )
+            action_candidate_audits_required = bool(
+                GENERATION_VISUAL_AUDITS_BLOCKING
+                or advisory_action_candidate_gate_required
+            )
+            if advisory_action_candidate_gate_required:
+                update_job(
+                    job_id,
+                    action_candidate_gate_policy=(
+                        GENERATION_ACTION_CANDIDATE_GATE_POLICY
+                    ),
+                    action_candidate_gate_status="running",
+                    action_candidate_gate_action=action_key(pose),
+                    action_candidate_gate_job_blocking=False,
+                    action_candidate_gate_returns_original_upload=False,
+                )
+            negative_prompt = DOG_ACTION_NEGATIVE if species == "dog" else QWEN_NEGATIVE
+            if transparent_gif:
+                active_pose_profiles = pose_generation_profiles(pose, pose_profiles)
+                if not GENERATION_VISUAL_AUDITS_BLOCKING:
+                    if advisory_grooming_minimum_gate_required:
+                        active_pose_profiles = advisory_grooming_generation_profiles(
+                            pose,
+                            active_pose_profiles,
+                            enabled=True,
+                        )
+                if species != "dog":
+                    negative_prompt += ", " + CARTOON_NEGATIVE + ", " + CHROMA_NEGATIVE
+                    if profile_fur_negative:
+                        negative_prompt += ", " + profile_fur_negative
+                if action_key(pose) == "running":
+                    negative_prompt += (
+                        ", seated pose, sitting, crouched sitting, airborne leap, flying pose, extreme foreshortening, hidden hind leg, shortened hind leg, "
+                        "fused legs, overlapping legs, detached paw, paw fragment, disconnected limb"
+                    )
+                elif action_key(pose) == "eating":
+                    negative_prompt += (
+                        ", food held in paw, paw holding kibble, raised front paw, paw-to-mouth gesture, "
+                        "humanlike eating, anthropomorphic hand gesture, kibble outside bowl, "
+                        "open mouth holding food, empty bowl, sniffing bowl, looking at bowl, "
+                        "watching food, nose above kibble, muzzle hovering above bowl, visible air gap, "
+                        "green gap between mouth and food, fully unobstructed nose"
+                    )
+                elif action_key(pose) == "grooming":
+                    negative_prompt += (
+                        ", neutral seated pose, both front paws planted, missing raised foreleg, "
+                        "hidden raised foreleg, viewer-right raised foreleg, mirrored grooming pose, "
+                        "detached rigid prop, strap, zipper, cord, pen, pencil, stick, pendant, black hanging object, "
+                        "microphone, flashlight, battery, lipstick, bottle, capsule, handle, "
+                        "green internal mark, gray guide material, black seam, dark seam, dark contour line, "
+                        "continuous ink stroke, guide-shaped stripe, outlined foreleg, invented dark stripe, "
+                        "sleeve, hoodie, hood, jacket, sweater, shirt, cuff, fabric fold, garment seam, "
+                        "elephant, elephant head, elephant ears, trunk, tusk, dog head, non-cat species, hybrid animal, "
+                        "pedestal, plinth, display stand, display base, circular platform, stage, floor disc"
+                    )
+            keyframe = job_dir / f"pose_{index:02d}_keyframe.png"
+            if transparent_gif:
+                bowl_action = action_uses_bowl(pose)
+                pose_fur_reference_path: Path | None = None
+                effective_subject_config = job.get("effective_subject_config")
+                if (
+                    action_candidate_audits_required
+                    and action_key(pose) == "eating"
+                    and isinstance(effective_subject_config, dict)
+                ):
+                    action_config = effective_subject_config.get("actions", {}).get(
+                        "eating"
+                    )
+                    fur_gate = (
+                        action_config.get("fur_silhouette_gate")
+                        if isinstance(action_config, dict)
+                        else None
+                    )
+                    if isinstance(fur_gate, dict) and fur_gate.get("enabled"):
+                        pose_fur_reference_path = Path(str(fur_gate.get("reference") or ""))
+                        if not pose_fur_reference_path.is_file():
+                            raise FileNotFoundError(
+                                "Frozen eating fur-silhouette reference is missing: "
+                                f"{pose_fur_reference_path}"
+                            )
+                        expected_fur_reference_sha = str(
+                            fur_gate.get("reference_sha256") or ""
+                        ).strip()
+                        if (
+                            expected_fur_reference_sha
+                            and file_sha256(pose_fur_reference_path)
+                            != expected_fur_reference_sha
+                        ):
+                            raise RuntimeError(
+                                "Frozen eating fur-silhouette reference digest changed."
+                            )
+                pose_palette_bottom_exclusion = (
+                    BOWL_IDENTITY_PALETTE_BOTTOM_EXCLUSION if bowl_action else 0.0
+                )
+                pose_palette_reference_path = resolve_action_identity_palette_reference(
+                    uploaded_reference_job=bool(
+                        force_qwen_reference and upload_integrity is not None
+                    ),
+                    identity_input_policy=effective_pose_identity_input_policy,
+                    uploaded_identity_source=identity_source_path,
+                    canonical_reference=canonical_similarity_reference,
+                )
+                grooming_identity_contract_reference_path = (
+                    canonical_similarity_reference or pose_palette_reference_path
+                )
+                pose_identity_palette_prompt_signature = (
+                    identity_palette_signature(
+                        pose_palette_reference_path,
+                        exclude_bottom_fraction=0.0,
+                    )
+                    if (
+                        identity_palette_guidance_enabled
+                        and pose_palette_reference_path is not None
+                    )
+                    else None
+                )
+                pose_identity_palette_prompt_builder = (
+                    dog_action_identity_palette_prompt
+                    if species == "dog"
+                    else identity_palette_prompt
+                )
+                pose_identity_palette_prompt_marker = (
+                    "COAT PIGMENT:"
+                    if species == "dog"
+                    else "SOURCE COAT PALETTE LOCK"
+                )
+                # Every generated action candidate must prove its identity palette;
+                # visual-audit mode may change additional gates, never this floor.
+                pose_identity_palette_gate_required = True
+                pose_palette_negative = (
+                    identity_palette_negative_prompt(
+                        pose_identity_palette_prompt_signature
+                    )
+                    if (
+                        species != "dog"
+                        and pose_identity_palette_prompt_signature is not None
+                    )
+                    else source_palette_negative
+                )
+                if species == "dog":
+                    pose_palette_negative = ""
+                pose_negative_prompt = negative_prompt
+                if pose_palette_negative:
+                    pose_negative_prompt += ", " + pose_palette_negative
+                pose_reference_identity_palette = (
+                    identity_palette_signature(
+                        pose_palette_reference_path,
+                        exclude_bottom_fraction=pose_palette_bottom_exclusion,
+                    )
+                    if (
+                        pose_identity_palette_gate_required
+                        and pose_palette_reference_path is not None
+                    )
+                    else None
+                )
+                pose_reference_upper_body_identity_palette = (
+                    identity_palette_signature(
+                        pose_palette_reference_path,
+                        exclude_bottom_fraction=(
+                            BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
+                        ),
+                    )
+                    if (
+                        bowl_action
+                        and pose_identity_palette_gate_required
+                        and pose_palette_reference_path is not None
+                    )
+                    else None
+                )
+                advisory_grooming_identity_palette_reference = (
+                    identity_palette_signature(
+                        pose_palette_reference_path,
+                        exclude_bottom_fraction=0.0,
+                    )
+                    if (
+                        advisory_grooming_minimum_gate_required
+                        and pose_palette_reference_path is not None
+                    )
+                    else None
+                )
+                attempts: list[dict[str, Any]] = []
+                best_attempt: dict[str, Any] | None = None
+                best_action_candidate_degraded_attempt: dict[str, Any] | None = None
+                best_strict_first_frame_attempt: dict[str, Any] | None = None
+                best_advisory_grooming_degraded_attempt: dict[str, Any] | None = None
+                best_raw_attempt: dict[str, Any] | None = None
+                best_semantic_source: dict[str, Any] | None = None
+                grooming_foreleg_repair_source: dict[str, Any] | None = None
+                grooming_full_pose_refine_source: dict[str, Any] | None = None
+                grooming_advisory_identity_refine_source: dict[str, Any] | None = None
+                eating_identity_refine_source: dict[str, Any] | None = None
+                eating_contact_repair_source: dict[str, Any] | None = None
+                previous_pose_identity_palette_quality: dict[str, Any] | None = None
+                previous_advisory_grooming_minimum_issues: list[str] = []
+                canonical_grooming_completion_capable = bool(
+                    canonical_action_reference and action_key(pose) == "grooming"
+                )
+                active_pose_profiles = canonical_grooming_generation_profiles(
+                    pose,
+                    active_pose_profiles,
+                    enabled=(
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                        and canonical_grooming_completion_capable
+                    ),
+                )
+                active_pose_profiles = action_candidate_generation_profiles(
+                    pose,
+                    active_pose_profiles,
+                )
+                if len(active_pose_profiles) != QWEN_ACTION_CANDIDATE_ATTEMPTS:
+                    raise RuntimeError(
+                        "Action candidate profile budget is not exactly five."
                     )
                 update_job(
                     job_id,
-                    grooming_action_first_frame_input_policy=(
-                        GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY
+                    action_candidate_selection_policy=(
+                        GENERATION_ACTION_CANDIDATE_GATE_POLICY
                     ),
-                    grooming_action_first_frame_open_channel_loaded_by_qwen=True,
-                    grooming_action_first_frame_soft_foreleg_depth_loaded_by_qwen=False,
-                    grooming_action_first_frame_normalized_white_maquette_depth_loaded_by_qwen=False,
-                    grooming_action_first_frame_identity_input=(qwen_input_name),
-                    grooming_action_first_frame_identity_confirmation_input=None,
-                    grooming_action_first_frame_geometry_input=(
-                        pose_reference_input_name
-                    ),
-                    grooming_action_first_frame_action_reference_role=(
-                        "appearance_free_single_tone_action_geometry_image2"
-                    ),
-                    grooming_action_first_frame_action_reference_sha256=(
-                        (job.get("pose_reference_input_sha256s") or {}).get(
-                            action_key(pose)
+                    action_candidate_attempt_budget=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                    action_candidate_selection_requires_identity=True,
+                    action_candidate_original_upload_fallback=False,
+                )
+                grooming_geometry_canonical_reference = bool(
+                    effective_pose_identity_input_policy
+                    == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
+                    and pose_reference_input_name is not None
+                )
+                geometry_first_action_reference = bool(
+                    effective_pose_identity_input_policy
+                    in {
+                        POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+                        POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL,
+                    }
+                )
+                advisory_grooming_action_transfer_active = bool(
+                    not GENERATION_VISUAL_AUDITS_BLOCKING
+                    and canonical_grooming_completion_capable
+                )
+                advisory_grooming_action_canvas_audit: dict[str, Any] | None = None
+                advisory_grooming_action_canvas_path: Path | None = None
+                advisory_grooming_action_input_name: str | None = None
+                advisory_grooming_action_geometry_guide_path: Path | None = None
+                advisory_grooming_face_identity_path: Path | None = None
+                advisory_grooming_face_identity_input_name: str | None = None
+                advisory_grooming_face_identity_audit: dict[str, Any] | None = None
+                advisory_grooming_local_action_edit_mask_path: Path | None = None
+                advisory_grooming_local_action_edit_input_name: str | None = None
+                advisory_grooming_local_action_edit_audit: dict[str, Any] | None = None
+                advisory_grooming_white_frame0_audit: dict[str, Any] | None = None
+                advisory_grooming_normalized_white_depth = False
+                if advisory_grooming_action_transfer_active:
+                    canonical_action_identity_reference = COMFY_INPUT / qwen_input_name
+                    if not canonical_action_identity_reference.is_file():
+                        raise RuntimeError(
+                            "Advisory grooming action transfer lacks its canonical Image 1."
                         )
-                    ),
-                    grooming_action_first_frame_action_canvas=None,
-                    grooming_action_first_frame_image_roles={
-                        "image1": "approved_canonical_identity_sampler",
-                        "image2": "appearance_free_single_tone_action_geometry",
-                    },
-                    grooming_action_first_frame_negative_prompt_conditioning=False,
-                    grooming_action_first_frame_sampling_schedule=(
-                        "qwen_image_edit_2511_lightning_exact_four_step_v1"
-                    ),
-                    grooming_action_first_frame_uploaded_views_consumed_via_canonical_only=(
-                        True
-                    ),
-                    grooming_action_first_frame_raw_action_rgb_loaded_by_qwen=False,
-                    grooming_action_first_frame_source_chroma_loaded_by_qwen=False,
-                    grooming_action_first_frame_source_texture_loaded_by_qwen=False,
-                    grooming_action_first_frame_video_frame_loaded_by_qwen=False,
-                    grooming_action_first_frame_white_maquette_loaded_by_qwen=False,
-                    grooming_action_first_frame_white_maquette_frame_index=None,
-                    grooming_action_first_frame_white_maquette_head_identity_removed=False,
-                    grooming_action_first_frame_white_maquette_head_silhouette_removed=False,
-                    grooming_action_first_frame_local_action_edit_mask_input=(
-                        None
-                    ),
-                    grooming_action_first_frame_local_action_edit_mask=(
-                        None
-                    ),
-                    grooming_action_first_frame_local_action_edit_mask_applied=(
-                        False
-                    ),
-                    grooming_action_first_frame_full_canvas_action_redraw=True,
-                    grooming_action_first_frame_prompt_only_action_geometry=False,
-                    grooming_action_first_frame_post_qwen_pixel_composite_enabled=(
-                        False
-                    ),
-                    grooming_action_first_frame_raw_qwen_output_required=True,
-                    grooming_action_first_frame_raw_white_maquette_frame_loaded_by_qwen=(
-                        False
-                    ),
-                    grooming_action_first_frame_canonical_face_reference=None,
-                    grooming_action_first_frame_white_maquette_frame0=None,
-                    grooming_action_first_frame_source_low_frequency_luma_loaded_by_qwen=(
-                        False
-                    ),
-                    grooming_action_first_frame_normalized_low_frequency_geometry_loaded_by_qwen=True,
-                    grooming_action_first_frame_identity_refine_required=False,
-                    grooming_action_first_frame_identity_refine_mode=(
-                        "conditional_only_for_detected_repairable_face_drift"
-                    ),
-                    grooming_action_first_frame_identity_safe_draft_byte_preservation_required=(
-                        True
-                    ),
-                    grooming_action_first_frame_identity_refine_policy=(
-                        GROOMING_ADVISORY_IDENTITY_REFINE_POLICY
-                    ),
-                    grooming_action_first_frame_identity_refine_white_maquette_loaded=(
-                        False
-                    ),
-                )
-            if canonical_action_reference:
-                pose_effective_lora_policy = (
-                    "qwen_lightning_only_after_canonical_identity_style_lock_v1"
-                )
-                pose_effective_user_loras: list[dict[str, Any]] = []
-                pose_effective_lora_scale = 0.0
-                pose_effective_lora_scope = (
-                    "canonical_action_lightning_only; use "
-                    "effective_pose_lora_attempts for selected per-pose settings"
-                )
-            elif grooming_geometry_canonical_reference:
-                pose_effective_lora_policy = (
-                    "geometry_first_user_loras_disabled_masked_pet3d_repair_v1"
-                )
-                pose_effective_user_loras = []
-                pose_effective_lora_scale = 0.0
-                pose_effective_lora_scope = (
-                    "grooming_attempts_1_2_lightning_only; attempt_3 adds the "
-                    "low_strength_pet3d_surface_prior_under_the_sampler_noise_mask"
-                )
-            elif geometry_first_action_reference:
-                pose_effective_lora_policy = "geometry_first_user_loras_disabled_v1"
-                pose_effective_user_loras = []
-                pose_effective_lora_scale = 0.0
-                pose_effective_lora_scope = (
-                    "geometry_first_action_user_loras_disabled; use "
-                    "effective_pose_lora_attempts for selected per-pose settings"
-                )
-            else:
-                pose_effective_lora_policy = "profile_user_loras_enabled_v1"
-                pose_effective_user_loras = active_pose_profiles[0]["user_loras"]
-                pose_effective_lora_scale = active_pose_profiles[0][
-                    "user_lora_strength_scale"
-                ]
-                pose_effective_lora_scope = (
-                    "initial_profile_only; use effective_pose_lora_attempts "
-                    "for selected per-pose settings"
-                )
-            pose_effective_lora_policies[action_key(pose)] = pose_effective_lora_policy
-            update_job(
-                job_id,
-                pose_effective_lora_policy=pose_effective_lora_policy,
-                pose_effective_lora_policies=dict(pose_effective_lora_policies),
-                effective_pose_user_loras=pose_effective_user_loras,
-                pose_user_lora_strength_scale=pose_effective_lora_scale,
-                effective_pose_user_loras_scope=pose_effective_lora_scope,
-            )
-            if canonical_action_reference or grooming_geometry_canonical_reference:
+                    if pose_reference_input_name is None:
+                        raise RuntimeError(
+                            "Advisory grooming action transfer lacks its appearance-free "
+                            "Image 2 geometry guide."
+                        )
+                    update_job(
+                        job_id,
+                        grooming_action_first_frame_input_policy=(
+                            GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY
+                        ),
+                        grooming_action_first_frame_open_channel_loaded_by_qwen=True,
+                        grooming_action_first_frame_soft_foreleg_depth_loaded_by_qwen=False,
+                        grooming_action_first_frame_normalized_white_maquette_depth_loaded_by_qwen=False,
+                        grooming_action_first_frame_identity_input=(qwen_input_name),
+                        grooming_action_first_frame_identity_confirmation_input=None,
+                        grooming_action_first_frame_geometry_input=(
+                            pose_reference_input_name
+                        ),
+                        grooming_action_first_frame_action_reference_role=(
+                            "appearance_free_single_tone_action_geometry_image2"
+                        ),
+                        grooming_action_first_frame_action_reference_sha256=(
+                            (job.get("pose_reference_input_sha256s") or {}).get(
+                                action_key(pose)
+                            )
+                        ),
+                        grooming_action_first_frame_action_canvas=None,
+                        grooming_action_first_frame_image_roles={
+                            "image1": "approved_canonical_identity_sampler",
+                            "image2": "appearance_free_single_tone_action_geometry",
+                        },
+                        grooming_action_first_frame_negative_prompt_conditioning=False,
+                        grooming_action_first_frame_sampling_schedule=(
+                            "qwen_image_edit_2511_lightning_exact_four_step_v1"
+                        ),
+                        grooming_action_first_frame_uploaded_views_consumed_via_canonical_only=(
+                            True
+                        ),
+                        grooming_action_first_frame_raw_action_rgb_loaded_by_qwen=False,
+                        grooming_action_first_frame_source_chroma_loaded_by_qwen=False,
+                        grooming_action_first_frame_source_texture_loaded_by_qwen=False,
+                        grooming_action_first_frame_video_frame_loaded_by_qwen=False,
+                        grooming_action_first_frame_white_maquette_loaded_by_qwen=False,
+                        grooming_action_first_frame_white_maquette_frame_index=None,
+                        grooming_action_first_frame_white_maquette_head_identity_removed=False,
+                        grooming_action_first_frame_white_maquette_head_silhouette_removed=False,
+                        grooming_action_first_frame_local_action_edit_mask_input=(
+                            None
+                        ),
+                        grooming_action_first_frame_local_action_edit_mask=(
+                            None
+                        ),
+                        grooming_action_first_frame_local_action_edit_mask_applied=(
+                            False
+                        ),
+                        grooming_action_first_frame_full_canvas_action_redraw=True,
+                        grooming_action_first_frame_prompt_only_action_geometry=False,
+                        grooming_action_first_frame_post_qwen_pixel_composite_enabled=(
+                            False
+                        ),
+                        grooming_action_first_frame_raw_qwen_output_required=True,
+                        grooming_action_first_frame_raw_white_maquette_frame_loaded_by_qwen=(
+                            False
+                        ),
+                        grooming_action_first_frame_canonical_face_reference=None,
+                        grooming_action_first_frame_white_maquette_frame0=None,
+                        grooming_action_first_frame_source_low_frequency_luma_loaded_by_qwen=(
+                            False
+                        ),
+                        grooming_action_first_frame_normalized_low_frequency_geometry_loaded_by_qwen=True,
+                        grooming_action_first_frame_identity_refine_required=False,
+                        grooming_action_first_frame_identity_refine_mode=(
+                            "conditional_only_for_detected_repairable_face_drift"
+                        ),
+                        grooming_action_first_frame_identity_safe_draft_byte_preservation_required=(
+                            True
+                        ),
+                        grooming_action_first_frame_identity_refine_policy=(
+                            GROOMING_ADVISORY_IDENTITY_REFINE_POLICY
+                        ),
+                        grooming_action_first_frame_identity_refine_white_maquette_loaded=(
+                            False
+                        ),
+                    )
+                if canonical_action_reference:
+                    pose_effective_lora_policy = (
+                        "qwen_lightning_only_after_canonical_identity_style_lock_v1"
+                    )
+                    pose_effective_user_loras: list[dict[str, Any]] = []
+                    pose_effective_lora_scale = 0.0
+                    pose_effective_lora_scope = (
+                        "canonical_action_lightning_only; use "
+                        "effective_pose_lora_attempts for selected per-pose settings"
+                    )
+                elif grooming_geometry_canonical_reference:
+                    pose_effective_lora_policy = (
+                        "geometry_first_user_loras_disabled_masked_pet3d_repair_v1"
+                    )
+                    pose_effective_user_loras = []
+                    pose_effective_lora_scale = 0.0
+                    pose_effective_lora_scope = (
+                        "grooming_attempts_1_2_lightning_only; attempt_3 adds the "
+                        "low_strength_pet3d_surface_prior_under_the_sampler_noise_mask"
+                    )
+                elif geometry_first_action_reference:
+                    pose_effective_lora_policy = "geometry_first_user_loras_disabled_v1"
+                    pose_effective_user_loras = []
+                    pose_effective_lora_scale = 0.0
+                    pose_effective_lora_scope = (
+                        "geometry_first_action_user_loras_disabled; use "
+                        "effective_pose_lora_attempts for selected per-pose settings"
+                    )
+                else:
+                    pose_effective_lora_policy = "profile_user_loras_enabled_v1"
+                    pose_effective_user_loras = active_pose_profiles[0]["user_loras"]
+                    pose_effective_lora_scale = active_pose_profiles[0][
+                        "user_lora_strength_scale"
+                    ]
+                    pose_effective_lora_scope = (
+                        "initial_profile_only; use effective_pose_lora_attempts "
+                        "for selected per-pose settings"
+                    )
+                pose_effective_lora_policies[action_key(pose)] = pose_effective_lora_policy
                 update_job(
                     job_id,
-                    pose_photography_lora_policy=(
-                        "disabled_after_canonical_identity_style_lock_v1"
-                    ),
-                    pose_builtin_style_lora_policy=(
-                        "masked_pet3d_on_grooming_foreleg_repair_attempt_only_v1"
-                        if grooming_geometry_canonical_reference
-                        else "disabled_after_canonical_identity_style_lock_v1"
-                    ),
-                    pose_candidate_normalization_policy=(
-                        QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
-                    ),
-                    pose_candidate_matte_policy=(QWEN_ACTION_CANDIDATE_MATTE_POLICY),
+                    pose_effective_lora_policy=pose_effective_lora_policy,
+                    pose_effective_lora_policies=dict(pose_effective_lora_policies),
+                    effective_pose_user_loras=pose_effective_user_loras,
+                    pose_user_lora_strength_scale=pose_effective_lora_scale,
+                    effective_pose_user_loras_scope=pose_effective_lora_scope,
                 )
-            if should_reuse_validated_first_frame_cache(
-                strict_first_frame_required=strict_first_frame_required,
-                first_frame_retry_wave=first_frame_retry_wave,
-            ):
-                cached_attempt = load_validated_first_frame_cache(
-                    job_id,
-                    get_job(job_id),
-                    action=action_key(pose),
-                    pose_index=index,
-                    job_dir=job_dir,
-                )
-                if cached_attempt is not None:
-                    cached_path = job_dir / str(cached_attempt["keyframe"])
-                    if (
-                        action_key(pose) == "grooming"
-                        and advisory_grooming_minimum_gate_required
-                    ):
+                if canonical_action_reference or grooming_geometry_canonical_reference:
+                    update_job(
+                        job_id,
+                        pose_photography_lora_policy=(
+                            "disabled_after_canonical_identity_style_lock_v1"
+                        ),
+                        pose_builtin_style_lora_policy=(
+                            "masked_pet3d_on_grooming_foreleg_repair_attempt_only_v1"
+                            if grooming_geometry_canonical_reference
+                            else "disabled_after_canonical_identity_style_lock_v1"
+                        ),
+                        pose_candidate_normalization_policy=(
+                            QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+                        ),
+                        pose_candidate_matte_policy=(QWEN_ACTION_CANDIDATE_MATTE_POLICY),
+                    )
+                if should_reuse_validated_first_frame_cache(
+                    strict_first_frame_required=strict_first_frame_required,
+                    first_frame_retry_wave=first_frame_retry_wave,
+                ):
+                    cached_attempt = load_validated_first_frame_cache(
+                        job_id,
+                        get_job(job_id),
+                        action=action_key(pose),
+                        pose_index=index,
+                        job_dir=job_dir,
+                    )
+                    if cached_attempt is not None:
+                        cached_path = job_dir / str(cached_attempt["keyframe"])
                         if (
-                            advisory_grooming_identity_palette_reference is None
-                            or pose_palette_reference_path is None
-                            or grooming_identity_contract_reference_path is None
-                            or grooming_pose_gate_guide_path is None
-                            or grooming_pose_gate_metadata_path is None
+                            action_key(pose) == "grooming"
+                            and advisory_grooming_minimum_gate_required
                         ):
-                            cached_minimum_gate = {
-                                "policy": GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
-                                "version": GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
-                                "available": False,
-                                "acceptable": False,
-                                "issues": [
-                                    "cache_revalidation_references_unavailable"
-                                ],
-                                "cache_revalidated": False,
-                            }
-                            cached_attempt[
-                                "grooming_advisory_minimum_gate"
-                            ] = cached_minimum_gate
-                        else:
-                            try:
-                                cached_minimum_gate = (
-                                    revalidate_cached_grooming_minimum_gate(
-                                        cached_attempt,
-                                        candidate_path=cached_path,
-                                        identity_reference_palette=(
-                                            advisory_grooming_identity_palette_reference
-                                        ),
-                                        identity_palette_reference_path=(
-                                            pose_palette_reference_path
-                                        ),
-                                        identity_reference_path=(
-                                            grooming_identity_contract_reference_path
-                                        ),
-                                        geometry_guide=grooming_pose_gate_guide_path,
-                                        geometry_metadata=(
-                                            grooming_pose_gate_metadata_path
-                                        ),
-                                        topology_guide=(
-                                            qwen_grooming_guide_path
-                                        ),
-                                    )
-                                )
-                            except (OSError, ValueError, KeyError, RuntimeError) as exc:
-                                LOGGER.warning(
-                                    "%s cached grooming minimum-contract "
-                                    "revalidation failed: %s",
-                                    job_id,
-                                    exc,
-                                )
+                            if (
+                                advisory_grooming_identity_palette_reference is None
+                                or pose_palette_reference_path is None
+                                or grooming_identity_contract_reference_path is None
+                                or grooming_pose_gate_guide_path is None
+                                or grooming_pose_gate_metadata_path is None
+                            ):
                                 cached_minimum_gate = {
-                                    "policy": (
-                                        GROOMING_ADVISORY_MINIMUM_GATE_POLICY
-                                    ),
-                                    "version": (
-                                        GROOMING_ADVISORY_MINIMUM_GATE_VERSION
-                                    ),
+                                    "policy": GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
+                                    "version": GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
                                     "available": False,
                                     "acceptable": False,
                                     "issues": [
-                                        "cache_minimum_contract_revalidation_failed"
+                                        "cache_revalidation_references_unavailable"
                                     ],
-                                    "error": str(exc),
                                     "cache_revalidated": False,
                                 }
                                 cached_attempt[
                                     "grooming_advisory_minimum_gate"
                                 ] = cached_minimum_gate
-                        grooming_advisory_minimum_gate_attempts.append(
-                            {
-                                "pose_index": index,
-                                "pose": pose,
-                                "action": action_key(pose),
-                                "attempt": cached_attempt.get("attempt"),
-                                "seed": cached_attempt.get("seed"),
-                                "gate": cached_minimum_gate,
-                                "result": (
-                                    "cache_revalidated_passed"
-                                    if cached_minimum_gate.get("acceptable")
-                                    is True
-                                    else "cache_revalidated_rejected"
-                                ),
-                            }
-                        )
-                    cached_quality = pose_cutout_quality(
-                        cached_path,
-                        pose,
-                        require_eating_mouth_contact=(
-                            require_eating_mouth_contact
-                        ),
-                    )
-                    cached_similarity = pose_similarity_quality(
-                        cached_path,
-                        pose=pose,
-                        canonical_path=canonical_similarity_reference,
-                        previous_poses=accepted_pose_similarity_references,
-                    )
-                    cached_attempt["quality"] = cached_quality
-                    if action_key(pose) == "grooming":
-                        cached_attempt["cache_revalidation_similarity_probe"] = (
-                            cached_similarity
-                        )
-                    else:
-                        cached_attempt["similarity"] = cached_similarity
-                    if pose_palette_reference_path is not None:
-                        cached_palette = evaluate_pose_identity_palette(
+                            else:
+                                try:
+                                    cached_minimum_gate = (
+                                        revalidate_cached_grooming_minimum_gate(
+                                            cached_attempt,
+                                            candidate_path=cached_path,
+                                            identity_reference_palette=(
+                                                advisory_grooming_identity_palette_reference
+                                            ),
+                                            identity_palette_reference_path=(
+                                                pose_palette_reference_path
+                                            ),
+                                            identity_reference_path=(
+                                                grooming_identity_contract_reference_path
+                                            ),
+                                            geometry_guide=grooming_pose_gate_guide_path,
+                                            geometry_metadata=(
+                                                grooming_pose_gate_metadata_path
+                                            ),
+                                            topology_guide=(
+                                                qwen_grooming_guide_path
+                                            ),
+                                        )
+                                    )
+                                except (OSError, ValueError, KeyError, RuntimeError) as exc:
+                                    LOGGER.warning(
+                                        "%s cached grooming minimum-contract "
+                                        "revalidation failed: %s",
+                                        job_id,
+                                        exc,
+                                    )
+                                    cached_minimum_gate = {
+                                        "policy": (
+                                            GROOMING_ADVISORY_MINIMUM_GATE_POLICY
+                                        ),
+                                        "version": (
+                                            GROOMING_ADVISORY_MINIMUM_GATE_VERSION
+                                        ),
+                                        "available": False,
+                                        "acceptable": False,
+                                        "issues": [
+                                            "cache_minimum_contract_revalidation_failed"
+                                        ],
+                                        "error": str(exc),
+                                        "cache_revalidated": False,
+                                    }
+                                    cached_attempt[
+                                        "grooming_advisory_minimum_gate"
+                                    ] = cached_minimum_gate
+                            grooming_advisory_minimum_gate_attempts.append(
+                                {
+                                    "pose_index": index,
+                                    "pose": pose,
+                                    "action": action_key(pose),
+                                    "attempt": cached_attempt.get("attempt"),
+                                    "seed": cached_attempt.get("seed"),
+                                    "gate": cached_minimum_gate,
+                                    "result": (
+                                        "cache_revalidated_passed"
+                                        if cached_minimum_gate.get("acceptable")
+                                        is True
+                                        else "cache_revalidated_rejected"
+                                    ),
+                                }
+                            )
+                        cached_quality = pose_cutout_quality(
                             cached_path,
-                            primary_reference=pose_reference_identity_palette,
-                            upper_body_reference=(
-                                pose_reference_upper_body_identity_palette
+                            pose,
+                            require_eating_mouth_contact=(
+                                require_eating_mouth_contact
                             ),
-                            bottom_exclusion=pose_palette_bottom_exclusion,
-                            bowl_action=bowl_action,
                         )
-                        cached_attempt["identity_palette"] = cached_palette[
-                            "quality"
-                        ]
-                        cached_attempt["candidate_identity_palette"] = (
-                            cached_palette["candidate"]
+                        cached_similarity = pose_similarity_quality(
+                            cached_path,
+                            pose=pose,
+                            canonical_path=canonical_similarity_reference,
+                            previous_poses=accepted_pose_similarity_references,
                         )
-                        cached_attempt[
-                            "candidate_upper_body_identity_palette"
-                        ] = cached_palette["upper_body_candidate"]
-                    if pose_fur_reference_path is not None:
-                        cached_attempt["fur_silhouette"] = (
-                            eating_fur_silhouette_quality(
+                        cached_attempt["quality"] = cached_quality
+                        if action_key(pose) == "grooming":
+                            cached_attempt["cache_revalidation_similarity_probe"] = (
+                                cached_similarity
+                            )
+                        else:
+                            cached_attempt["similarity"] = cached_similarity
+                        if pose_palette_reference_path is not None:
+                            cached_palette = evaluate_pose_identity_palette(
                                 cached_path,
-                                pose_fur_reference_path,
-                            )
-                        )
-                    cached_gate = dict(
-                        cached_attempt.get("action_candidate_gate") or {}
-                    )
-                    (
-                        cached_palette_acceptable,
-                        cached_palette_source,
-                    ) = strict_first_frame_identity_palette_evidence(
-                        cached_attempt,
-                        action=action_key(pose),
-                    )
-                    cached_gate.update(
-                        acceptable=bool(
-                            cached_quality.get("acceptable") is True
-                            and cached_attempt["similarity"].get("acceptable")
-                            is True
-                            and cached_palette_acceptable
-                            and (
-                                not isinstance(
-                                    cached_attempt.get("fur_silhouette"), dict
-                                )
-                                or cached_attempt["fur_silhouette"].get(
-                                    "acceptable"
-                                )
-                                is True
-                            )
-                        ),
-                        degraded_fallback_accepted=False,
-                        cache_revalidated=True,
-                        cache_revalidated_at=utc_now(),
-                        cache_identity_palette_source=cached_palette_source,
-                    )
-                    cached_attempt["action_candidate_gate"] = cached_gate
-                    cached_attempt["combined_penalty"] = round(
-                        sum(
-                            float(value.get("penalty", 0.0))
-                            for value in (
-                                cached_attempt.get("quality"),
-                                cached_attempt.get("similarity"),
-                                cached_attempt.get("identity_palette"),
-                                cached_attempt.get("fur_silhouette"),
-                                cached_attempt.get("fur_surface_gate"),
-                                cached_attempt.get("grooming_pose_gate"),
-                                cached_attempt.get(
-                                    "grooming_advisory_minimum_gate"
+                                primary_reference=pose_reference_identity_palette,
+                                upper_body_reference=(
+                                    pose_reference_upper_body_identity_palette
                                 ),
+                                bottom_exclusion=pose_palette_bottom_exclusion,
+                                bowl_action=bowl_action,
                             )
-                            if isinstance(value, dict)
-                        ),
-                        6,
-                    )
-                    cache_issues = strict_first_frame_record_issues(
-                        cached_attempt,
-                        action=action_key(pose),
-                    )
-                    if not cache_issues:
-                        best_attempt = cached_attempt
-                        attempts.append(
-                            {
-                                key: value
-                                for key, value in cached_attempt.items()
-                                if key != "workflow"
-                            }
+                            cached_attempt["identity_palette"] = cached_palette[
+                                "quality"
+                            ]
+                            cached_attempt["candidate_identity_palette"] = (
+                                cached_palette["candidate"]
+                            )
+                            cached_attempt[
+                                "candidate_upper_body_identity_palette"
+                            ] = cached_palette["upper_body_candidate"]
+                        if pose_fur_reference_path is not None:
+                            cached_attempt["fur_silhouette"] = (
+                                eating_fur_silhouette_quality(
+                                    cached_path,
+                                    pose_fur_reference_path,
+                                )
+                            )
+                        cached_gate = dict(
+                            cached_attempt.get("action_candidate_gate") or {}
                         )
-                        first_frame_states = dict(
-                            get_job(job_id).get("qwen_first_frame_states") or {}
+                        (
+                            cached_palette_acceptable,
+                            cached_palette_source,
+                        ) = strict_first_frame_identity_palette_evidence(
+                            cached_attempt,
+                            action=action_key(pose),
                         )
-                        first_frame_states[action_key(pose)] = {
-                            "status": "validated_cache_hit",
-                            "retry_wave": first_frame_retry_wave,
-                            "source": cached_attempt[
-                                "validated_first_frame_cache"
-                            ],
-                            "quality_revalidated": True,
-                        }
-                        update_job(
-                            job_id,
-                            qwen_first_frame_states=first_frame_states,
-                            qwen_first_frame_current_action=action_key(pose),
-                            qwen_first_frame_cache_status="hit",
-                            qwen_first_frame_cache_fingerprint=(
-                                cached_attempt["validated_first_frame_cache"][
-                                    "fingerprint"
-                                ]
+                        cached_gate.update(
+                            acceptable=bool(
+                                cached_quality.get("acceptable") is True
+                                and cached_attempt["similarity"].get("acceptable")
+                                is True
+                                and cached_palette_acceptable
+                                and (
+                                    not isinstance(
+                                        cached_attempt.get("fur_silhouette"), dict
+                                    )
+                                    or cached_attempt["fur_silhouette"].get(
+                                        "acceptable"
+                                    )
+                                    is True
+                                )
                             ),
+                            degraded_fallback_accepted=False,
+                            cache_revalidated=True,
+                            cache_revalidated_at=utc_now(),
+                            cache_identity_palette_source=cached_palette_source,
                         )
-                        append_recovery_event(
-                            job_id,
-                            {
-                                "stage": "cartoon_keyframe",
-                                "pose_index": index,
-                                "reason": "exact_input_validated_first_frame_cache_hit",
-                                "strategy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
-                                "result": "accepted_after_current_gate_revalidation",
-                                "action": action_key(pose),
-                                "cache": cached_attempt[
+                        cached_attempt["action_candidate_gate"] = cached_gate
+                        cached_attempt["combined_penalty"] = round(
+                            sum(
+                                float(value.get("penalty", 0.0))
+                                for value in (
+                                    cached_attempt.get("quality"),
+                                    cached_attempt.get("similarity"),
+                                    cached_attempt.get("identity_palette"),
+                                    cached_attempt.get("fur_silhouette"),
+                                    cached_attempt.get("fur_surface_gate"),
+                                    cached_attempt.get("grooming_pose_gate"),
+                                    cached_attempt.get(
+                                        "grooming_advisory_minimum_gate"
+                                    ),
+                                )
+                                if isinstance(value, dict)
+                            ),
+                            6,
+                        )
+                        cache_issues = strict_first_frame_record_issues(
+                            cached_attempt,
+                            action=action_key(pose),
+                        )
+                        if not cache_issues:
+                            best_attempt = cached_attempt
+                            attempts.append(
+                                {
+                                    key: value
+                                    for key, value in cached_attempt.items()
+                                    if key != "workflow"
+                                }
+                            )
+                            first_frame_states = dict(
+                                get_job(job_id).get("qwen_first_frame_states") or {}
+                            )
+                            first_frame_states[action_key(pose)] = {
+                                "status": "validated_cache_hit",
+                                "retry_wave": first_frame_retry_wave,
+                                "source": cached_attempt[
                                     "validated_first_frame_cache"
                                 ],
-                            },
-                        )
-                    else:
-                        LOGGER.warning(
-                            "%s rejected cached first frame for %s after current "
-                            "gate revalidation: %s",
-                            job_id,
-                            action_key(pose),
-                            cache_issues,
-                        )
-            elif strict_first_frame_required:
-                update_job(
-                    job_id,
-                    qwen_first_frame_cache_status=(
-                        "disabled_for_fixed_five_candidate_budget"
-                    ),
-                    qwen_first_frame_cache_bypassed_action=action_key(pose),
-                    qwen_first_frame_cache_bypassed_retry_wave=(
-                        first_frame_retry_wave
-                    ),
-                )
-            generation_pose_profiles = active_pose_profiles
-            if strict_first_frame_required and generation_pose_profiles:
-                first_frame_states = dict(
-                    get_job(job_id).get("qwen_first_frame_states") or {}
-                )
-                first_frame_states[action_key(pose)] = {
-                    "status": "generating_candidates",
-                    "completed": False,
-                    "quality_passed": False,
-                    "published": False,
-                    "retry_wave": first_frame_retry_wave,
-                    "attempt_budget": len(generation_pose_profiles),
-                    "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
-                    "current_attempt": 0,
-                    "original_upload_fallback_published": False,
-                    "action_removed": False,
-                }
-                update_job(
-                    job_id,
-                    qwen_first_frame_states=first_frame_states,
-                    qwen_first_frame_current_action=action_key(pose),
-                    qwen_first_frame_cache_status="miss",
-                )
-            for attempt, profile in enumerate(generation_pose_profiles, start=1):
-                raise_if_cancelled(job_id)
-                if strict_first_frame_required:
+                                "quality_revalidated": True,
+                            }
+                            update_job(
+                                job_id,
+                                qwen_first_frame_states=first_frame_states,
+                                qwen_first_frame_current_action=action_key(pose),
+                                qwen_first_frame_cache_status="hit",
+                                qwen_first_frame_cache_fingerprint=(
+                                    cached_attempt["validated_first_frame_cache"][
+                                        "fingerprint"
+                                    ]
+                                ),
+                            )
+                            append_recovery_event(
+                                job_id,
+                                {
+                                    "stage": "cartoon_keyframe",
+                                    "pose_index": index,
+                                    "reason": "exact_input_validated_first_frame_cache_hit",
+                                    "strategy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
+                                    "result": "accepted_after_current_gate_revalidation",
+                                    "action": action_key(pose),
+                                    "cache": cached_attempt[
+                                        "validated_first_frame_cache"
+                                    ],
+                                },
+                            )
+                        else:
+                            LOGGER.warning(
+                                "%s rejected cached first frame for %s after current "
+                                "gate revalidation: %s",
+                                job_id,
+                                action_key(pose),
+                                cache_issues,
+                            )
+                elif strict_first_frame_required:
+                    update_job(
+                        job_id,
+                        qwen_first_frame_cache_status=(
+                            "disabled_for_fixed_five_candidate_budget"
+                        ),
+                        qwen_first_frame_cache_bypassed_action=action_key(pose),
+                        qwen_first_frame_cache_bypassed_retry_wave=(
+                            first_frame_retry_wave
+                        ),
+                    )
+                generation_pose_profiles = active_pose_profiles
+                if strict_first_frame_required and generation_pose_profiles:
                     first_frame_states = dict(
                         get_job(job_id).get("qwen_first_frame_states") or {}
                     )
-                    action_state = dict(first_frame_states.get(action_key(pose)) or {})
-                    action_state.update(
-                        status="generating_candidate",
-                        current_attempt=attempt,
-                        attempts_completed=attempt - 1,
-                        attempt_budget=len(generation_pose_profiles),
-                        attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
-                    )
-                    first_frame_states[action_key(pose)] = action_state
+                    first_frame_states[action_key(pose)] = {
+                        "status": "generating_candidates",
+                        "completed": False,
+                        "quality_passed": False,
+                        "published": False,
+                        "retry_wave": first_frame_retry_wave,
+                        "attempt_budget": len(generation_pose_profiles),
+                        "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                        "current_attempt": 0,
+                        "original_upload_fallback_published": False,
+                        "action_removed": False,
+                    }
                     update_job(
                         job_id,
                         qwen_first_frame_states=first_frame_states,
                         qwen_first_frame_current_action=action_key(pose),
-                        qwen_first_frame_current_attempt=attempt,
-                        qwen_first_frame_attempt_limit=(
-                            QWEN_FIRST_FRAME_MAX_ATTEMPTS
-                        ),
+                        qwen_first_frame_cache_status="miss",
                     )
-                if attempt > 1:
-                    update_job(
-                        job_id,
-                        stage="retrying_cartoon_keyframe",
-                        quality_retry=attempt,
-                        recovery_active=True,
-                        recovery_attempt=attempt,
-                    )
-                attempt_seed = (
-                    base_seed
-                    + pose_seed_offset(pose, index)
-                    + first_frame_retry_wave * QWEN_FIRST_FRAME_SEED_WAVE_STRIDE
-                    + (attempt - 1) * 1009
-                )
-                prefix = f"local_video_api/{job_id}/qwen_pose_{index:02d}_attempt_{attempt:02d}"
-                attempt_prompt = build_qwen_prompt(
-                    "",
-                    pose,
-                    transparent_gif=True,
-                    quality_retry=profile["quality_retry"],
-                    pose_reference_available=bool(
-                        pose_reference_input_name is not None
-                        and not dog_photoreal_single_image_action_transfer_active
-                    ),
-                    profile_fur_lock=profile_fur_lock,
-                    pose_identity_input_policy=(effective_pose_identity_input_policy),
-                    species=species,
-                )
-                if pose_identity_palette_prompt_signature is not None:
-                    attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
-                        pose_identity_palette_prompt_signature,
-                        retry=attempt > 1,
-                        previous_quality=previous_pose_identity_palette_quality,
-                    )
-                main_case_geometry_first = (
-                    effective_pose_identity_input_policy
-                    == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
-                )
-                grooming_geometry_canonical = (
-                    effective_pose_identity_input_policy
-                    == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
-                )
-                advisory_grooming_identity_refine_active = bool(
-                    advisory_grooming_action_transfer_active
-                    and isinstance(
-                        grooming_advisory_identity_refine_source,
-                        dict,
-                    )
-                    and attempt
-                    > int(grooming_advisory_identity_refine_source["attempt"])
-                )
-                legacy_grooming_foreleg_repair_active = bool(
-                    grooming_geometry_canonical
-                    and attempt == GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
-                    and isinstance(grooming_foreleg_repair_source, dict)
-                    and not advisory_grooming_identity_refine_active
-                )
-                canonical_grooming_completion_active = bool(
-                    canonical_grooming_completion_capable
-                    and not advisory_grooming_action_transfer_active
-                    and attempt == GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
-                    and isinstance(grooming_foreleg_repair_source, dict)
-                    and not advisory_grooming_identity_refine_active
-                )
-                canonical_grooming_full_pose_rescue_active = bool(
-                    canonical_grooming_completion_capable
-                    and not advisory_grooming_action_transfer_active
-                    and attempt == GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
-                    and not advisory_grooming_identity_refine_active
-                )
-                canonical_grooming_full_pose_refine_active = bool(
-                    canonical_grooming_completion_capable
-                    and not advisory_grooming_action_transfer_active
-                    and attempt == GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT
-                    and not advisory_grooming_identity_refine_active
-                )
-                canonical_grooming_full_pose_recovery_active = bool(
-                    canonical_grooming_full_pose_rescue_active
-                    or canonical_grooming_full_pose_refine_active
-                )
-                canonical_eating_identity_refine_active = bool(
-                    canonical_action_reference
-                    and action_key(pose) == "eating"
-                    and attempt >= EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
-                    and isinstance(eating_identity_refine_source, dict)
-                )
-                prior_strict_eating_candidate_exists = bool(
-                    action_key(pose) == "eating"
-                    and any(
-                        not strict_first_frame_record_issues(
-                            item,
-                            action="eating",
+                for attempt, profile in enumerate(generation_pose_profiles, start=1):
+                    raise_if_cancelled(job_id)
+                    if strict_first_frame_required:
+                        first_frame_states = dict(
+                            get_job(job_id).get("qwen_first_frame_states") or {}
                         )
-                        for item in attempts
-                        if isinstance(item, dict)
-                    )
-                )
-                canonical_eating_contact_repair_active = bool(
-                    canonical_action_reference
-                    and action_key(pose) == "eating"
-                    and attempt >= EATING_CONTACT_REPAIR_ATTEMPT
-                    and isinstance(eating_contact_repair_source, dict)
-                    and not canonical_eating_identity_refine_active
-                    and not prior_strict_eating_candidate_exists
-                )
-                grooming_foreleg_repair_active = bool(
-                    legacy_grooming_foreleg_repair_active
-                    or canonical_grooming_completion_active
-                )
-                attempt_primary_input_name = pose_qwen_input_name
-                attempt_secondary_input_name = pose_qwen_secondary_input_name
-                attempt_tertiary_input_name: str | None = None
-                attempt_additional_reference_input_names: list[str] | None = None
-                attempt_noise_mask_input_name: str | None = None
-                attempt_geometry_input_name = pose_geometry_input_name
-                grooming_foreleg_repair_audit: dict[str, Any] | None = None
-                grooming_full_pose_recovery_audit: dict[str, Any] | None = None
-                grooming_advisory_identity_refine_audit: (
-                    dict[str, Any] | None
-                ) = None
-                grooming_advisory_identity_refine_noise_mask_path: Path | None = None
-                eating_identity_refine_audit: dict[str, Any] | None = None
-                eating_contact_repair_audit: dict[str, Any] | None = None
-                eating_contact_repair_canvas_path: Path | None = None
-                eating_contact_repair_noise_mask_path: Path | None = None
-                pose_transfer_seed_path: Path | None = None
-                grooming_advisory_action_transfer_attempt: (
-                    dict[str, Any] | None
-                ) = None
-                dog_eating_prompt_only_action_transfer_attempt: (
-                    dict[str, Any] | None
-                ) = None
-                dog_drinking_prompt_only_action_transfer_attempt: (
-                    dict[str, Any] | None
-                ) = None
-                dog_toileting_prompt_only_action_transfer_attempt: (
-                    dict[str, Any] | None
-                ) = None
-                dog_photoreal_single_image_action_transfer_attempt: (
-                    dict[str, Any] | None
-                ) = None
-                if dog_prompt_only_action_transfer_active:
-                    attempt_primary_input_name = qwen_input_name
-                    attempt_secondary_input_name = None
-                    attempt_tertiary_input_name = None
-                    attempt_additional_reference_input_names = None
-                    attempt_noise_mask_input_name = None
-                    attempt_geometry_input_name = None
-                    dog_photoreal_single_image_action_transfer_attempt = {
-                        "policy": DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_POLICY,
-                        "action": action_key(pose),
-                        "image1_role": (
-                            "approved_photoreal_canonical_identity_and_material_"
-                            "sampler"
-                        ),
-                        "image2_role": None,
-                        "image3_role": None,
-                        "prompt_only_action_geometry": True,
-                        "white_model_loaded_by_qwen": False,
-                        "secondary_reference_loaded_by_qwen": False,
-                        "foreign_pose_image_loaded_by_qwen": False,
-                        "uploaded_identity_views_consumed_via_canonical_only": True,
-                        "full_canvas_action_redraw": True,
-                        "action_geometry_deferred_to_scail": False,
-                        "pose_guide_reserved_for_scail": True,
-                        "sampler_noise_mask_input_name": None,
-                        "post_qwen_pixel_composite_enabled": False,
-                    }
-                    if dog_eating_prompt_only_action_transfer_active:
-                        dog_eating_prompt_only_action_transfer_attempt = (
-                            dog_photoreal_single_image_action_transfer_attempt
+                        action_state = dict(first_frame_states.get(action_key(pose)) or {})
+                        action_state.update(
+                            status="generating_candidate",
+                            current_attempt=attempt,
+                            attempts_completed=attempt - 1,
+                            attempt_budget=len(generation_pose_profiles),
+                            attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
                         )
-                    elif dog_drinking_prompt_only_action_transfer_active:
-                        dog_drinking_prompt_only_action_transfer_attempt = (
-                            dog_photoreal_single_image_action_transfer_attempt
-                        )
-                    elif dog_toileting_prompt_only_action_transfer_active:
-                        dog_toileting_prompt_only_action_transfer_attempt = (
-                            dog_photoreal_single_image_action_transfer_attempt
-                        )
-                if advisory_grooming_action_transfer_active:
-                    attempt_primary_input_name = qwen_input_name
-                    if pose_reference_input_name is None:
-                        raise RuntimeError(
-                            "Grooming action transfer lost its appearance-free "
-                            "geometry guide."
-                        )
-                    attempt_secondary_input_name = pose_reference_input_name
-                    attempt_tertiary_input_name = None
-                    attempt_additional_reference_input_names = None
-                    # Keep the digest-bound canonical as Image 1/start latent and
-                    # expose only the single-tone, appearance-free action guide as
-                    # Image 2. Full-canvas redraw lets Qwen handle canonical inputs
-                    # that are lying or otherwise far from the seated driver pose.
-                    attempt_noise_mask_input_name = None
-                    attempt_geometry_input_name = pose_reference_input_name
-                    attempt_prompt = build_advisory_grooming_action_transfer_prompt(
-                        pose,
-                        profile_fur_lock=profile_fur_lock,
-                        anatomy_priority_retry=(
-                            attempt
-                            >= GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT
-                        ),
-                    )
-                    grooming_advisory_action_transfer_attempt = {
-                        "policy": GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY,
-                        "image1_role": "approved_canonical_identity_sampler",
-                        "image2_role": (
-                            "appearance_free_single_tone_action_geometry"
-                        ),
-                        "image3_role": None,
-                        "uploaded_identity_views_consumed_via_canonical_only": True,
-                        "prompt_only_action_geometry": False,
-                        "video_first_frame_loaded_by_qwen": False,
-                        "white_maquette_loaded_by_qwen": False,
-                        "foreign_pose_image_loaded_by_qwen": False,
-                        "raw_action_rgb_loaded_by_qwen": False,
-                        "source_low_frequency_luma_loaded_by_qwen": False,
-                        "normalized_low_frequency_geometry_loaded_by_qwen": True,
-                        "public_open_channel_loaded_by_qwen": True,
-                        "soft_foreleg_depth_loaded_by_qwen": False,
-                        "white_maquette_frame_index": None,
-                        "white_maquette_head_identity_removed": False,
-                        "white_maquette_head_silhouette_removed": False,
-                        "canonical_local_action_edit_mask": (
-                            None
-                        ),
-                        "canonical_local_action_edit_mask_applied": False,
-                        "full_canvas_action_redraw": True,
-                        "anatomy_priority_retry": bool(
-                            attempt
-                            >= GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT
-                        ),
-                        "guide_alignment_is_advisory": bool(
-                            attempt
-                            >= GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT
-                        ),
-                        "terminal_completion_blocked_by_topology": False,
-                        "full_canvas_redraw_reason": (
-                            "local_latent_lock_retained_original_planted_paw_"
-                            "topology"
-                        ),
-                        "sampler_noise_mask_input_name": (
-                            attempt_noise_mask_input_name
-                        ),
-                        "post_qwen_pixel_composite_enabled": False,
-                        "raw_qwen_output_required": True,
-                        "raw_qwen_selection_byte_preserving": True,
-                        "canonical_face_identity_reference": None,
-                        "action_canvas": None,
-                    }
-                if advisory_grooming_identity_refine_active:
-                    grooming_advisory_action_transfer_attempt = None
-                    assert isinstance(
-                        grooming_advisory_identity_refine_source,
-                        dict,
-                    )
-                    if advisory_grooming_face_identity_input_name is None:
-                        raise RuntimeError(
-                            "Grooming identity restoration lost its canonical face."
-                        )
-                    refine_source_attempt = int(
-                        grooming_advisory_identity_refine_source["attempt"]
-                    )
-                    refine_source_path = Path(
-                        str(
-                            grooming_advisory_identity_refine_source[
-                                "cutout_path"
-                            ]
-                        )
-                    )
-                    expected_refine_source_sha256 = str(
-                        grooming_advisory_identity_refine_source[
-                            "cutout_sha256"
-                        ]
-                    )
-                    if (
-                        not refine_source_path.is_file()
-                        or file_sha256(refine_source_path)
-                        != expected_refine_source_sha256
-                    ):
-                        raise RuntimeError(
-                            "Accepted grooming action draft disappeared or changed "
-                            "before identity restoration."
-                        )
-                    refine_input_path = (
-                        comfy_input_dir
-                        / (
-                            "grooming_advisory_identity_refine_source_"
-                            f"attempt_{refine_source_attempt:02d}.png"
-                        )
-                    )
-                    grooming_advisory_identity_refine_noise_mask_path = (
-                        comfy_input_dir
-                        / (
-                            "grooming_advisory_identity_refine_face_noise_mask_"
-                            f"attempt_{refine_source_attempt:02d}.png"
-                        )
-                    )
-                    refine_canvas_audit = (
-                        prepare_advisory_grooming_identity_refine_canvas(
-                            refine_source_path,
-                            refine_input_path,
-                            grooming_advisory_identity_refine_noise_mask_path,
-                            identity_reference_palette=(
-                                advisory_grooming_identity_palette_reference
+                        first_frame_states[action_key(pose)] = action_state
+                        update_job(
+                            job_id,
+                            qwen_first_frame_states=first_frame_states,
+                            qwen_first_frame_current_action=action_key(pose),
+                            qwen_first_frame_current_attempt=attempt,
+                            qwen_first_frame_attempt_limit=(
+                                QWEN_FIRST_FRAME_MAX_ATTEMPTS
                             ),
                         )
+                    if attempt > 1:
+                        update_job(
+                            job_id,
+                            stage="retrying_cartoon_keyframe",
+                            quality_retry=attempt,
+                            recovery_active=True,
+                            recovery_attempt=attempt,
+                        )
+                    attempt_seed = (
+                        base_seed
+                        + pose_seed_offset(pose, index)
+                        + first_frame_retry_wave * QWEN_FIRST_FRAME_SEED_WAVE_STRIDE
+                        + (attempt - 1) * 1009
                     )
-                    refine_input_name = (
-                        comfy_relative_dir / refine_input_path.name
-                    ).as_posix()
-                    attempt_primary_input_name = refine_input_name
-                    attempt_secondary_input_name = qwen_input_name
-                    attempt_tertiary_input_name = (
-                        advisory_grooming_face_identity_input_name
-                    )
-                    attempt_additional_reference_input_names = [
-                        attempt_secondary_input_name,
-                        attempt_tertiary_input_name,
-                    ]
-                    attempt_noise_mask_input_name = (
-                        comfy_relative_dir
-                        / grooming_advisory_identity_refine_noise_mask_path.name
-                    ).as_posix()
-                    attempt_geometry_input_name = refine_input_name
-                    attempt_prompt = build_advisory_grooming_identity_refine_prompt(
+                    prefix = f"local_video_api/{job_id}/qwen_pose_{index:02d}_attempt_{attempt:02d}"
+                    attempt_prompt = build_qwen_prompt(
+                        "",
                         pose,
-                        source_attempt=refine_source_attempt,
+                        transparent_gif=True,
+                        quality_retry=profile["quality_retry"],
+                        pose_reference_available=bool(
+                            pose_reference_input_name is not None
+                            and not dog_photoreal_single_image_action_transfer_active
+                        ),
                         profile_fur_lock=profile_fur_lock,
+                        pose_identity_input_policy=(effective_pose_identity_input_policy),
+                        species=species,
                     )
                     if pose_identity_palette_prompt_signature is not None:
                         attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
                             pose_identity_palette_prompt_signature,
-                            retry=True,
-                            previous_quality=(
-                                previous_pose_identity_palette_quality
+                            retry=attempt > 1,
+                            previous_quality=previous_pose_identity_palette_quality,
+                        )
+                    main_case_geometry_first = (
+                        effective_pose_identity_input_policy
+                        == POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST
+                    )
+                    grooming_geometry_canonical = (
+                        effective_pose_identity_input_policy
+                        == POSE_IDENTITY_INPUT_POLICY_GROOMING_GEOMETRY_CANONICAL
+                    )
+                    advisory_grooming_identity_refine_active = bool(
+                        advisory_grooming_action_transfer_active
+                        and isinstance(
+                            grooming_advisory_identity_refine_source,
+                            dict,
+                        )
+                        and attempt
+                        > int(grooming_advisory_identity_refine_source["attempt"])
+                    )
+                    legacy_grooming_foreleg_repair_active = bool(
+                        grooming_geometry_canonical
+                        and attempt == GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
+                        and isinstance(grooming_foreleg_repair_source, dict)
+                        and not advisory_grooming_identity_refine_active
+                    )
+                    canonical_grooming_completion_active = bool(
+                        canonical_grooming_completion_capable
+                        and not advisory_grooming_action_transfer_active
+                        and attempt == GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
+                        and isinstance(grooming_foreleg_repair_source, dict)
+                        and not advisory_grooming_identity_refine_active
+                    )
+                    canonical_grooming_full_pose_rescue_active = bool(
+                        canonical_grooming_completion_capable
+                        and not advisory_grooming_action_transfer_active
+                        and attempt == GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
+                        and not advisory_grooming_identity_refine_active
+                    )
+                    canonical_grooming_full_pose_refine_active = bool(
+                        canonical_grooming_completion_capable
+                        and not advisory_grooming_action_transfer_active
+                        and attempt == GROOMING_CANONICAL_FULL_POSE_REFINE_ATTEMPT
+                        and not advisory_grooming_identity_refine_active
+                    )
+                    canonical_grooming_full_pose_recovery_active = bool(
+                        canonical_grooming_full_pose_rescue_active
+                        or canonical_grooming_full_pose_refine_active
+                    )
+                    canonical_eating_identity_refine_active = bool(
+                        canonical_action_reference
+                        and action_key(pose) == "eating"
+                        and attempt >= EATING_CANONICAL_IDENTITY_REFINE_ATTEMPT
+                        and isinstance(eating_identity_refine_source, dict)
+                    )
+                    prior_strict_eating_candidate_exists = bool(
+                        action_key(pose) == "eating"
+                        and any(
+                            not strict_first_frame_record_issues(
+                                item,
+                                action="eating",
+                            )
+                            for item in attempts
+                            if isinstance(item, dict)
+                        )
+                    )
+                    canonical_eating_contact_repair_active = bool(
+                        canonical_action_reference
+                        and action_key(pose) == "eating"
+                        and attempt >= EATING_CONTACT_REPAIR_ATTEMPT
+                        and isinstance(eating_contact_repair_source, dict)
+                        and not canonical_eating_identity_refine_active
+                        and not prior_strict_eating_candidate_exists
+                    )
+                    grooming_foreleg_repair_active = bool(
+                        legacy_grooming_foreleg_repair_active
+                        or canonical_grooming_completion_active
+                    )
+                    attempt_primary_input_name = pose_qwen_input_name
+                    attempt_secondary_input_name = pose_qwen_secondary_input_name
+                    attempt_tertiary_input_name: str | None = None
+                    attempt_additional_reference_input_names: list[str] | None = None
+                    attempt_noise_mask_input_name: str | None = None
+                    attempt_geometry_input_name = pose_geometry_input_name
+                    grooming_foreleg_repair_audit: dict[str, Any] | None = None
+                    grooming_full_pose_recovery_audit: dict[str, Any] | None = None
+                    grooming_advisory_identity_refine_audit: (
+                        dict[str, Any] | None
+                    ) = None
+                    grooming_advisory_identity_refine_noise_mask_path: Path | None = None
+                    eating_identity_refine_audit: dict[str, Any] | None = None
+                    eating_contact_repair_audit: dict[str, Any] | None = None
+                    eating_contact_repair_canvas_path: Path | None = None
+                    eating_contact_repair_noise_mask_path: Path | None = None
+                    pose_transfer_seed_path: Path | None = None
+                    grooming_advisory_action_transfer_attempt: (
+                        dict[str, Any] | None
+                    ) = None
+                    dog_eating_prompt_only_action_transfer_attempt: (
+                        dict[str, Any] | None
+                    ) = None
+                    dog_drinking_prompt_only_action_transfer_attempt: (
+                        dict[str, Any] | None
+                    ) = None
+                    dog_toileting_prompt_only_action_transfer_attempt: (
+                        dict[str, Any] | None
+                    ) = None
+                    dog_photoreal_single_image_action_transfer_attempt: (
+                        dict[str, Any] | None
+                    ) = None
+                    if dog_prompt_only_action_transfer_active:
+                        attempt_primary_input_name = qwen_input_name
+                        attempt_secondary_input_name = None
+                        attempt_tertiary_input_name = None
+                        attempt_additional_reference_input_names = None
+                        attempt_noise_mask_input_name = None
+                        attempt_geometry_input_name = None
+                        dog_photoreal_single_image_action_transfer_attempt = {
+                            "policy": DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_POLICY,
+                            "action": action_key(pose),
+                            "image1_role": (
+                                "approved_photoreal_canonical_identity_and_material_"
+                                "sampler"
+                            ),
+                            "image2_role": None,
+                            "image3_role": None,
+                            "prompt_only_action_geometry": True,
+                            "white_model_loaded_by_qwen": False,
+                            "secondary_reference_loaded_by_qwen": False,
+                            "foreign_pose_image_loaded_by_qwen": False,
+                            "uploaded_identity_views_consumed_via_canonical_only": True,
+                            "full_canvas_action_redraw": True,
+                            "action_geometry_deferred_to_scail": False,
+                            "pose_guide_reserved_for_scail": True,
+                            "sampler_noise_mask_input_name": None,
+                            "post_qwen_pixel_composite_enabled": False,
+                        }
+                        if dog_eating_prompt_only_action_transfer_active:
+                            dog_eating_prompt_only_action_transfer_attempt = (
+                                dog_photoreal_single_image_action_transfer_attempt
+                            )
+                        elif dog_drinking_prompt_only_action_transfer_active:
+                            dog_drinking_prompt_only_action_transfer_attempt = (
+                                dog_photoreal_single_image_action_transfer_attempt
+                            )
+                        elif dog_toileting_prompt_only_action_transfer_active:
+                            dog_toileting_prompt_only_action_transfer_attempt = (
+                                dog_photoreal_single_image_action_transfer_attempt
+                            )
+                    if advisory_grooming_action_transfer_active:
+                        attempt_primary_input_name = qwen_input_name
+                        if pose_reference_input_name is None:
+                            raise RuntimeError(
+                                "Grooming action transfer lost its appearance-free "
+                                "geometry guide."
+                            )
+                        attempt_secondary_input_name = pose_reference_input_name
+                        attempt_tertiary_input_name = None
+                        attempt_additional_reference_input_names = None
+                        # Keep the digest-bound canonical as Image 1/start latent and
+                        # expose only the single-tone, appearance-free action guide as
+                        # Image 2. Full-canvas redraw lets Qwen handle canonical inputs
+                        # that are lying or otherwise far from the seated driver pose.
+                        attempt_noise_mask_input_name = None
+                        attempt_geometry_input_name = pose_reference_input_name
+                        attempt_prompt = build_advisory_grooming_action_transfer_prompt(
+                            pose,
+                            profile_fur_lock=profile_fur_lock,
+                            anatomy_priority_retry=(
+                                attempt
+                                >= GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT
                             ),
                         )
-                    grooming_advisory_identity_refine_audit = {
-                        "policy": GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,
-                        "source_attempt": refine_source_attempt,
-                        "source_path": refine_canvas_audit[
-                            "sanitized_source_path"
-                        ],
-                        "source_sha256": refine_canvas_audit[
-                            "sanitized_source_sha256"
-                        ],
-                        "original_source_path": str(refine_source_path),
-                        "original_source_sha256": expected_refine_source_sha256,
-                        "refine_canvas": refine_canvas_audit,
-                        "image1_role": (
-                            "accepted_grooming_pose_sampler_no_identity_authority"
-                        ),
-                        "image2_role": (
-                            "approved_canonical_sole_whole_pet_identity_authority"
-                        ),
-                        "image3_role": (
-                            "same_canonical_enlarged_face_identity_authority"
-                        ),
-                        "white_maquette_loaded": False,
-                        "action_geometry_source": "accepted_pose_draft_only",
-                        "sampler_noise_mask": {
-                            "input_name": attempt_noise_mask_input_name,
-                            "path": str(
-                                grooming_advisory_identity_refine_noise_mask_path
+                        grooming_advisory_action_transfer_attempt = {
+                            "policy": GROOMING_ADVISORY_FIRST_FRAME_INPUT_POLICY,
+                            "image1_role": "approved_canonical_identity_sampler",
+                            "image2_role": (
+                                "appearance_free_single_tone_action_geometry"
                             ),
-                            "sha256": refine_canvas_audit[
+                            "image3_role": None,
+                            "uploaded_identity_views_consumed_via_canonical_only": True,
+                            "prompt_only_action_geometry": False,
+                            "video_first_frame_loaded_by_qwen": False,
+                            "white_maquette_loaded_by_qwen": False,
+                            "foreign_pose_image_loaded_by_qwen": False,
+                            "raw_action_rgb_loaded_by_qwen": False,
+                            "source_low_frequency_luma_loaded_by_qwen": False,
+                            "normalized_low_frequency_geometry_loaded_by_qwen": True,
+                            "public_open_channel_loaded_by_qwen": True,
+                            "soft_foreleg_depth_loaded_by_qwen": False,
+                            "white_maquette_frame_index": None,
+                            "white_maquette_head_identity_removed": False,
+                            "white_maquette_head_silhouette_removed": False,
+                            "canonical_local_action_edit_mask": (
+                                None
+                            ),
+                            "canonical_local_action_edit_mask_applied": False,
+                            "full_canvas_action_redraw": True,
+                            "anatomy_priority_retry": bool(
+                                attempt
+                                >= GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT
+                            ),
+                            "guide_alignment_is_advisory": bool(
+                                attempt
+                                >= GROOMING_ADVISORY_ANATOMY_FREEDOM_ATTEMPT
+                            ),
+                            "terminal_completion_blocked_by_topology": False,
+                            "full_canvas_redraw_reason": (
+                                "local_latent_lock_retained_original_planted_paw_"
+                                "topology"
+                            ),
+                            "sampler_noise_mask_input_name": (
+                                attempt_noise_mask_input_name
+                            ),
+                            "post_qwen_pixel_composite_enabled": False,
+                            "raw_qwen_output_required": True,
+                            "raw_qwen_selection_byte_preserving": True,
+                            "canonical_face_identity_reference": None,
+                            "action_canvas": None,
+                        }
+                    if advisory_grooming_identity_refine_active:
+                        grooming_advisory_action_transfer_attempt = None
+                        assert isinstance(
+                            grooming_advisory_identity_refine_source,
+                            dict,
+                        )
+                        if advisory_grooming_face_identity_input_name is None:
+                            raise RuntimeError(
+                                "Grooming identity restoration lost its canonical face."
+                            )
+                        refine_source_attempt = int(
+                            grooming_advisory_identity_refine_source["attempt"]
+                        )
+                        refine_source_path = Path(
+                            str(
+                                grooming_advisory_identity_refine_source[
+                                    "cutout_path"
+                                ]
+                            )
+                        )
+                        expected_refine_source_sha256 = str(
+                            grooming_advisory_identity_refine_source[
+                                "cutout_sha256"
+                            ]
+                        )
+                        if (
+                            not refine_source_path.is_file()
+                            or file_sha256(refine_source_path)
+                            != expected_refine_source_sha256
+                        ):
+                            raise RuntimeError(
+                                "Accepted grooming action draft disappeared or changed "
+                                "before identity restoration."
+                            )
+                        refine_input_path = (
+                            comfy_input_dir
+                            / (
+                                "grooming_advisory_identity_refine_source_"
+                                f"attempt_{refine_source_attempt:02d}.png"
+                            )
+                        )
+                        grooming_advisory_identity_refine_noise_mask_path = (
+                            comfy_input_dir
+                            / (
+                                "grooming_advisory_identity_refine_face_noise_mask_"
+                                f"attempt_{refine_source_attempt:02d}.png"
+                            )
+                        )
+                        refine_canvas_audit = (
+                            prepare_advisory_grooming_identity_refine_canvas(
+                                refine_source_path,
+                                refine_input_path,
+                                grooming_advisory_identity_refine_noise_mask_path,
+                                identity_reference_palette=(
+                                    advisory_grooming_identity_palette_reference
+                                ),
+                            )
+                        )
+                        refine_input_name = (
+                            comfy_relative_dir / refine_input_path.name
+                        ).as_posix()
+                        attempt_primary_input_name = refine_input_name
+                        attempt_secondary_input_name = qwen_input_name
+                        attempt_tertiary_input_name = (
+                            advisory_grooming_face_identity_input_name
+                        )
+                        attempt_additional_reference_input_names = [
+                            attempt_secondary_input_name,
+                            attempt_tertiary_input_name,
+                        ]
+                        attempt_noise_mask_input_name = (
+                            comfy_relative_dir
+                            / grooming_advisory_identity_refine_noise_mask_path.name
+                        ).as_posix()
+                        attempt_geometry_input_name = refine_input_name
+                        attempt_prompt = build_advisory_grooming_identity_refine_prompt(
+                            pose,
+                            source_attempt=refine_source_attempt,
+                            profile_fur_lock=profile_fur_lock,
+                        )
+                        if pose_identity_palette_prompt_signature is not None:
+                            attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
+                                pose_identity_palette_prompt_signature,
+                                retry=True,
+                                previous_quality=(
+                                    previous_pose_identity_palette_quality
+                                ),
+                            )
+                        grooming_advisory_identity_refine_audit = {
+                            "policy": GROOMING_ADVISORY_IDENTITY_REFINE_POLICY,
+                            "source_attempt": refine_source_attempt,
+                            "source_path": refine_canvas_audit[
+                                "sanitized_source_path"
+                            ],
+                            "source_sha256": refine_canvas_audit[
+                                "sanitized_source_sha256"
+                            ],
+                            "original_source_path": str(refine_source_path),
+                            "original_source_sha256": expected_refine_source_sha256,
+                            "refine_canvas": refine_canvas_audit,
+                            "image1_role": (
+                                "accepted_grooming_pose_sampler_no_identity_authority"
+                            ),
+                            "image2_role": (
+                                "approved_canonical_sole_whole_pet_identity_authority"
+                            ),
+                            "image3_role": (
+                                "same_canonical_enlarged_face_identity_authority"
+                            ),
+                            "white_maquette_loaded": False,
+                            "action_geometry_source": "accepted_pose_draft_only",
+                            "sampler_noise_mask": {
+                                "input_name": attempt_noise_mask_input_name,
+                                "path": str(
+                                    grooming_advisory_identity_refine_noise_mask_path
+                                ),
+                                "sha256": refine_canvas_audit[
+                                    "noise_mask_target_sha256"
+                                ],
+                                "policy": refine_canvas_audit["noise_mask_policy"],
+                            },
+                            "full_frame_sampling": False,
+                            "body_and_raised_paw_pixel_lock_required": True,
+                        }
+                        update_job(
+                            job_id,
+                            grooming_advisory_identity_refine_status="running",
+                            grooming_advisory_identity_refine_policy=(
+                                GROOMING_ADVISORY_IDENTITY_REFINE_POLICY
+                            ),
+                            grooming_advisory_identity_refine_source_attempt=(
+                                refine_source_attempt
+                            ),
+                            grooming_advisory_identity_refine_attempt=attempt,
+                            grooming_advisory_identity_refine_white_maquette_loaded=(
+                                False
+                            ),
+                        )
+                    if grooming_foreleg_repair_active:
+                        assert isinstance(grooming_foreleg_repair_source, dict)
+                        repair_source_palette_quality = grooming_foreleg_repair_source.get(
+                            "identity_palette_quality"
+                        )
+                        if (
+                            not isinstance(repair_source_palette_quality, dict)
+                            or repair_source_palette_quality.get("available") is not True
+                            or repair_source_palette_quality.get("acceptable") is not True
+                        ):
+                            raise RuntimeError(
+                                "Grooming foreleg repair source lost its required "
+                                "identity-palette-safe verdict."
+                            )
+                        repair_source_path = Path(
+                            str(grooming_foreleg_repair_source["cutout_path"])
+                        )
+                        if not repair_source_path.is_file():
+                            raise RuntimeError(
+                                "Grooming foreleg repair source disappeared before retry."
+                            )
+                        expected_repair_source_sha256 = str(
+                            grooming_foreleg_repair_source["cutout_sha256"]
+                        )
+                        if file_sha256(repair_source_path) != expected_repair_source_sha256:
+                            raise RuntimeError(
+                                "Grooming foreleg repair source digest changed."
+                            )
+                        if (
+                            grooming_pose_gate_guide_path is None
+                            or not grooming_pose_gate_guide_path.is_file()
+                        ):
+                            raise RuntimeError(
+                                "Grooming foreleg repair anatomy guide is unavailable."
+                            )
+                        repair_input_path = (
+                            comfy_input_dir / "grooming_foreleg_repair_source.png"
+                        )
+                        if canonical_grooming_completion_active:
+                            if (
+                                grooming_completion_mask_path is None
+                                or not grooming_completion_mask_path.is_file()
+                            ):
+                                raise RuntimeError(
+                                    "Canonical grooming completion mask is unavailable."
+                                )
+                            repair_canvas_audit = (
+                                prepare_canonical_grooming_foreleg_completion_canvas(
+                                    repair_source_path,
+                                    grooming_completion_mask_path,
+                                    cartoon_transparent,
+                                    repair_input_path,
+                                )
+                            )
+                        else:
+                            repair_canvas_audit = prepare_grooming_foreleg_repair_canvas(
+                                repair_source_path,
+                                qwen_grooming_guide_path,
+                                cartoon_transparent,
+                                repair_input_path,
+                            )
+                        repair_input_sha256 = file_sha256(repair_input_path)
+                        repair_noise_mask_path = Path(
+                            str(repair_canvas_audit["noise_mask_target_path"])
+                        )
+                        if not repair_noise_mask_path.is_file():
+                            raise RuntimeError(
+                                "Grooming foreleg repair noise mask is unavailable."
+                            )
+                        repair_anatomy_path = (
+                            comfy_input_dir / "grooming_foreleg_repair_anatomy_guide.png"
+                        )
+                        if (
+                            canonical_grooming_completion_active
+                            and advisory_grooming_action_canvas_path is not None
+                            and advisory_grooming_action_canvas_path.is_file()
+                            and isinstance(
+                                advisory_grooming_action_canvas_audit,
+                                dict,
+                            )
+                        ):
+                            shutil.copy2(
+                                advisory_grooming_action_canvas_path,
+                                repair_anatomy_path,
+                            )
+                            repair_anatomy_audit = {
+                                "policy": GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY,
+                                "source_path": str(
+                                    advisory_grooming_action_canvas_path
+                                ),
+                                "source_sha256": file_sha256(
+                                    advisory_grooming_action_canvas_path
+                                ),
+                                "target_path": str(repair_anatomy_path),
+                                "target_sha256": file_sha256(repair_anatomy_path),
+                                "role": "image3_soft_foreleg_depth_anatomy_only",
+                                "public_open_channel_exposed": False,
+                                "soft_foreleg_depth_exposed": True,
+                                "source_rgb_or_luma_exposed": False,
+                            }
+                        else:
+                            repair_anatomy_audit = (
+                                prepare_grooming_foreleg_repair_anatomy_guide(
+                                    (
+                                        qwen_grooming_guide_path
+                                        if canonical_grooming_completion_active
+                                        else grooming_pose_gate_guide_path
+                                    ),
+                                    repair_anatomy_path,
+                                )
+                            )
+                        attempt_primary_input_name = (
+                            comfy_relative_dir / repair_input_path.name
+                        ).as_posix()
+                        attempt_tertiary_input_name = (
+                            comfy_relative_dir / repair_anatomy_path.name
+                        ).as_posix()
+                        attempt_noise_mask_input_name = (
+                            comfy_relative_dir / repair_noise_mask_path.name
+                        ).as_posix()
+                        if canonical_grooming_completion_active:
+                            attempt_secondary_input_name = qwen_input_name
+                        if not attempt_secondary_input_name:
+                            raise RuntimeError(
+                                "Grooming foreleg repair canonical Image 2 is unavailable."
+                            )
+                        attempt_additional_reference_input_names = [
+                            attempt_secondary_input_name,
+                            attempt_tertiary_input_name,
+                        ]
+                        active_repair_policy = (
+                            GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
+                            if canonical_grooming_completion_active
+                            else GROOMING_QWEN_FORELEG_REPAIR_POLICY
+                        )
+                        active_repair_style_policy = (
+                            "disabled_for_canonical_masked_completion"
+                            if canonical_grooming_completion_active
+                            else GROOMING_QWEN_FORELEG_REPAIR_STYLE_POLICY
+                        )
+                        active_repair_style_lora = (
+                            None
+                            if canonical_grooming_completion_active
+                            else QWEN_STYLE_LORA
+                        )
+                        active_repair_style_strength = (
+                            0.0
+                            if canonical_grooming_completion_active
+                            else GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH
+                        )
+                        active_composite_gate_policy = (
+                            None
+                            if canonical_grooming_completion_active
+                            else GROOMING_QWEN_FORELEG_REPAIR_COMPOSITE_GATE_POLICY
+                        )
+                        attempt_prompt = (
+                            build_canonical_grooming_foreleg_completion_prompt(
+                                pose,
+                                source_attempt=int(
+                                    grooming_foreleg_repair_source["attempt"]
+                                ),
+                                profile_fur_lock=profile_fur_lock,
+                                soft_depth_anatomy=bool(
+                                    repair_anatomy_audit.get(
+                                        "soft_foreleg_depth_exposed"
+                                    )
+                                ),
+                            )
+                            if canonical_grooming_completion_active
+                            else build_grooming_foreleg_repair_prompt(
+                                pose,
+                                source_attempt=int(
+                                    grooming_foreleg_repair_source["attempt"]
+                                ),
+                                profile_fur_lock=profile_fur_lock,
+                            )
+                        )
+                        if pose_identity_palette_prompt_signature is not None:
+                            attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
+                                pose_identity_palette_prompt_signature,
+                                retry=True,
+                                previous_quality=(
+                                    previous_pose_identity_palette_quality
+                                ),
+                            )
+                        grooming_foreleg_repair_audit = {
+                            "policy": active_repair_policy,
+                            "production_canonical_masked_completion": (
+                                canonical_grooming_completion_active
+                            ),
+                            "source_attempt": int(
+                                grooming_foreleg_repair_source["attempt"]
+                            ),
+                            "source_path": str(repair_source_path),
+                            "source_sha256": expected_repair_source_sha256,
+                            "source_gate_issues": list(
+                                grooming_foreleg_repair_source["gate_issues"]
+                            ),
+                            "source_fur_surface_issues": list(
+                                grooming_foreleg_repair_source["fur_surface_issues"]
+                            ),
+                            "source_identity_palette_available": True,
+                            "source_identity_palette_acceptable": True,
+                            "source_identity_palette_issues": list(
+                                repair_source_palette_quality.get("issues", [])
+                            ),
+                            "source_identity_palette_penalty": float(
+                                repair_source_palette_quality.get("penalty", 0.0)
+                            ),
+                            "comfy_input_path": str(repair_input_path),
+                            "comfy_input_sha256": repair_input_sha256,
+                            "foreleg_seed": (
+                                None
+                                if canonical_grooming_completion_active
+                                else repair_canvas_audit
+                            ),
+                            "completion_canvas": (
+                                repair_canvas_audit
+                                if canonical_grooming_completion_active
+                                else None
+                            ),
+                            "anatomy_guide": repair_anatomy_audit,
+                            "image1_role": (
+                                "identity_safe_candidate_unchanged_masked_sampler"
+                                if canonical_grooming_completion_active
+                                else "band_limited_canonical_foreleg_seeded_candidate_sampler"
+                            ),
+                            "image2_role": (
+                                "approved_canonical_identity_appearance_authority"
+                            ),
+                            "image3_role": (
+                                "soft_foreleg_depth_grooming_geometry_only"
+                                if canonical_grooming_completion_active
+                                else "single_tone_open_channel_grooming_geometry_only"
+                            ),
+                            "synthetic_capsule_geometry_exposed_on_repair_attempt": (False),
+                            "open_channel_geometry_exposed_on_repair_attempt": (
+                                not canonical_grooming_completion_active
+                            ),
+                            "soft_foreleg_depth_exposed_on_repair_attempt": (
+                                canonical_grooming_completion_active
+                            ),
+                            "private_cv_luma_exposed_on_repair_attempt": False,
+                            "sampler_noise_mask_role": (
+                                "expanded_context_full_denoise_muzzle_shoulder_chest_foreleg"
+                            ),
+                            "sampler_noise_mask_input_name": (
+                                attempt_noise_mask_input_name
+                            ),
+                            "sampler_noise_mask_sha256": repair_canvas_audit[
                                 "noise_mask_target_sha256"
                             ],
-                            "policy": refine_canvas_audit["noise_mask_policy"],
-                        },
-                        "full_frame_sampling": False,
-                        "body_and_raised_paw_pixel_lock_required": True,
-                    }
-                    update_job(
-                        job_id,
-                        grooming_advisory_identity_refine_status="running",
-                        grooming_advisory_identity_refine_policy=(
-                            GROOMING_ADVISORY_IDENTITY_REFINE_POLICY
-                        ),
-                        grooming_advisory_identity_refine_source_attempt=(
-                            refine_source_attempt
-                        ),
-                        grooming_advisory_identity_refine_attempt=attempt,
-                        grooming_advisory_identity_refine_white_maquette_loaded=(
-                            False
-                        ),
-                    )
-                if grooming_foreleg_repair_active:
-                    assert isinstance(grooming_foreleg_repair_source, dict)
-                    repair_source_palette_quality = grooming_foreleg_repair_source.get(
-                        "identity_palette_quality"
-                    )
-                    if (
-                        not isinstance(repair_source_palette_quality, dict)
-                        or repair_source_palette_quality.get("available") is not True
-                        or repair_source_palette_quality.get("acceptable") is not True
-                    ):
-                        raise RuntimeError(
-                            "Grooming foreleg repair source lost its required "
-                            "identity-palette-safe verdict."
+                            "localized_style_policy": (active_repair_style_policy),
+                            "localized_style_lora": active_repair_style_lora,
+                            "localized_style_strength": (active_repair_style_strength),
+                            "localized_style_scope": (
+                                "none; canonical Image 2 is the only style authority"
+                                if canonical_grooming_completion_active
+                                else (
+                                    "sampler_noise_mask_only; image2_remains_identity_"
+                                    "palette_marking_and_coat_length_authority"
+                                )
+                            ),
+                            "composite_gate_policy": active_composite_gate_policy,
+                            "composite_recovery_enabled": (
+                                not canonical_grooming_completion_active
+                            ),
+                            "composite_edge_density_ratio_min": (
+                                None
+                                if canonical_grooming_completion_active
+                                else GROOMING_QWEN_FORELEG_REPAIR_EDGE_DENSITY_RATIO_MIN
+                            ),
+                            "composite_planted_paw_gradient_p90_max": (
+                                None
+                                if canonical_grooming_completion_active
+                                else GROOMING_QWEN_FORELEG_REPAIR_PLANTED_PAW_GRADIENT_P90_MAX
+                            ),
+                            "composite_raised_paw_gradient_p90_max": (
+                                None
+                                if canonical_grooming_completion_active
+                                else GROOMING_QWEN_FORELEG_REPAIR_RAISED_PAW_GRADIENT_P90_MAX
+                            ),
+                            "canonical_completion_edge_evidence_policy": (
+                                GROOMING_CANONICAL_COMPLETION_EDGE_EVIDENCE_POLICY
+                                if canonical_grooming_completion_active
+                                else None
+                            ),
+                            "canonical_completion_edge_density_ratio_min": (
+                                GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN
+                                if canonical_grooming_completion_active
+                                else None
+                            ),
+                            "canonical_completion_independent_fur_surface_required": (
+                                canonical_grooming_completion_active
+                            ),
+                            "global_pose_threshold_changed": False,
+                            "main_case_rgb_appearance_exposed_on_repair_attempt": False,
+                        }
+                        update_job(
+                            job_id,
+                            grooming_foreleg_repair_active=True,
+                            grooming_foreleg_repair_policy=(active_repair_policy),
+                            grooming_foreleg_repair_source_attempt=(
+                                grooming_foreleg_repair_audit["source_attempt"]
+                            ),
+                            grooming_foreleg_repair_source_sha256=(
+                                expected_repair_source_sha256
+                            ),
+                            grooming_foreleg_repair_input_sha256=(repair_input_sha256),
+                            grooming_foreleg_repair_edit_mask_sha256=(
+                                repair_canvas_audit["edit_mask_sha256"]
+                            ),
+                            grooming_foreleg_repair_anatomy_sha256=(
+                                repair_anatomy_audit["target_sha256"]
+                            ),
+                            grooming_foreleg_repair_noise_mask_sha256=(
+                                repair_canvas_audit["noise_mask_target_sha256"]
+                            ),
+                            grooming_foreleg_repair_style_policy=(
+                                active_repair_style_policy
+                            ),
+                            grooming_foreleg_repair_style_lora=(active_repair_style_lora),
+                            grooming_foreleg_repair_style_strength=(
+                                active_repair_style_strength
+                            ),
+                            grooming_foreleg_repair_style_scope=(
+                                "none"
+                                if canonical_grooming_completion_active
+                                else "sampler_noise_mask_only"
+                            ),
+                            grooming_foreleg_repair_composite_gate_policy=(
+                                active_composite_gate_policy
+                            ),
+                            grooming_foreleg_repair_composite_recovery_enabled=(
+                                not canonical_grooming_completion_active
+                            ),
+                            grooming_foreleg_repair_composite_edge_density_ratio_min=(
+                                None
+                                if canonical_grooming_completion_active
+                                else GROOMING_QWEN_FORELEG_REPAIR_EDGE_DENSITY_RATIO_MIN
+                            ),
+                            grooming_foreleg_repair_composite_planted_paw_gradient_p90_max=(
+                                None
+                                if canonical_grooming_completion_active
+                                else GROOMING_QWEN_FORELEG_REPAIR_PLANTED_PAW_GRADIENT_P90_MAX
+                            ),
+                            grooming_foreleg_repair_composite_raised_paw_gradient_p90_max=(
+                                None
+                                if canonical_grooming_completion_active
+                                else GROOMING_QWEN_FORELEG_REPAIR_RAISED_PAW_GRADIENT_P90_MAX
+                            ),
+                            grooming_canonical_completion_edge_evidence_policy=(
+                                GROOMING_CANONICAL_COMPLETION_EDGE_EVIDENCE_POLICY
+                                if canonical_grooming_completion_active
+                                else None
+                            ),
+                            grooming_canonical_completion_edge_density_ratio_min=(
+                                GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN
+                                if canonical_grooming_completion_active
+                                else None
+                            ),
+                            grooming_canonical_completion_independent_fur_surface_required=(
+                                canonical_grooming_completion_active
+                            ),
+                            grooming_foreleg_repair_global_edge_density_min=(
+                                GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN
+                            ),
+                            grooming_foreleg_repair_global_pose_threshold_changed=False,
                         )
-                    repair_source_path = Path(
-                        str(grooming_foreleg_repair_source["cutout_path"])
-                    )
-                    if not repair_source_path.is_file():
-                        raise RuntimeError(
-                            "Grooming foreleg repair source disappeared before retry."
+                    if canonical_grooming_full_pose_recovery_active:
+                        if (
+                            grooming_pose_gate_guide_path is None
+                            or not grooming_pose_gate_guide_path.is_file()
+                        ):
+                            raise RuntimeError(
+                                "Canonical grooming pose-transfer validation guide is "
+                                "unavailable."
+                            )
+                        canonical_recovery_reference_path = COMFY_INPUT / qwen_input_name
+                        if not canonical_recovery_reference_path.is_file():
+                            raise RuntimeError(
+                                "Canonical grooming pose-transfer identity reference "
+                                "is unavailable."
+                            )
+                        action_reference_text = (
+                            str(pose_action_config.get("reference") or "").strip()
+                            if isinstance(pose_action_config, dict)
+                            else ""
                         )
-                    expected_repair_source_sha256 = str(
-                        grooming_foreleg_repair_source["cutout_sha256"]
-                    )
-                    if file_sha256(repair_source_path) != expected_repair_source_sha256:
-                        raise RuntimeError(
-                            "Grooming foreleg repair source digest changed."
+                        expected_action_reference_sha256 = (
+                            str(pose_action_config.get("reference_sha256") or "").strip()
+                            if isinstance(pose_action_config, dict)
+                            else ""
                         )
-                    if (
-                        grooming_pose_gate_guide_path is None
-                        or not grooming_pose_gate_guide_path.is_file()
-                    ):
-                        raise RuntimeError(
-                            "Grooming foreleg repair anatomy guide is unavailable."
+                        action_reference_path = (
+                            Path(action_reference_text)
+                            if action_reference_text
+                            else Path()
                         )
-                    repair_input_path = (
-                        comfy_input_dir / "grooming_foreleg_repair_source.png"
-                    )
-                    if canonical_grooming_completion_active:
+                        if (
+                            not action_reference_text
+                            or not expected_action_reference_sha256
+                            or not action_reference_path.is_file()
+                            or file_sha256(action_reference_path)
+                            != expected_action_reference_sha256
+                        ):
+                            raise RuntimeError(
+                                "Canonical grooming pose-transfer action reference is "
+                                "missing or its digest changed."
+                            )
+                        pose_transfer_seed_path = (
+                            comfy_input_dir / "grooming_canonical_pose_transfer_seed.png"
+                        )
                         if (
                             grooming_completion_mask_path is None
                             or not grooming_completion_mask_path.is_file()
                         ):
                             raise RuntimeError(
-                                "Canonical grooming completion mask is unavailable."
+                                "Canonical grooming pose-transfer foreleg geometry "
+                                "is unavailable."
                             )
-                        repair_canvas_audit = (
-                            prepare_canonical_grooming_foreleg_completion_canvas(
-                                repair_source_path,
-                                grooming_completion_mask_path,
-                                cartoon_transparent,
-                                repair_input_path,
-                            )
-                        )
-                    else:
-                        repair_canvas_audit = prepare_grooming_foreleg_repair_canvas(
-                            repair_source_path,
-                            qwen_grooming_guide_path,
-                            cartoon_transparent,
-                            repair_input_path,
-                        )
-                    repair_input_sha256 = file_sha256(repair_input_path)
-                    repair_noise_mask_path = Path(
-                        str(repair_canvas_audit["noise_mask_target_path"])
-                    )
-                    if not repair_noise_mask_path.is_file():
-                        raise RuntimeError(
-                            "Grooming foreleg repair noise mask is unavailable."
-                        )
-                    repair_anatomy_path = (
-                        comfy_input_dir / "grooming_foreleg_repair_anatomy_guide.png"
-                    )
-                    if (
-                        canonical_grooming_completion_active
-                        and advisory_grooming_action_canvas_path is not None
-                        and advisory_grooming_action_canvas_path.is_file()
-                        and isinstance(
-                            advisory_grooming_action_canvas_audit,
-                            dict,
-                        )
-                    ):
-                        shutil.copy2(
-                            advisory_grooming_action_canvas_path,
-                            repair_anatomy_path,
-                        )
-                        repair_anatomy_audit = {
-                            "policy": GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY,
-                            "source_path": str(
-                                advisory_grooming_action_canvas_path
-                            ),
-                            "source_sha256": file_sha256(
-                                advisory_grooming_action_canvas_path
-                            ),
-                            "target_path": str(repair_anatomy_path),
-                            "target_sha256": file_sha256(repair_anatomy_path),
-                            "role": "image3_soft_foreleg_depth_anatomy_only",
-                            "public_open_channel_exposed": False,
-                            "soft_foreleg_depth_exposed": True,
-                            "source_rgb_or_luma_exposed": False,
-                        }
-                    else:
-                        repair_anatomy_audit = (
-                            prepare_grooming_foreleg_repair_anatomy_guide(
-                                (
-                                    qwen_grooming_guide_path
-                                    if canonical_grooming_completion_active
-                                    else grooming_pose_gate_guide_path
-                                ),
-                                repair_anatomy_path,
+                        pose_transfer_seed_audit = (
+                            prepare_canonical_grooming_pose_transfer_seed(
+                                action_reference_path,
+                                canonical_recovery_reference_path,
+                                pose_transfer_seed_path,
+                                geometry_guide=qwen_grooming_guide_path,
+                                foreleg_guide=grooming_completion_mask_path,
                             )
                         )
-                    attempt_primary_input_name = (
-                        comfy_relative_dir / repair_input_path.name
-                    ).as_posix()
-                    attempt_tertiary_input_name = (
-                        comfy_relative_dir / repair_anatomy_path.name
-                    ).as_posix()
-                    attempt_noise_mask_input_name = (
-                        comfy_relative_dir / repair_noise_mask_path.name
-                    ).as_posix()
-                    if canonical_grooming_completion_active:
+                        pose_transfer_seed_input_name = (
+                            comfy_relative_dir / pose_transfer_seed_path.name
+                        ).as_posix()
+                        attempt_primary_input_name = pose_transfer_seed_input_name
                         attempt_secondary_input_name = qwen_input_name
-                    if not attempt_secondary_input_name:
-                        raise RuntimeError(
-                            "Grooming foreleg repair canonical Image 2 is unavailable."
-                        )
-                    attempt_additional_reference_input_names = [
-                        attempt_secondary_input_name,
-                        attempt_tertiary_input_name,
-                    ]
-                    active_repair_policy = (
-                        GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
-                        if canonical_grooming_completion_active
-                        else GROOMING_QWEN_FORELEG_REPAIR_POLICY
-                    )
-                    active_repair_style_policy = (
-                        "disabled_for_canonical_masked_completion"
-                        if canonical_grooming_completion_active
-                        else GROOMING_QWEN_FORELEG_REPAIR_STYLE_POLICY
-                    )
-                    active_repair_style_lora = (
-                        None
-                        if canonical_grooming_completion_active
-                        else QWEN_STYLE_LORA
-                    )
-                    active_repair_style_strength = (
-                        0.0
-                        if canonical_grooming_completion_active
-                        else GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH
-                    )
-                    active_composite_gate_policy = (
-                        None
-                        if canonical_grooming_completion_active
-                        else GROOMING_QWEN_FORELEG_REPAIR_COMPOSITE_GATE_POLICY
-                    )
-                    attempt_prompt = (
-                        build_canonical_grooming_foreleg_completion_prompt(
+                        attempt_tertiary_input_name = None
+                        attempt_additional_reference_input_names = [
+                            attempt_secondary_input_name,
+                        ]
+                        attempt_noise_mask_input_name = None
+                        attempt_prompt = build_canonical_grooming_pose_transfer_prompt(
                             pose,
-                            source_attempt=int(
-                                grooming_foreleg_repair_source["attempt"]
-                            ),
-                            profile_fur_lock=profile_fur_lock,
-                            soft_depth_anatomy=bool(
-                                repair_anatomy_audit.get(
-                                    "soft_foreleg_depth_exposed"
-                                )
-                            ),
-                        )
-                        if canonical_grooming_completion_active
-                        else build_grooming_foreleg_repair_prompt(
-                            pose,
-                            source_attempt=int(
-                                grooming_foreleg_repair_source["attempt"]
-                            ),
                             profile_fur_lock=profile_fur_lock,
                         )
-                    )
-                    if pose_identity_palette_prompt_signature is not None:
-                        attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
-                            pose_identity_palette_prompt_signature,
-                            retry=True,
-                            previous_quality=(
-                                previous_pose_identity_palette_quality
+                        recovery_mode = "canonical_palette_action_pose_transfer"
+                        recovery_policy = GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY
+                        recovery_source: dict[str, Any] = {
+                            "action_reference_path": str(action_reference_path),
+                            "action_reference_sha256": (
+                                expected_action_reference_sha256
                             ),
+                            "pose_transfer_seed": pose_transfer_seed_audit,
+                        }
+                        recovery_fallback = bool(
+                            canonical_grooming_full_pose_refine_active
                         )
-                    grooming_foreleg_repair_audit = {
-                        "policy": active_repair_policy,
-                        "production_canonical_masked_completion": (
-                            canonical_grooming_completion_active
-                        ),
-                        "source_attempt": int(
-                            grooming_foreleg_repair_source["attempt"]
-                        ),
-                        "source_path": str(repair_source_path),
-                        "source_sha256": expected_repair_source_sha256,
-                        "source_gate_issues": list(
-                            grooming_foreleg_repair_source["gate_issues"]
-                        ),
-                        "source_fur_surface_issues": list(
-                            grooming_foreleg_repair_source["fur_surface_issues"]
-                        ),
-                        "source_identity_palette_available": True,
-                        "source_identity_palette_acceptable": True,
-                        "source_identity_palette_issues": list(
-                            repair_source_palette_quality.get("issues", [])
-                        ),
-                        "source_identity_palette_penalty": float(
-                            repair_source_palette_quality.get("penalty", 0.0)
-                        ),
-                        "comfy_input_path": str(repair_input_path),
-                        "comfy_input_sha256": repair_input_sha256,
-                        "foreleg_seed": (
-                            None
-                            if canonical_grooming_completion_active
-                            else repair_canvas_audit
-                        ),
-                        "completion_canvas": (
-                            repair_canvas_audit
-                            if canonical_grooming_completion_active
-                            else None
-                        ),
-                        "anatomy_guide": repair_anatomy_audit,
-                        "image1_role": (
-                            "identity_safe_candidate_unchanged_masked_sampler"
-                            if canonical_grooming_completion_active
-                            else "band_limited_canonical_foreleg_seeded_candidate_sampler"
-                        ),
-                        "image2_role": (
-                            "approved_canonical_identity_appearance_authority"
-                        ),
-                        "image3_role": (
-                            "soft_foreleg_depth_grooming_geometry_only"
-                            if canonical_grooming_completion_active
-                            else "single_tone_open_channel_grooming_geometry_only"
-                        ),
-                        "synthetic_capsule_geometry_exposed_on_repair_attempt": (False),
-                        "open_channel_geometry_exposed_on_repair_attempt": (
-                            not canonical_grooming_completion_active
-                        ),
-                        "soft_foreleg_depth_exposed_on_repair_attempt": (
-                            canonical_grooming_completion_active
-                        ),
-                        "private_cv_luma_exposed_on_repair_attempt": False,
-                        "sampler_noise_mask_role": (
-                            "expanded_context_full_denoise_muzzle_shoulder_chest_foreleg"
-                        ),
-                        "sampler_noise_mask_input_name": (
-                            attempt_noise_mask_input_name
-                        ),
-                        "sampler_noise_mask_sha256": repair_canvas_audit[
-                            "noise_mask_target_sha256"
-                        ],
-                        "localized_style_policy": (active_repair_style_policy),
-                        "localized_style_lora": active_repair_style_lora,
-                        "localized_style_strength": (active_repair_style_strength),
-                        "localized_style_scope": (
-                            "none; canonical Image 2 is the only style authority"
-                            if canonical_grooming_completion_active
-                            else (
-                                "sampler_noise_mask_only; image2_remains_identity_"
-                                "palette_marking_and_coat_length_authority"
+                        pose_safe_candidate_used_as_sampler = False
+                        recovery_source_sha256 = expected_action_reference_sha256
+                        if (
+                            canonical_grooming_full_pose_refine_active
+                            and isinstance(grooming_full_pose_refine_source, dict)
+                        ):
+                            refine_source_path = Path(
+                                str(grooming_full_pose_refine_source.get("cutout_path") or "")
                             )
-                        ),
-                        "composite_gate_policy": active_composite_gate_policy,
-                        "composite_recovery_enabled": (
-                            not canonical_grooming_completion_active
-                        ),
-                        "composite_edge_density_ratio_min": (
-                            None
-                            if canonical_grooming_completion_active
-                            else GROOMING_QWEN_FORELEG_REPAIR_EDGE_DENSITY_RATIO_MIN
-                        ),
-                        "composite_planted_paw_gradient_p90_max": (
-                            None
-                            if canonical_grooming_completion_active
-                            else GROOMING_QWEN_FORELEG_REPAIR_PLANTED_PAW_GRADIENT_P90_MAX
-                        ),
-                        "composite_raised_paw_gradient_p90_max": (
-                            None
-                            if canonical_grooming_completion_active
-                            else GROOMING_QWEN_FORELEG_REPAIR_RAISED_PAW_GRADIENT_P90_MAX
-                        ),
-                        "canonical_completion_edge_evidence_policy": (
-                            GROOMING_CANONICAL_COMPLETION_EDGE_EVIDENCE_POLICY
-                            if canonical_grooming_completion_active
-                            else None
-                        ),
-                        "canonical_completion_edge_density_ratio_min": (
-                            GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN
-                            if canonical_grooming_completion_active
-                            else None
-                        ),
-                        "canonical_completion_independent_fur_surface_required": (
-                            canonical_grooming_completion_active
-                        ),
-                        "global_pose_threshold_changed": False,
-                        "main_case_rgb_appearance_exposed_on_repair_attempt": False,
-                    }
-                    update_job(
-                        job_id,
-                        grooming_foreleg_repair_active=True,
-                        grooming_foreleg_repair_policy=(active_repair_policy),
-                        grooming_foreleg_repair_source_attempt=(
-                            grooming_foreleg_repair_audit["source_attempt"]
-                        ),
-                        grooming_foreleg_repair_source_sha256=(
-                            expected_repair_source_sha256
-                        ),
-                        grooming_foreleg_repair_input_sha256=(repair_input_sha256),
-                        grooming_foreleg_repair_edit_mask_sha256=(
-                            repair_canvas_audit["edit_mask_sha256"]
-                        ),
-                        grooming_foreleg_repair_anatomy_sha256=(
-                            repair_anatomy_audit["target_sha256"]
-                        ),
-                        grooming_foreleg_repair_noise_mask_sha256=(
-                            repair_canvas_audit["noise_mask_target_sha256"]
-                        ),
-                        grooming_foreleg_repair_style_policy=(
-                            active_repair_style_policy
-                        ),
-                        grooming_foreleg_repair_style_lora=(active_repair_style_lora),
-                        grooming_foreleg_repair_style_strength=(
-                            active_repair_style_strength
-                        ),
-                        grooming_foreleg_repair_style_scope=(
-                            "none"
-                            if canonical_grooming_completion_active
-                            else "sampler_noise_mask_only"
-                        ),
-                        grooming_foreleg_repair_composite_gate_policy=(
-                            active_composite_gate_policy
-                        ),
-                        grooming_foreleg_repair_composite_recovery_enabled=(
-                            not canonical_grooming_completion_active
-                        ),
-                        grooming_foreleg_repair_composite_edge_density_ratio_min=(
-                            None
-                            if canonical_grooming_completion_active
-                            else GROOMING_QWEN_FORELEG_REPAIR_EDGE_DENSITY_RATIO_MIN
-                        ),
-                        grooming_foreleg_repair_composite_planted_paw_gradient_p90_max=(
-                            None
-                            if canonical_grooming_completion_active
-                            else GROOMING_QWEN_FORELEG_REPAIR_PLANTED_PAW_GRADIENT_P90_MAX
-                        ),
-                        grooming_foreleg_repair_composite_raised_paw_gradient_p90_max=(
-                            None
-                            if canonical_grooming_completion_active
-                            else GROOMING_QWEN_FORELEG_REPAIR_RAISED_PAW_GRADIENT_P90_MAX
-                        ),
-                        grooming_canonical_completion_edge_evidence_policy=(
-                            GROOMING_CANONICAL_COMPLETION_EDGE_EVIDENCE_POLICY
-                            if canonical_grooming_completion_active
-                            else None
-                        ),
-                        grooming_canonical_completion_edge_density_ratio_min=(
-                            GROOMING_CANONICAL_COMPLETION_EDGE_DENSITY_RATIO_MIN
-                            if canonical_grooming_completion_active
-                            else None
-                        ),
-                        grooming_canonical_completion_independent_fur_surface_required=(
-                            canonical_grooming_completion_active
-                        ),
-                        grooming_foreleg_repair_global_edge_density_min=(
-                            GROOMING_QWEN_FORELEG_REPAIR_GLOBAL_EDGE_DENSITY_MIN
-                        ),
-                        grooming_foreleg_repair_global_pose_threshold_changed=False,
-                    )
-                if canonical_grooming_full_pose_recovery_active:
-                    if (
-                        grooming_pose_gate_guide_path is None
-                        or not grooming_pose_gate_guide_path.is_file()
-                    ):
-                        raise RuntimeError(
-                            "Canonical grooming pose-transfer validation guide is "
-                            "unavailable."
+                            expected_refine_source_sha256 = str(
+                                grooming_full_pose_refine_source.get("cutout_sha256") or ""
+                            )
+                            refine_eligibility = grooming_full_pose_refine_source.get(
+                                "eligibility"
+                            )
+                            expected_eligibility_sha256 = str(
+                                grooming_full_pose_refine_source.get("eligibility_sha256")
+                                or ""
+                            )
+                            source_matte = grooming_full_pose_refine_source.get(
+                                "seed_bound_matte"
+                            )
+                            if (
+                                int(grooming_full_pose_refine_source.get("attempt") or 0)
+                                != GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
+                                or not refine_source_path.is_file()
+                                or not expected_refine_source_sha256
+                                or file_sha256(refine_source_path)
+                                != expected_refine_source_sha256
+                                or not isinstance(refine_eligibility, dict)
+                                or refine_eligibility.get("policy")
+                                != GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY
+                                or refine_eligibility.get("eligible") is not True
+                                or not expected_eligibility_sha256
+                                or json_value_sha256(refine_eligibility)
+                                != expected_eligibility_sha256
+                                or not isinstance(source_matte, dict)
+                                or source_matte.get("policy")
+                                != GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY
+                                or source_matte.get("pose_transfer_seed_sha256")
+                                != pose_transfer_seed_audit["target_sha256"]
+                            ):
+                                raise RuntimeError(
+                                    "Canonical grooming pose-safe identity-refine source "
+                                    "lost its digest-bound gate provenance."
+                                )
+                            refine_canvas_path = (
+                                comfy_input_dir
+                                / "grooming_full_pose_identity_refine_source.png"
+                            )
+                            refine_canvas_audit = (
+                                prepare_canonical_grooming_full_pose_refine_canvas(
+                                    refine_source_path,
+                                    refine_canvas_path,
+                                )
+                            )
+                            attempt_primary_input_name = (
+                                comfy_relative_dir / refine_canvas_path.name
+                            ).as_posix()
+                            attempt_tertiary_input_name = pose_transfer_seed_input_name
+                            attempt_additional_reference_input_names = [
+                                attempt_secondary_input_name,
+                                attempt_tertiary_input_name,
+                            ]
+                            attempt_prompt = (
+                                build_canonical_grooming_full_pose_identity_refine_prompt(
+                                    pose,
+                                    source_attempt=int(
+                                        grooming_full_pose_refine_source["attempt"]
+                                    ),
+                                    profile_fur_lock=profile_fur_lock,
+                                )
+                            )
+                            recovery_mode = "pose_safe_identity_refine"
+                            recovery_policy = GROOMING_CANONICAL_FULL_POSE_REFINE_POLICY
+                            recovery_source = {
+                                **grooming_full_pose_refine_source,
+                                "refine_canvas": refine_canvas_audit,
+                                "pose_transfer_seed": pose_transfer_seed_audit,
+                            }
+                            recovery_fallback = False
+                            pose_safe_candidate_used_as_sampler = True
+                            recovery_source_sha256 = expected_refine_source_sha256
+                        if pose_identity_palette_prompt_signature is not None:
+                            attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
+                                pose_identity_palette_prompt_signature,
+                                retry=True,
+                                previous_quality=(
+                                    previous_pose_identity_palette_quality
+                                ),
+                            )
+                        grooming_full_pose_recovery_audit = {
+                            "policy": recovery_policy,
+                            "mode": recovery_mode,
+                            "attempt": attempt,
+                            "fallback_to_fresh_full_pose_rescue": recovery_fallback,
+                            "image1_role": (
+                                "seed_bound_pose_and_surface_approved_candidate_"
+                                "sampler_no_identity_authority"
+                                if pose_safe_candidate_used_as_sampler
+                                else "canonical_palette_soft_foreleg_depth_action_"
+                                "anatomy_sampler"
+                            ),
+                            "image2_role": (
+                                "approved_canonical_sole_identity_appearance_authority"
+                            ),
+                            "image3_role": (
+                                "digest_bound_soft_foreleg_depth_action_corroboration"
+                                if pose_safe_candidate_used_as_sampler
+                                else None
+                            ),
+                            "anatomy_seed": pose_transfer_seed_audit,
+                            "source": recovery_source,
+                            "sampler_noise_mask": None,
+                            "full_frame_sampling": True,
+                            "qwen_lightning_only": True,
+                            "style_lora": None,
+                            "main_case_rgb_appearance_exposed": (
+                                pose_safe_candidate_used_as_sampler
+                            ),
+                            "main_case_raw_luma_exposed": (
+                                pose_safe_candidate_used_as_sampler
+                            ),
+                            "main_case_low_frequency_action_geometry_exposed": False,
+                            "geometry_distance_field_exposed": True,
+                            "uploaded_front_identity_reference_exposed": False,
+                            "uploaded_identity_views_consumed_via_canonical_only": True,
+                            "public_open_channel_geometry_exposed": False,
+                            "soft_foreleg_depth_geometry_exposed": True,
+                            "rejected_qwen_candidate_used_as_sampler": (
+                                pose_safe_candidate_used_as_sampler
+                            ),
+                            "candidate_rejection_scope": (
+                                "identity_palette_only_after_pose_quality_and_surface_pass"
+                                if pose_safe_candidate_used_as_sampler
+                                else None
+                            ),
+                            "seed_bound_matte_required": True,
+                            "pose_safe_source_policy": (
+                                GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY
+                            ),
+                            "identity_gate_unchanged": True,
+                            "pose_gate_unchanged": True,
+                            "fur_surface_gate_unchanged": True,
+                            "global_pose_threshold_changed": False,
+                        }
+                        update_job(
+                            job_id,
+                            grooming_full_pose_recovery_active=True,
+                            grooming_full_pose_recovery_attempt=attempt,
+                            grooming_full_pose_recovery_mode=recovery_mode,
+                            grooming_full_pose_recovery_policy=recovery_policy,
+                            grooming_full_pose_recovery_fallback=(recovery_fallback),
+                            grooming_full_pose_recovery_anatomy_sha256=(
+                                pose_transfer_seed_audit["target_sha256"]
+                            ),
+                            grooming_full_pose_recovery_source_sha256=(
+                                recovery_source_sha256
+                            ),
+                            grooming_pose_transfer_seed_sha256=(
+                                pose_transfer_seed_audit["target_sha256"]
+                            ),
+                            grooming_pose_transfer_action_reference_sha256=(
+                                expected_action_reference_sha256
+                            ),
+                            grooming_pose_transfer_rejected_candidate_used_as_sampler=(
+                                pose_safe_candidate_used_as_sampler
+                            ),
+                            grooming_pose_safe_identity_refine_source_sha256=(
+                                recovery_source_sha256
+                                if pose_safe_candidate_used_as_sampler
+                                else None
+                            ),
                         )
-                    canonical_recovery_reference_path = COMFY_INPUT / qwen_input_name
-                    if not canonical_recovery_reference_path.is_file():
-                        raise RuntimeError(
-                            "Canonical grooming pose-transfer identity reference "
-                            "is unavailable."
+                    if canonical_eating_contact_repair_active:
+                        assert isinstance(eating_contact_repair_source, dict)
+                        repair_source_attempt = int(
+                            eating_contact_repair_source["attempt"]
                         )
-                    action_reference_text = (
-                        str(pose_action_config.get("reference") or "").strip()
-                        if isinstance(pose_action_config, dict)
-                        else ""
-                    )
-                    expected_action_reference_sha256 = (
-                        str(pose_action_config.get("reference_sha256") or "").strip()
-                        if isinstance(pose_action_config, dict)
-                        else ""
-                    )
-                    action_reference_path = (
-                        Path(action_reference_text)
-                        if action_reference_text
-                        else Path()
-                    )
-                    if (
-                        not action_reference_text
-                        or not expected_action_reference_sha256
-                        or not action_reference_path.is_file()
-                        or file_sha256(action_reference_path)
-                        != expected_action_reference_sha256
-                    ):
-                        raise RuntimeError(
-                            "Canonical grooming pose-transfer action reference is "
-                            "missing or its digest changed."
+                        repair_source_path = Path(
+                            str(eating_contact_repair_source["cutout_path"])
                         )
-                    pose_transfer_seed_path = (
-                        comfy_input_dir / "grooming_canonical_pose_transfer_seed.png"
-                    )
-                    if (
-                        grooming_completion_mask_path is None
-                        or not grooming_completion_mask_path.is_file()
-                    ):
-                        raise RuntimeError(
-                            "Canonical grooming pose-transfer foreleg geometry "
-                            "is unavailable."
-                        )
-                    pose_transfer_seed_audit = (
-                        prepare_canonical_grooming_pose_transfer_seed(
-                            action_reference_path,
-                            canonical_recovery_reference_path,
-                            pose_transfer_seed_path,
-                            geometry_guide=qwen_grooming_guide_path,
-                            foreleg_guide=grooming_completion_mask_path,
-                        )
-                    )
-                    pose_transfer_seed_input_name = (
-                        comfy_relative_dir / pose_transfer_seed_path.name
-                    ).as_posix()
-                    attempt_primary_input_name = pose_transfer_seed_input_name
-                    attempt_secondary_input_name = qwen_input_name
-                    attempt_tertiary_input_name = None
-                    attempt_additional_reference_input_names = [
-                        attempt_secondary_input_name,
-                    ]
-                    attempt_noise_mask_input_name = None
-                    attempt_prompt = build_canonical_grooming_pose_transfer_prompt(
-                        pose,
-                        profile_fur_lock=profile_fur_lock,
-                    )
-                    recovery_mode = "canonical_palette_action_pose_transfer"
-                    recovery_policy = GROOMING_CANONICAL_POSE_TRANSFER_SEED_POLICY
-                    recovery_source: dict[str, Any] = {
-                        "action_reference_path": str(action_reference_path),
-                        "action_reference_sha256": (
-                            expected_action_reference_sha256
-                        ),
-                        "pose_transfer_seed": pose_transfer_seed_audit,
-                    }
-                    recovery_fallback = bool(
-                        canonical_grooming_full_pose_refine_active
-                    )
-                    pose_safe_candidate_used_as_sampler = False
-                    recovery_source_sha256 = expected_action_reference_sha256
-                    if (
-                        canonical_grooming_full_pose_refine_active
-                        and isinstance(grooming_full_pose_refine_source, dict)
-                    ):
-                        refine_source_path = Path(
-                            str(grooming_full_pose_refine_source.get("cutout_path") or "")
-                        )
-                        expected_refine_source_sha256 = str(
-                            grooming_full_pose_refine_source.get("cutout_sha256") or ""
-                        )
-                        refine_eligibility = grooming_full_pose_refine_source.get(
-                            "eligibility"
-                        )
-                        expected_eligibility_sha256 = str(
-                            grooming_full_pose_refine_source.get("eligibility_sha256")
-                            or ""
-                        )
-                        source_matte = grooming_full_pose_refine_source.get(
-                            "seed_bound_matte"
+                        expected_repair_source_sha256 = str(
+                            eating_contact_repair_source["cutout_sha256"]
                         )
                         if (
-                            int(grooming_full_pose_refine_source.get("attempt") or 0)
-                            != GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
-                            or not refine_source_path.is_file()
-                            or not expected_refine_source_sha256
-                            or file_sha256(refine_source_path)
-                            != expected_refine_source_sha256
-                            or not isinstance(refine_eligibility, dict)
-                            or refine_eligibility.get("policy")
-                            != GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY
-                            or refine_eligibility.get("eligible") is not True
-                            or not expected_eligibility_sha256
-                            or json_value_sha256(refine_eligibility)
-                            != expected_eligibility_sha256
-                            or not isinstance(source_matte, dict)
-                            or source_matte.get("policy")
-                            != GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY
-                            or source_matte.get("pose_transfer_seed_sha256")
-                            != pose_transfer_seed_audit["target_sha256"]
+                            not repair_source_path.is_file()
+                            or file_sha256(repair_source_path)
+                            != expected_repair_source_sha256
                         ):
                             raise RuntimeError(
-                                "Canonical grooming pose-safe identity-refine source "
-                                "lost its digest-bound gate provenance."
+                                "Canonical eating contact-repair source disappeared "
+                                "or changed."
                             )
-                        refine_canvas_path = (
+                        contact_geometry_input_name = attempt_secondary_input_name
+                        if not contact_geometry_input_name:
+                            raise RuntimeError(
+                                "Canonical eating contact repair lacks its white-model "
+                                "action guide."
+                            )
+                        eating_contact_repair_canvas_path = (
                             comfy_input_dir
-                            / "grooming_full_pose_identity_refine_source.png"
+                            / (
+                                "eating_contact_repair_source_attempt_"
+                                f"{repair_source_attempt:02d}.png"
+                            )
                         )
-                        refine_canvas_audit = (
-                            prepare_canonical_grooming_full_pose_refine_canvas(
-                                refine_source_path,
-                                refine_canvas_path,
+                        eating_contact_repair_noise_mask_path = (
+                            comfy_input_dir
+                            / (
+                                "eating_contact_repair_noise_mask_attempt_"
+                                f"{repair_source_attempt:02d}.png"
+                            )
+                        )
+                        repair_canvas_audit = (
+                            prepare_canonical_eating_contact_repair_canvas(
+                                repair_source_path,
+                                eating_contact_repair_canvas_path,
+                                eating_contact_repair_noise_mask_path,
+                                contact_quality=(
+                                    eating_contact_repair_source["contact_quality"]
+                                ),
                             )
                         )
                         attempt_primary_input_name = (
-                            comfy_relative_dir / refine_canvas_path.name
+                            comfy_relative_dir
+                            / eating_contact_repair_canvas_path.name
                         ).as_posix()
-                        attempt_tertiary_input_name = pose_transfer_seed_input_name
+                        attempt_secondary_input_name = qwen_input_name
+                        attempt_tertiary_input_name = contact_geometry_input_name
                         attempt_additional_reference_input_names = [
                             attempt_secondary_input_name,
                             attempt_tertiary_input_name,
                         ]
-                        attempt_prompt = (
-                            build_canonical_grooming_full_pose_identity_refine_prompt(
-                                pose,
-                                source_attempt=int(
-                                    grooming_full_pose_refine_source["attempt"]
-                                ),
-                                profile_fur_lock=profile_fur_lock,
-                            )
-                        )
-                        recovery_mode = "pose_safe_identity_refine"
-                        recovery_policy = GROOMING_CANONICAL_FULL_POSE_REFINE_POLICY
-                        recovery_source = {
-                            **grooming_full_pose_refine_source,
-                            "refine_canvas": refine_canvas_audit,
-                            "pose_transfer_seed": pose_transfer_seed_audit,
-                        }
-                        recovery_fallback = False
-                        pose_safe_candidate_used_as_sampler = True
-                        recovery_source_sha256 = expected_refine_source_sha256
-                    if pose_identity_palette_prompt_signature is not None:
-                        attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
-                            pose_identity_palette_prompt_signature,
-                            retry=True,
-                            previous_quality=(
-                                previous_pose_identity_palette_quality
+                        attempt_noise_mask_input_name = (
+                            comfy_relative_dir
+                            / eating_contact_repair_noise_mask_path.name
+                        ).as_posix()
+                        attempt_geometry_input_name = attempt_tertiary_input_name
+                        attempt_prompt = build_canonical_eating_contact_repair_prompt(
+                            pose,
+                            source_attempt=repair_source_attempt,
+                            source_gap_px=int(
+                                eating_contact_repair_source["gap_px"]
                             ),
+                            prealignment_shift_px=int(
+                                repair_canvas_audit["prealignment_shift_px"]
+                            ),
+                            prealignment_expected_seed_gap_px=int(
+                                repair_canvas_audit[
+                                    "prealignment_expected_seed_gap_px"
+                                ]
+                            ),
+                            profile_fur_lock=profile_fur_lock,
                         )
-                    grooming_full_pose_recovery_audit = {
-                        "policy": recovery_policy,
-                        "mode": recovery_mode,
-                        "attempt": attempt,
-                        "fallback_to_fresh_full_pose_rescue": recovery_fallback,
-                        "image1_role": (
-                            "seed_bound_pose_and_surface_approved_candidate_"
-                            "sampler_no_identity_authority"
-                            if pose_safe_candidate_used_as_sampler
-                            else "canonical_palette_soft_foreleg_depth_action_"
-                            "anatomy_sampler"
-                        ),
-                        "image2_role": (
-                            "approved_canonical_sole_identity_appearance_authority"
-                        ),
-                        "image3_role": (
-                            "digest_bound_soft_foreleg_depth_action_corroboration"
-                            if pose_safe_candidate_used_as_sampler
-                            else None
-                        ),
-                        "anatomy_seed": pose_transfer_seed_audit,
-                        "source": recovery_source,
-                        "sampler_noise_mask": None,
-                        "full_frame_sampling": True,
-                        "qwen_lightning_only": True,
-                        "style_lora": None,
-                        "main_case_rgb_appearance_exposed": (
-                            pose_safe_candidate_used_as_sampler
-                        ),
-                        "main_case_raw_luma_exposed": (
-                            pose_safe_candidate_used_as_sampler
-                        ),
-                        "main_case_low_frequency_action_geometry_exposed": False,
-                        "geometry_distance_field_exposed": True,
-                        "uploaded_front_identity_reference_exposed": False,
-                        "uploaded_identity_views_consumed_via_canonical_only": True,
-                        "public_open_channel_geometry_exposed": False,
-                        "soft_foreleg_depth_geometry_exposed": True,
-                        "rejected_qwen_candidate_used_as_sampler": (
-                            pose_safe_candidate_used_as_sampler
-                        ),
-                        "candidate_rejection_scope": (
-                            "identity_palette_only_after_pose_quality_and_surface_pass"
-                            if pose_safe_candidate_used_as_sampler
-                            else None
-                        ),
-                        "seed_bound_matte_required": True,
-                        "pose_safe_source_policy": (
-                            GROOMING_CANONICAL_POSE_SAFE_REFINE_SOURCE_POLICY
-                        ),
-                        "identity_gate_unchanged": True,
-                        "pose_gate_unchanged": True,
-                        "fur_surface_gate_unchanged": True,
-                        "global_pose_threshold_changed": False,
-                    }
-                    update_job(
-                        job_id,
-                        grooming_full_pose_recovery_active=True,
-                        grooming_full_pose_recovery_attempt=attempt,
-                        grooming_full_pose_recovery_mode=recovery_mode,
-                        grooming_full_pose_recovery_policy=recovery_policy,
-                        grooming_full_pose_recovery_fallback=(recovery_fallback),
-                        grooming_full_pose_recovery_anatomy_sha256=(
-                            pose_transfer_seed_audit["target_sha256"]
-                        ),
-                        grooming_full_pose_recovery_source_sha256=(
-                            recovery_source_sha256
-                        ),
-                        grooming_pose_transfer_seed_sha256=(
-                            pose_transfer_seed_audit["target_sha256"]
-                        ),
-                        grooming_pose_transfer_action_reference_sha256=(
-                            expected_action_reference_sha256
-                        ),
-                        grooming_pose_transfer_rejected_candidate_used_as_sampler=(
-                            pose_safe_candidate_used_as_sampler
-                        ),
-                        grooming_pose_safe_identity_refine_source_sha256=(
-                            recovery_source_sha256
-                            if pose_safe_candidate_used_as_sampler
-                            else None
-                        ),
-                    )
-                if canonical_eating_contact_repair_active:
-                    assert isinstance(eating_contact_repair_source, dict)
-                    repair_source_attempt = int(
-                        eating_contact_repair_source["attempt"]
-                    )
-                    repair_source_path = Path(
-                        str(eating_contact_repair_source["cutout_path"])
-                    )
-                    expected_repair_source_sha256 = str(
-                        eating_contact_repair_source["cutout_sha256"]
-                    )
-                    if (
-                        not repair_source_path.is_file()
-                        or file_sha256(repair_source_path)
-                        != expected_repair_source_sha256
-                    ):
-                        raise RuntimeError(
-                            "Canonical eating contact-repair source disappeared "
-                            "or changed."
-                        )
-                    contact_geometry_input_name = attempt_secondary_input_name
-                    if not contact_geometry_input_name:
-                        raise RuntimeError(
-                            "Canonical eating contact repair lacks its white-model "
-                            "action guide."
-                        )
-                    eating_contact_repair_canvas_path = (
-                        comfy_input_dir
-                        / (
-                            "eating_contact_repair_source_attempt_"
-                            f"{repair_source_attempt:02d}.png"
-                        )
-                    )
-                    eating_contact_repair_noise_mask_path = (
-                        comfy_input_dir
-                        / (
-                            "eating_contact_repair_noise_mask_attempt_"
-                            f"{repair_source_attempt:02d}.png"
-                        )
-                    )
-                    repair_canvas_audit = (
-                        prepare_canonical_eating_contact_repair_canvas(
-                            repair_source_path,
-                            eating_contact_repair_canvas_path,
-                            eating_contact_repair_noise_mask_path,
-                            contact_quality=(
+                        eating_contact_repair_audit = {
+                            "policy": EATING_CONTACT_REPAIR_POLICY,
+                            "attempt": attempt,
+                            "source_attempt": repair_source_attempt,
+                            "source_path": str(repair_source_path),
+                            "source_sha256": expected_repair_source_sha256,
+                            "source_gap_px": int(
+                                eating_contact_repair_source["gap_px"]
+                            ),
+                            "source_contact_quality": (
                                 eating_contact_repair_source["contact_quality"]
                             ),
-                        )
-                    )
-                    attempt_primary_input_name = (
-                        comfy_relative_dir
-                        / eating_contact_repair_canvas_path.name
-                    ).as_posix()
-                    attempt_secondary_input_name = qwen_input_name
-                    attempt_tertiary_input_name = contact_geometry_input_name
-                    attempt_additional_reference_input_names = [
-                        attempt_secondary_input_name,
-                        attempt_tertiary_input_name,
-                    ]
-                    attempt_noise_mask_input_name = (
-                        comfy_relative_dir
-                        / eating_contact_repair_noise_mask_path.name
-                    ).as_posix()
-                    attempt_geometry_input_name = attempt_tertiary_input_name
-                    attempt_prompt = build_canonical_eating_contact_repair_prompt(
-                        pose,
-                        source_attempt=repair_source_attempt,
-                        source_gap_px=int(
-                            eating_contact_repair_source["gap_px"]
-                        ),
-                        prealignment_shift_px=int(
-                            repair_canvas_audit["prealignment_shift_px"]
-                        ),
-                        prealignment_expected_seed_gap_px=int(
-                            repair_canvas_audit[
-                                "prealignment_expected_seed_gap_px"
-                            ]
-                        ),
-                        profile_fur_lock=profile_fur_lock,
-                    )
-                    eating_contact_repair_audit = {
-                        "policy": EATING_CONTACT_REPAIR_POLICY,
-                        "attempt": attempt,
-                        "source_attempt": repair_source_attempt,
-                        "source_path": str(repair_source_path),
-                        "source_sha256": expected_repair_source_sha256,
-                        "source_gap_px": int(
-                            eating_contact_repair_source["gap_px"]
-                        ),
-                        "source_contact_quality": (
-                            eating_contact_repair_source["contact_quality"]
-                        ),
-                        "source_identity_palette": (
-                            eating_contact_repair_source[
-                                "identity_palette_quality"
-                            ]
-                        ),
-                        "repair_canvas": repair_canvas_audit,
-                        "image1_role": (
-                            "gap_measured_head_neck_prealigned_local_sampler"
-                        ),
-                        "image2_role": (
-                            "approved_canonical_identity_appearance_corroboration"
-                        ),
-                        "image3_role": (
-                            "white_maquette_eating_contact_geometry_only"
-                        ),
-                        "sampler_noise_mask": {
-                            "input_name": attempt_noise_mask_input_name,
-                            "path": str(
-                                eating_contact_repair_noise_mask_path
+                            "source_identity_palette": (
+                                eating_contact_repair_source[
+                                    "identity_palette_quality"
+                                ]
                             ),
-                            "sha256": repair_canvas_audit[
-                                "noise_mask_target_sha256"
-                            ],
-                            "policy": (
-                                "lower_muzzle_to_fixed_bowl_seam_v3"
+                            "repair_canvas": repair_canvas_audit,
+                            "image1_role": (
+                                "gap_measured_head_neck_prealigned_local_sampler"
                             ),
-                        },
-                        "full_frame_sampling": False,
-                        "post_qwen_pixel_lock_required": True,
-                        "upper_head_body_bowl_paws_tail_lock_required": True,
-                        "identity_gate_unchanged": True,
-                        "eating_contact_gate_unchanged": True,
-                        "downstream_scail_prop_mask_thresholds_unchanged": True,
-                    }
-                    update_job(
-                        job_id,
-                        eating_contact_repair_active=True,
-                        eating_contact_repair_policy=(
-                            EATING_CONTACT_REPAIR_POLICY
-                        ),
-                        eating_contact_repair_attempt=attempt,
-                        eating_contact_repair_source_attempt=(
-                            repair_source_attempt
-                        ),
-                        eating_contact_repair_source_gap_px=int(
-                            eating_contact_repair_source["gap_px"]
-                        ),
-                        eating_contact_repair_prealignment_shift_px=int(
-                            repair_canvas_audit["prealignment_shift_px"]
-                        ),
-                        eating_contact_repair_expected_seed_gap_px=int(
-                            repair_canvas_audit[
-                                "prealignment_expected_seed_gap_px"
+                            "image2_role": (
+                                "approved_canonical_identity_appearance_corroboration"
+                            ),
+                            "image3_role": (
+                                "white_maquette_eating_contact_geometry_only"
+                            ),
+                            "sampler_noise_mask": {
+                                "input_name": attempt_noise_mask_input_name,
+                                "path": str(
+                                    eating_contact_repair_noise_mask_path
+                                ),
+                                "sha256": repair_canvas_audit[
+                                    "noise_mask_target_sha256"
+                                ],
+                                "policy": (
+                                    "lower_muzzle_to_fixed_bowl_seam_v3"
+                                ),
+                            },
+                            "full_frame_sampling": False,
+                            "post_qwen_pixel_lock_required": True,
+                            "upper_head_body_bowl_paws_tail_lock_required": True,
+                            "identity_gate_unchanged": True,
+                            "eating_contact_gate_unchanged": True,
+                            "downstream_scail_prop_mask_thresholds_unchanged": True,
+                        }
+                        update_job(
+                            job_id,
+                            eating_contact_repair_active=True,
+                            eating_contact_repair_policy=(
+                                EATING_CONTACT_REPAIR_POLICY
+                            ),
+                            eating_contact_repair_attempt=attempt,
+                            eating_contact_repair_source_attempt=(
+                                repair_source_attempt
+                            ),
+                            eating_contact_repair_source_gap_px=int(
+                                eating_contact_repair_source["gap_px"]
+                            ),
+                            eating_contact_repair_prealignment_shift_px=int(
+                                repair_canvas_audit["prealignment_shift_px"]
+                            ),
+                            eating_contact_repair_expected_seed_gap_px=int(
+                                repair_canvas_audit[
+                                    "prealignment_expected_seed_gap_px"
+                                ]
+                            ),
+                            eating_contact_repair_source_sha256=(
+                                expected_repair_source_sha256
+                            ),
+                            eating_contact_repair_noise_mask_sha256=(
+                                repair_canvas_audit["noise_mask_target_sha256"]
+                            ),
+                        )
+                    elif canonical_eating_identity_refine_active:
+                        assert isinstance(eating_identity_refine_source, dict)
+                        refine_source_path = Path(
+                            str(eating_identity_refine_source["cutout_path"])
+                        )
+                        expected_refine_source_sha256 = str(
+                            eating_identity_refine_source["cutout_sha256"]
+                        )
+                        if not refine_source_path.is_file():
+                            raise RuntimeError(
+                                "Canonical eating identity-refine source disappeared."
+                            )
+                        if file_sha256(refine_source_path) != expected_refine_source_sha256:
+                            raise RuntimeError(
+                                "Canonical eating identity-refine source digest changed."
+                            )
+                        if not attempt_secondary_input_name:
+                            raise RuntimeError(
+                                "Canonical eating identity refine lacks its action guide."
+                            )
+                        eating_refine_canvas_path = (
+                            comfy_input_dir / "eating_identity_refine_source.png"
+                        )
+                        eating_refine_canvas_audit = (
+                            prepare_canonical_eating_identity_refine_canvas(
+                                refine_source_path,
+                                eating_refine_canvas_path,
+                            )
+                        )
+                        attempt_primary_input_name = (
+                            comfy_relative_dir / eating_refine_canvas_path.name
+                        ).as_posix()
+                        attempt_secondary_input_name = qwen_input_name
+                        attempt_tertiary_input_name = uploaded_qwen_input_name
+                        if not attempt_tertiary_input_name:
+                            raise RuntimeError(
+                                "Canonical eating identity refine lacks uploaded front identity."
+                            )
+                        attempt_additional_reference_input_names = [
+                            attempt_secondary_input_name,
+                            attempt_tertiary_input_name,
+                        ]
+                        attempt_noise_mask_input_name = None
+                        attempt_prompt = build_canonical_eating_identity_refine_prompt(
+                            pose,
+                            source_attempt=int(eating_identity_refine_source["attempt"]),
+                            profile_fur_lock=profile_fur_lock,
+                        )
+                        if pose_identity_palette_prompt_signature is not None:
+                            attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
+                                pose_identity_palette_prompt_signature,
+                                retry=True,
+                                previous_quality=eating_identity_refine_source.get(
+                                    "identity_palette_quality"
+                                ),
+                            )
+                        eating_identity_refine_audit = {
+                            "policy": EATING_CANONICAL_IDENTITY_REFINE_POLICY,
+                            "attempt": attempt,
+                            "source_attempt": int(eating_identity_refine_source["attempt"]),
+                            "source_path": str(refine_source_path),
+                            "source_sha256": expected_refine_source_sha256,
+                            "source_pose_quality": (
+                                eating_identity_refine_source["pose_quality"]
+                            ),
+                            "source_identity_palette": (
+                                eating_identity_refine_source["identity_palette_quality"]
+                            ),
+                            "source_stripe_amplification_refine_eligibility": (
+                                eating_identity_refine_source.get(
+                                    "stripe_amplification_refine_eligibility"
+                                )
+                            ),
+                            "source_conditionally_repairable_palette_issues": (
+                                eating_identity_refine_source.get(
+                                    "conditionally_repairable_palette_issues",
+                                    [],
+                                )
+                            ),
+                            "refine_canvas": eating_refine_canvas_audit,
+                            "image1_role": (
+                                "approved_eating_pose_and_bowl_sampler_no_identity_authority"
+                            ),
+                            "image2_role": (
+                                "approved_canonical_sole_pet_identity_appearance_authority"
+                            ),
+                            "image3_role": (
+                                "uploaded_front_real_identity_palette_corroboration"
+                            ),
+                            "sampler_noise_mask": None,
+                            "full_frame_sampling": True,
+                            "qwen_lightning_only": True,
+                            "style_lora": None,
+                            "identity_gate_unchanged": True,
+                            "eating_pose_gate_unchanged": True,
+                            "fur_surface_gate_unchanged": True,
+                        }
+                        update_job(
+                            job_id,
+                            eating_identity_refine_active=True,
+                            eating_identity_refine_policy=(
+                                EATING_CANONICAL_IDENTITY_REFINE_POLICY
+                            ),
+                            eating_identity_refine_attempt=attempt,
+                            eating_identity_refine_source_attempt=(
+                                eating_identity_refine_source["attempt"]
+                            ),
+                            eating_identity_refine_source_sha256=(
+                                expected_refine_source_sha256
+                            ),
+                            eating_identity_refine_canvas_sha256=(
+                                eating_refine_canvas_audit["target_sha256"]
+                            ),
+                        )
+                    if (
+                        advisory_grooming_action_transfer_active
+                        and not advisory_grooming_identity_refine_active
+                    ):
+                        # Keep every retry on the exact prompt verified across four
+                        # independent seeds. Appending issue prose previously grew
+                        # the edit instruction past 1,300 words and destabilized it.
+                        pass
+                    elif (
+                        advisory_grooming_identity_refine_active
+                        and previous_advisory_grooming_minimum_issues
+                    ):
+                        attempt_prompt += (
+                            "\n\nGROOMING IDENTITY RESTORATION RETRY: keep Image 1's "
+                            "accepted action geometry, but correct every reported issue "
+                            "using Image 2 as the sole whole-pet identity and Image 3 as "
+                            "the strongest face authority. Never reintroduce a white-model "
+                            "face, generic pointed head, plastic surface or extra limb. "
+                            "Previous issues: "
+                            + ", ".join(previous_advisory_grooming_minimum_issues)
+                            + "."
+                        )
+                    pose_user_loras_disabled = bool(
+                        main_case_geometry_first
+                        or grooming_geometry_canonical
+                        or canonical_action_reference
+                    )
+                    effective_pose_denoise = float(profile["denoise"])
+                    if pose_reference_input_name is not None:
+                        configured_pose_denoise = job.get("pose_reference_denoise")
+                        if configured_pose_denoise is not None:
+                            configured_pose_denoise_step = float(
+                                job.get("pose_reference_denoise_step") or 0.0
+                            )
+                            effective_pose_denoise = max(
+                                0.1,
+                                min(
+                                    1.0,
+                                    float(configured_pose_denoise)
+                                    + configured_pose_denoise_step * (attempt - 1),
+                                ),
+                            )
+                    if main_case_geometry_first:
+                        effective_pose_denoise = (
+                            QWEN_EATING_GEOMETRY_FIRST_DENOISE_HIGH
+                            if attempt in {1, 3}
+                            else QWEN_EATING_GEOMETRY_FIRST_DENOISE_LOW
+                        )
+                    elif (
+                        grooming_geometry_canonical
+                        or (
+                            canonical_action_reference
+                            and action_key(pose) == "grooming"
+                        )
+                    ):
+                        effective_pose_denoise = (
+                            QWEN_GROOMING_CANONICAL_GEOMETRY_DENOISE_BY_ATTEMPT[
+                                min(
+                                    attempt - 1,
+                                    len(QWEN_GROOMING_CANONICAL_GEOMETRY_DENOISE_BY_ATTEMPT)
+                                    - 1,
+                                )
                             ]
-                        ),
-                        eating_contact_repair_source_sha256=(
-                            expected_repair_source_sha256
-                        ),
-                        eating_contact_repair_noise_mask_sha256=(
-                            repair_canvas_audit["noise_mask_target_sha256"]
-                        ),
-                    )
-                elif canonical_eating_identity_refine_active:
-                    assert isinstance(eating_identity_refine_source, dict)
-                    refine_source_path = Path(
-                        str(eating_identity_refine_source["cutout_path"])
-                    )
-                    expected_refine_source_sha256 = str(
-                        eating_identity_refine_source["cutout_sha256"]
-                    )
-                    if not refine_source_path.is_file():
-                        raise RuntimeError(
-                            "Canonical eating identity-refine source disappeared."
                         )
-                    if file_sha256(refine_source_path) != expected_refine_source_sha256:
-                        raise RuntimeError(
-                            "Canonical eating identity-refine source digest changed."
+                    if advisory_grooming_action_transfer_active:
+                        effective_pose_denoise = (
+                            GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT[
+                                min(
+                                    attempt - 1,
+                                    len(
+                                        GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT
+                                    )
+                                    - 1,
+                                )
+                            ]
                         )
-                    if not attempt_secondary_input_name:
-                        raise RuntimeError(
-                            "Canonical eating identity refine lacks its action guide."
+                    if dog_prompt_only_action_transfer_active:
+                        effective_pose_denoise = (
+                            DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE
                         )
-                    eating_refine_canvas_path = (
-                        comfy_input_dir / "eating_identity_refine_source.png"
+                    if advisory_grooming_identity_refine_active:
+                        effective_pose_denoise = (
+                            GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE
+                        )
+                    if grooming_foreleg_repair_active:
+                        effective_pose_denoise = GROOMING_QWEN_FORELEG_REPAIR_DENOISE
+                    elif canonical_grooming_full_pose_recovery_active:
+                        effective_pose_denoise = (
+                            GROOMING_CANONICAL_FULL_POSE_REFINE_DENOISE
+                            if isinstance(grooming_full_pose_recovery_audit, dict)
+                            and grooming_full_pose_recovery_audit.get("mode")
+                            == "pose_safe_identity_refine"
+                            else GROOMING_CANONICAL_FULL_POSE_RESCUE_DENOISE
+                        )
+                    elif canonical_eating_contact_repair_active:
+                        effective_pose_denoise = EATING_CONTACT_REPAIR_DENOISE
+                    elif canonical_eating_identity_refine_active:
+                        effective_pose_denoise = EATING_CANONICAL_IDENTITY_REFINE_DENOISE
+                    effective_pose_user_lora = (
+                        None if pose_user_loras_disabled else profile["user_lora"]
                     )
-                    eating_refine_canvas_audit = (
-                        prepare_canonical_eating_identity_refine_canvas(
-                            refine_source_path,
-                            eating_refine_canvas_path,
+                    effective_pose_user_lora_strength = (
+                        0.0 if pose_user_loras_disabled else profile["user_lora_strength"]
+                    )
+                    effective_pose_user_lora_mode = (
+                        "stack" if pose_user_loras_disabled else profile["user_lora_mode"]
+                    )
+                    effective_pose_user_loras = (
+                        [] if pose_user_loras_disabled else profile["user_loras"]
+                    )
+                    geometry_style_recovery = bool(
+                        main_case_geometry_first
+                        and action_key(pose) == "eating"
+                        and attempt >= 3
+                        and QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH > 0.0
+                    )
+                    grooming_local_style_recovery = bool(
+                        legacy_grooming_foreleg_repair_active
+                        and GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH > 0.0
+                    )
+                    builtin_style_recovery = bool(
+                        geometry_style_recovery or grooming_local_style_recovery
+                    )
+                    effective_pose_steps = (
+                        max(8, int(profile["steps"]))
+                        if (
+                            geometry_first_action_reference
+                            and action_key(pose) == "grooming"
+                        )
+                        else int(profile["steps"])
+                    )
+                    if advisory_grooming_action_transfer_active:
+                        # The loaded Lightning LoRA is distilled for exactly four
+                        # steps. Longer schedules produced neutral copies and scene
+                        # drift in the same-seed grooming reproduction.
+                        effective_pose_steps = GROOMING_ADVISORY_ACTION_TRANSFER_STEPS
+                    if dog_prompt_only_action_transfer_active:
+                        effective_pose_steps = DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS
+                    if advisory_grooming_identity_refine_active:
+                        effective_pose_steps = max(
+                            GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
+                            effective_pose_steps,
+                        )
+                    if grooming_foreleg_repair_active:
+                        effective_pose_steps = max(
+                            GROOMING_QWEN_FORELEG_REPAIR_STEPS,
+                            effective_pose_steps,
+                        )
+                    if canonical_grooming_full_pose_recovery_active:
+                        effective_pose_steps = max(
+                            GROOMING_CANONICAL_FULL_POSE_RESCUE_STEPS,
+                            effective_pose_steps,
+                        )
+                    if canonical_eating_identity_refine_active:
+                        effective_pose_steps = max(
+                            EATING_CANONICAL_IDENTITY_REFINE_STEPS,
+                            effective_pose_steps,
+                        )
+                    if canonical_eating_contact_repair_active:
+                        effective_pose_steps = max(
+                            EATING_CONTACT_REPAIR_STEPS,
+                            effective_pose_steps,
+                        )
+                    effective_suppress_builtin_style = (
+                        False
+                        if grooming_local_style_recovery
+                        else (
+                            True
+                            if (canonical_action_reference or grooming_geometry_canonical)
+                            else (
+                                not geometry_style_recovery
+                                if main_case_geometry_first
+                                else suppress_builtin_style
+                            )
                         )
                     )
-                    attempt_primary_input_name = (
-                        comfy_relative_dir / eating_refine_canvas_path.name
-                    ).as_posix()
-                    attempt_secondary_input_name = qwen_input_name
-                    attempt_tertiary_input_name = uploaded_qwen_input_name
-                    if not attempt_tertiary_input_name:
-                        raise RuntimeError(
-                            "Canonical eating identity refine lacks uploaded front identity."
+                    effective_builtin_style_strength = (
+                        GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH
+                        if grooming_local_style_recovery
+                        else (
+                            QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH
+                            if geometry_style_recovery
+                            else QWEN_POSE_STYLE_LORA_STRENGTH
                         )
-                    attempt_additional_reference_input_names = [
-                        attempt_secondary_input_name,
-                        attempt_tertiary_input_name,
-                    ]
-                    attempt_noise_mask_input_name = None
-                    attempt_prompt = build_canonical_eating_identity_refine_prompt(
-                        pose,
-                        source_attempt=int(eating_identity_refine_source["attempt"]),
-                        profile_fur_lock=profile_fur_lock,
                     )
-                    if pose_identity_palette_prompt_signature is not None:
+                    if (
+                        dog_prompt_only_action_transfer_active
+                        and pose_identity_palette_prompt_signature is not None
+                        and pose_identity_palette_prompt_marker not in attempt_prompt
+                    ):
+                        # Keep the identity palette attached if a future specialized
+                        # written-action prompt replaces the generic dog prompt.
                         attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
                             pose_identity_palette_prompt_signature,
-                            retry=True,
-                            previous_quality=eating_identity_refine_source.get(
-                                "identity_palette_quality"
-                            ),
+                            retry=attempt > 1,
+                            previous_quality=previous_pose_identity_palette_quality,
                         )
-                    eating_identity_refine_audit = {
-                        "policy": EATING_CANONICAL_IDENTITY_REFINE_POLICY,
-                        "attempt": attempt,
-                        "source_attempt": int(eating_identity_refine_source["attempt"]),
-                        "source_path": str(refine_source_path),
-                        "source_sha256": expected_refine_source_sha256,
-                        "source_pose_quality": (
-                            eating_identity_refine_source["pose_quality"]
+                    workflow = qwen_workflow(
+                        attempt_primary_input_name,
+                        attempt_prompt,
+                        (
+                            ""
+                            if advisory_grooming_action_transfer_active
+                            else pose_negative_prompt
                         ),
-                        "source_identity_palette": (
-                            eating_identity_refine_source["identity_palette_quality"]
+                        attempt_seed,
+                        prefix,
+                        user_lora=effective_pose_user_lora,
+                        user_lora_strength=effective_pose_user_lora_strength,
+                        user_lora_mode=effective_pose_user_lora_mode,
+                        user_loras=effective_pose_user_loras,
+                        steps=effective_pose_steps,
+                        cfg=profile["cfg"],
+                        denoise=effective_pose_denoise,
+                        builtin_style_strength=effective_builtin_style_strength,
+                        suppress_builtin_style=effective_suppress_builtin_style,
+                        pose_reference_input_name=(
+                            None
+                            if attempt_additional_reference_input_names is not None
+                            else attempt_secondary_input_name
                         ),
-                        "source_stripe_amplification_refine_eligibility": (
-                            eating_identity_refine_source.get(
-                                "stripe_amplification_refine_eligibility"
-                            )
+                        additional_reference_input_names=(
+                            attempt_additional_reference_input_names
                         ),
-                        "source_conditionally_repairable_palette_issues": (
-                            eating_identity_refine_source.get(
-                                "conditionally_repairable_palette_issues",
-                                [],
-                            )
-                        ),
-                        "refine_canvas": eating_refine_canvas_audit,
-                        "image1_role": (
-                            "approved_eating_pose_and_bowl_sampler_no_identity_authority"
-                        ),
-                        "image2_role": (
-                            "approved_canonical_sole_pet_identity_appearance_authority"
-                        ),
-                        "image3_role": (
-                            "uploaded_front_real_identity_palette_corroboration"
-                        ),
-                        "sampler_noise_mask": None,
-                        "full_frame_sampling": True,
-                        "qwen_lightning_only": True,
-                        "style_lora": None,
-                        "identity_gate_unchanged": True,
-                        "eating_pose_gate_unchanged": True,
-                        "fur_surface_gate_unchanged": True,
-                    }
-                    update_job(
-                        job_id,
-                        eating_identity_refine_active=True,
-                        eating_identity_refine_policy=(
-                            EATING_CANONICAL_IDENTITY_REFINE_POLICY
-                        ),
-                        eating_identity_refine_attempt=attempt,
-                        eating_identity_refine_source_attempt=(
-                            eating_identity_refine_source["attempt"]
-                        ),
-                        eating_identity_refine_source_sha256=(
-                            expected_refine_source_sha256
-                        ),
-                        eating_identity_refine_canvas_sha256=(
-                            eating_refine_canvas_audit["target_sha256"]
-                        ),
+                        noise_mask_input_name=attempt_noise_mask_input_name,
                     )
-                if (
-                    advisory_grooming_action_transfer_active
-                    and not advisory_grooming_identity_refine_active
-                ):
-                    # Keep every retry on the exact prompt verified across four
-                    # independent seeds. Appending issue prose previously grew
-                    # the edit instruction past 1,300 words and destabilized it.
-                    pass
-                elif (
-                    advisory_grooming_identity_refine_active
-                    and previous_advisory_grooming_minimum_issues
-                ):
-                    attempt_prompt += (
-                        "\n\nGROOMING IDENTITY RESTORATION RETRY: keep Image 1's "
-                        "accepted action geometry, but correct every reported issue "
-                        "using Image 2 as the sole whole-pet identity and Image 3 as "
-                        "the strongest face authority. Never reintroduce a white-model "
-                        "face, generic pointed head, plastic surface or extra limb. "
-                        "Previous issues: "
-                        + ", ".join(previous_advisory_grooming_minimum_issues)
-                        + "."
+                    write_workflow(
+                        job_dir,
+                        f"qwen_pose_{index:02d}_attempt_{attempt:02d}.json",
+                        workflow,
                     )
-                pose_user_loras_disabled = bool(
-                    main_case_geometry_first
-                    or grooming_geometry_canonical
-                    or canonical_action_reference
-                )
-                effective_pose_denoise = float(profile["denoise"])
-                if pose_reference_input_name is not None:
-                    configured_pose_denoise = job.get("pose_reference_denoise")
-                    if configured_pose_denoise is not None:
-                        configured_pose_denoise_step = float(
-                            job.get("pose_reference_denoise_step") or 0.0
+                    entry = queue_and_wait(
+                        workflow,
+                        f"{job_id} keyframe {index}/{len(poses)} attempt {attempt}",
+                        timeout=7200,
+                        job_id=job_id,
+                    )
+                    raw_qwen_source_output = first_output(
+                        entry,
+                        {".png", ".jpg", ".jpeg", ".webp"},
+                        "Qwen keyframe",
+                    )
+                    raw_qwen_source_sha256 = file_sha256(raw_qwen_source_output)
+                    source_output = raw_qwen_source_output
+                    source_output_sha256 = file_sha256(source_output)
+                    raw_qwen_byte_preserved = False
+                    if canonical_eating_contact_repair_active:
+                        if (
+                            eating_contact_repair_canvas_path is None
+                            or eating_contact_repair_noise_mask_path is None
+                            or eating_contact_repair_audit is None
+                        ):
+                            raise RuntimeError(
+                                "Canonical eating contact repair lost its pixel-lock "
+                                "inputs."
+                            )
+                        locked_output = (
+                            job_dir
+                            / (
+                                f"pose_{index:02d}_eating_contact_locked_"
+                                f"attempt_{attempt:02d}.png"
+                            )
                         )
-                        effective_pose_denoise = max(
-                            0.1,
-                            min(
-                                1.0,
-                                float(configured_pose_denoise)
-                                + configured_pose_denoise_step * (attempt - 1),
-                            ),
-                        )
-                if main_case_geometry_first:
-                    effective_pose_denoise = (
-                        QWEN_EATING_GEOMETRY_FIRST_DENOISE_HIGH
-                        if attempt in {1, 3}
-                        else QWEN_EATING_GEOMETRY_FIRST_DENOISE_LOW
-                    )
-                elif (
-                    grooming_geometry_canonical
-                    or (
-                        canonical_action_reference
-                        and action_key(pose) == "grooming"
-                    )
-                ):
-                    effective_pose_denoise = (
-                        QWEN_GROOMING_CANONICAL_GEOMETRY_DENOISE_BY_ATTEMPT[
-                            min(
-                                attempt - 1,
-                                len(QWEN_GROOMING_CANONICAL_GEOMETRY_DENOISE_BY_ATTEMPT)
-                                - 1,
-                            )
+                        repair_canvas_audit = eating_contact_repair_audit[
+                            "repair_canvas"
                         ]
-                    )
-                if advisory_grooming_action_transfer_active:
-                    effective_pose_denoise = (
-                        GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT[
-                            min(
-                                attempt - 1,
-                                len(
-                                    GROOMING_ADVISORY_ACTION_TRANSFER_DENOISE_BY_ATTEMPT
-                                )
-                                - 1,
+                        source_bowl_bbox = repair_canvas_audit.get(
+                            "source_bowl_bbox"
+                        )
+                        if (
+                            not isinstance(source_bowl_bbox, list)
+                            or len(source_bowl_bbox) != 4
+                        ):
+                            raise RuntimeError(
+                                "Canonical eating contact repair lost its bowl boundary."
                             )
-                        ]
-                    )
-                if dog_prompt_only_action_transfer_active:
-                    effective_pose_denoise = (
-                        DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_DENOISE
-                    )
-                if advisory_grooming_identity_refine_active:
-                    effective_pose_denoise = (
-                        GROOMING_ADVISORY_IDENTITY_REFINE_DENOISE
-                    )
-                if grooming_foreleg_repair_active:
-                    effective_pose_denoise = GROOMING_QWEN_FORELEG_REPAIR_DENOISE
-                elif canonical_grooming_full_pose_recovery_active:
-                    effective_pose_denoise = (
-                        GROOMING_CANONICAL_FULL_POSE_REFINE_DENOISE
-                        if isinstance(grooming_full_pose_recovery_audit, dict)
-                        and grooming_full_pose_recovery_audit.get("mode")
-                        == "pose_safe_identity_refine"
-                        else GROOMING_CANONICAL_FULL_POSE_RESCUE_DENOISE
-                    )
-                elif canonical_eating_contact_repair_active:
-                    effective_pose_denoise = EATING_CONTACT_REPAIR_DENOISE
-                elif canonical_eating_identity_refine_active:
-                    effective_pose_denoise = EATING_CANONICAL_IDENTITY_REFINE_DENOISE
-                effective_pose_user_lora = (
-                    None if pose_user_loras_disabled else profile["user_lora"]
-                )
-                effective_pose_user_lora_strength = (
-                    0.0 if pose_user_loras_disabled else profile["user_lora_strength"]
-                )
-                effective_pose_user_lora_mode = (
-                    "stack" if pose_user_loras_disabled else profile["user_lora_mode"]
-                )
-                effective_pose_user_loras = (
-                    [] if pose_user_loras_disabled else profile["user_loras"]
-                )
-                geometry_style_recovery = bool(
-                    main_case_geometry_first
-                    and action_key(pose) == "eating"
-                    and attempt >= 3
-                    and QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH > 0.0
-                )
-                grooming_local_style_recovery = bool(
-                    legacy_grooming_foreleg_repair_active
-                    and GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH > 0.0
-                )
-                builtin_style_recovery = bool(
-                    geometry_style_recovery or grooming_local_style_recovery
-                )
-                effective_pose_steps = (
-                    max(8, int(profile["steps"]))
-                    if (
-                        geometry_first_action_reference
-                        and action_key(pose) == "grooming"
-                    )
-                    else int(profile["steps"])
-                )
-                if advisory_grooming_action_transfer_active:
-                    # The loaded Lightning LoRA is distilled for exactly four
-                    # steps. Longer schedules produced neutral copies and scene
-                    # drift in the same-seed grooming reproduction.
-                    effective_pose_steps = GROOMING_ADVISORY_ACTION_TRANSFER_STEPS
-                if dog_prompt_only_action_transfer_active:
-                    effective_pose_steps = DOG_PHOTOREAL_SINGLE_IMAGE_ACTION_STEPS
-                if advisory_grooming_identity_refine_active:
-                    effective_pose_steps = max(
-                        GROOMING_ADVISORY_IDENTITY_REFINE_STEPS,
-                        effective_pose_steps,
-                    )
-                if grooming_foreleg_repair_active:
-                    effective_pose_steps = max(
-                        GROOMING_QWEN_FORELEG_REPAIR_STEPS,
-                        effective_pose_steps,
-                    )
-                if canonical_grooming_full_pose_recovery_active:
-                    effective_pose_steps = max(
-                        GROOMING_CANONICAL_FULL_POSE_RESCUE_STEPS,
-                        effective_pose_steps,
-                    )
-                if canonical_eating_identity_refine_active:
-                    effective_pose_steps = max(
-                        EATING_CANONICAL_IDENTITY_REFINE_STEPS,
-                        effective_pose_steps,
-                    )
-                if canonical_eating_contact_repair_active:
-                    effective_pose_steps = max(
-                        EATING_CONTACT_REPAIR_STEPS,
-                        effective_pose_steps,
-                    )
-                effective_suppress_builtin_style = (
-                    False
-                    if grooming_local_style_recovery
-                    else (
-                        True
-                        if (canonical_action_reference or grooming_geometry_canonical)
-                        else (
-                            not geometry_style_recovery
-                            if main_case_geometry_first
-                            else suppress_builtin_style
+                        pixel_lock_audit = (
+                            composite_canonical_eating_contact_repair_output(
+                                raw_qwen_source_output,
+                                eating_contact_repair_canvas_path,
+                                eating_contact_repair_noise_mask_path,
+                                locked_output,
+                                bowl_top=int(source_bowl_bbox[1]),
+                            )
                         )
+                        eating_contact_repair_audit[
+                            "post_qwen_pixel_lock"
+                        ] = pixel_lock_audit
+                        source_output = locked_output
+                        source_output_sha256 = pixel_lock_audit["target_sha256"]
+                    attempt_keyframe = (
+                        job_dir / f"pose_{index:02d}_keyframe_attempt_{attempt:02d}.png"
                     )
-                )
-                effective_builtin_style_strength = (
-                    GROOMING_QWEN_FORELEG_REPAIR_STYLE_STRENGTH
-                    if grooming_local_style_recovery
-                    else (
-                        QWEN_EATING_GEOMETRY_FIRST_STYLE_STRENGTH
-                        if geometry_style_recovery
-                        else QWEN_POSE_STYLE_LORA_STRENGTH
-                    )
-                )
-                if (
-                    dog_prompt_only_action_transfer_active
-                    and pose_identity_palette_prompt_signature is not None
-                    and pose_identity_palette_prompt_marker not in attempt_prompt
-                ):
-                    # Keep the identity palette attached if a future specialized
-                    # written-action prompt replaces the generic dog prompt.
-                    attempt_prompt += "\n\n" + pose_identity_palette_prompt_builder(
-                        pose_identity_palette_prompt_signature,
-                        retry=attempt > 1,
-                        previous_quality=previous_pose_identity_palette_quality,
-                    )
-                workflow = qwen_workflow(
-                    attempt_primary_input_name,
-                    attempt_prompt,
-                    (
-                        ""
-                        if advisory_grooming_action_transfer_active
-                        else pose_negative_prompt
-                    ),
-                    attempt_seed,
-                    prefix,
-                    user_lora=effective_pose_user_lora,
-                    user_lora_strength=effective_pose_user_lora_strength,
-                    user_lora_mode=effective_pose_user_lora_mode,
-                    user_loras=effective_pose_user_loras,
-                    steps=effective_pose_steps,
-                    cfg=profile["cfg"],
-                    denoise=effective_pose_denoise,
-                    builtin_style_strength=effective_builtin_style_strength,
-                    suppress_builtin_style=effective_suppress_builtin_style,
-                    pose_reference_input_name=(
-                        None
-                        if attempt_additional_reference_input_names is not None
-                        else attempt_secondary_input_name
-                    ),
-                    additional_reference_input_names=(
-                        attempt_additional_reference_input_names
-                    ),
-                    noise_mask_input_name=attempt_noise_mask_input_name,
-                )
-                write_workflow(
-                    job_dir,
-                    f"qwen_pose_{index:02d}_attempt_{attempt:02d}.json",
-                    workflow,
-                )
-                entry = queue_and_wait(
-                    workflow,
-                    f"{job_id} keyframe {index}/{len(poses)} attempt {attempt}",
-                    timeout=7200,
-                    job_id=job_id,
-                )
-                raw_qwen_source_output = first_output(
-                    entry,
-                    {".png", ".jpg", ".jpeg", ".webp"},
-                    "Qwen keyframe",
-                )
-                raw_qwen_source_sha256 = file_sha256(raw_qwen_source_output)
-                source_output = raw_qwen_source_output
-                source_output_sha256 = file_sha256(source_output)
-                raw_qwen_byte_preserved = False
-                if canonical_eating_contact_repair_active:
-                    if (
-                        eating_contact_repair_canvas_path is None
-                        or eating_contact_repair_noise_mask_path is None
-                        or eating_contact_repair_audit is None
-                    ):
+                    if advisory_grooming_identity_refine_active:
                         raise RuntimeError(
-                            "Canonical eating contact repair lost its pixel-lock "
-                            "inputs."
+                            "Post-Qwen grooming identity refinement is disabled: the "
+                            "first frame must be an untouched raw Qwen action output."
                         )
-                    locked_output = (
-                        job_dir
-                        / (
-                            f"pose_{index:02d}_eating_contact_locked_"
-                            f"attempt_{attempt:02d}.png"
-                        )
-                    )
-                    repair_canvas_audit = eating_contact_repair_audit[
-                        "repair_canvas"
-                    ]
-                    source_bowl_bbox = repair_canvas_audit.get(
-                        "source_bowl_bbox"
-                    )
-                    if (
-                        not isinstance(source_bowl_bbox, list)
-                        or len(source_bowl_bbox) != 4
-                    ):
-                        raise RuntimeError(
-                            "Canonical eating contact repair lost its bowl boundary."
-                        )
-                    pixel_lock_audit = (
-                        composite_canonical_eating_contact_repair_output(
-                            raw_qwen_source_output,
-                            eating_contact_repair_canvas_path,
-                            eating_contact_repair_noise_mask_path,
-                            locked_output,
-                            bowl_top=int(source_bowl_bbox[1]),
-                        )
-                    )
-                    eating_contact_repair_audit[
-                        "post_qwen_pixel_lock"
-                    ] = pixel_lock_audit
-                    source_output = locked_output
-                    source_output_sha256 = pixel_lock_audit["target_sha256"]
-                attempt_keyframe = (
-                    job_dir / f"pose_{index:02d}_keyframe_attempt_{attempt:02d}.png"
-                )
-                if advisory_grooming_identity_refine_active:
-                    raise RuntimeError(
-                        "Post-Qwen grooming identity refinement is disabled: the "
-                        "first frame must be an untouched raw Qwen action output."
-                    )
-                elif advisory_grooming_action_transfer_active:
-                    if source_output.suffix.lower() != ".png":
-                        raise RuntimeError(
-                            "Raw Qwen grooming output must be a PNG before exact "
-                            "byte-preserving selection."
-                        )
-                    shutil.copy2(source_output, attempt_keyframe)
-                    if file_sha256(attempt_keyframe) != source_output_sha256:
-                        raise RuntimeError(
-                            "Raw Qwen grooming output changed while being selected."
-                        )
-                    raw_qwen_byte_preserved = True
-                else:
-                    with Image.open(source_output) as generated:
-                        generated.convert("RGB").save(
-                            attempt_keyframe, format="PNG", optimize=True
-                        )
-                candidate_identity_palette = (
-                    identity_palette_signature(
-                        attempt_keyframe,
-                        exclude_bottom_fraction=pose_palette_bottom_exclusion,
-                    )
-                    if pose_reference_identity_palette is not None
-                    else None
-                )
-                primary_palette_quality = (
-                    identity_palette_quality(
-                        pose_reference_identity_palette,
-                        candidate_identity_palette,
-                    )
-                    if (
-                        pose_reference_identity_palette is not None
-                        and candidate_identity_palette is not None
-                    )
-                    else None
-                )
-                candidate_upper_body_identity_palette = (
-                    identity_palette_signature(
-                        attempt_keyframe,
-                        exclude_bottom_fraction=(
-                            BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
-                        ),
-                    )
-                    if pose_reference_upper_body_identity_palette is not None
-                    else None
-                )
-                upper_body_palette_quality = (
-                    identity_palette_quality(
-                        pose_reference_upper_body_identity_palette,
-                        candidate_upper_body_identity_palette,
-                    )
-                    if (
-                        pose_reference_upper_body_identity_palette is not None
-                        and candidate_upper_body_identity_palette is not None
-                    )
-                    else None
-                )
-                palette_quality = (
-                    bowl_aware_identity_palette_quality(
-                        primary_palette_quality,
-                        upper_body_palette_quality,
-                    )
-                    if primary_palette_quality is not None and bowl_action
-                    else primary_palette_quality
-                )
-                attempt_cutout = (
-                    job_dir / f"pose_{index:02d}_qwen_cutout_attempt_{attempt:02d}.png"
-                )
-                semantic_green_attempt = (
-                    job_dir
-                    / f"pose_{index:02d}_semantic_green_attempt_{attempt:02d}.png"
-                )
-                semantic_cutout_attempt = (
-                    job_dir
-                    / f"pose_{index:02d}_semantic_cutout_attempt_{attempt:02d}.png"
-                )
-                semantic_raw_attempt = (
-                    job_dir / f"pose_{index:02d}_semantic_raw_attempt_{attempt:02d}.png"
-                )
-                chroma_metrics, attempt_cutout = normalize_qwen_action_candidate(
-                    attempt_keyframe,
-                    attempt_cutout,
-                    semantic_green_attempt,
-                    semantic_cutout_attempt,
-                    semantic_raw_attempt,
-                    pose=pose,
-                    allow_semantic_matte=bool(
-                        canonical_action_reference and not grooming_pose_gate_required
-                    ),
-                )
-                if chroma_metrics.get("normalized_after_qwen"):
-                    semantic_palette = evaluate_pose_identity_palette(
-                        attempt_cutout,
-                        primary_reference=pose_reference_identity_palette,
-                        upper_body_reference=(
-                            pose_reference_upper_body_identity_palette
-                        ),
-                        bottom_exclusion=pose_palette_bottom_exclusion,
-                        bowl_action=bowl_action,
-                    )
-                    candidate_identity_palette = semantic_palette["candidate"]
-                    candidate_upper_body_identity_palette = semantic_palette[
-                        "upper_body_candidate"
-                    ]
-                    palette_quality = semantic_palette["quality"]
-                grooming_pose_gate_metrics: dict[str, Any] | None = None
-                if grooming_pose_gate_required:
-                    if (
-                        grooming_pose_gate_guide_path is None
-                        or grooming_pose_gate_metadata_path is None
-                    ):
-                        raise RuntimeError(
-                            "Main_case grooming pose gate inputs were not resolved."
-                        )
-                    direct_chroma_metrics = chroma_metrics
-                    grooming_gate_green = (
-                        job_dir
-                        / f"pose_{index:02d}_grooming_gate_green_attempt_{attempt:02d}.png"
-                    )
-                    grooming_gate_cutout = (
-                        job_dir
-                        / f"pose_{index:02d}_grooming_gate_cutout_attempt_{attempt:02d}.png"
-                    )
-                    grooming_gate_semantic = (
-                        job_dir
-                        / f"pose_{index:02d}_grooming_gate_semantic_attempt_{attempt:02d}.png"
-                    )
-                    grooming_gate_reference = (
-                        job_dir
-                        / f"pose_{index:02d}_qwen_reference_attempt_{attempt:02d}.png"
-                    )
-                    chroma_metrics, grooming_pose_gate_metrics = (
-                        evaluate_main_case_grooming_pose_candidate(
+                    elif advisory_grooming_action_transfer_active:
+                        if source_output.suffix.lower() != ".png":
+                            raise RuntimeError(
+                                "Raw Qwen grooming output must be a PNG before exact "
+                                "byte-preserving selection."
+                            )
+                        shutil.copy2(source_output, attempt_keyframe)
+                        if file_sha256(attempt_keyframe) != source_output_sha256:
+                            raise RuntimeError(
+                                "Raw Qwen grooming output changed while being selected."
+                            )
+                        raw_qwen_byte_preserved = True
+                    else:
+                        with Image.open(source_output) as generated:
+                            generated.convert("RGB").save(
+                                attempt_keyframe, format="PNG", optimize=True
+                            )
+                    candidate_identity_palette = (
+                        identity_palette_signature(
                             attempt_keyframe,
-                            pose=pose,
-                            green_target=grooming_gate_green,
-                            cutout_target=grooming_gate_cutout,
-                            semantic_target=grooming_gate_semantic,
-                            normalized_cutout_target=grooming_gate_reference,
-                            geometry_guide=grooming_pose_gate_guide_path,
-                            geometry_metadata=grooming_pose_gate_metadata_path,
-                            pose_transfer_seed=(
-                                pose_transfer_seed_path
-                                if canonical_grooming_full_pose_recovery_active
-                                else None
-                            ),
+                            exclude_bottom_fraction=pose_palette_bottom_exclusion,
                         )
+                        if pose_reference_identity_palette is not None
+                        else None
                     )
-                    if (
-                        canonical_action_reference
-                        and attempt
-                        <= GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
-                    ):
-                        grooming_pose_gate_metrics = apply_canonical_grooming_direct_structural_edge_evidence_gate(
-                            grooming_pose_gate_metrics,
-                            attempt=attempt,
-                            canonical_action_reference=(canonical_action_reference),
-                            canonical_completion_active=(
-                                canonical_grooming_completion_active
-                            ),
-                            canonical_full_pose_recovery_active=(
-                                canonical_grooming_full_pose_recovery_active
+                    primary_palette_quality = (
+                        identity_palette_quality(
+                            pose_reference_identity_palette,
+                            candidate_identity_palette,
+                        )
+                        if (
+                            pose_reference_identity_palette is not None
+                            and candidate_identity_palette is not None
+                        )
+                        else None
+                    )
+                    candidate_upper_body_identity_palette = (
+                        identity_palette_signature(
+                            attempt_keyframe,
+                            exclude_bottom_fraction=(
+                                BOWL_IDENTITY_PALETTE_UPPER_BODY_EXCLUSION
                             ),
                         )
-                    if canonical_grooming_completion_active:
-                        grooming_pose_gate_metrics = (
-                            apply_canonical_grooming_completion_edge_evidence_gate(
-                                grooming_pose_gate_metrics,
-                                grooming_foreleg_repair_audit,
-                            )
+                        if pose_reference_upper_body_identity_palette is not None
+                        else None
+                    )
+                    upper_body_palette_quality = (
+                        identity_palette_quality(
+                            pose_reference_upper_body_identity_palette,
+                            candidate_upper_body_identity_palette,
                         )
-                    chroma_metrics = {
-                        **chroma_metrics,
-                        "direct_chroma": direct_chroma_metrics,
-                        "semantic_recovery_attempted": True,
-                        "semantic_recovery_acceptable": bool(
-                            chroma_metrics.get("acceptable")
-                        ),
-                        "normalized_after_qwen": bool(chroma_metrics.get("acceptable")),
-                        "matte_policy": QWEN_ACTION_CANDIDATE_MATTE_POLICY,
-                        "normalization_policy": (
-                            QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
-                        ),
-                        "grooming_pose_gate_alpha_input": (
-                            grooming_gate_reference.name
-                        ),
-                    }
+                        if (
+                            pose_reference_upper_body_identity_palette is not None
+                            and candidate_upper_body_identity_palette is not None
+                        )
+                        else None
+                    )
+                    palette_quality = (
+                        bowl_aware_identity_palette_quality(
+                            primary_palette_quality,
+                            upper_body_palette_quality,
+                        )
+                        if primary_palette_quality is not None and bowl_action
+                        else primary_palette_quality
+                    )
                     attempt_cutout = (
-                        grooming_gate_reference
-                        if chroma_metrics.get("acceptable")
-                        else grooming_gate_cutout
+                        job_dir / f"pose_{index:02d}_qwen_cutout_attempt_{attempt:02d}.png"
                     )
-                    if chroma_metrics.get("acceptable"):
+                    semantic_green_attempt = (
+                        job_dir
+                        / f"pose_{index:02d}_semantic_green_attempt_{attempt:02d}.png"
+                    )
+                    semantic_cutout_attempt = (
+                        job_dir
+                        / f"pose_{index:02d}_semantic_cutout_attempt_{attempt:02d}.png"
+                    )
+                    semantic_raw_attempt = (
+                        job_dir / f"pose_{index:02d}_semantic_raw_attempt_{attempt:02d}.png"
+                    )
+                    chroma_metrics, attempt_cutout = normalize_qwen_action_candidate(
+                        attempt_keyframe,
+                        attempt_cutout,
+                        semantic_green_attempt,
+                        semantic_cutout_attempt,
+                        semantic_raw_attempt,
+                        pose=pose,
+                        allow_semantic_matte=bool(
+                            canonical_action_reference and not grooming_pose_gate_required
+                        ),
+                    )
+                    if chroma_metrics.get("normalized_after_qwen"):
                         semantic_palette = evaluate_pose_identity_palette(
                             attempt_cutout,
                             primary_reference=pose_reference_identity_palette,
@@ -6416,58 +6409,58 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             "upper_body_candidate"
                         ]
                         palette_quality = semantic_palette["quality"]
-                    palette_normalization_eligibility = (
-                        canonical_grooming_palette_normalization_eligibility(
-                            canonical_action_identity_palette_quality(
-                                palette_quality
-                            ),
-                            grooming_pose_gate_metrics,
-                            attempt=attempt,
-                        )
-                    )
-                    palette_normalization_audit: dict[str, Any] = {
-                        "eligibility": palette_normalization_eligibility,
-                        "applied": False,
-                        "fail_closed": True,
-                    }
-                    if (
-                        canonical_action_reference
-                        and palette_normalization_eligibility.get("eligible") is True
-                        and chroma_metrics.get("acceptable") is True
-                        and attempt_cutout.is_file()
-                    ):
-                        palette_normalized_reference = (
-                            job_dir
-                            / f"pose_{index:02d}_grooming_palette_normalized_"
-                            f"attempt_{attempt:02d}.png"
-                        )
-                        try:
-                            canonical_reference_path = COMFY_INPUT / qwen_input_name
-                            normalization = (
-                                prepare_canonical_grooming_achromatic_palette_normalization(
-                                    attempt_cutout,
-                                    canonical_reference_path,
-                                    palette_normalized_reference,
-                                )
+                    grooming_pose_gate_metrics: dict[str, Any] | None = None
+                    if grooming_pose_gate_required:
+                        if (
+                            grooming_pose_gate_guide_path is None
+                            or grooming_pose_gate_metadata_path is None
+                        ):
+                            raise RuntimeError(
+                                "Main_case grooming pose gate inputs were not resolved."
                             )
-                            normalized_pose_gate = evaluate_grooming_pose(
-                                palette_normalized_reference,
-                                grooming_pose_gate_guide_path,
-                                geometry_metadata=(
-                                    grooming_pose_gate_metadata_path
+                        direct_chroma_metrics = chroma_metrics
+                        grooming_gate_green = (
+                            job_dir
+                            / f"pose_{index:02d}_grooming_gate_green_attempt_{attempt:02d}.png"
+                        )
+                        grooming_gate_cutout = (
+                            job_dir
+                            / f"pose_{index:02d}_grooming_gate_cutout_attempt_{attempt:02d}.png"
+                        )
+                        grooming_gate_semantic = (
+                            job_dir
+                            / f"pose_{index:02d}_grooming_gate_semantic_attempt_{attempt:02d}.png"
+                        )
+                        grooming_gate_reference = (
+                            job_dir
+                            / f"pose_{index:02d}_qwen_reference_attempt_{attempt:02d}.png"
+                        )
+                        chroma_metrics, grooming_pose_gate_metrics = (
+                            evaluate_main_case_grooming_pose_candidate(
+                                attempt_keyframe,
+                                pose=pose,
+                                green_target=grooming_gate_green,
+                                cutout_target=grooming_gate_cutout,
+                                semantic_target=grooming_gate_semantic,
+                                normalized_cutout_target=grooming_gate_reference,
+                                geometry_guide=grooming_pose_gate_guide_path,
+                                geometry_metadata=grooming_pose_gate_metadata_path,
+                                pose_transfer_seed=(
+                                    pose_transfer_seed_path
+                                    if canonical_grooming_full_pose_recovery_active
+                                    else None
                                 ),
                             )
-                            normalized_pose_gate = json.loads(
-                                json.dumps(
-                                    normalized_pose_gate,
-                                    ensure_ascii=False,
-                                    allow_nan=False,
-                                )
-                            )
-                            normalized_pose_gate = apply_canonical_grooming_direct_structural_edge_evidence_gate(
-                                normalized_pose_gate,
+                        )
+                        if (
+                            canonical_action_reference
+                            and attempt
+                            <= GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+                        ):
+                            grooming_pose_gate_metrics = apply_canonical_grooming_direct_structural_edge_evidence_gate(
+                                grooming_pose_gate_metrics,
                                 attempt=attempt,
-                                canonical_action_reference=True,
+                                canonical_action_reference=(canonical_action_reference),
                                 canonical_completion_active=(
                                     canonical_grooming_completion_active
                                 ),
@@ -6475,348 +6468,579 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                     canonical_grooming_full_pose_recovery_active
                                 ),
                             )
-                            normalized_palette = evaluate_pose_identity_palette(
-                                palette_normalized_reference,
-                                primary_reference=(
-                                    pose_reference_identity_palette
-                                ),
+                        if canonical_grooming_completion_active:
+                            grooming_pose_gate_metrics = (
+                                apply_canonical_grooming_completion_edge_evidence_gate(
+                                    grooming_pose_gate_metrics,
+                                    grooming_foreleg_repair_audit,
+                                )
+                            )
+                        chroma_metrics = {
+                            **chroma_metrics,
+                            "direct_chroma": direct_chroma_metrics,
+                            "semantic_recovery_attempted": True,
+                            "semantic_recovery_acceptable": bool(
+                                chroma_metrics.get("acceptable")
+                            ),
+                            "normalized_after_qwen": bool(chroma_metrics.get("acceptable")),
+                            "matte_policy": QWEN_ACTION_CANDIDATE_MATTE_POLICY,
+                            "normalization_policy": (
+                                QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+                            ),
+                            "grooming_pose_gate_alpha_input": (
+                                grooming_gate_reference.name
+                            ),
+                        }
+                        attempt_cutout = (
+                            grooming_gate_reference
+                            if chroma_metrics.get("acceptable")
+                            else grooming_gate_cutout
+                        )
+                        if chroma_metrics.get("acceptable"):
+                            semantic_palette = evaluate_pose_identity_palette(
+                                attempt_cutout,
+                                primary_reference=pose_reference_identity_palette,
                                 upper_body_reference=(
                                     pose_reference_upper_body_identity_palette
                                 ),
-                                bottom_exclusion=(pose_palette_bottom_exclusion),
-                                bowl_action=False,
+                                bottom_exclusion=pose_palette_bottom_exclusion,
+                                bowl_action=bowl_action,
                             )
-                            normalized_palette_quality = (
+                            candidate_identity_palette = semantic_palette["candidate"]
+                            candidate_upper_body_identity_palette = semantic_palette[
+                                "upper_body_candidate"
+                            ]
+                            palette_quality = semantic_palette["quality"]
+                        palette_normalization_eligibility = (
+                            canonical_grooming_palette_normalization_eligibility(
                                 canonical_action_identity_palette_quality(
-                                    normalized_palette["quality"]
+                                    palette_quality
+                                ),
+                                grooming_pose_gate_metrics,
+                                attempt=attempt,
+                            )
+                        )
+                        palette_normalization_audit: dict[str, Any] = {
+                            "eligibility": palette_normalization_eligibility,
+                            "applied": False,
+                            "fail_closed": True,
+                        }
+                        if (
+                            canonical_action_reference
+                            and palette_normalization_eligibility.get("eligible") is True
+                            and chroma_metrics.get("acceptable") is True
+                            and attempt_cutout.is_file()
+                        ):
+                            palette_normalized_reference = (
+                                job_dir
+                                / f"pose_{index:02d}_grooming_palette_normalized_"
+                                f"attempt_{attempt:02d}.png"
+                            )
+                            try:
+                                canonical_reference_path = COMFY_INPUT / qwen_input_name
+                                normalization = (
+                                    prepare_canonical_grooming_achromatic_palette_normalization(
+                                        attempt_cutout,
+                                        canonical_reference_path,
+                                        palette_normalized_reference,
+                                    )
+                                )
+                                normalized_pose_gate = evaluate_grooming_pose(
+                                    palette_normalized_reference,
+                                    grooming_pose_gate_guide_path,
+                                    geometry_metadata=(
+                                        grooming_pose_gate_metadata_path
+                                    ),
+                                )
+                                normalized_pose_gate = json.loads(
+                                    json.dumps(
+                                        normalized_pose_gate,
+                                        ensure_ascii=False,
+                                        allow_nan=False,
+                                    )
+                                )
+                                normalized_pose_gate = apply_canonical_grooming_direct_structural_edge_evidence_gate(
+                                    normalized_pose_gate,
+                                    attempt=attempt,
+                                    canonical_action_reference=True,
+                                    canonical_completion_active=(
+                                        canonical_grooming_completion_active
+                                    ),
+                                    canonical_full_pose_recovery_active=(
+                                        canonical_grooming_full_pose_recovery_active
+                                    ),
+                                )
+                                normalized_palette = evaluate_pose_identity_palette(
+                                    palette_normalized_reference,
+                                    primary_reference=(
+                                        pose_reference_identity_palette
+                                    ),
+                                    upper_body_reference=(
+                                        pose_reference_upper_body_identity_palette
+                                    ),
+                                    bottom_exclusion=(pose_palette_bottom_exclusion),
+                                    bowl_action=False,
+                                )
+                                normalized_palette_quality = (
+                                    canonical_action_identity_palette_quality(
+                                        normalized_palette["quality"]
+                                    )
+                                )
+                                revalidation_passed = bool(
+                                    normalized_pose_gate.get("acceptable") is True
+                                    and isinstance(
+                                        normalized_palette_quality,
+                                        dict,
+                                    )
+                                    and normalized_palette_quality.get("acceptable")
+                                    is True
+                                )
+                                palette_normalization_audit.update(
+                                    normalization=normalization,
+                                    revalidated_pose_gate=normalized_pose_gate,
+                                    revalidated_identity_palette=(
+                                        normalized_palette_quality
+                                    ),
+                                    revalidation_passed=revalidation_passed,
+                                    applied=revalidation_passed,
+                                )
+                                if revalidation_passed:
+                                    attempt_cutout = palette_normalized_reference
+                                    grooming_gate_reference = (
+                                        palette_normalized_reference
+                                    )
+                                    grooming_pose_gate_metrics = normalized_pose_gate
+                                    candidate_identity_palette = normalized_palette[
+                                        "candidate"
+                                    ]
+                                    candidate_upper_body_identity_palette = (
+                                        normalized_palette["upper_body_candidate"]
+                                    )
+                                    palette_quality = normalized_palette["quality"]
+                                    chroma_metrics[
+                                        "pre_palette_final_reference_normalization"
+                                    ] = chroma_metrics.get(
+                                        "final_reference_normalization"
+                                    )
+                                    chroma_metrics["final_reference_normalization"] = {
+                                        "policy": (
+                                            GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_PALETTE_POLICY
+                                        ),
+                                        "source_path": normalization["source_path"],
+                                        "source_sha256": normalization[
+                                            "source_sha256"
+                                        ],
+                                        "output_path": normalization["target_path"],
+                                        "output_sha256": normalization[
+                                            "target_sha256"
+                                        ],
+                                        "output_mode": "RGBA",
+                                        "output_size": [512, 512],
+                                        "alpha_geometry_preserved_exactly": True,
+                                    }
+                                    chroma_metrics["final_reference_sha256"] = (
+                                        file_sha256(attempt_cutout)
+                                    )
+                                    chroma_metrics[
+                                        "grooming_pose_gate_alpha_input"
+                                    ] = attempt_cutout.name
+                            except Exception as exc:  # noqa: BLE001 - retry fail closed
+                                palette_normalization_audit.update(
+                                    applied=False,
+                                    revalidation_passed=False,
+                                    error=f"{type(exc).__name__}: {str(exc)[:1000]}",
+                                )
+                        chroma_metrics[
+                            "grooming_achromatic_palette_normalization"
+                        ] = palette_normalization_audit
+                        update_job(
+                            job_id,
+                            grooming_achromatic_palette_normalization=(
+                                palette_normalization_audit
+                            ),
+                        )
+                        gate_audit = {
+                            "pose_index": index,
+                            "pose": pose,
+                            "action": action_key(pose),
+                            "attempt": attempt,
+                            "seed": attempt_seed,
+                            "source": attempt_keyframe.name,
+                            "alpha_cutout": attempt_cutout.name,
+                            "geometry_guide": str(grooming_pose_gate_guide_path),
+                            "geometry_metadata": str(grooming_pose_gate_metadata_path),
+                            "chroma": chroma_metrics,
+                            "gate": grooming_pose_gate_metrics,
+                            "result": (
+                                "passed"
+                                if grooming_pose_gate_metrics.get("acceptable")
+                                else "rejected"
+                            ),
+                        }
+                        grooming_pose_gate_attempt_audits.append(gate_audit)
+                        write_json_atomic(
+                            job_dir
+                            / "workflows"
+                            / f"qwen_pose_{index:02d}_grooming_pose_gate.json",
+                            {
+                                "policy": GROOMING_POSE_GATE_POLICY,
+                                "version": GROOMING_POSE_GATE_VERSION,
+                                "fail_closed": True,
+                                "attempts": [
+                                    item
+                                    for item in grooming_pose_gate_attempt_audits
+                                    if item["pose_index"] == index
+                                ],
+                            },
+                        )
+                        update_job(
+                            job_id,
+                            grooming_pose_gate_status=(
+                                "candidate_passed"
+                                if grooming_pose_gate_metrics.get("acceptable")
+                                else (
+                                    "failed"
+                                    if attempt == len(active_pose_profiles)
+                                    else "retrying"
+                                )
+                            ),
+                            grooming_pose_gate_attempts=(grooming_pose_gate_attempt_audits),
+                        )
+                    if (
+                        canonical_action_reference
+                        and chroma_metrics.get("acceptable")
+                        and attempt_cutout.is_file()
+                    ):
+                        try:
+                            cleanup = neutralize_uploaded_identity_chroma_spill(
+                                attempt_cutout,
+                                source_identity_palette,
+                            )
+                            chroma_metrics = merge_identity_chroma_spill_cleanup(
+                                chroma_metrics,
+                                cleanup,
+                                blocking=bool(action_candidate_audits_required),
+                            )
+                        except Exception as exc:  # noqa: BLE001 - retry fail closed
+                            chroma_metrics = {
+                                **chroma_metrics,
+                                "acceptable": False,
+                                "issues": list(
+                                    dict.fromkeys(
+                                        [
+                                            *[
+                                                str(issue)
+                                                for issue in chroma_metrics.get(
+                                                    "issues",
+                                                    [],
+                                                )
+                                            ],
+                                            "identity_chroma_spill_cleanup_failed",
+                                        ]
+                                    )
+                                ),
+                                "identity_chroma_spill_cleanup": {
+                                    "policy": UPLOADED_IDENTITY_CHROMA_SPILL_POLICY,
+                                    "applied": False,
+                                    "error": (f"{type(exc).__name__}: {str(exc)[:1000]}"),
+                                },
+                            }
+                            if not action_candidate_audits_required:
+                                chroma_metrics["warnings"] = list(
+                                    chroma_metrics.get("issues", [])
+                                )
+                                chroma_metrics["issues"] = []
+                                chroma_metrics["acceptable"] = True
+                        if chroma_metrics.get("acceptable"):
+                            cleaned_palette = evaluate_pose_identity_palette(
+                                attempt_cutout,
+                                primary_reference=pose_reference_identity_palette,
+                                upper_body_reference=(
+                                    pose_reference_upper_body_identity_palette
+                                ),
+                                bottom_exclusion=pose_palette_bottom_exclusion,
+                                bowl_action=bowl_action,
+                            )
+                            candidate_identity_palette = cleaned_palette["candidate"]
+                            candidate_upper_body_identity_palette = cleaned_palette[
+                                "upper_body_candidate"
+                            ]
+                            palette_quality = cleaned_palette["quality"]
+                    if canonical_action_reference:
+                        palette_quality = canonical_action_identity_palette_quality(
+                            palette_quality
+                        )
+                    eating_dark_feature_recovery_eligibility = (
+                        light_achromatic_eating_dark_feature_recovery_eligibility(
+                            palette_quality
+                        )
+                    )
+                    eating_dark_feature_recovery_audit: dict[str, Any] = {
+                        "eligibility": eating_dark_feature_recovery_eligibility,
+                        "applied": False,
+                        "identity_palette_gate_bypassed": False,
+                        "fail_closed": True,
+                    }
+                    if (
+                        canonical_action_reference
+                        and action_key(pose) == "eating"
+                        and eating_dark_feature_recovery_eligibility.get("eligible")
+                        is True
+                        and chroma_metrics.get("acceptable") is True
+                        and attempt_cutout.is_file()
+                        and canonical_similarity_reference is not None
+                        and canonical_similarity_reference.is_file()
+                    ):
+                        recovered_cutout = (
+                            job_dir
+                            / f"pose_{index:02d}_light_achromatic_identity_recovered_"
+                            f"attempt_{attempt:02d}.png"
+                        )
+                        try:
+                            before_recovery_pose_quality = pose_cutout_quality(
+                                attempt_cutout,
+                                pose,
+                                require_eating_mouth_contact=(
+                                    require_eating_mouth_contact
+                                ),
+                            )
+                            recovery = (
+                                prepare_light_achromatic_eating_dark_feature_recovery(
+                                    attempt_cutout,
+                                    canonical_similarity_reference,
+                                    recovered_cutout,
                                 )
                             )
-                            revalidation_passed = bool(
-                                normalized_pose_gate.get("acceptable") is True
-                                and isinstance(
-                                    normalized_palette_quality,
-                                    dict,
+                            recovered_palette = evaluate_pose_identity_palette(
+                                recovered_cutout,
+                                primary_reference=pose_reference_identity_palette,
+                                upper_body_reference=(
+                                    pose_reference_upper_body_identity_palette
+                                ),
+                                bottom_exclusion=pose_palette_bottom_exclusion,
+                                bowl_action=True,
+                            )
+                            recovered_palette_quality = (
+                                canonical_action_identity_palette_quality(
+                                    recovered_palette["quality"]
                                 )
-                                and normalized_palette_quality.get("acceptable")
+                            )
+                            after_recovery_pose_quality = pose_cutout_quality(
+                                recovered_cutout,
+                                pose,
+                                require_eating_mouth_contact=(
+                                    require_eating_mouth_contact
+                                ),
+                            )
+                            pose_gate_non_regressed = bool(
+                                before_recovery_pose_quality.get("acceptable")
+                                is not True
+                                or after_recovery_pose_quality.get("acceptable")
                                 is True
                             )
-                            palette_normalization_audit.update(
-                                normalization=normalization,
-                                revalidated_pose_gate=normalized_pose_gate,
-                                revalidated_identity_palette=(
-                                    normalized_palette_quality
+                            revalidation_passed = bool(
+                                isinstance(recovered_palette_quality, dict)
+                                and recovered_palette_quality.get("acceptable") is True
+                                and pose_gate_non_regressed
+                            )
+                            eating_dark_feature_recovery_audit.update(
+                                recovery=recovery,
+                                before_identity_palette=palette_quality,
+                                after_identity_palette=recovered_palette_quality,
+                                before_pose_quality=before_recovery_pose_quality,
+                                after_pose_quality=after_recovery_pose_quality,
+                                pose_gate_non_regressed=pose_gate_non_regressed,
+                                identity_palette_revalidated=bool(
+                                    isinstance(recovered_palette_quality, dict)
+                                    and recovered_palette_quality.get("acceptable")
+                                    is True
                                 ),
                                 revalidation_passed=revalidation_passed,
                                 applied=revalidation_passed,
                             )
                             if revalidation_passed:
-                                attempt_cutout = palette_normalized_reference
-                                grooming_gate_reference = (
-                                    palette_normalized_reference
-                                )
-                                grooming_pose_gate_metrics = normalized_pose_gate
-                                candidate_identity_palette = normalized_palette[
+                                attempt_cutout = recovered_cutout
+                                candidate_identity_palette = recovered_palette[
                                     "candidate"
                                 ]
                                 candidate_upper_body_identity_palette = (
-                                    normalized_palette["upper_body_candidate"]
+                                    recovered_palette["upper_body_candidate"]
                                 )
-                                palette_quality = normalized_palette["quality"]
-                                chroma_metrics[
-                                    "pre_palette_final_reference_normalization"
-                                ] = chroma_metrics.get(
-                                    "final_reference_normalization"
-                                )
-                                chroma_metrics["final_reference_normalization"] = {
-                                    "policy": (
-                                        GROOMING_CANONICAL_DIRECT_ORGANIC_PAW_PALETTE_POLICY
+                                palette_quality = recovered_palette_quality
+                                update_job(
+                                    job_id,
+                                    eating_light_achromatic_identity_recovery_status=(
+                                        "candidate_recovered"
                                     ),
-                                    "source_path": normalization["source_path"],
-                                    "source_sha256": normalization[
-                                        "source_sha256"
-                                    ],
-                                    "output_path": normalization["target_path"],
-                                    "output_sha256": normalization[
-                                        "target_sha256"
-                                    ],
-                                    "output_mode": "RGBA",
-                                    "output_size": [512, 512],
-                                    "alpha_geometry_preserved_exactly": True,
-                                }
-                                chroma_metrics["final_reference_sha256"] = (
-                                    file_sha256(attempt_cutout)
+                                    eating_light_achromatic_identity_recovery_attempt=(
+                                        attempt
+                                    ),
+                                    eating_light_achromatic_identity_recovery_policy=(
+                                        EATING_LIGHT_ACHROMATIC_DARK_FEATURE_RECOVERY_POLICY
+                                    ),
                                 )
-                                chroma_metrics[
-                                    "grooming_pose_gate_alpha_input"
-                                ] = attempt_cutout.name
                         except Exception as exc:  # noqa: BLE001 - retry fail closed
-                            palette_normalization_audit.update(
-                                applied=False,
-                                revalidation_passed=False,
+                            eating_dark_feature_recovery_audit.update(
                                 error=f"{type(exc).__name__}: {str(exc)[:1000]}",
+                                revalidation_passed=False,
+                                applied=False,
                             )
-                    chroma_metrics[
-                        "grooming_achromatic_palette_normalization"
-                    ] = palette_normalization_audit
-                    update_job(
-                        job_id,
-                        grooming_achromatic_palette_normalization=(
-                            palette_normalization_audit
-                        ),
+                        chroma_metrics[
+                            "eating_light_achromatic_dark_feature_recovery"
+                        ] = eating_dark_feature_recovery_audit
+                    previous_pose_identity_palette_quality = (
+                        json.loads(json.dumps(palette_quality))
+                        if isinstance(palette_quality, dict)
+                        else None
                     )
-                    gate_audit = {
-                        "pose_index": index,
-                        "pose": pose,
-                        "action": action_key(pose),
-                        "attempt": attempt,
-                        "seed": attempt_seed,
-                        "source": attempt_keyframe.name,
-                        "alpha_cutout": attempt_cutout.name,
-                        "geometry_guide": str(grooming_pose_gate_guide_path),
-                        "geometry_metadata": str(grooming_pose_gate_metadata_path),
-                        "chroma": chroma_metrics,
-                        "gate": grooming_pose_gate_metrics,
-                        "result": (
-                            "passed"
-                            if grooming_pose_gate_metrics.get("acceptable")
-                            else "rejected"
-                        ),
-                    }
-                    grooming_pose_gate_attempt_audits.append(gate_audit)
-                    write_json_atomic(
-                        job_dir
-                        / "workflows"
-                        / f"qwen_pose_{index:02d}_grooming_pose_gate.json",
-                        {
-                            "policy": GROOMING_POSE_GATE_POLICY,
-                            "version": GROOMING_POSE_GATE_VERSION,
-                            "fail_closed": True,
-                            "attempts": [
-                                item
-                                for item in grooming_pose_gate_attempt_audits
-                                if item["pose_index"] == index
-                            ],
-                        },
-                    )
-                    update_job(
-                        job_id,
-                        grooming_pose_gate_status=(
-                            "candidate_passed"
-                            if grooming_pose_gate_metrics.get("acceptable")
-                            else (
-                                "failed"
-                                if attempt == len(active_pose_profiles)
-                                else "retrying"
-                            )
-                        ),
-                        grooming_pose_gate_attempts=(grooming_pose_gate_attempt_audits),
-                    )
-                if (
-                    canonical_action_reference
-                    and chroma_metrics.get("acceptable")
-                    and attempt_cutout.is_file()
-                ):
-                    try:
-                        cleanup = neutralize_uploaded_identity_chroma_spill(
+                    pre_surface_pose_quality: dict[str, Any] | None = None
+                    if (
+                        canonical_action_reference
+                        and chroma_metrics.get("acceptable")
+                        and attempt_cutout.is_file()
+                    ):
+                        pre_surface_pose_quality = pose_cutout_quality(
                             attempt_cutout,
-                            source_identity_palette,
+                            pose,
+                            require_eating_mouth_contact=(require_eating_mouth_contact),
                         )
-                        chroma_metrics = merge_identity_chroma_spill_cleanup(
-                            chroma_metrics,
-                            cleanup,
-                            blocking=bool(action_candidate_audits_required),
+                    grooming_pose_safe_refine_surface_gate: dict[str, Any] | None = None
+                    grooming_pose_safe_refine_eligibility: dict[str, Any] | None = None
+                    if (
+                        canonical_grooming_completion_capable
+                        and attempt == GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
+                    ):
+                        seed_bound_matte = chroma_metrics.get("seed_bound_matte")
+                        palette_issue_set = (
+                            {
+                                str(issue)
+                                for issue in palette_quality.get("issues", [])
+                                if str(issue).strip()
+                            }
+                            if isinstance(palette_quality, dict)
+                            else set()
                         )
-                    except Exception as exc:  # noqa: BLE001 - retry fail closed
-                        chroma_metrics = {
-                            **chroma_metrics,
-                            "acceptable": False,
-                            "issues": list(
-                                dict.fromkeys(
-                                    [
-                                        *[
-                                            str(issue)
-                                            for issue in chroma_metrics.get(
-                                                "issues",
-                                                [],
-                                            )
-                                        ],
-                                        "identity_chroma_spill_cleanup_failed",
-                                    ]
+                        pose_safe_surface_probe_ready = bool(
+                            fur_surface_gate_required
+                            and isinstance(pose_effective_subject_config, dict)
+                            and chroma_metrics.get("acceptable") is True
+                            and chroma_metrics.get("method")
+                            == GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE
+                            and isinstance(seed_bound_matte, dict)
+                            and seed_bound_matte.get("policy")
+                            == GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY
+                            and attempt_cutout.is_file()
+                            and isinstance(grooming_pose_gate_metrics, dict)
+                            and grooming_pose_gate_metrics.get("acceptable") is True
+                            and isinstance(pre_surface_pose_quality, dict)
+                            and pre_surface_pose_quality.get("acceptable") is True
+                            and isinstance(palette_quality, dict)
+                            and palette_quality.get("available") is True
+                            and palette_quality.get("acceptable") is not True
+                            and bool(palette_issue_set)
+                            and not (
+                                palette_issue_set
+                                - GROOMING_CANONICAL_POSE_SAFE_IDENTITY_ONLY_ISSUES
+                            )
+                        )
+                        if pose_safe_surface_probe_ready:
+                            grooming_pose_safe_refine_surface_gate = (
+                                evaluate_main_case_fur_surface_candidate(
+                                    attempt_cutout,
+                                    action="grooming",
+                                    alpha_provenance=(
+                                        GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE
+                                    ),
+                                    effective_subject_config=(
+                                        pose_effective_subject_config
+                                    ),
                                 )
-                            ),
-                            "identity_chroma_spill_cleanup": {
-                                "policy": UPLOADED_IDENTITY_CHROMA_SPILL_POLICY,
-                                "applied": False,
-                                "error": (f"{type(exc).__name__}: {str(exc)[:1000]}"),
+                            )
+                        grooming_pose_safe_refine_eligibility = (
+                            canonical_grooming_pose_safe_identity_refine_eligibility(
+                                attempt=attempt,
+                                seed_bound_matte=(
+                                    seed_bound_matte
+                                    if isinstance(seed_bound_matte, dict)
+                                    else None
+                                ),
+                                pose_gate=grooming_pose_gate_metrics,
+                                pose_quality=pre_surface_pose_quality,
+                                identity_palette_quality=palette_quality,
+                                fur_surface_gate=(
+                                    grooming_pose_safe_refine_surface_gate
+                                ),
+                            )
+                        )
+                        chroma_metrics["pose_safe_identity_refine_eligibility"] = (
+                            grooming_pose_safe_refine_eligibility
+                        )
+                        update_job(
+                            job_id,
+                            grooming_pose_safe_identity_refine_probe={
+                                "attempt": attempt,
+                                "eligibility": grooming_pose_safe_refine_eligibility,
+                                "independent_fur_surface_gate": (
+                                    grooming_pose_safe_refine_surface_gate
+                                ),
                             },
-                        }
-                        if not action_candidate_audits_required:
-                            chroma_metrics["warnings"] = list(
-                                chroma_metrics.get("issues", [])
+                        )
+                        if grooming_pose_safe_refine_eligibility.get("eligible") is True:
+                            eligibility_sha256 = json_value_sha256(
+                                grooming_pose_safe_refine_eligibility
                             )
-                            chroma_metrics["issues"] = []
-                            chroma_metrics["acceptable"] = True
-                    if chroma_metrics.get("acceptable"):
-                        cleaned_palette = evaluate_pose_identity_palette(
-                            attempt_cutout,
-                            primary_reference=pose_reference_identity_palette,
-                            upper_body_reference=(
-                                pose_reference_upper_body_identity_palette
-                            ),
-                            bottom_exclusion=pose_palette_bottom_exclusion,
-                            bowl_action=bowl_action,
-                        )
-                        candidate_identity_palette = cleaned_palette["candidate"]
-                        candidate_upper_body_identity_palette = cleaned_palette[
-                            "upper_body_candidate"
-                        ]
-                        palette_quality = cleaned_palette["quality"]
-                if canonical_action_reference:
-                    palette_quality = canonical_action_identity_palette_quality(
-                        palette_quality
-                    )
-                eating_dark_feature_recovery_eligibility = (
-                    light_achromatic_eating_dark_feature_recovery_eligibility(
-                        palette_quality
-                    )
-                )
-                eating_dark_feature_recovery_audit: dict[str, Any] = {
-                    "eligibility": eating_dark_feature_recovery_eligibility,
-                    "applied": False,
-                    "identity_palette_gate_bypassed": False,
-                    "fail_closed": True,
-                }
-                if (
-                    canonical_action_reference
-                    and action_key(pose) == "eating"
-                    and eating_dark_feature_recovery_eligibility.get("eligible")
-                    is True
-                    and chroma_metrics.get("acceptable") is True
-                    and attempt_cutout.is_file()
-                    and canonical_similarity_reference is not None
-                    and canonical_similarity_reference.is_file()
-                ):
-                    recovered_cutout = (
-                        job_dir
-                        / f"pose_{index:02d}_light_achromatic_identity_recovered_"
-                        f"attempt_{attempt:02d}.png"
-                    )
-                    try:
-                        before_recovery_pose_quality = pose_cutout_quality(
-                            attempt_cutout,
-                            pose,
-                            require_eating_mouth_contact=(
-                                require_eating_mouth_contact
-                            ),
-                        )
-                        recovery = (
-                            prepare_light_achromatic_eating_dark_feature_recovery(
-                                attempt_cutout,
-                                canonical_similarity_reference,
-                                recovered_cutout,
-                            )
-                        )
-                        recovered_palette = evaluate_pose_identity_palette(
-                            recovered_cutout,
-                            primary_reference=pose_reference_identity_palette,
-                            upper_body_reference=(
-                                pose_reference_upper_body_identity_palette
-                            ),
-                            bottom_exclusion=pose_palette_bottom_exclusion,
-                            bowl_action=True,
-                        )
-                        recovered_palette_quality = (
-                            canonical_action_identity_palette_quality(
-                                recovered_palette["quality"]
-                            )
-                        )
-                        after_recovery_pose_quality = pose_cutout_quality(
-                            recovered_cutout,
-                            pose,
-                            require_eating_mouth_contact=(
-                                require_eating_mouth_contact
-                            ),
-                        )
-                        pose_gate_non_regressed = bool(
-                            before_recovery_pose_quality.get("acceptable")
-                            is not True
-                            or after_recovery_pose_quality.get("acceptable")
-                            is True
-                        )
-                        revalidation_passed = bool(
-                            isinstance(recovered_palette_quality, dict)
-                            and recovered_palette_quality.get("acceptable") is True
-                            and pose_gate_non_regressed
-                        )
-                        eating_dark_feature_recovery_audit.update(
-                            recovery=recovery,
-                            before_identity_palette=palette_quality,
-                            after_identity_palette=recovered_palette_quality,
-                            before_pose_quality=before_recovery_pose_quality,
-                            after_pose_quality=after_recovery_pose_quality,
-                            pose_gate_non_regressed=pose_gate_non_regressed,
-                            identity_palette_revalidated=bool(
-                                isinstance(recovered_palette_quality, dict)
-                                and recovered_palette_quality.get("acceptable")
-                                is True
-                            ),
-                            revalidation_passed=revalidation_passed,
-                            applied=revalidation_passed,
-                        )
-                        if revalidation_passed:
-                            attempt_cutout = recovered_cutout
-                            candidate_identity_palette = recovered_palette[
-                                "candidate"
-                            ]
-                            candidate_upper_body_identity_palette = (
-                                recovered_palette["upper_body_candidate"]
-                            )
-                            palette_quality = recovered_palette_quality
+                            assert isinstance(seed_bound_matte, dict)
+                            grooming_full_pose_refine_source = {
+                                "attempt": attempt,
+                                "cutout_path": str(attempt_cutout),
+                                "cutout_sha256": file_sha256(attempt_cutout),
+                                "keyframe_path": str(attempt_keyframe),
+                                "keyframe_sha256": file_sha256(attempt_keyframe),
+                                "pose_quality": pre_surface_pose_quality,
+                                "grooming_pose_gate": grooming_pose_gate_metrics,
+                                "identity_palette_quality": palette_quality,
+                                "identity_palette_acceptable": False,
+                                "independent_fur_surface_gate": (
+                                    grooming_pose_safe_refine_surface_gate
+                                ),
+                                "seed_bound_matte": seed_bound_matte,
+                                "eligibility": grooming_pose_safe_refine_eligibility,
+                                "eligibility_sha256": eligibility_sha256,
+                                "selection_key": [attempt],
+                                "source_role": (
+                                    "digest_bound_seed_matte_pose_surface_approved_"
+                                    "identity_drift_candidate_for_attempt5_repaint"
+                                ),
+                            }
                             update_job(
                                 job_id,
-                                eating_light_achromatic_identity_recovery_status=(
-                                    "candidate_recovered"
-                                ),
-                                eating_light_achromatic_identity_recovery_attempt=(
-                                    attempt
-                                ),
-                                eating_light_achromatic_identity_recovery_policy=(
-                                    EATING_LIGHT_ACHROMATIC_DARK_FEATURE_RECOVERY_POLICY
+                                grooming_full_pose_refine_candidate=(
+                                    grooming_full_pose_refine_source
                                 ),
                             )
-                    except Exception as exc:  # noqa: BLE001 - retry fail closed
-                        eating_dark_feature_recovery_audit.update(
-                            error=f"{type(exc).__name__}: {str(exc)[:1000]}",
-                            revalidation_passed=False,
-                            applied=False,
-                        )
-                    chroma_metrics[
-                        "eating_light_achromatic_dark_feature_recovery"
-                    ] = eating_dark_feature_recovery_audit
-                previous_pose_identity_palette_quality = (
-                    json.loads(json.dumps(palette_quality))
-                    if isinstance(palette_quality, dict)
-                    else None
-                )
-                pre_surface_pose_quality: dict[str, Any] | None = None
-                if (
-                    canonical_action_reference
-                    and chroma_metrics.get("acceptable")
-                    and attempt_cutout.is_file()
-                ):
-                    pre_surface_pose_quality = pose_cutout_quality(
-                        attempt_cutout,
-                        pose,
-                        require_eating_mouth_contact=(require_eating_mouth_contact),
+                    eating_refine_pose_issues = (
+                        {
+                            str(issue)
+                            for issue in pre_surface_pose_quality.get("issues", [])
+                            if str(issue).strip()
+                        }
+                        if isinstance(pre_surface_pose_quality, dict)
+                        else set()
                     )
-                grooming_pose_safe_refine_surface_gate: dict[str, Any] | None = None
-                grooming_pose_safe_refine_eligibility: dict[str, Any] | None = None
-                if (
-                    canonical_grooming_completion_capable
-                    and attempt == GROOMING_CANONICAL_FULL_POSE_RESCUE_ATTEMPT
-                ):
-                    seed_bound_matte = chroma_metrics.get("seed_bound_matte")
-                    palette_issue_set = (
+                    eating_refine_pose_safe = bool(
+                        isinstance(pre_surface_pose_quality, dict)
+                        and (
+                            pre_surface_pose_quality.get("acceptable") is True
+                            or (
+                                bool(eating_refine_pose_issues)
+                                and not (
+                                    eating_refine_pose_issues
+                                    - EATING_CANONICAL_IDENTITY_REFINE_POSE_SAFE_ISSUES
+                                )
+                            )
+                        )
+                    )
+                    eating_refine_palette_issues = (
                         {
                             str(issue)
                             for issue in palette_quality.get("issues", [])
@@ -6825,732 +7049,493 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                         if isinstance(palette_quality, dict)
                         else set()
                     )
-                    pose_safe_surface_probe_ready = bool(
-                        fur_surface_gate_required
-                        and isinstance(pose_effective_subject_config, dict)
-                        and chroma_metrics.get("acceptable") is True
-                        and chroma_metrics.get("method")
-                        == GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE
-                        and isinstance(seed_bound_matte, dict)
-                        and seed_bound_matte.get("policy")
-                        == GROOMING_CANONICAL_SEED_BOUND_MATTE_POLICY
+                    eating_refine_stripe_amplification_eligibility = (
+                        identity_palette_stripe_amplification_refine_eligibility(
+                            palette_quality
+                        )
+                    )
+                    eating_refine_unrepairable_conditional_issues = sorted(
+                        (
+                            eating_refine_palette_issues
+                            & EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES
+                        )
+                        if not eating_refine_stripe_amplification_eligibility.get(
+                            "eligible"
+                        )
+                        else set()
+                    )
+                    eating_refine_unsafe_palette_issues = sorted(
+                        (
+                            eating_refine_palette_issues
+                            & EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES
+                        )
+                        | set(eating_refine_unrepairable_conditional_issues)
+                    )
+                    if (
+                        canonical_action_reference
+                        and action_key(pose) == "eating"
+                        # Photoreal dog candidates use deterministic post-selection
+                        # LAB pigment recovery.  Feeding the draft and extra identity
+                        # images back through Qwen reintroduced the smooth CGI coat.
+                        and not dog_photoreal_single_image_action_transfer_active
+                        # Attempt 4 can be the first candidate with strict mouth-to-food
+                        # contact. Preserve it as geometry so attempt 5 can repair a
+                        # conditionally safe identity drift instead of returning to a
+                        # fresh full-frame pose sample.
+                        and attempt < QWEN_ACTION_CANDIDATE_ATTEMPTS
+                        and chroma_metrics.get("acceptable")
                         and attempt_cutout.is_file()
-                        and isinstance(grooming_pose_gate_metrics, dict)
-                        and grooming_pose_gate_metrics.get("acceptable") is True
-                        and isinstance(pre_surface_pose_quality, dict)
-                        and pre_surface_pose_quality.get("acceptable") is True
+                        and eating_refine_pose_safe
                         and isinstance(palette_quality, dict)
                         and palette_quality.get("available") is True
                         and palette_quality.get("acceptable") is not True
-                        and bool(palette_issue_set)
-                        and not (
-                            palette_issue_set
-                            - GROOMING_CANONICAL_POSE_SAFE_IDENTITY_ONLY_ISSUES
-                        )
-                    )
-                    if pose_safe_surface_probe_ready:
-                        grooming_pose_safe_refine_surface_gate = (
-                            evaluate_main_case_fur_surface_candidate(
-                                attempt_cutout,
-                                action="grooming",
-                                alpha_provenance=(
-                                    GROOMING_CANONICAL_SEED_BOUND_MATTE_ALPHA_PROVENANCE
-                                ),
-                                effective_subject_config=(
-                                    pose_effective_subject_config
-                                ),
-                            )
-                        )
-                    grooming_pose_safe_refine_eligibility = (
-                        canonical_grooming_pose_safe_identity_refine_eligibility(
-                            attempt=attempt,
-                            seed_bound_matte=(
-                                seed_bound_matte
-                                if isinstance(seed_bound_matte, dict)
-                                else None
-                            ),
-                            pose_gate=grooming_pose_gate_metrics,
-                            pose_quality=pre_surface_pose_quality,
-                            identity_palette_quality=palette_quality,
-                            fur_surface_gate=(
-                                grooming_pose_safe_refine_surface_gate
-                            ),
-                        )
-                    )
-                    chroma_metrics["pose_safe_identity_refine_eligibility"] = (
-                        grooming_pose_safe_refine_eligibility
-                    )
-                    update_job(
-                        job_id,
-                        grooming_pose_safe_identity_refine_probe={
-                            "attempt": attempt,
-                            "eligibility": grooming_pose_safe_refine_eligibility,
-                            "independent_fur_surface_gate": (
-                                grooming_pose_safe_refine_surface_gate
-                            ),
-                        },
-                    )
-                    if grooming_pose_safe_refine_eligibility.get("eligible") is True:
-                        eligibility_sha256 = json_value_sha256(
-                            grooming_pose_safe_refine_eligibility
-                        )
-                        assert isinstance(seed_bound_matte, dict)
-                        grooming_full_pose_refine_source = {
-                            "attempt": attempt,
-                            "cutout_path": str(attempt_cutout),
-                            "cutout_sha256": file_sha256(attempt_cutout),
-                            "keyframe_path": str(attempt_keyframe),
-                            "keyframe_sha256": file_sha256(attempt_keyframe),
-                            "pose_quality": pre_surface_pose_quality,
-                            "grooming_pose_gate": grooming_pose_gate_metrics,
-                            "identity_palette_quality": palette_quality,
-                            "identity_palette_acceptable": False,
-                            "independent_fur_surface_gate": (
-                                grooming_pose_safe_refine_surface_gate
-                            ),
-                            "seed_bound_matte": seed_bound_matte,
-                            "eligibility": grooming_pose_safe_refine_eligibility,
-                            "eligibility_sha256": eligibility_sha256,
-                            "selection_key": [attempt],
-                            "source_role": (
-                                "digest_bound_seed_matte_pose_surface_approved_"
-                                "identity_drift_candidate_for_attempt5_repaint"
-                            ),
-                        }
-                        update_job(
-                            job_id,
-                            grooming_full_pose_refine_candidate=(
-                                grooming_full_pose_refine_source
-                            ),
-                        )
-                eating_refine_pose_issues = (
-                    {
-                        str(issue)
-                        for issue in pre_surface_pose_quality.get("issues", [])
-                        if str(issue).strip()
-                    }
-                    if isinstance(pre_surface_pose_quality, dict)
-                    else set()
-                )
-                eating_refine_pose_safe = bool(
-                    isinstance(pre_surface_pose_quality, dict)
-                    and (
-                        pre_surface_pose_quality.get("acceptable") is True
-                        or (
-                            bool(eating_refine_pose_issues)
-                            and not (
-                                eating_refine_pose_issues
-                                - EATING_CANONICAL_IDENTITY_REFINE_POSE_SAFE_ISSUES
-                            )
-                        )
-                    )
-                )
-                eating_refine_palette_issues = (
-                    {
-                        str(issue)
-                        for issue in palette_quality.get("issues", [])
-                        if str(issue).strip()
-                    }
-                    if isinstance(palette_quality, dict)
-                    else set()
-                )
-                eating_refine_stripe_amplification_eligibility = (
-                    identity_palette_stripe_amplification_refine_eligibility(
-                        palette_quality
-                    )
-                )
-                eating_refine_unrepairable_conditional_issues = sorted(
-                    (
-                        eating_refine_palette_issues
-                        & EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES
-                    )
-                    if not eating_refine_stripe_amplification_eligibility.get(
-                        "eligible"
-                    )
-                    else set()
-                )
-                eating_refine_unsafe_palette_issues = sorted(
-                    (
-                        eating_refine_palette_issues
-                        & EATING_CANONICAL_IDENTITY_REFINE_UNSAFE_PALETTE_ISSUES
-                    )
-                    | set(eating_refine_unrepairable_conditional_issues)
-                )
-                if (
-                    canonical_action_reference
-                    and action_key(pose) == "eating"
-                    # Photoreal dog candidates use deterministic post-selection
-                    # LAB pigment recovery.  Feeding the draft and extra identity
-                    # images back through Qwen reintroduced the smooth CGI coat.
-                    and not dog_photoreal_single_image_action_transfer_active
-                    # Attempt 4 can be the first candidate with strict mouth-to-food
-                    # contact. Preserve it as geometry so attempt 5 can repair a
-                    # conditionally safe identity drift instead of returning to a
-                    # fresh full-frame pose sample.
-                    and attempt < QWEN_ACTION_CANDIDATE_ATTEMPTS
-                    and chroma_metrics.get("acceptable")
-                    and attempt_cutout.is_file()
-                    and eating_refine_pose_safe
-                    and isinstance(palette_quality, dict)
-                    and palette_quality.get("available") is True
-                    and palette_quality.get("acceptable") is not True
-                    and not eating_refine_unsafe_palette_issues
-                ):
-                    eating_refine_selection_key = (
-                        float(palette_quality.get("penalty", 0.0)),
-                        float(pre_surface_pose_quality.get("penalty", 0.0)),
-                        -attempt,
-                    )
-                    if (
-                        eating_identity_refine_source is None
-                        or eating_refine_selection_key
-                        < tuple(eating_identity_refine_source["selection_key"])
+                        and not eating_refine_unsafe_palette_issues
                     ):
-                        eating_identity_refine_source = {
-                            "attempt": attempt,
-                            "cutout_path": str(attempt_cutout),
-                            "cutout_sha256": file_sha256(attempt_cutout),
-                            "keyframe_path": str(attempt_keyframe),
-                            "keyframe_sha256": file_sha256(attempt_keyframe),
-                            "pose_quality": pre_surface_pose_quality,
-                            "pose_safe_allowed_issues": sorted(
-                                eating_refine_pose_issues
-                            ),
-                            "unsafe_palette_issues": [],
-                            "stripe_amplification_refine_eligibility": (
-                                eating_refine_stripe_amplification_eligibility
-                            ),
-                            "conditionally_repairable_palette_issues": sorted(
-                                eating_refine_palette_issues
-                                & EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES
-                            ),
-                            "identity_palette_quality": palette_quality,
-                            "selection_key": list(eating_refine_selection_key),
-                            "source_role": (
-                                "geometry_safe_eating_pose_and_bowl_for_identity_refine"
-                            ),
-                        }
-                        update_job(
-                            job_id,
-                            eating_identity_refine_candidate=(
-                                eating_identity_refine_source
-                            ),
+                        eating_refine_selection_key = (
+                            float(palette_quality.get("penalty", 0.0)),
+                            float(pre_surface_pose_quality.get("penalty", 0.0)),
+                            -attempt,
                         )
-                fur_surface_gate_metrics: dict[str, Any] | None = None
-                fur_surface_short_circuit_due = False
-                fur_surface_retry_decision: dict[str, Any] | None = None
-                if fur_surface_gate_required:
-                    assert isinstance(pose_effective_subject_config, dict)
-                    alpha_provenance = str(chroma_metrics.get("method") or "").strip()
-                    surface_candidate_ready = bool(
-                        chroma_metrics.get("acceptable")
-                        and attempt_cutout.is_file()
-                        and (
-                            not canonical_action_reference
-                            or (
-                                isinstance(pre_surface_pose_quality, dict)
-                                and pre_surface_pose_quality.get("acceptable") is True
-                                and (
-                                    not isinstance(palette_quality, dict)
-                                    or palette_quality.get("acceptable") is True
-                                )
-                                and (
-                                    not grooming_pose_gate_required
-                                    or (
-                                        isinstance(
-                                            grooming_pose_gate_metrics,
-                                            dict,
+                        if (
+                            eating_identity_refine_source is None
+                            or eating_refine_selection_key
+                            < tuple(eating_identity_refine_source["selection_key"])
+                        ):
+                            eating_identity_refine_source = {
+                                "attempt": attempt,
+                                "cutout_path": str(attempt_cutout),
+                                "cutout_sha256": file_sha256(attempt_cutout),
+                                "keyframe_path": str(attempt_keyframe),
+                                "keyframe_sha256": file_sha256(attempt_keyframe),
+                                "pose_quality": pre_surface_pose_quality,
+                                "pose_safe_allowed_issues": sorted(
+                                    eating_refine_pose_issues
+                                ),
+                                "unsafe_palette_issues": [],
+                                "stripe_amplification_refine_eligibility": (
+                                    eating_refine_stripe_amplification_eligibility
+                                ),
+                                "conditionally_repairable_palette_issues": sorted(
+                                    eating_refine_palette_issues
+                                    & EATING_CANONICAL_IDENTITY_REFINE_CONDITIONAL_PALETTE_ISSUES
+                                ),
+                                "identity_palette_quality": palette_quality,
+                                "selection_key": list(eating_refine_selection_key),
+                                "source_role": (
+                                    "geometry_safe_eating_pose_and_bowl_for_identity_refine"
+                                ),
+                            }
+                            update_job(
+                                job_id,
+                                eating_identity_refine_candidate=(
+                                    eating_identity_refine_source
+                                ),
+                            )
+                    fur_surface_gate_metrics: dict[str, Any] | None = None
+                    fur_surface_short_circuit_due = False
+                    fur_surface_retry_decision: dict[str, Any] | None = None
+                    if fur_surface_gate_required:
+                        assert isinstance(pose_effective_subject_config, dict)
+                        alpha_provenance = str(chroma_metrics.get("method") or "").strip()
+                        surface_candidate_ready = bool(
+                            chroma_metrics.get("acceptable")
+                            and attempt_cutout.is_file()
+                            and (
+                                not canonical_action_reference
+                                or (
+                                    isinstance(pre_surface_pose_quality, dict)
+                                    and pre_surface_pose_quality.get("acceptable") is True
+                                    and (
+                                        not isinstance(palette_quality, dict)
+                                        or palette_quality.get("acceptable") is True
+                                    )
+                                    and (
+                                        not grooming_pose_gate_required
+                                        or (
+                                            isinstance(
+                                                grooming_pose_gate_metrics,
+                                                dict,
+                                            )
+                                            and grooming_pose_gate_metrics.get("acceptable")
+                                            is True
                                         )
-                                        and grooming_pose_gate_metrics.get("acceptable")
-                                        is True
                                     )
                                 )
                             )
                         )
-                    )
-                    if surface_candidate_ready:
-                        fur_surface_gate_metrics = (
-                            evaluate_main_case_fur_surface_candidate(
-                                attempt_cutout,
-                                action=action_key(pose),
-                                alpha_provenance=alpha_provenance,
-                                effective_subject_config=(
-                                    pose_effective_subject_config
-                                ),
+                        if surface_candidate_ready:
+                            fur_surface_gate_metrics = (
+                                evaluate_main_case_fur_surface_candidate(
+                                    attempt_cutout,
+                                    action=action_key(pose),
+                                    alpha_provenance=alpha_provenance,
+                                    effective_subject_config=(
+                                        pose_effective_subject_config
+                                    ),
+                                )
                             )
-                        )
-                        if (
-                            action_key(pose) == "grooming"
-                            and canonical_action_reference
-                            and attempt
-                            <= GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
-                            and fur_surface_gate_metrics.get("acceptable") is not True
-                            and isinstance(grooming_pose_gate_metrics, dict)
-                            and isinstance(palette_quality, dict)
-                        ):
-                            fur_surface_gate_metrics = apply_canonical_grooming_direct_surface_nonexpansion_gate(
-                                fur_surface_gate_metrics,
-                                pose_gate=grooming_pose_gate_metrics,
-                                identity_palette_quality=palette_quality,
-                                attempt=attempt,
-                                canonical_reference_path=cartoon_output,
-                                canonical_reference_sha256=(
-                                    file_sha256(cartoon_output)
-                                ),
+                            if (
+                                action_key(pose) == "grooming"
+                                and canonical_action_reference
+                                and attempt
+                                <= GROOMING_CANONICAL_DIRECT_EDGE_EVIDENCE_MAX_ATTEMPT
+                                and fur_surface_gate_metrics.get("acceptable") is not True
+                                and isinstance(grooming_pose_gate_metrics, dict)
+                                and isinstance(palette_quality, dict)
+                            ):
+                                fur_surface_gate_metrics = apply_canonical_grooming_direct_surface_nonexpansion_gate(
+                                    fur_surface_gate_metrics,
+                                    pose_gate=grooming_pose_gate_metrics,
+                                    identity_palette_quality=palette_quality,
+                                    attempt=attempt,
+                                    canonical_reference_path=cartoon_output,
+                                    canonical_reference_sha256=(
+                                        file_sha256(cartoon_output)
+                                    ),
+                                )
+                        else:
+                            surface_gate_config = (
+                                pose_effective_subject_config.get("actions", {})
+                                .get(action_key(pose), {})
+                                .get("fur_surface_gate", {})
                             )
-                    else:
-                        surface_gate_config = (
-                            pose_effective_subject_config.get("actions", {})
-                            .get(action_key(pose), {})
-                            .get("fur_surface_gate", {})
-                        )
-                        baseline_config = (
-                            surface_gate_config.get("baseline")
-                            if isinstance(surface_gate_config, dict)
-                            else None
-                        )
-                        fur_surface_gate_metrics = fur_surface_gate_failure(
-                            action_key(pose),
-                            (
-                                "fur_surface_gate_not_evaluated_upstream_gate_failed"
-                                if chroma_metrics.get("acceptable")
-                                else "fur_surface_reliable_alpha_cutout_unavailable"
-                            ),
-                            baseline=(
-                                baseline_config
-                                if isinstance(baseline_config, dict)
+                            baseline_config = (
+                                surface_gate_config.get("baseline")
+                                if isinstance(surface_gate_config, dict)
                                 else None
-                            ),
-                            candidate=attempt_cutout,
-                            alpha_provenance=alpha_provenance or None,
+                            )
+                            fur_surface_gate_metrics = fur_surface_gate_failure(
+                                action_key(pose),
+                                (
+                                    "fur_surface_gate_not_evaluated_upstream_gate_failed"
+                                    if chroma_metrics.get("acceptable")
+                                    else "fur_surface_reliable_alpha_cutout_unavailable"
+                                ),
+                                baseline=(
+                                    baseline_config
+                                    if isinstance(baseline_config, dict)
+                                    else None
+                                ),
+                                candidate=attempt_cutout,
+                                alpha_provenance=alpha_provenance or None,
+                            )
+                        if (
+                            fur_surface_gate_metrics.get("evaluated") is True
+                            and fur_surface_gate_metrics.get("acceptable") is not True
+                        ):
+                            fur_surface_rejection_streak += 1
+                        elif fur_surface_gate_metrics.get("acceptable") is True:
+                            fur_surface_rejection_streak = 0
+                        else:
+                            # Missing alpha is already rejected by the chroma path,
+                            # but it is not evidence of three consecutive fur defects.
+                            fur_surface_rejection_streak = 0
+                        fur_surface_retry_decision = resolve_fur_surface_retry_decision(
+                            action=action_key(pose),
+                            rejection_streak=fur_surface_rejection_streak,
+                            attempt=attempt,
+                            active_profiles=active_pose_profiles,
                         )
-                    if (
-                        fur_surface_gate_metrics.get("evaluated") is True
-                        and fur_surface_gate_metrics.get("acceptable") is not True
-                    ):
-                        fur_surface_rejection_streak += 1
-                    elif fur_surface_gate_metrics.get("acceptable") is True:
-                        fur_surface_rejection_streak = 0
-                    else:
-                        # Missing alpha is already rejected by the chroma path,
-                        # but it is not evidence of three consecutive fur defects.
-                        fur_surface_rejection_streak = 0
-                    fur_surface_retry_decision = resolve_fur_surface_retry_decision(
-                        action=action_key(pose),
-                        rejection_streak=fur_surface_rejection_streak,
-                        attempt=attempt,
-                        active_profiles=active_pose_profiles,
-                    )
-                    fur_surface_short_circuit_due = bool(
-                        fur_surface_retry_decision["short_circuit_due"]
-                    )
-                    surface_audit = {
-                        "pose_index": index,
-                        "pose": pose,
-                        "action": action_key(pose),
-                        "attempt": attempt,
-                        "seed": attempt_seed,
-                        "source": attempt_keyframe.name,
-                        "alpha_cutout": (
-                            attempt_cutout.name if attempt_cutout.is_file() else None
-                        ),
-                        "alpha_provenance": alpha_provenance or None,
-                        "gate": fur_surface_gate_metrics,
-                        "consecutive_rejections": (fur_surface_rejection_streak),
-                        "retry_decision": fur_surface_retry_decision,
-                        "result": (
-                            "passed"
+                        fur_surface_short_circuit_due = bool(
+                            fur_surface_retry_decision["short_circuit_due"]
+                        )
+                        surface_audit = {
+                            "pose_index": index,
+                            "pose": pose,
+                            "action": action_key(pose),
+                            "attempt": attempt,
+                            "seed": attempt_seed,
+                            "source": attempt_keyframe.name,
+                            "alpha_cutout": (
+                                attempt_cutout.name if attempt_cutout.is_file() else None
+                            ),
+                            "alpha_provenance": alpha_provenance or None,
+                            "gate": fur_surface_gate_metrics,
+                            "consecutive_rejections": (fur_surface_rejection_streak),
+                            "retry_decision": fur_surface_retry_decision,
+                            "result": (
+                                "passed"
+                                if fur_surface_gate_metrics.get("acceptable") is True
+                                else (
+                                    "rejected"
+                                    if fur_surface_gate_metrics.get("evaluated") is True
+                                    else "blocked_upstream"
+                                )
+                            ),
+                        }
+                        fur_surface_gate_attempt_audits.append(surface_audit)
+                        fur_surface_gate_status_by_action[action_key(pose)] = (
+                            "candidate_passed"
                             if fur_surface_gate_metrics.get("acceptable") is True
                             else (
-                                "rejected"
+                                ("failed" if fur_surface_short_circuit_due else "retrying")
                                 if fur_surface_gate_metrics.get("evaluated") is True
                                 else "blocked_upstream"
                             )
-                        ),
-                    }
-                    fur_surface_gate_attempt_audits.append(surface_audit)
-                    fur_surface_gate_status_by_action[action_key(pose)] = (
-                        "candidate_passed"
-                        if fur_surface_gate_metrics.get("acceptable") is True
-                        else (
-                            ("failed" if fur_surface_short_circuit_due else "retrying")
-                            if fur_surface_gate_metrics.get("evaluated") is True
-                            else "blocked_upstream"
                         )
-                    )
-                    write_json_atomic(
-                        job_dir
-                        / "workflows"
-                        / f"qwen_pose_{index:02d}_fur_surface_gate.json",
-                        {
-                            "policy": FUR_SURFACE_GATE_POLICY,
-                            "gate_version": FUR_SURFACE_GATE_VERSION,
-                            "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
-                            "thresholds": fur_surface_thresholds_payload(),
-                            "fail_closed": True,
-                            "max_consecutive_rejections": (
-                                FUR_SURFACE_GATE_MAX_REJECTIONS
-                            ),
-                            "retry_policy": FUR_SURFACE_GATE_RETRY_POLICY,
-                            "preserves_configured_eating_bowl_recovery": True,
-                            "configured_eating_bowl_recovery_attempts": (
-                                QWEN_BOWL_POSE_EXTRA_ATTEMPTS
-                            ),
-                            "short_circuit": fur_surface_gate_short_circuit,
-                            "attempts": [
-                                item
-                                for item in fur_surface_gate_attempt_audits
-                                if item["pose_index"] == index
-                            ],
-                        },
-                    )
-                    update_job(
-                        job_id,
-                        fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
-                        fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
-                    )
-                if (
-                    legacy_grooming_foreleg_repair_active
-                    and grooming_pose_gate_required
-                    and isinstance(grooming_pose_gate_metrics, dict)
-                ):
-                    grooming_pose_gate_metrics = (
-                        apply_masked_pet3d_grooming_composite_gate(
-                            grooming_pose_gate_metrics,
-                            fur_surface_gate_metrics,
-                            grooming_foreleg_repair_audit,
+                        write_json_atomic(
+                            job_dir
+                            / "workflows"
+                            / f"qwen_pose_{index:02d}_fur_surface_gate.json",
+                            {
+                                "policy": FUR_SURFACE_GATE_POLICY,
+                                "gate_version": FUR_SURFACE_GATE_VERSION,
+                                "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
+                                "thresholds": fur_surface_thresholds_payload(),
+                                "fail_closed": True,
+                                "max_consecutive_rejections": (
+                                    FUR_SURFACE_GATE_MAX_REJECTIONS
+                                ),
+                                "retry_policy": FUR_SURFACE_GATE_RETRY_POLICY,
+                                "preserves_configured_eating_bowl_recovery": True,
+                                "configured_eating_bowl_recovery_attempts": (
+                                    QWEN_BOWL_POSE_EXTRA_ATTEMPTS
+                                ),
+                                "short_circuit": fur_surface_gate_short_circuit,
+                                "attempts": [
+                                    item
+                                    for item in fur_surface_gate_attempt_audits
+                                    if item["pose_index"] == index
+                                ],
+                            },
                         )
-                    )
-                    current_gate_audit = next(
-                        (
-                            item
-                            for item in reversed(grooming_pose_gate_attempt_audits)
-                            if item.get("pose_index") == index
-                            and item.get("attempt") == attempt
-                        ),
-                        None,
-                    )
-                    if isinstance(current_gate_audit, dict):
-                        current_gate_audit["gate"] = grooming_pose_gate_metrics
-                        composite_recovery = grooming_pose_gate_metrics.get(
-                            "composite_recovery"
+                        update_job(
+                            job_id,
+                            fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
+                            fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
                         )
-                        current_gate_audit["result"] = (
-                            "passed_composite"
-                            if (
-                                isinstance(composite_recovery, dict)
-                                and composite_recovery.get("accepted") is True
-                            )
-                            else (
-                                "passed"
-                                if grooming_pose_gate_metrics.get("acceptable") is True
-                                else "rejected"
-                            )
-                        )
-                    write_json_atomic(
-                        job_dir
-                        / "workflows"
-                        / f"qwen_pose_{index:02d}_grooming_pose_gate.json",
-                        {
-                            "policy": GROOMING_POSE_GATE_POLICY,
-                            "version": GROOMING_POSE_GATE_VERSION,
-                            "composite_recovery_policy": (
-                                GROOMING_QWEN_FORELEG_REPAIR_COMPOSITE_GATE_POLICY
-                            ),
-                            "fail_closed": True,
-                            "attempts": [
-                                item
-                                for item in grooming_pose_gate_attempt_audits
-                                if item["pose_index"] == index
-                            ],
-                        },
-                    )
-                    update_job(
-                        job_id,
-                        grooming_pose_gate_status=(
-                            "candidate_passed"
-                            if grooming_pose_gate_metrics.get("acceptable") is True
-                            else (
-                                "failed"
-                                if attempt == len(active_pose_profiles)
-                                else "retrying"
-                            )
-                        ),
-                        grooming_pose_gate_attempts=(grooming_pose_gate_attempt_audits),
-                        grooming_pose_gate_composite_recovery=(
-                            grooming_pose_gate_metrics.get("composite_recovery")
-                        ),
-                    )
-                advisory_grooming_minimum_gate_metrics: dict[str, Any] | None = None
-                if (
-                    advisory_grooming_minimum_gate_required
-                    and chroma_metrics.get("acceptable") is True
-                    and attempt_cutout.is_file()
-                ):
                     if (
-                        not isinstance(
-                            advisory_grooming_identity_palette_reference,
-                            dict,
-                        )
-                        or pose_palette_reference_path is None
-                        or grooming_identity_contract_reference_path is None
-                        or grooming_pose_gate_guide_path is None
-                        or grooming_pose_gate_metadata_path is None
+                        legacy_grooming_foreleg_repair_active
+                        and grooming_pose_gate_required
+                        and isinstance(grooming_pose_gate_metrics, dict)
                     ):
-                        raise RuntimeError(
-                            "Advisory grooming minimum gate lost its immutable "
-                            "identity or geometry reference."
+                        grooming_pose_gate_metrics = (
+                            apply_masked_pet3d_grooming_composite_gate(
+                                grooming_pose_gate_metrics,
+                                fur_surface_gate_metrics,
+                                grooming_foreleg_repair_audit,
+                            )
                         )
-                    advisory_grooming_minimum_gate_metrics = (
-                        evaluate_advisory_grooming_minimum_gate(
-                            attempt_cutout,
-                            identity_reference_palette=(
-                                advisory_grooming_identity_palette_reference
+                        current_gate_audit = next(
+                            (
+                                item
+                                for item in reversed(grooming_pose_gate_attempt_audits)
+                                if item.get("pose_index") == index
+                                and item.get("attempt") == attempt
                             ),
-                            identity_palette_reference_path=(
-                                pose_palette_reference_path
+                            None,
+                        )
+                        if isinstance(current_gate_audit, dict):
+                            current_gate_audit["gate"] = grooming_pose_gate_metrics
+                            composite_recovery = grooming_pose_gate_metrics.get(
+                                "composite_recovery"
+                            )
+                            current_gate_audit["result"] = (
+                                "passed_composite"
+                                if (
+                                    isinstance(composite_recovery, dict)
+                                    and composite_recovery.get("accepted") is True
+                                )
+                                else (
+                                    "passed"
+                                    if grooming_pose_gate_metrics.get("acceptable") is True
+                                    else "rejected"
+                                )
+                            )
+                        write_json_atomic(
+                            job_dir
+                            / "workflows"
+                            / f"qwen_pose_{index:02d}_grooming_pose_gate.json",
+                            {
+                                "policy": GROOMING_POSE_GATE_POLICY,
+                                "version": GROOMING_POSE_GATE_VERSION,
+                                "composite_recovery_policy": (
+                                    GROOMING_QWEN_FORELEG_REPAIR_COMPOSITE_GATE_POLICY
+                                ),
+                                "fail_closed": True,
+                                "attempts": [
+                                    item
+                                    for item in grooming_pose_gate_attempt_audits
+                                    if item["pose_index"] == index
+                                ],
+                            },
+                        )
+                        update_job(
+                            job_id,
+                            grooming_pose_gate_status=(
+                                "candidate_passed"
+                                if grooming_pose_gate_metrics.get("acceptable") is True
+                                else (
+                                    "failed"
+                                    if attempt == len(active_pose_profiles)
+                                    else "retrying"
+                                )
                             ),
-                            identity_reference_path=(
-                                grooming_identity_contract_reference_path
+                            grooming_pose_gate_attempts=(grooming_pose_gate_attempt_audits),
+                            grooming_pose_gate_composite_recovery=(
+                                grooming_pose_gate_metrics.get("composite_recovery")
                             ),
-                            geometry_guide=grooming_pose_gate_guide_path,
-                            geometry_metadata=grooming_pose_gate_metadata_path,
-                            topology_guide=qwen_grooming_guide_path,
-                            attempt=attempt,
                         )
-                    )
-                    minimum_gate_issues = [
-                        str(issue)
-                        for issue in advisory_grooming_minimum_gate_metrics.get(
-                            "issues",
-                            [],
+                    advisory_grooming_minimum_gate_metrics: dict[str, Any] | None = None
+                    if (
+                        advisory_grooming_minimum_gate_required
+                        and chroma_metrics.get("acceptable") is True
+                        and attempt_cutout.is_file()
+                    ):
+                        if (
+                            not isinstance(
+                                advisory_grooming_identity_palette_reference,
+                                dict,
+                            )
+                            or pose_palette_reference_path is None
+                            or grooming_identity_contract_reference_path is None
+                            or grooming_pose_gate_guide_path is None
+                            or grooming_pose_gate_metadata_path is None
+                        ):
+                            raise RuntimeError(
+                                "Advisory grooming minimum gate lost its immutable "
+                                "identity or geometry reference."
+                            )
+                        advisory_grooming_minimum_gate_metrics = (
+                            evaluate_advisory_grooming_minimum_gate(
+                                attempt_cutout,
+                                identity_reference_palette=(
+                                    advisory_grooming_identity_palette_reference
+                                ),
+                                identity_palette_reference_path=(
+                                    pose_palette_reference_path
+                                ),
+                                identity_reference_path=(
+                                    grooming_identity_contract_reference_path
+                                ),
+                                geometry_guide=grooming_pose_gate_guide_path,
+                                geometry_metadata=grooming_pose_gate_metadata_path,
+                                topology_guide=qwen_grooming_guide_path,
+                                attempt=attempt,
+                            )
                         )
-                    ]
-                    action_retry_guidance = (
-                        advisory_grooming_action_retry_guidance(
-                            advisory_grooming_minimum_gate_metrics,
-                            attempt=attempt,
+                        minimum_gate_issues = [
+                            str(issue)
+                            for issue in advisory_grooming_minimum_gate_metrics.get(
+                                "issues",
+                                [],
+                            )
+                        ]
+                        action_retry_guidance = (
+                            advisory_grooming_action_retry_guidance(
+                                advisory_grooming_minimum_gate_metrics,
+                                attempt=attempt,
+                            )
                         )
-                    )
-                    action_retry_warnings = list(
-                        action_retry_guidance["warnings"]
-                    )
-                    action_retry_requested = bool(
-                        action_retry_guidance["requested"]
-                    )
-                    advisory_grooming_minimum_gate_metrics[
-                        "action_retry_warnings"
-                    ] = action_retry_warnings
-                    advisory_grooming_minimum_gate_metrics[
-                        "action_retry_requested"
-                    ] = action_retry_requested
-                    advisory_grooming_minimum_gate_metrics[
-                        "action_retry_never_blocks_final_attempt"
-                    ] = action_retry_guidance["never_blocks_final_attempt"]
-                    advisory_grooming_minimum_gate_metrics[
-                        "action_retry_final_attempt_fail_closed"
-                    ] = action_retry_guidance["final_attempt_fail_closed"]
-                    previous_advisory_grooming_minimum_issues = list(
-                        dict.fromkeys(
-                            [*minimum_gate_issues, *action_retry_warnings]
+                        action_retry_warnings = list(
+                            action_retry_guidance["warnings"]
                         )
-                    )
-                    minimum_gate_audit = {
-                        "pose_index": index,
-                        "pose": pose,
-                        "action": action_key(pose),
-                        "attempt": attempt,
-                        "seed": attempt_seed,
-                        "gate": advisory_grooming_minimum_gate_metrics,
-                        "result": (
-                            "retry_requested"
+                        action_retry_requested = bool(
+                            action_retry_guidance["requested"]
+                        )
+                        advisory_grooming_minimum_gate_metrics[
+                            "action_retry_warnings"
+                        ] = action_retry_warnings
+                        advisory_grooming_minimum_gate_metrics[
+                            "action_retry_requested"
+                        ] = action_retry_requested
+                        advisory_grooming_minimum_gate_metrics[
+                            "action_retry_never_blocks_final_attempt"
+                        ] = action_retry_guidance["never_blocks_final_attempt"]
+                        advisory_grooming_minimum_gate_metrics[
+                            "action_retry_final_attempt_fail_closed"
+                        ] = action_retry_guidance["final_attempt_fail_closed"]
+                        previous_advisory_grooming_minimum_issues = list(
+                            dict.fromkeys(
+                                [*minimum_gate_issues, *action_retry_warnings]
+                            )
+                        )
+                        minimum_gate_audit = {
+                            "pose_index": index,
+                            "pose": pose,
+                            "action": action_key(pose),
+                            "attempt": attempt,
+                            "seed": attempt_seed,
+                            "gate": advisory_grooming_minimum_gate_metrics,
+                            "result": (
+                                "retry_requested"
+                                if action_retry_requested
+                                else (
+                                    "passed"
+                                    if advisory_grooming_minimum_gate_metrics.get(
+                                        "acceptable"
+                                    )
+                                    is True
+                                    else "rejected"
+                                )
+                            ),
+                        }
+                        grooming_advisory_minimum_gate_attempts.append(
+                            minimum_gate_audit
+                        )
+                        write_json_atomic(
+                            job_dir
+                            / "workflows"
+                            / f"qwen_pose_{index:02d}_grooming_minimum_gate.json",
+                            {
+                                "policy": GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
+                                "version": GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
+                                "blocking_scope": (
+                                    "retry_and_candidate_ranking_only_nonterminal"
+                                ),
+                                "blocks_scail_on_exhaustion": False,
+                                "attempts": [
+                                    item
+                                    for item in grooming_advisory_minimum_gate_attempts
+                                    if item["pose_index"] == index
+                                ],
+                            },
+                        )
+                        minimum_status = (
+                            "candidate_retry_requested"
                             if action_retry_requested
                             else (
-                                "passed"
+                                "candidate_passed"
                                 if advisory_grooming_minimum_gate_metrics.get(
                                     "acceptable"
                                 )
                                 is True
-                                else "rejected"
+                                else (
+                                    "failed"
+                                    if attempt == len(active_pose_profiles)
+                                    else "retrying"
+                                )
                             )
-                        ),
-                    }
-                    grooming_advisory_minimum_gate_attempts.append(
-                        minimum_gate_audit
-                    )
-                    write_json_atomic(
-                        job_dir
-                        / "workflows"
-                        / f"qwen_pose_{index:02d}_grooming_minimum_gate.json",
-                        {
-                            "policy": GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
-                            "version": GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
-                            "blocking_scope": (
-                                "retry_and_candidate_ranking_only_nonterminal"
+                        )
+                        update_job(
+                            job_id,
+                            grooming_pose_gate_status=(
+                                f"minimum_contract_{minimum_status}"
                             ),
-                            "blocks_scail_on_exhaustion": False,
-                            "attempts": [
-                                item
-                                for item in grooming_advisory_minimum_gate_attempts
-                                if item["pose_index"] == index
-                            ],
-                        },
-                    )
-                    minimum_status = (
-                        "candidate_retry_requested"
-                        if action_retry_requested
-                        else (
-                            "candidate_passed"
-                            if advisory_grooming_minimum_gate_metrics.get(
-                                "acceptable"
-                            )
-                            is True
-                            else (
-                                "failed"
-                                if attempt == len(active_pose_profiles)
-                                else "retrying"
-                            )
+                            grooming_advisory_minimum_gate_status=minimum_status,
+                            grooming_advisory_minimum_gate_attempts=(
+                                grooming_advisory_minimum_gate_attempts
+                            ),
                         )
-                    )
-                    update_job(
-                        job_id,
-                        grooming_pose_gate_status=(
-                            f"minimum_contract_{minimum_status}"
-                        ),
-                        grooming_advisory_minimum_gate_status=minimum_status,
-                        grooming_advisory_minimum_gate_attempts=(
-                            grooming_advisory_minimum_gate_attempts
-                        ),
-                    )
-                record = {
-                    "attempt": attempt,
-                    "profile": profile["name"],
-                    "seed": attempt_seed,
-                    "identity_input_policy": (effective_pose_identity_input_policy),
-                    "image1_input_name": attempt_primary_input_name,
-                    "image2_input_name": attempt_secondary_input_name,
-                    "image3_input_name": attempt_tertiary_input_name,
-                    "sampler_latent_input_name": attempt_primary_input_name,
-                    "sampler_noise_mask_input_name": (attempt_noise_mask_input_name),
-                    "identity_input_name": pose_identity_input_name,
-                    "geometry_input_name": (
-                        attempt_tertiary_input_name
-                        if (
-                            canonical_eating_identity_refine_active
-                            or canonical_eating_contact_repair_active
-                        )
-                        else (
-                            (attempt_tertiary_input_name or attempt_primary_input_name)
-                            if canonical_grooming_full_pose_recovery_active
-                            else (
-                                attempt_tertiary_input_name
-                                if grooming_foreleg_repair_active
-                                else attempt_geometry_input_name
-                            )
-                        )
-                    ),
-                    "grooming_advisory_action_transfer": (
-                        grooming_advisory_action_transfer_attempt
-                    ),
-                    "dog_photoreal_single_image_action_transfer": (
-                        dog_photoreal_single_image_action_transfer_attempt
-                    ),
-                    "dog_eating_prompt_only_action_transfer": (
-                        dog_eating_prompt_only_action_transfer_attempt
-                    ),
-                    "dog_drinking_prompt_only_action_transfer": (
-                        dog_drinking_prompt_only_action_transfer_attempt
-                    ),
-                    "dog_toileting_prompt_only_action_transfer": (
-                        dog_toileting_prompt_only_action_transfer_attempt
-                    ),
-                    "grooming_advisory_identity_refine": (
-                        grooming_advisory_identity_refine_audit
-                    ),
-                    "grooming_foreleg_repair": (grooming_foreleg_repair_audit),
-                    "grooming_full_pose_recovery": (grooming_full_pose_recovery_audit),
-                    "eating_identity_refine": eating_identity_refine_audit,
-                    "eating_contact_repair": eating_contact_repair_audit,
-                    "raw_qwen_source_path": str(raw_qwen_source_output),
-                    "raw_qwen_source_sha256": raw_qwen_source_sha256,
-                    "raw_qwen_byte_preserved": raw_qwen_byte_preserved,
-                    "candidate_source_path": str(source_output),
-                    "candidate_source_sha256": source_output_sha256,
-                    "keyframe": attempt_keyframe.name,
-                    "keyframe_sha256": file_sha256(attempt_keyframe),
-                    "cutout": attempt_cutout.name
-                    if chroma_metrics["acceptable"]
-                    else None,
-                    "chroma": chroma_metrics,
-                    "quality": None,
-                    "similarity": None,
-                    "identity_palette": palette_quality,
-                    "candidate_identity_palette": candidate_identity_palette,
-                    "candidate_upper_body_identity_palette": (
-                        candidate_upper_body_identity_palette
-                    ),
-                    "grooming_pose_gate": grooming_pose_gate_metrics,
-                    "grooming_advisory_minimum_gate": (
-                        advisory_grooming_minimum_gate_metrics
-                    ),
-                    "fur_surface_gate": fur_surface_gate_metrics,
-                    "combined_penalty": None,
-                    "settings": {
-                        "steps": effective_pose_steps,
-                        "cfg": profile["cfg"],
-                        "denoise": effective_pose_denoise,
-                        "user_lora": effective_pose_user_lora,
-                        "user_lora_strength": effective_pose_user_lora_strength,
-                        "user_loras": effective_pose_user_loras,
-                        "user_lora_strength_scale": (
-                            0.0
-                            if pose_user_loras_disabled
-                            else profile["user_lora_strength_scale"]
-                        ),
-                        "user_lora_mode": effective_pose_user_lora_mode,
-                        "use_user_prompt": profile["use_user_prompt"],
-                        "quality_retry": profile["quality_retry"],
-                        "total_strength_cap": (
-                            0.0
-                            if pose_user_loras_disabled
-                            else profile["total_strength_cap"]
-                        ),
-                        "per_lora_strength_cap": (
-                            0.0
-                            if pose_user_loras_disabled
-                            else profile["per_lora_strength_cap"]
-                        ),
-                        "builtin_style_lora": (
-                            QWEN_STYLE_LORA if builtin_style_recovery else None
-                        ),
-                        "builtin_style_strength": (
-                            effective_builtin_style_strength
-                            if builtin_style_recovery
-                            else None
-                        ),
-                        "builtin_style_scope": (
-                            "sampler_noise_mask_only"
-                            if grooming_local_style_recovery
-                            else ("full_sampler" if geometry_style_recovery else None)
-                        ),
-                        "suppress_builtin_style": (effective_suppress_builtin_style),
+                    record = {
+                        "attempt": attempt,
+                        "profile": profile["name"],
+                        "seed": attempt_seed,
                         "identity_input_policy": (effective_pose_identity_input_policy),
                         "image1_input_name": attempt_primary_input_name,
                         "image2_input_name": attempt_secondary_input_name,
                         "image3_input_name": attempt_tertiary_input_name,
-                        "sampler_latent_input_name": (attempt_primary_input_name),
-                        "sampler_noise_mask_input_name": (
-                            attempt_noise_mask_input_name
-                        ),
+                        "sampler_latent_input_name": attempt_primary_input_name,
+                        "sampler_noise_mask_input_name": (attempt_noise_mask_input_name),
                         "identity_input_name": pose_identity_input_name,
                         "geometry_input_name": (
                             attempt_tertiary_input_name
-                            if canonical_eating_identity_refine_active
+                            if (
+                                canonical_eating_identity_refine_active
+                                or canonical_eating_contact_repair_active
+                            )
                             else (
-                                (
-                                    attempt_tertiary_input_name
-                                    or attempt_primary_input_name
-                                )
+                                (attempt_tertiary_input_name or attempt_primary_input_name)
                                 if canonical_grooming_full_pose_recovery_active
                                 else (
                                     attempt_tertiary_input_name
@@ -7559,141 +7544,869 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 )
                             )
                         ),
-                        "grooming_foreleg_repair_policy": (
-                            grooming_foreleg_repair_audit.get("policy")
-                            if isinstance(grooming_foreleg_repair_audit, dict)
-                            else None
+                        "grooming_advisory_action_transfer": (
+                            grooming_advisory_action_transfer_attempt
                         ),
-                        "grooming_advisory_identity_refine_policy": (
-                            grooming_advisory_identity_refine_audit.get("policy")
-                            if isinstance(
-                                grooming_advisory_identity_refine_audit,
-                                dict,
-                            )
-                            else None
+                        "dog_photoreal_single_image_action_transfer": (
+                            dog_photoreal_single_image_action_transfer_attempt
                         ),
-                        "grooming_full_pose_recovery_policy": (
-                            grooming_full_pose_recovery_audit.get("policy")
-                            if isinstance(
-                                grooming_full_pose_recovery_audit,
-                                dict,
-                            )
-                            else None
+                        "dog_eating_prompt_only_action_transfer": (
+                            dog_eating_prompt_only_action_transfer_attempt
                         ),
-                        "eating_identity_refine_policy": (
-                            eating_identity_refine_audit.get("policy")
-                            if isinstance(
-                                eating_identity_refine_audit,
-                                dict,
-                            )
-                            else None
+                        "dog_drinking_prompt_only_action_transfer": (
+                            dog_drinking_prompt_only_action_transfer_attempt
                         ),
-                    },
-                    "workflow": workflow,
-                }
-                grooming_candidate_rejected = bool(
-                    grooming_pose_gate_required
-                    and (
-                        not isinstance(grooming_pose_gate_metrics, dict)
-                        or not grooming_pose_gate_metrics.get("acceptable")
-                    )
-                )
-                fur_surface_candidate_rejected = bool(
-                    fur_surface_gate_required
-                    and isinstance(fur_surface_gate_metrics, dict)
-                    and fur_surface_gate_metrics.get("evaluated") is True
-                    and fur_surface_gate_metrics.get("acceptable") is not True
-                )
-                if grooming_candidate_rejected or fur_surface_candidate_rejected:
-                    if chroma_metrics.get("acceptable") and attempt_cutout.is_file():
-                        gate_quality = pre_surface_pose_quality or pose_cutout_quality(
-                            attempt_cutout,
-                            pose,
-                            require_eating_mouth_contact=(require_eating_mouth_contact),
-                        )
-                        gate_similarity_path = attempt_cutout
-                    else:
-                        gate_quality = {
-                            "available": False,
-                            "acceptable": False,
-                            "issues": ["grooming_pose_gate_alpha_cutout_unavailable"],
-                            "penalty": 1000.0,
-                        }
-                        gate_similarity_path = attempt_keyframe
-                    gate_similarity = pose_similarity_quality(
-                        gate_similarity_path,
-                        pose=pose,
-                        canonical_path=canonical_similarity_reference,
-                        previous_poses=accepted_pose_similarity_references,
-                    )
-                    record.update(
-                        {
-                            "quality": gate_quality,
-                            "similarity": gate_similarity,
-                            "transparent": bool(chroma_metrics.get("acceptable")),
-                            "background_removal_failed": not bool(
-                                chroma_metrics.get("acceptable")
+                        "dog_toileting_prompt_only_action_transfer": (
+                            dog_toileting_prompt_only_action_transfer_attempt
+                        ),
+                        "grooming_advisory_identity_refine": (
+                            grooming_advisory_identity_refine_audit
+                        ),
+                        "grooming_foreleg_repair": (grooming_foreleg_repair_audit),
+                        "grooming_full_pose_recovery": (grooming_full_pose_recovery_audit),
+                        "eating_identity_refine": eating_identity_refine_audit,
+                        "eating_contact_repair": eating_contact_repair_audit,
+                        "raw_qwen_source_path": str(raw_qwen_source_output),
+                        "raw_qwen_source_sha256": raw_qwen_source_sha256,
+                        "raw_qwen_byte_preserved": raw_qwen_byte_preserved,
+                        "candidate_source_path": str(source_output),
+                        "candidate_source_sha256": source_output_sha256,
+                        "keyframe": attempt_keyframe.name,
+                        "keyframe_sha256": file_sha256(attempt_keyframe),
+                        "cutout": attempt_cutout.name
+                        if chroma_metrics["acceptable"]
+                        else None,
+                        "chroma": chroma_metrics,
+                        "quality": None,
+                        "similarity": None,
+                        "identity_palette": palette_quality,
+                        "candidate_identity_palette": candidate_identity_palette,
+                        "candidate_upper_body_identity_palette": (
+                            candidate_upper_body_identity_palette
+                        ),
+                        "grooming_pose_gate": grooming_pose_gate_metrics,
+                        "grooming_advisory_minimum_gate": (
+                            advisory_grooming_minimum_gate_metrics
+                        ),
+                        "fur_surface_gate": fur_surface_gate_metrics,
+                        "combined_penalty": None,
+                        "settings": {
+                            "steps": effective_pose_steps,
+                            "cfg": profile["cfg"],
+                            "denoise": effective_pose_denoise,
+                            "user_lora": effective_pose_user_lora,
+                            "user_lora_strength": effective_pose_user_lora_strength,
+                            "user_loras": effective_pose_user_loras,
+                            "user_lora_strength_scale": (
+                                0.0
+                                if pose_user_loras_disabled
+                                else profile["user_lora_strength_scale"]
                             ),
-                            "background_removal_failure_reason": (
-                                None
-                                if chroma_metrics.get("acceptable")
-                                else "candidate_gate_alpha_recovery_failed"
+                            "user_lora_mode": effective_pose_user_lora_mode,
+                            "use_user_prompt": profile["use_user_prompt"],
+                            "quality_retry": profile["quality_retry"],
+                            "total_strength_cap": (
+                                0.0
+                                if pose_user_loras_disabled
+                                else profile["total_strength_cap"]
                             ),
-                            "combined_penalty": round(
-                                float(gate_quality.get("penalty", 0.0))
-                                + float(gate_similarity.get("penalty", 0.0))
-                                + float(
-                                    grooming_pose_gate_metrics.get(
-                                        "penalty",
-                                        1000.0,
+                            "per_lora_strength_cap": (
+                                0.0
+                                if pose_user_loras_disabled
+                                else profile["per_lora_strength_cap"]
+                            ),
+                            "builtin_style_lora": (
+                                QWEN_STYLE_LORA if builtin_style_recovery else None
+                            ),
+                            "builtin_style_strength": (
+                                effective_builtin_style_strength
+                                if builtin_style_recovery
+                                else None
+                            ),
+                            "builtin_style_scope": (
+                                "sampler_noise_mask_only"
+                                if grooming_local_style_recovery
+                                else ("full_sampler" if geometry_style_recovery else None)
+                            ),
+                            "suppress_builtin_style": (effective_suppress_builtin_style),
+                            "identity_input_policy": (effective_pose_identity_input_policy),
+                            "image1_input_name": attempt_primary_input_name,
+                            "image2_input_name": attempt_secondary_input_name,
+                            "image3_input_name": attempt_tertiary_input_name,
+                            "sampler_latent_input_name": (attempt_primary_input_name),
+                            "sampler_noise_mask_input_name": (
+                                attempt_noise_mask_input_name
+                            ),
+                            "identity_input_name": pose_identity_input_name,
+                            "geometry_input_name": (
+                                attempt_tertiary_input_name
+                                if canonical_eating_identity_refine_active
+                                else (
+                                    (
+                                        attempt_tertiary_input_name
+                                        or attempt_primary_input_name
                                     )
+                                    if canonical_grooming_full_pose_recovery_active
+                                    else (
+                                        attempt_tertiary_input_name
+                                        if grooming_foreleg_repair_active
+                                        else attempt_geometry_input_name
+                                    )
+                                )
+                            ),
+                            "grooming_foreleg_repair_policy": (
+                                grooming_foreleg_repair_audit.get("policy")
+                                if isinstance(grooming_foreleg_repair_audit, dict)
+                                else None
+                            ),
+                            "grooming_advisory_identity_refine_policy": (
+                                grooming_advisory_identity_refine_audit.get("policy")
+                                if isinstance(
+                                    grooming_advisory_identity_refine_audit,
+                                    dict,
+                                )
+                                else None
+                            ),
+                            "grooming_full_pose_recovery_policy": (
+                                grooming_full_pose_recovery_audit.get("policy")
+                                if isinstance(
+                                    grooming_full_pose_recovery_audit,
+                                    dict,
+                                )
+                                else None
+                            ),
+                            "eating_identity_refine_policy": (
+                                eating_identity_refine_audit.get("policy")
+                                if isinstance(
+                                    eating_identity_refine_audit,
+                                    dict,
+                                )
+                                else None
+                            ),
+                        },
+                        "workflow": workflow,
+                    }
+                    grooming_candidate_rejected = bool(
+                        grooming_pose_gate_required
+                        and (
+                            not isinstance(grooming_pose_gate_metrics, dict)
+                            or not grooming_pose_gate_metrics.get("acceptable")
+                        )
+                    )
+                    fur_surface_candidate_rejected = bool(
+                        fur_surface_gate_required
+                        and isinstance(fur_surface_gate_metrics, dict)
+                        and fur_surface_gate_metrics.get("evaluated") is True
+                        and fur_surface_gate_metrics.get("acceptable") is not True
+                    )
+                    if grooming_candidate_rejected or fur_surface_candidate_rejected:
+                        if chroma_metrics.get("acceptable") and attempt_cutout.is_file():
+                            gate_quality = pre_surface_pose_quality or pose_cutout_quality(
+                                attempt_cutout,
+                                pose,
+                                require_eating_mouth_contact=(require_eating_mouth_contact),
+                            )
+                            gate_similarity_path = attempt_cutout
+                        else:
+                            gate_quality = {
+                                "available": False,
+                                "acceptable": False,
+                                "issues": ["grooming_pose_gate_alpha_cutout_unavailable"],
+                                "penalty": 1000.0,
+                            }
+                            gate_similarity_path = attempt_keyframe
+                        gate_similarity = pose_similarity_quality(
+                            gate_similarity_path,
+                            pose=pose,
+                            canonical_path=canonical_similarity_reference,
+                            previous_poses=accepted_pose_similarity_references,
+                        )
+                        record.update(
+                            {
+                                "quality": gate_quality,
+                                "similarity": gate_similarity,
+                                "transparent": bool(chroma_metrics.get("acceptable")),
+                                "background_removal_failed": not bool(
+                                    chroma_metrics.get("acceptable")
+                                ),
+                                "background_removal_failure_reason": (
+                                    None
+                                    if chroma_metrics.get("acceptable")
+                                    else "candidate_gate_alpha_recovery_failed"
+                                ),
+                                "combined_penalty": round(
+                                    float(gate_quality.get("penalty", 0.0))
+                                    + float(gate_similarity.get("penalty", 0.0))
+                                    + float(
+                                        grooming_pose_gate_metrics.get(
+                                            "penalty",
+                                            1000.0,
+                                        )
+                                        if isinstance(
+                                            grooming_pose_gate_metrics,
+                                            dict,
+                                        )
+                                        else (
+                                            1000.0 if grooming_pose_gate_required else 0.0
+                                        )
+                                    )
+                                    + (
+                                        float(palette_quality.get("penalty", 0.0))
+                                        if isinstance(palette_quality, dict)
+                                        else 0.0
+                                    )
+                                    + (
+                                        float(
+                                            fur_surface_gate_metrics.get(
+                                                "penalty",
+                                                1000.0,
+                                            )
+                                        )
+                                        if isinstance(
+                                            fur_surface_gate_metrics,
+                                            dict,
+                                        )
+                                        and fur_surface_gate_metrics.get("evaluated")
+                                        is True
+                                        else 0.0
+                                    ),
+                                    6,
+                                ),
+                            }
+                        )
+                        record["fur_silhouette"] = None
+                        record["action_candidate_gate"] = {
+                            "policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
+                            "required": action_candidate_audits_required,
+                            "advisory_retry_gate": (
+                                advisory_action_candidate_gate_required
+                            ),
+                            "acceptable": False,
+                            "attempt": attempt,
+                            "transparent_edge_quality": chroma_metrics.get(
+                                "transparent_edge_quality"
+                            ),
+                            "grooming_pose_gate_rejected": grooming_candidate_rejected,
+                            "fur_surface_gate_rejected": (
+                                fur_surface_candidate_rejected
+                            ),
+                        }
+                        if strict_first_frame_required:
+                            strict_selection_key = (
+                                strict_first_frame_best_effort_selection_key(
+                                    record,
+                                    action=action_key(pose),
+                                )
+                            )
+                            record[
+                                "strict_first_frame_best_effort_selection_key"
+                            ] = list(strict_selection_key)
+                            if (
+                                best_strict_first_frame_attempt is None
+                                or strict_selection_key
+                                < tuple(
+                                    best_strict_first_frame_attempt[
+                                        "strict_first_frame_best_effort_selection_key"
+                                    ]
+                                )
+                            ):
+                                best_strict_first_frame_attempt = record
+                        if (
+                            (
+                                grooming_geometry_canonical
+                                or canonical_grooming_completion_capable
+                            )
+                            and attempt < GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
+                            and chroma_metrics.get("acceptable")
+                            and attempt_cutout.is_file()
+                            and isinstance(palette_quality, dict)
+                            and palette_quality.get("available") is True
+                            and palette_quality.get("acceptable") is True
+                        ):
+                            repair_gate_issues = [
+                                str(issue)
+                                for issue in (
+                                    grooming_pose_gate_metrics.get("issues", [])
                                     if isinstance(
                                         grooming_pose_gate_metrics,
                                         dict,
                                     )
-                                    else (
-                                        1000.0 if grooming_pose_gate_required else 0.0
-                                    )
+                                    else []
                                 )
-                                + (
-                                    float(palette_quality.get("penalty", 0.0))
-                                    if isinstance(palette_quality, dict)
-                                    else 0.0
-                                )
-                                + (
-                                    float(
-                                        fur_surface_gate_metrics.get(
-                                            "penalty",
-                                            1000.0,
-                                        )
-                                    )
+                            ]
+                            repair_fur_surface_issues = [
+                                str(issue)
+                                for issue in (
+                                    fur_surface_gate_metrics.get("issues", [])
                                     if isinstance(
                                         fur_surface_gate_metrics,
                                         dict,
                                     )
-                                    and fur_surface_gate_metrics.get("evaluated")
-                                    is True
+                                    else []
+                                )
+                            ]
+                            repair_selection_key = (
+                                len(repair_gate_issues),
+                                len(repair_fur_surface_issues),
+                                float(gate_quality.get("penalty", 0.0)),
+                                float(
+                                    palette_quality.get("penalty", 0.0)
+                                    if isinstance(palette_quality, dict)
                                     else 0.0
                                 ),
-                                6,
+                            )
+                            if (
+                                grooming_foreleg_repair_source is None
+                                or repair_selection_key
+                                < tuple(grooming_foreleg_repair_source["selection_key"])
+                            ):
+                                grooming_foreleg_repair_source = {
+                                    "attempt": attempt,
+                                    "cutout_path": str(attempt_cutout),
+                                    "cutout_sha256": file_sha256(attempt_cutout),
+                                    "keyframe_path": str(attempt_keyframe),
+                                    "keyframe_sha256": file_sha256(attempt_keyframe),
+                                    "gate_issues": repair_gate_issues,
+                                    "fur_surface_issues": (repair_fur_surface_issues),
+                                    "identity_palette_quality": palette_quality,
+                                    "selection_key": list(repair_selection_key),
+                                }
+                                update_job(
+                                    job_id,
+                                    grooming_foreleg_repair_candidate={
+                                        "policy": (
+                                            GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
+                                            if canonical_grooming_completion_capable
+                                            else GROOMING_QWEN_FORELEG_REPAIR_POLICY
+                                        ),
+                                        **grooming_foreleg_repair_source,
+                                    },
+                                )
+                        attempts.append(
+                            {
+                                key: value
+                                for key, value in record.items()
+                                if key != "workflow"
+                            }
+                        )
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "cartoon_keyframe",
+                                "pose_index": index,
+                                "attempt": attempt,
+                                "reason": (
+                                    "fur_surface_gate_failed"
+                                    if fur_surface_candidate_rejected
+                                    else "grooming_pose_gate_failed"
+                                ),
+                                "strategy": (
+                                    "main_case_fur_surface_retry"
+                                    if fur_surface_candidate_rejected
+                                    else "main_case_grooming_pose_retry"
+                                ),
+                                "profile": profile["name"],
+                                "result": "rejected",
+                                "chroma": chroma_metrics,
+                                "quality": gate_quality,
+                                "similarity": gate_similarity,
+                                "identity_palette": palette_quality,
+                                "grooming_pose_gate": grooming_pose_gate_metrics,
+                                "fur_surface_gate": fur_surface_gate_metrics,
+                            },
+                        )
+                        LOGGER.warning(
+                            "%s pose %s attempt %s failed Main_case candidate gate: grooming=%s fur_surface=%s",
+                            job_id,
+                            index,
+                            attempt,
+                            (
+                                grooming_pose_gate_metrics.get("issues")
+                                if isinstance(grooming_pose_gate_metrics, dict)
+                                else ["grooming_pose_gate_result_unavailable"]
+                            ),
+                            (
+                                fur_surface_gate_metrics.get("issues")
+                                if isinstance(fur_surface_gate_metrics, dict)
+                                else None
+                            ),
+                        )
+                        if fur_surface_short_circuit_due:
+                            assert isinstance(fur_surface_retry_decision, dict)
+                            fur_surface_gate_short_circuit = {
+                                "action": action_key(pose),
+                                "pose_index": index,
+                                "attempt": attempt,
+                                "reason": "consecutive_fur_surface_rejections",
+                                "rejections": fur_surface_rejection_streak,
+                                "attempt_budget": len(active_pose_profiles),
+                                "retry_decision": fur_surface_retry_decision,
+                                "eating_fourth_attempt_skipped": bool(
+                                    action_key(pose) == "eating"
+                                    and len(active_pose_profiles) > attempt
+                                ),
+                                "blocks_scail": not strict_first_frame_required,
+                                "bounded_candidate_generation_continues": (
+                                    strict_first_frame_required
+                                ),
+                            }
+                            fur_surface_gate_status_by_action[action_key(pose)] = (
+                                "retrying_bounded_candidates"
+                                if strict_first_frame_required
+                                else "failed"
+                            )
+                            update_job(
+                                job_id,
+                                fur_surface_gate_status=dict(
+                                    fur_surface_gate_status_by_action
+                                ),
+                                fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+                                fur_surface_gate_short_circuit=(
+                                    fur_surface_gate_short_circuit
+                                ),
+                                fur_surface_gate_final_quality={
+                                    "scope": "qwen_action_reference_pre_scail",
+                                    "status": (
+                                        "retrying_bounded_candidates"
+                                        if strict_first_frame_required
+                                        else "failed"
+                                    ),
+                                    "actions": dict(fur_surface_gate_selected_metrics),
+                                    "failure": fur_surface_gate_short_circuit,
+                                    "final_video_frame_audit": False,
+                                },
+                            )
+                            write_json_atomic(
+                                job_dir
+                                / "workflows"
+                                / f"qwen_pose_{index:02d}_fur_surface_gate.json",
+                                {
+                                    "policy": FUR_SURFACE_GATE_POLICY,
+                                    "gate_version": FUR_SURFACE_GATE_VERSION,
+                                    "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
+                                    "thresholds": (fur_surface_thresholds_payload()),
+                                    "fail_closed": not strict_first_frame_required,
+                                    "max_consecutive_rejections": (
+                                        FUR_SURFACE_GATE_MAX_REJECTIONS
+                                    ),
+                                    "retry_policy": (FUR_SURFACE_GATE_RETRY_POLICY),
+                                    "preserves_configured_eating_bowl_recovery": (True),
+                                    "configured_eating_bowl_recovery_attempts": (
+                                        QWEN_BOWL_POSE_EXTRA_ATTEMPTS
+                                    ),
+                                    "short_circuit": (fur_surface_gate_short_circuit),
+                                    "attempts": [
+                                        item
+                                        for item in fur_surface_gate_attempt_audits
+                                        if item["pose_index"] == index
+                                    ],
+                                },
+                            )
+                            if not strict_first_frame_required:
+                                raise RuntimeError(
+                                    "Main_case fur surface gate rejected "
+                                    f"{fur_surface_rejection_streak} consecutive "
+                                    f"{action_key(pose)} Qwen candidates after attempt "
+                                    f"{attempt} of {len(active_pose_profiles)}; "
+                                    "blocking SCAIL."
+                                )
+                            LOGGER.warning(
+                                "%s kept bounded first-frame candidate generation active "
+                                "after %s consecutive %s fur-surface rejections",
+                                job_id,
+                                fur_surface_rejection_streak,
+                                action_key(pose),
+                            )
+                        continue
+                    if not chroma_metrics["acceptable"]:
+                        raw_similarity = (
+                            pose_similarity_quality(
+                                attempt_keyframe,
+                                pose=pose,
+                                canonical_path=canonical_similarity_reference,
+                                previous_poses=accepted_pose_similarity_references,
+                            )
+                            if GENERATION_VISUAL_AUDITS_BLOCKING
+                            else skipped_visual_audit("raw_pose_similarity")
+                        )
+                        record.update(
+                            {
+                                "profile": f"{profile['name']}_raw_image",
+                                "cutout": None,
+                                "transparent": False,
+                                "background_removal_failed": True,
+                                "background_removal_error": (
+                                    "Generated image did not contain a clean removable green background."
+                                ),
+                                "background_removal_failure_reason": (
+                                    "unclean_chroma_background"
+                                ),
+                                "similarity": raw_similarity,
+                                "combined_penalty": round(
+                                    float(raw_similarity["penalty"])
+                                    + (
+                                        float(palette_quality["penalty"])
+                                        if palette_quality is not None
+                                        else 0.0
+                                    ),
+                                    6,
+                                ),
+                            }
+                        )
+                        attempts.append(
+                            {
+                                key: value
+                                for key, value in record.items()
+                                if key != "workflow"
+                            }
+                        )
+                        semantic_recovery_not_attempted = not chroma_metrics.get(
+                            "semantic_recovery_attempted",
+                            False,
+                        )
+                        if strict_first_frame_required and semantic_recovery_not_attempted:
+                            semantic_selection_key = (
+                                strict_first_frame_best_effort_selection_key(
+                                    record,
+                                    action=action_key(pose),
+                                )
+                            )
+                            record["strict_first_frame_semantic_selection_key"] = list(
+                                semantic_selection_key
+                            )
+                            if (
+                                best_semantic_source is None
+                                or semantic_selection_key
+                                < tuple(
+                                    best_semantic_source.get(
+                                        "strict_first_frame_semantic_selection_key",
+                                        [float("inf")],
+                                    )
+                                )
+                            ):
+                                best_semantic_source = record
+                        elif semantic_recovery_candidate_eligible(
+                            record
+                        ) and semantic_recovery_not_attempted:
+                            if (
+                                best_semantic_source is None
+                                or record["combined_penalty"]
+                                < best_semantic_source["combined_penalty"]
+                            ):
+                                best_semantic_source = record
+                        if (
+                            image_request
+                            and raw_similarity["acceptable"]
+                            and (palette_quality is None or palette_quality["acceptable"])
+                        ):
+                            if (
+                                best_raw_attempt is None
+                                or record["combined_penalty"]
+                                < best_raw_attempt["combined_penalty"]
+                            ):
+                                best_raw_attempt = record
+                            append_recovery_event(
+                                job_id,
+                                {
+                                    "stage": "cartoon_keyframe",
+                                    "pose_index": index,
+                                    "attempt": attempt,
+                                    "reason": "unclean_chroma_background",
+                                    "strategy": "retry_pose_before_raw_fallback",
+                                    "profile": profile["name"],
+                                    "result": "rejected",
+                                    "chroma": chroma_metrics,
+                                    "similarity": raw_similarity,
+                                    "identity_palette": palette_quality,
+                                },
+                            )
+                            LOGGER.warning(
+                                "%s pose %s attempt %s could not be reliably cut out; "
+                                "retrying before an opaque-image fallback",
+                                job_id,
+                                index,
+                                attempt,
+                            )
+                            continue
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "cartoon_keyframe",
+                                "pose_index": index,
+                                "attempt": attempt,
+                                "reason": "unclean_chroma_background",
+                                "strategy": "safe_qwen_retry",
+                                "profile": profile["name"],
+                                "result": "rejected",
+                                "chroma": chroma_metrics,
+                                "similarity": raw_similarity,
+                                "identity_palette": palette_quality,
+                            },
+                        )
+                        LOGGER.warning(
+                            "%s pose %s attempt %s (%s) failed chroma checks: %s",
+                            job_id,
+                            index,
+                            attempt,
+                            profile["name"],
+                            chroma_metrics["issues"],
+                        )
+                        continue
+                    quality = (
+                        pre_surface_pose_quality
+                        or pose_cutout_quality(
+                            attempt_cutout,
+                            pose,
+                            require_eating_mouth_contact=(
+                                require_eating_mouth_contact
+                            ),
+                        )
+                        if action_candidate_audits_required
+                        else skipped_visual_audit("action_subject_quality")
+                    )
+                    similarity = (
+                        pose_similarity_quality(
+                            attempt_cutout,
+                            pose=pose,
+                            canonical_path=canonical_similarity_reference,
+                            previous_poses=accepted_pose_similarity_references,
+                        )
+                        if action_candidate_audits_required
+                        else skipped_visual_audit("action_pose_similarity")
+                    )
+                    fur_silhouette_quality = (
+                        eating_fur_silhouette_quality(
+                            attempt_cutout,
+                            pose_fur_reference_path,
+                        )
+                        if (
+                            action_candidate_audits_required
+                            and pose_fur_reference_path is not None
+                        )
+                        else None
+                    )
+                    record["quality"] = quality
+                    record["similarity"] = similarity
+                    record["fur_silhouette"] = fur_silhouette_quality
+                    record["combined_penalty"] = round(
+                        float(quality["penalty"])
+                        + float(similarity["penalty"])
+                        + (
+                            float(palette_quality["penalty"])
+                            if palette_quality is not None
+                            else 0.0
+                        )
+                        + (
+                            float(fur_silhouette_quality["penalty"])
+                            if fur_silhouette_quality is not None
+                            else 0.0
+                        )
+                        + (
+                            float(fur_surface_gate_metrics.get("penalty", 1000.0))
+                            if isinstance(fur_surface_gate_metrics, dict)
+                            else (1000.0 if fur_surface_gate_required else 0.0)
+                        )
+                        + (
+                            float(
+                                advisory_grooming_minimum_gate_metrics.get(
+                                    "penalty",
+                                    1000.0,
+                                )
+                            )
+                            if isinstance(
+                                advisory_grooming_minimum_gate_metrics,
+                                dict,
+                            )
+                            else (
+                                1000.0
+                                if advisory_grooming_minimum_gate_required
+                                else 0.0
+                            )
+                        ),
+                        6,
+                    )
+                    record["transparent"] = True
+                    eating_contact_quality = (
+                        quality.get("eating_mouth_bowl_contact")
+                        if isinstance(quality, dict)
+                        else None
+                    )
+                    eating_contact_issues = {
+                        str(issue)
+                        for issue in quality.get("issues", [])
+                        if str(issue).strip()
+                    }
+                    eating_contact_components = (
+                        list(eating_contact_quality.get("component_candidates", []))
+                        if isinstance(eating_contact_quality, dict)
+                        and isinstance(
+                            eating_contact_quality.get("component_candidates"),
+                            list,
+                        )
+                        else []
+                    )
+                    if isinstance(eating_contact_quality, dict) and isinstance(
+                        eating_contact_quality.get("selected_component"),
+                        dict,
+                    ):
+                        eating_contact_components.append(
+                            eating_contact_quality["selected_component"]
+                        )
+                    eating_contact_component_gaps = [
+                        int(component["gap_px"])
+                        for component in eating_contact_components
+                        if isinstance(component, dict)
+                        and isinstance(component.get("gap_px"), (int, float))
+                        and 0
+                        <= int(component["gap_px"])
+                        <= EATING_CONTACT_REPAIR_SOURCE_GAP_MAX_PX
+                        and not (
+                            {
+                                str(reason)
+                                for reason in component.get(
+                                    "rejection_reasons",
+                                    [],
+                                )
+                                if str(reason).strip()
+                            }
+                            - {"gap_outside_contact_range"}
+                        )
+                    ]
+                    eating_contact_gap_px = (
+                        min(eating_contact_component_gaps)
+                        if eating_contact_component_gaps
+                        else None
+                    )
+                    if (
+                        canonical_action_reference
+                        and action_key(pose) == "eating"
+                        and attempt < QWEN_ACTION_CANDIDATE_ATTEMPTS
+                        and chroma_metrics.get("acceptable") is True
+                        and attempt_cutout.is_file()
+                        and eating_contact_issues
+                        == EATING_CONTACT_REPAIR_SOURCE_ISSUES
+                        and isinstance(eating_contact_quality, dict)
+                        and eating_contact_quality.get("available") is True
+                        and eating_contact_gap_px is not None
+                        and eating_contact_gap_px > EATING_MUZZLE_BOWL_GAP_MAX_PX
+                        and isinstance(palette_quality, dict)
+                        and palette_quality.get("acceptable") is True
+                        and (
+                            fur_silhouette_quality is None
+                            or fur_silhouette_quality.get("acceptable") is True
+                        )
+                    ):
+                        eating_contact_selection_key = (
+                            int(eating_contact_gap_px),
+                            float(record["combined_penalty"]),
+                            -attempt,
+                        )
+                        if (
+                            eating_contact_repair_source is None
+                            or eating_contact_selection_key
+                            < tuple(
+                                eating_contact_repair_source["selection_key"]
+                            )
+                        ):
+                            eating_contact_repair_source = {
+                                "attempt": attempt,
+                                "cutout_path": str(attempt_cutout),
+                                "cutout_sha256": file_sha256(attempt_cutout),
+                                "keyframe_path": str(attempt_keyframe),
+                                "keyframe_sha256": file_sha256(attempt_keyframe),
+                                "gap_px": int(eating_contact_gap_px),
+                                "contact_quality": eating_contact_quality,
+                                "identity_palette_quality": palette_quality,
+                                "fur_silhouette_quality": fur_silhouette_quality,
+                                "selection_key": list(
+                                    eating_contact_selection_key
+                                ),
+                                "source_role": (
+                                    "identity_safe_nearest_muzzle_to_bowl_candidate_"
+                                    "for_local_contact_repair"
+                                ),
+                            }
+                            update_job(
+                                job_id,
+                                eating_contact_repair_candidate=(
+                                    eating_contact_repair_source
+                                ),
+                            )
+                    if (
+                        image_request
+                        and similarity["acceptable"]
+                        and (palette_quality is None or palette_quality["acceptable"])
+                        and not quality["acceptable"]
+                    ):
+                        raw_record = {
+                            **record,
+                            "profile": f"{profile['name']}_raw_image",
+                            "cutout": None,
+                            "transparent": False,
+                            "background_removal_failed": True,
+                            "background_removal_error": (
+                                "Background removal could not preserve a complete pose subject; "
+                                "the original generated image was returned."
+                            ),
+                            "background_removal_failure_reason": (
+                                "subject_quality_invalid"
                             ),
                         }
+                        if (
+                            best_raw_attempt is None
+                            or raw_record["combined_penalty"]
+                            < best_raw_attempt["combined_penalty"]
+                        ):
+                            best_raw_attempt = raw_record
+                    action_candidate_gate_acceptable = bool(
+                        quality.get("acceptable") is True
+                        and similarity.get("acceptable") is True
+                        and (
+                            not isinstance(
+                                chroma_metrics.get("transparent_edge_quality"),
+                                dict,
+                            )
+                            or chroma_metrics["transparent_edge_quality"].get(
+                                "acceptable"
+                            )
+                            is True
+                        )
+                        and (
+                            not pose_identity_palette_gate_required
+                            or (
+                                isinstance(palette_quality, dict)
+                                and palette_quality.get("acceptable") is True
+                            )
+                        )
+                        and (
+                            fur_silhouette_quality is None
+                            or fur_silhouette_quality.get("acceptable") is True
+                        )
+                        and (
+                            not fur_surface_gate_required
+                            or (
+                                isinstance(fur_surface_gate_metrics, dict)
+                                and fur_surface_gate_metrics.get("acceptable") is True
+                            )
+                        )
+                        and (
+                            not grooming_pose_gate_required
+                            or (
+                                isinstance(grooming_pose_gate_metrics, dict)
+                                and grooming_pose_gate_metrics.get("acceptable") is True
+                            )
+                        )
                     )
-                    record["fur_silhouette"] = None
                     record["action_candidate_gate"] = {
                         "policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
                         "required": action_candidate_audits_required,
                         "advisory_retry_gate": (
                             advisory_action_candidate_gate_required
                         ),
-                        "acceptable": False,
+                        "acceptable": action_candidate_gate_acceptable,
                         "attempt": attempt,
                         "transparent_edge_quality": chroma_metrics.get(
                             "transparent_edge_quality"
-                        ),
-                        "grooming_pose_gate_rejected": grooming_candidate_rejected,
-                        "fur_surface_gate_rejected": (
-                            fur_surface_candidate_rejected
                         ),
                     }
                     if strict_first_frame_required:
@@ -7703,9 +8416,9 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 action=action_key(pose),
                             )
                         )
-                        record[
-                            "strict_first_frame_best_effort_selection_key"
-                        ] = list(strict_selection_key)
+                        record["strict_first_frame_best_effort_selection_key"] = list(
+                            strict_selection_key
+                        )
                         if (
                             best_strict_first_frame_attempt is None
                             or strict_selection_key
@@ -7716,53 +8429,124 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                             )
                         ):
                             best_strict_first_frame_attempt = record
-                    if (
-                        (
-                            grooming_geometry_canonical
-                            or canonical_grooming_completion_capable
+                    if advisory_action_candidate_gate_required:
+                        degraded_selection_key = action_candidate_degraded_selection_key(
+                            record,
+                            action=action_key(pose),
                         )
+                        record["action_candidate_degraded_selection_key"] = list(
+                            degraded_selection_key
+                        )
+                        if (
+                            best_action_candidate_degraded_attempt is None
+                            or degraded_selection_key
+                            < tuple(
+                                best_action_candidate_degraded_attempt[
+                                    "action_candidate_degraded_selection_key"
+                                ]
+                            )
+                        ):
+                            best_action_candidate_degraded_attempt = record
+                    attempts.append(
+                        {key: value for key, value in record.items() if key != "workflow"}
+                    )
+                    if (
+                        advisory_grooming_minimum_gate_required
+                        and chroma_metrics.get("acceptable") is True
+                        and attempt_cutout.is_file()
+                        and isinstance(
+                            advisory_grooming_minimum_gate_metrics,
+                            dict,
+                        )
+                    ):
+                        degraded_selection_key = (
+                            advisory_grooming_degraded_candidate_selection_key(
+                                record
+                            )
+                        )
+                        record["grooming_advisory_degraded_selection_key"] = list(
+                            degraded_selection_key
+                        )
+                        if (
+                            best_advisory_grooming_degraded_attempt is None
+                            or degraded_selection_key
+                            < advisory_grooming_degraded_candidate_selection_key(
+                                best_advisory_grooming_degraded_attempt
+                            )
+                        ):
+                            best_advisory_grooming_degraded_attempt = record
+                    advisory_minimum_acceptable = bool(
+                        not advisory_grooming_minimum_gate_required
+                        or (
+                            isinstance(
+                                advisory_grooming_minimum_gate_metrics,
+                                dict,
+                            )
+                            and advisory_grooming_minimum_gate_metrics.get("acceptable")
+                            is True
+                            and not advisory_grooming_minimum_gate_metrics.get(
+                                "action_retry_requested",
+                                False,
+                            )
+                        )
+                    )
+                    advisory_repair_palette_quality = (
+                        advisory_grooming_minimum_gate_metrics.get(
+                            "identity_palette"
+                        )
+                        if isinstance(
+                            advisory_grooming_minimum_gate_metrics,
+                            dict,
+                        )
+                        and isinstance(
+                            advisory_grooming_minimum_gate_metrics.get(
+                                "identity_palette"
+                            ),
+                            dict,
+                        )
+                        else palette_quality
+                    )
+                    if (
+                        advisory_grooming_minimum_gate_required
+                        and not advisory_minimum_acceptable
+                        and not advisory_grooming_identity_refine_active
                         and attempt < GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
                         and chroma_metrics.get("acceptable")
                         and attempt_cutout.is_file()
-                        and isinstance(palette_quality, dict)
-                        and palette_quality.get("available") is True
-                        and palette_quality.get("acceptable") is True
+                        and isinstance(advisory_repair_palette_quality, dict)
+                        and advisory_repair_palette_quality.get("available") is True
+                        and advisory_repair_palette_quality.get("acceptable") is True
+                        and isinstance(
+                            advisory_grooming_minimum_gate_metrics,
+                            dict,
+                        )
+                        and advisory_grooming_candidate_safe_for_masked_repair(
+                            advisory_grooming_minimum_gate_metrics
+                        )
                     ):
-                        repair_gate_issues = [
+                        advisory_repair_issues = [
                             str(issue)
-                            for issue in (
-                                grooming_pose_gate_metrics.get("issues", [])
-                                if isinstance(
-                                    grooming_pose_gate_metrics,
-                                    dict,
-                                )
-                                else []
+                            for issue in advisory_grooming_minimum_gate_metrics.get(
+                                "issues",
+                                [],
                             )
                         ]
-                        repair_fur_surface_issues = [
-                            str(issue)
-                            for issue in (
-                                fur_surface_gate_metrics.get("issues", [])
-                                if isinstance(
-                                    fur_surface_gate_metrics,
-                                    dict,
-                                )
-                                else []
-                            )
-                        ]
-                        repair_selection_key = (
-                            len(repair_gate_issues),
-                            len(repair_fur_surface_issues),
-                            float(gate_quality.get("penalty", 0.0)),
+                        advisory_repair_selection_key = (
+                            len(advisory_repair_issues),
                             float(
-                                palette_quality.get("penalty", 0.0)
-                                if isinstance(palette_quality, dict)
-                                else 0.0
+                                advisory_grooming_minimum_gate_metrics.get(
+                                    "penalty",
+                                    1000.0,
+                                )
                             ),
+                            float(
+                                advisory_repair_palette_quality.get("penalty", 0.0)
+                            ),
+                            attempt,
                         )
                         if (
                             grooming_foreleg_repair_source is None
-                            or repair_selection_key
+                            or advisory_repair_selection_key
                             < tuple(grooming_foreleg_repair_source["selection_key"])
                         ):
                             grooming_foreleg_repair_source = {
@@ -7771,115 +8555,1881 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 "cutout_sha256": file_sha256(attempt_cutout),
                                 "keyframe_path": str(attempt_keyframe),
                                 "keyframe_sha256": file_sha256(attempt_keyframe),
-                                "gate_issues": repair_gate_issues,
-                                "fur_surface_issues": (repair_fur_surface_issues),
-                                "identity_palette_quality": palette_quality,
-                                "selection_key": list(repair_selection_key),
+                                "gate_issues": advisory_repair_issues,
+                                "fur_surface_issues": [],
+                                "identity_palette_quality": (
+                                    advisory_repair_palette_quality
+                                ),
+                                "selection_key": list(advisory_repair_selection_key),
+                                "selection_policy": (
+                                    "advisory_minimum_identity_safe_candidate_for_"
+                                    "masked_foreleg_completion_v1"
+                                ),
+                                "masked_repair_unsafe_issues_absent": True,
                             }
                             update_job(
                                 job_id,
                                 grooming_foreleg_repair_candidate={
                                     "policy": (
                                         GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
-                                        if canonical_grooming_completion_capable
-                                        else GROOMING_QWEN_FORELEG_REPAIR_POLICY
                                     ),
                                     **grooming_foreleg_repair_source,
                                 },
                             )
-                    attempts.append(
-                        {
-                            key: value
-                            for key, value in record.items()
-                            if key != "workflow"
-                        }
+                    if (
+                        isinstance(palette_quality, dict)
+                        and palette_quality.get("acceptable") is True
+                        and (
+                            (
+                                advisory_action_candidate_gate_required
+                                and action_candidate_gate_acceptable
+                            )
+                            or (
+                                not advisory_action_candidate_gate_required
+                                and (
+                                    (
+                                        not GENERATION_VISUAL_AUDITS_BLOCKING
+                                        and advisory_minimum_acceptable
+                                    )
+                                    or (
+                                        GENERATION_VISUAL_AUDITS_BLOCKING
+                                        and (
+                                            fur_silhouette_quality is None
+                                            or fur_silhouette_quality["acceptable"]
+                                        )
+                                        and (
+                                            not fur_surface_gate_required
+                                            or (
+                                                isinstance(
+                                                    fur_surface_gate_metrics,
+                                                    dict,
+                                                )
+                                                and fur_surface_gate_metrics.get(
+                                                    "acceptable"
+                                                )
+                                                is True
+                                            )
+                                        )
+                                        and (
+                                            not grooming_pose_gate_required
+                                            or (
+                                                isinstance(
+                                                    grooming_pose_gate_metrics,
+                                                    dict,
+                                                )
+                                                and grooming_pose_gate_metrics.get(
+                                                    "acceptable"
+                                                )
+                                            )
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                        and (
+                            best_attempt is None
+                            or record["combined_penalty"] < best_attempt["combined_penalty"]
+                        )
+                    ):
+                        best_attempt = record
+                    advisory_identity_refine_source_eligible = bool(
+                        advisory_grooming_minimum_gate_required
+                        and GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS > 0
+                        and not advisory_grooming_identity_refine_active
+                        and attempt
+                        <= GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                        and (
+                            advisory_minimum_acceptable
+                            or attempt
+                            == GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
+                        )
+                        and chroma_metrics.get("acceptable") is True
+                        and attempt_cutout.is_file()
+                        and advisory_grooming_candidate_safe_for_identity_refine(
+                            advisory_grooming_minimum_gate_metrics
+                        )
                     )
+                    candidate_acceptable = bool(
+                        isinstance(palette_quality, dict)
+                        and palette_quality.get("acceptable") is True
+                        and (
+                            (
+                                advisory_action_candidate_gate_required
+                                and action_candidate_gate_acceptable
+                            )
+                            or (
+                                not advisory_action_candidate_gate_required
+                                and not GENERATION_VISUAL_AUDITS_BLOCKING
+                                and (
+                                    advisory_minimum_acceptable
+                                    or advisory_identity_refine_source_eligible
+                                )
+                            )
+                            or (
+                                GENERATION_VISUAL_AUDITS_BLOCKING
+                                and action_candidate_gate_acceptable
+                            )
+                        )
+                    )
+                    if candidate_acceptable:
+                        if (
+                            advisory_grooming_minimum_gate_required
+                            and not advisory_grooming_identity_refine_active
+                            and advisory_identity_refine_source_eligible
+                            and attempt < len(active_pose_profiles)
+                            and attempt_cutout.is_file()
+                        ):
+                            grooming_advisory_identity_refine_source = {
+                                "attempt": attempt,
+                                "cutout_path": str(attempt_cutout),
+                                "cutout_sha256": file_sha256(attempt_cutout),
+                                "keyframe_path": str(attempt_keyframe),
+                                "keyframe_sha256": file_sha256(attempt_keyframe),
+                                "minimum_gate": (
+                                    advisory_grooming_minimum_gate_metrics
+                                ),
+                                "identity_palette_quality": palette_quality,
+                                "minimum_gate_acceptable": (
+                                    advisory_minimum_acceptable
+                                ),
+                                "identity_refine_source_eligible": (
+                                    advisory_identity_refine_source_eligible
+                                ),
+                                "identity_refine_source_allowed_issues": sorted(
+                                    GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_ALLOWED_ISSUES
+                                ),
+                                "fallback_eligible": advisory_minimum_acceptable,
+                                "selection_role": (
+                                    "action_safe_face_drift_candidate_for_"
+                                    "conditional_canonical_face_repair"
+                                ),
+                            }
+                            update_job(
+                                job_id,
+                                stage="restoring_grooming_identity",
+                                grooming_advisory_identity_refine_status="queued",
+                                grooming_advisory_identity_refine_policy=(
+                                    GROOMING_ADVISORY_IDENTITY_REFINE_POLICY
+                                ),
+                                grooming_advisory_identity_refine_source=(
+                                    grooming_advisory_identity_refine_source
+                                ),
+                                grooming_advisory_identity_refine_required=True,
+                                grooming_advisory_identity_refine_mode=(
+                                    "conditional_detected_face_drift_only"
+                                ),
+                            )
+                            append_recovery_event(
+                                job_id,
+                                {
+                                    "stage": "cartoon_keyframe",
+                                    "pose_index": index,
+                                    "attempt": attempt,
+                                    "reason": (
+                                        "grooming_action_draft_has_detected_repairable_"
+                                        "face_drift"
+                                    ),
+                                    "strategy": (
+                                        GROOMING_ADVISORY_IDENTITY_REFINE_POLICY
+                                    ),
+                                    "profile": profile["name"],
+                                    "result": "queued_identity_refine",
+                                    "grooming_advisory_minimum_gate": (
+                                        advisory_grooming_minimum_gate_metrics
+                                    ),
+                                },
+                            )
+                            continue
+                        if advisory_action_candidate_gate_required:
+                            update_job(
+                                job_id,
+                                action_candidate_gate_policy=(
+                                    GENERATION_ACTION_CANDIDATE_GATE_POLICY
+                                ),
+                                action_candidate_gate_status=(
+                                    "eligible_candidate_found"
+                                ),
+                                action_candidate_gate_action=action_key(pose),
+                                action_candidate_gate_current_best_attempt=(
+                                    best_attempt["attempt"]
+                                    if best_attempt is not None
+                                    else attempt
+                                ),
+                                action_candidate_gate_degraded_fallback_used=False,
+                            )
+                        if advisory_grooming_identity_refine_active:
+                            update_job(
+                                job_id,
+                                grooming_advisory_identity_refine_status="passed",
+                                grooming_advisory_identity_refine_selected_attempt=(
+                                    attempt
+                                ),
+                                grooming_advisory_identity_refine_selected=(
+                                    grooming_advisory_identity_refine_audit
+                                ),
+                            )
+                        if attempt > 1:
+                            append_recovery_event(
+                                job_id,
+                                {
+                                    "stage": "cartoon_keyframe",
+                                    "pose_index": index,
+                                    "attempt": attempt,
+                                    "reason": (
+                                        "candidate_added_to_best_of_five_pool"
+                                    ),
+                                    "strategy": "generate_five_then_select_best",
+                                    "profile": profile["name"],
+                                    "result": "eligible",
+                                    "chroma": chroma_metrics,
+                                    "quality": quality,
+                                    "similarity": similarity,
+                                    "identity_palette": palette_quality,
+                                    "fur_silhouette": fur_silhouette_quality,
+                                    "fur_surface_gate": fur_surface_gate_metrics,
+                                    "grooming_pose_gate": grooming_pose_gate_metrics,
+                                    "grooming_advisory_minimum_gate": (
+                                        advisory_grooming_minimum_gate_metrics
+                                    ),
+                                },
+                            )
+                        continue
+                    if (
+                        advisory_grooming_minimum_gate_required
+                        and not advisory_minimum_acceptable
+                    ):
+                        rejection_reason = (
+                            "grooming_minimum_action_identity_contract_failed"
+                        )
+                    elif palette_quality is not None and not palette_quality["acceptable"]:
+                        rejection_reason = "pose_identity_palette_drift"
+                    elif (
+                        fur_silhouette_quality is not None
+                        and not fur_silhouette_quality["acceptable"]
+                    ):
+                        rejection_reason = "fur_silhouette_expansion"
+                    elif not quality["acceptable"]:
+                        rejection_reason = "subject_quality_invalid"
+                    elif grooming_pose_gate_required and (
+                        not isinstance(grooming_pose_gate_metrics, dict)
+                        or not grooming_pose_gate_metrics.get("acceptable")
+                    ):
+                        rejection_reason = "grooming_pose_gate_failed"
+                    elif (
+                        fur_surface_gate_required
+                        and isinstance(fur_surface_gate_metrics, dict)
+                        and fur_surface_gate_metrics.get("evaluated") is True
+                        and fur_surface_gate_metrics.get("acceptable") is not True
+                    ):
+                        rejection_reason = "fur_surface_gate_failed"
+                    else:
+                        rejection_reason = "pose_too_similar"
                     append_recovery_event(
                         job_id,
                         {
                             "stage": "cartoon_keyframe",
                             "pose_index": index,
                             "attempt": attempt,
-                            "reason": (
-                                "fur_surface_gate_failed"
-                                if fur_surface_candidate_rejected
-                                else "grooming_pose_gate_failed"
-                            ),
-                            "strategy": (
-                                "main_case_fur_surface_retry"
-                                if fur_surface_candidate_rejected
-                                else "main_case_grooming_pose_retry"
-                            ),
+                            "reason": rejection_reason,
+                            "strategy": "pose_prompt_and_lora_retry",
                             "profile": profile["name"],
                             "result": "rejected",
                             "chroma": chroma_metrics,
-                            "quality": gate_quality,
-                            "similarity": gate_similarity,
+                            "quality": quality,
+                            "similarity": similarity,
                             "identity_palette": palette_quality,
-                            "grooming_pose_gate": grooming_pose_gate_metrics,
+                            "fur_silhouette": fur_silhouette_quality,
                             "fur_surface_gate": fur_surface_gate_metrics,
+                            "grooming_pose_gate": grooming_pose_gate_metrics,
+                            "grooming_advisory_minimum_gate": (
+                                advisory_grooming_minimum_gate_metrics
+                            ),
                         },
                     )
                     LOGGER.warning(
-                        "%s pose %s attempt %s failed Main_case candidate gate: grooming=%s fur_surface=%s",
+                        "%s pose %s attempt %s failed pose checks: quality=%s similarity=%s identity_palette=%s fur_silhouette=%s fur_surface=%s minimum_gate=%s",
                         job_id,
                         index,
                         attempt,
+                        quality["issues"],
+                        similarity["issues"],
+                        palette_quality["issues"] if palette_quality else None,
                         (
-                            grooming_pose_gate_metrics.get("issues")
-                            if isinstance(grooming_pose_gate_metrics, dict)
-                            else ["grooming_pose_gate_result_unavailable"]
+                            fur_silhouette_quality["issues"]
+                            if fur_silhouette_quality
+                            else None
                         ),
                         (
                             fur_surface_gate_metrics.get("issues")
                             if isinstance(fur_surface_gate_metrics, dict)
                             else None
                         ),
+                        (
+                            advisory_grooming_minimum_gate_metrics.get("issues")
+                            if isinstance(
+                                advisory_grooming_minimum_gate_metrics,
+                                dict,
+                            )
+                            else None
+                        ),
                     )
-                    if fur_surface_short_circuit_due:
-                        assert isinstance(fur_surface_retry_decision, dict)
-                        fur_surface_gate_short_circuit = {
-                            "action": action_key(pose),
-                            "pose_index": index,
-                            "attempt": attempt,
-                            "reason": "consecutive_fur_surface_rejections",
-                            "rejections": fur_surface_rejection_streak,
-                            "attempt_budget": len(active_pose_profiles),
-                            "retry_decision": fur_surface_retry_decision,
-                            "eating_fourth_attempt_skipped": bool(
-                                action_key(pose) == "eating"
-                                and len(active_pose_profiles) > attempt
-                            ),
-                            "blocks_scail": not strict_first_frame_required,
-                            "bounded_candidate_generation_continues": (
-                                strict_first_frame_required
-                            ),
-                        }
-                        fur_surface_gate_status_by_action[action_key(pose)] = (
-                            "retrying_bounded_candidates"
-                            if strict_first_frame_required
-                            else "failed"
+                    if advisory_grooming_identity_refine_active:
+                        identity_refine_fallback_eligible = bool(
+                            isinstance(grooming_advisory_identity_refine_source, dict)
+                            and grooming_advisory_identity_refine_source.get(
+                                "fallback_eligible"
+                            )
+                            is True
                         )
                         update_job(
                             job_id,
-                            fur_surface_gate_status=dict(
-                                fur_surface_gate_status_by_action
+                            grooming_advisory_identity_refine_status=(
+                                "failed_fallback_to_accepted_action_draft"
+                                if identity_refine_fallback_eligible
+                                else "failed_without_acceptable_action_draft_fallback"
                             ),
-                            fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
-                            fur_surface_gate_short_circuit=(
-                                fur_surface_gate_short_circuit
+                            grooming_advisory_identity_refine_failed_attempt=attempt,
+                            grooming_advisory_identity_refine_failure_issues=(
+                                advisory_grooming_minimum_gate_metrics.get("issues", [])
+                                if isinstance(
+                                    advisory_grooming_minimum_gate_metrics,
+                                    dict,
+                                )
+                                else ["identity_refine_candidate_unavailable"]
                             ),
-                            fur_surface_gate_final_quality={
-                                "scope": "qwen_action_reference_pre_scail",
-                                "status": (
-                                    "retrying_bounded_candidates"
-                                    if strict_first_frame_required
-                                    else "failed"
-                                ),
-                                "actions": dict(fur_surface_gate_selected_metrics),
-                                "failure": fur_surface_gate_short_circuit,
-                                "final_video_frame_audit": False,
+                        )
+                        if not identity_refine_fallback_eligible:
+                            best_attempt = None
+                        continue
+                if len(attempts) != QWEN_ACTION_CANDIDATE_ATTEMPTS:
+                    raise RuntimeError(
+                        "Action candidate generation did not complete all five attempts."
+                    )
+                if strict_first_frame_required:
+                    first_frame_states = dict(
+                        get_job(job_id).get("qwen_first_frame_states") or {}
+                    )
+                    action_state = dict(first_frame_states.get(action_key(pose)) or {})
+                    action_state.update(
+                        status="selecting_best_of_five",
+                        current_attempt=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        attempts_completed=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        attempt_budget=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                    )
+                    first_frame_states[action_key(pose)] = action_state
+                    update_job(
+                        job_id,
+                        qwen_first_frame_states=first_frame_states,
+                        qwen_first_frame_current_action=action_key(pose),
+                        qwen_first_frame_current_attempt=(
+                            QWEN_ACTION_CANDIDATE_ATTEMPTS
+                        ),
+                    )
+
+                def fail_identity_budget_exhausted(
+                    additional_palette: dict[str, Any] | None = None,
+                ) -> None:
+                    issue_counts: dict[str, int] = {}
+                    palette_records = [
+                        item.get("identity_palette")
+                        for item in attempts
+                        if isinstance(item, dict)
+                    ]
+                    if isinstance(additional_palette, dict) and not any(
+                        additional_palette == palette_record
+                        for palette_record in palette_records
+                        if isinstance(palette_record, dict)
+                    ):
+                        palette_records.append(additional_palette)
+                    for palette_record in palette_records:
+                        if not isinstance(palette_record, dict):
+                            issue_counts["identity_palette_signature_unavailable"] = (
+                                issue_counts.get(
+                                    "identity_palette_signature_unavailable",
+                                    0,
+                                )
+                                + 1
+                            )
+                            continue
+                        for issue in palette_record.get("issues", []):
+                            issue_name = str(issue).strip()
+                            if issue_name:
+                                issue_counts[issue_name] = (
+                                    issue_counts.get(issue_name, 0) + 1
+                                )
+                    ranked_issues = sorted(
+                        issue_counts.items(),
+                        key=lambda item: (-item[1], item[0]),
+                    )
+                    first_frame_states = dict(
+                        get_job(job_id).get("qwen_first_frame_states") or {}
+                    )
+                    failed_state = dict(
+                        first_frame_states.get(action_key(pose)) or {}
+                    )
+                    failed_state.update(
+                        status="failed_identity_budget_exhausted",
+                        completed=True,
+                        quality_passed=False,
+                        published=False,
+                        current_attempt=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        attempts_completed=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        attempt_budget=QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                        selected_attempt=None,
+                        best_effort=False,
+                        best_effort_issues=[],
+                        identity_issue_counts=dict(ranked_issues),
+                        original_upload_fallback_published=False,
+                        action_removed=False,
+                    )
+                    first_frame_states[action_key(pose)] = failed_state
+                    action_selection_records = get_job(job_id).get(
+                        "action_candidate_selection_by_action"
+                    )
+                    action_selection_records = (
+                        json.loads(json.dumps(action_selection_records))
+                        if isinstance(action_selection_records, dict)
+                        else {}
+                    )
+                    failure_record = {
+                        "policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
+                        "source_kind": "qwen_generated_action_candidates",
+                        "result": "failed_identity_budget_exhausted",
+                        "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        "selected_attempt": None,
+                        "identity_palette_acceptable": False,
+                        "identity_issue_counts": dict(ranked_issues),
+                        "original_upload_used": False,
+                        "approved_canonical_used_as_output": False,
+                    }
+                    action_selection_records[action_key(pose)] = failure_record
+                    write_json_atomic(
+                        job_dir
+                        / "workflows"
+                        / f"qwen_pose_{index:02d}_identity_budget_failure.json",
+                        failure_record,
+                    )
+                    update_job(
+                        job_id,
+                        qwen_first_frame_states=first_frame_states,
+                        qwen_first_frame_best_effort_selected=False,
+                        qwen_first_frame_best_effort_action=None,
+                        qwen_first_frame_best_effort_attempt=None,
+                        qwen_first_frame_best_effort_issues=[],
+                        action_candidate_gate_status=(
+                            "failed_identity_budget_exhausted"
+                        ),
+                        action_candidate_gate_action=action_key(pose),
+                        action_candidate_gate_attempt_budget=(
+                            QWEN_ACTION_CANDIDATE_ATTEMPTS
+                        ),
+                        action_candidate_gate_attempts_completed=(
+                            QWEN_ACTION_CANDIDATE_ATTEMPTS
+                        ),
+                        action_candidate_gate_selected_attempt=None,
+                        action_candidate_gate_returns_original_upload=False,
+                        action_candidate_gate_returns_approved_canonical=False,
+                        action_candidate_selection_by_action=(
+                            action_selection_records
+                        ),
+                    )
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_keyframe",
+                            "pose_index": index,
+                            "reason": "five_candidate_identity_budget_exhausted",
+                            "strategy": (
+                                "fail_closed_without_original_or_canonical_output"
+                            ),
+                            "result": "rejected_identity_budget_exhausted",
+                            "action": action_key(pose),
+                            "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                            "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                            "identity_issue_counts": dict(ranked_issues),
+                            "original_upload_fallback_published": False,
+                            "approved_canonical_published": False,
+                            "action_removed": False,
+                        },
+                    )
+                    issue_summary = ", ".join(
+                        f"{name}={count}" for name, count in ranked_issues
+                    ) or "identity_palette_signature_unavailable"
+                    raise RuntimeError(
+                        "Best-of-five selection found no identity-safe generated "
+                        f"candidate: {issue_summary}."
+                    )
+
+                identity_safe_attempt_exists = any(
+                    isinstance(item.get("identity_palette"), dict)
+                    and item["identity_palette"].get("acceptable") is True
+                    for item in attempts
+                    if isinstance(item, dict)
+                )
+                if (
+                    strict_first_frame_required
+                    and not identity_safe_attempt_exists
+                    and best_semantic_source is None
+                    and not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                ):
+                    fail_identity_budget_exhausted()
+                if (
+                    advisory_grooming_minimum_gate_required
+                    and best_attempt is not None
+                ):
+                    selected_identity_refine = best_attempt.get(
+                        "grooming_advisory_identity_refine"
+                    )
+                    identity_refine_was_queued = isinstance(
+                        grooming_advisory_identity_refine_source,
+                        dict,
+                    )
+                    update_job(
+                        job_id,
+                        grooming_advisory_identity_refine_status=(
+                            "passed"
+                            if isinstance(selected_identity_refine, dict)
+                            else (
+                                "fallback_to_accepted_action_draft"
+                                if identity_refine_was_queued
+                                else "not_required_identity_safe_draft_selected"
+                            )
+                        ),
+                        grooming_advisory_identity_refine_completed=(
+                            isinstance(selected_identity_refine, dict)
+                        ),
+                        grooming_advisory_identity_refine_fallback_used=(
+                            identity_refine_was_queued
+                            and not isinstance(selected_identity_refine, dict)
+                        ),
+                        grooming_advisory_identity_safe_draft_selected=(
+                            not identity_refine_was_queued
+                        ),
+                    )
+                if GENERATION_VISUAL_AUDITS_BLOCKING and best_attempt is not None and (
+                    not best_attempt["quality"]["acceptable"]
+                    or not best_attempt["similarity"]["acceptable"]
+                    or (
+                        isinstance(best_attempt.get("identity_palette"), dict)
+                        and not best_attempt["identity_palette"]["acceptable"]
+                    )
+                    or (
+                        fur_surface_gate_required
+                        and (
+                            not isinstance(
+                                best_attempt.get("fur_surface_gate"),
+                                dict,
+                            )
+                            or best_attempt["fur_surface_gate"].get("acceptable")
+                            is not True
+                        )
+                    )
+                    or (
+                        grooming_pose_gate_required
+                        and (
+                            not isinstance(
+                                best_attempt.get("grooming_pose_gate"),
+                                dict,
+                            )
+                            or not best_attempt["grooming_pose_gate"].get("acceptable")
+                        )
+                    )
+                ):
+                    if (
+                        fur_surface_gate_required
+                        and isinstance(
+                            best_attempt.get("fur_surface_gate"),
+                            dict,
+                        )
+                        and best_attempt["fur_surface_gate"].get("evaluated") is True
+                        and best_attempt["fur_surface_gate"].get("acceptable") is not True
+                    ):
+                        rejection_reason = "all_keyframe_fur_surface_gate_attempts_rejected"
+                    elif grooming_pose_gate_required and (
+                        not isinstance(
+                            best_attempt.get("grooming_pose_gate"),
+                            dict,
+                        )
+                        or not best_attempt["grooming_pose_gate"].get("acceptable")
+                    ):
+                        rejection_reason = (
+                            "all_keyframe_grooming_pose_gate_attempts_rejected"
+                        )
+                    elif (
+                        isinstance(best_attempt.get("identity_palette"), dict)
+                        and not best_attempt["identity_palette"]["acceptable"]
+                    ):
+                        rejection_reason = "all_keyframe_identity_palette_attempts_rejected"
+                    elif best_attempt["similarity"]["acceptable"]:
+                        rejection_reason = "all_keyframe_subject_quality_attempts_rejected"
+                    else:
+                        rejection_reason = "all_keyframe_similarity_attempts_rejected"
+                    recovery_strategy = (
+                        "return_distinct_raw_image_or_fail"
+                        if image_request
+                        else (
+                            "rembg_u2net_fallback"
+                            if best_semantic_source is not None
+                            else "fail_closed_without_background_recovery"
+                        )
+                    )
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_keyframe",
+                            "pose_index": index,
+                            "attempt": best_attempt["attempt"],
+                            "reason": rejection_reason,
+                            "strategy": recovery_strategy,
+                            "profile": best_attempt["profile"],
+                            "result": "rejected",
+                            "chroma": best_attempt["chroma"],
+                            "quality": best_attempt["quality"],
+                            "similarity": best_attempt["similarity"],
+                            "identity_palette": best_attempt.get("identity_palette"),
+                        },
+                    )
+                    best_attempt = None
+                if strict_first_frame_required and best_attempt is not None:
+                    strict_selection_issues = strict_first_frame_record_issues(
+                        best_attempt,
+                        action=action_key(pose),
+                    )
+                    if strict_selection_issues:
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "cartoon_keyframe",
+                                "pose_index": index,
+                                "attempt": best_attempt.get("attempt"),
+                                "reason": "selected_first_frame_failed_strict_publication_gate",
+                                "strategy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
+                                "profile": best_attempt.get("profile"),
+                                "result": "rejected_before_bounded_best_effort_selection",
+                                "issues": strict_selection_issues,
+                                "action": action_key(pose),
                             },
+                        )
+                        best_attempt = None
+                if (
+                    best_attempt is None
+                    and strict_first_frame_required
+                    and best_strict_first_frame_attempt is not None
+                    and bool(best_strict_first_frame_attempt.get("cutout"))
+                    and (
+                        job_dir / str(best_strict_first_frame_attempt["cutout"])
+                    ).is_file()
+                    and (
+                        GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                        or (
+                            isinstance(
+                                best_strict_first_frame_attempt.get(
+                                    "identity_palette"
+                                ),
+                                dict,
+                            )
+                            and best_strict_first_frame_attempt[
+                                "identity_palette"
+                            ].get("acceptable")
+                            is True
+                        )
+                    )
+                ):
+                    best_attempt = best_strict_first_frame_attempt
+                    strict_best_effort_issues = strict_first_frame_record_issues(
+                        best_attempt,
+                        action=action_key(pose),
+                    )
+                    selected_candidate_gate = dict(
+                        best_attempt.get("action_candidate_gate") or {}
+                    )
+                    selected_candidate_gate.update(
+                        strict_acceptable=False,
+                        best_effort_accepted=True,
+                        degraded_fallback_accepted=True,
+                        degraded_reason="bounded_first_frame_attempt_budget_exhausted",
+                        degraded_selection_policy=(
+                            QWEN_GENERATED_COMPLETION_SELECTION_POLICY
+                        ),
+                        degraded_selection_key=list(
+                            best_attempt[
+                                "strict_first_frame_best_effort_selection_key"
+                            ]
+                        ),
+                        returns_original_upload=False,
+                        action_removed=False,
+                        blocks_job=False,
+                    )
+                    best_attempt["action_candidate_gate"] = selected_candidate_gate
+                    best_attempt["strict_first_frame_best_effort_selected"] = True
+                    best_attempt["strict_first_frame_best_effort_issues"] = (
+                        strict_best_effort_issues
+                    )
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_keyframe",
+                            "pose_index": index,
+                            "attempt": best_attempt["attempt"],
+                            "reason": "bounded_first_frame_attempt_budget_exhausted",
+                            "strategy": (
+                                "select_generated_visual_completion_best_of_five"
+                            ),
+                            "profile": best_attempt["profile"],
+                            "result": "accepted_best_effort",
+                            "issues": strict_best_effort_issues,
+                            "selection_key": best_attempt[
+                                "strict_first_frame_best_effort_selection_key"
+                            ],
+                            "attempt_count": len(attempts),
+                            "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                            "original_upload_fallback_published": False,
+                            "action_removed": False,
+                        },
+                    )
+                    update_job(
+                        job_id,
+                        qwen_first_frame_best_effort_selected=True,
+                        qwen_first_frame_best_effort_action=action_key(pose),
+                        qwen_first_frame_best_effort_attempt=best_attempt["attempt"],
+                        qwen_first_frame_best_effort_issues=(strict_best_effort_issues),
+                        qwen_first_frame_attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                        visual_completion_fallback_used=True,
+                        visual_completion_fallback_policy=(
+                            GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                        ),
+                    )
+                if (
+                    best_attempt is None
+                    and advisory_action_candidate_gate_required
+                    and not strict_first_frame_required
+                    and best_action_candidate_degraded_attempt is not None
+                ):
+                    fallback_action = action_key(pose)
+                    approved_canonical_available = bool(
+                        species == "dog"
+                        and fallback_action
+                        in {
+                            "standing",
+                            "eating",
+                            "drinking",
+                            "running",
+                            "sleeping",
+                            "toileting",
+                        }
+                        and cartoon_is_transparent
+                        and cartoon_output.is_file()
+                    )
+                    exhausted_recovery = exhausted_action_candidate_recovery_policy(
+                        best_action_candidate_degraded_attempt,
+                        action=action_key(pose),
+                        approved_canonical_available=approved_canonical_available,
+                    )
+                    if exhausted_recovery in {
+                        "identity_safe_generated_candidate",
+                        "identity_safe_generated_candidate_requires_final_action_gate",
+                        "generated_completion_candidate",
+                    }:
+                        best_attempt = best_action_candidate_degraded_attempt
+                        requires_final_action_gate = bool(
+                            exhausted_recovery
+                            == "identity_safe_generated_candidate_requires_final_action_gate"
+                        )
+                        completion_candidate = bool(
+                            exhausted_recovery == "generated_completion_candidate"
+                        )
+                        selected_candidate_gate = dict(
+                            best_attempt.get("action_candidate_gate") or {}
+                        )
+                        selected_candidate_gate.update(
+                            strict_acceptable=bool(
+                                selected_candidate_gate.get("acceptable") is True
+                            ),
+                            degraded_fallback_accepted=True,
+                            degraded_reason="candidate_attempt_budget_exhausted",
+                            degraded_selection_policy=(
+                                QWEN_GENERATED_COMPLETION_SELECTION_POLICY
+                                if completion_candidate
+                                else (
+                                    "identity_safe_structural_action_generated_"
+                                    "candidate_v3"
+                                )
+                            ),
+                            degraded_selection_key=list(
+                                best_attempt[
+                                    "action_candidate_degraded_selection_key"
+                                ]
+                            ),
+                            returns_original_upload=False,
+                            returns_approved_canonical=False,
+                            blocks_job=False,
+                            requires_final_action_gate=requires_final_action_gate,
+                        )
+                        best_attempt["action_candidate_gate"] = (
+                            selected_candidate_gate
+                        )
+                        best_attempt["candidate_gate_degraded_fallback"] = True
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "cartoon_keyframe",
+                                "pose_index": index,
+                                "attempt": best_attempt["attempt"],
+                                "reason": "action_candidate_gate_attempts_exhausted",
+                                "strategy": (
+                                    "select_generated_visual_completion_candidate"
+                                    if completion_candidate
+                                    else (
+                                    "select_identity_safe_structural_action_generated_"
+                                    "candidate_with_required_final_action_gate"
+                                    if requires_final_action_gate
+                                    else "select_identity_safe_structural_action_generated_"
+                                    "candidate"
+                                    )
+                                ),
+                                "profile": best_attempt["profile"],
+                                "result": "accepted_degraded_generated_candidate",
+                                "action_candidate_gate": selected_candidate_gate,
+                                "identity_palette": best_attempt.get(
+                                    "identity_palette"
+                                ),
+                                "quality": best_attempt.get("quality"),
+                                "similarity": best_attempt.get("similarity"),
+                            },
+                        )
+                        update_job(
+                            job_id,
+                            action_candidate_gate_policy=(
+                                GENERATION_ACTION_CANDIDATE_GATE_POLICY
+                            ),
+                            action_candidate_gate_status=(
+                                "generated_completion_candidate_selected"
+                                if completion_candidate
+                                else (
+                                    "identity_safe_candidate_pending_final_action_gate"
+                                    if requires_final_action_gate
+                                    else "identity_safe_degraded_candidate_selected"
+                                )
+                            ),
+                            action_candidate_final_gate_required_actions=sorted(
+                                {
+                                    *(
+                                        get_job(job_id).get(
+                                            "action_candidate_final_gate_required_actions",
+                                            [],
+                                        )
+                                        or []
+                                    ),
+                                    *(
+                                        [action_key(pose)]
+                                        if requires_final_action_gate
+                                        else []
+                                    ),
+                                }
+                            ),
+                            action_candidate_gate_action=action_key(pose),
+                            action_candidate_gate_attempt_budget=len(
+                                active_pose_profiles
+                            ),
+                            action_candidate_gate_selected_attempt=(
+                                best_attempt["attempt"]
+                            ),
+                            action_candidate_gate_degraded_fallback_used=True,
+                            action_candidate_gate_returns_original_upload=False,
+                            action_candidate_gate_returns_approved_canonical=False,
+                            visual_completion_fallback_used=completion_candidate,
+                            visual_completion_fallback_policy=(
+                                GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                                if completion_candidate
+                                else None
+                            ),
+                        )
+                    elif exhausted_recovery == "upload_anchored_canonical":
+                        standing_fallback = fallback_action == "standing"
+                        canonical_fallback_policy = (
+                            "upload_anchored_canonical_standing_reference_v1"
+                            if standing_fallback
+                            else (
+                                DOG_EATING_CANONICAL_IDENTITY_FALLBACK_POLICY
+                                if fallback_action == "eating"
+                                else (
+                                    TOILETING_CANONICAL_TRAY_FALLBACK_POLICY
+                                    if fallback_action == "toileting"
+                                    else (
+                                        "upload_anchored_canonical_dog_action_"
+                                        "reference_v1"
+                                    )
+                                )
+                            )
+                        )
+                        canonical_fallback = (
+                            job_dir
+                            / f"pose_{index:02d}_upload_anchored_canonical_fallback.png"
+                        )
+                        canonical_identity_fallback = (
+                            canonical_fallback
+                            if fallback_action != "toileting"
+                            else job_dir
+                            / f"pose_{index:02d}_upload_anchored_canonical_identity.png"
+                        )
+                        canonical_identity_normalization = (
+                            normalize_qwen_action_reference_rgba(
+                                cartoon_output,
+                                canonical_identity_fallback,
+                                action=action_key(pose),
+                            )
+                        )
+                        toileting_tray_fallback: dict[str, Any] | None = None
+                        if fallback_action == "toileting":
+                            tray_staging = (
+                                job_dir
+                                / f"pose_{index:02d}_canonical_toileting_tray_staging.png"
+                            )
+                            toileting_tray_fallback = (
+                                make_toileting_canonical_tray_fallback(
+                                    canonical_identity_fallback,
+                                    tray_staging,
+                                )
+                            )
+                            canonical_normalization = (
+                                normalize_qwen_action_reference_rgba(
+                                    tray_staging,
+                                    canonical_fallback,
+                                    action=action_key(pose),
+                                )
+                            )
+                        else:
+                            canonical_normalization = canonical_identity_normalization
+                        canonical_edge_quality = canonical_normalization[
+                            "transparent_edge_quality"
+                        ]
+                        canonical_quality = pose_cutout_quality(
+                            canonical_fallback,
+                            pose,
+                            require_eating_mouth_contact=False,
+                            validate_action_geometry=fallback_action == "toileting",
+                        )
+                        canonical_palette = evaluate_pose_identity_palette(
+                            canonical_identity_fallback,
+                            primary_reference=pose_reference_identity_palette,
+                            upper_body_reference=(
+                                pose_reference_upper_body_identity_palette
+                            ),
+                            bottom_exclusion=pose_palette_bottom_exclusion,
+                            bowl_action=False,
+                        )
+                        canonical_palette_quality = canonical_palette["quality"]
+                        if (
+                            canonical_edge_quality.get("acceptable") is not True
+                            or canonical_quality.get("acceptable") is not True
+                            or canonical_palette_quality.get("acceptable") is not True
+                        ):
+                            raise RuntimeError(
+                                "Upload-anchored canonical "
+                                f"{fallback_action} fallback failed "
+                                "its alpha, subject, or identity-palette contract."
+                            )
+                        rejected_attempt = best_action_candidate_degraded_attempt
+                        selected_candidate_gate = dict(
+                            rejected_attempt.get("action_candidate_gate") or {}
+                        )
+                        selected_candidate_gate.update(
+                            strict_acceptable=False,
+                            degraded_fallback_accepted=True,
+                            degraded_reason=(
+                                "all_generated_candidates_failed_identity_palette"
+                            ),
+                            degraded_selection_policy=(
+                                canonical_fallback_policy
+                            ),
+                            degraded_selection_key=list(
+                                rejected_attempt[
+                                    "action_candidate_degraded_selection_key"
+                                ]
+                            ),
+                            returns_original_upload=False,
+                            returns_approved_canonical=True,
+                            action_geometry_deferred_to_scail=(
+                                fallback_action != "toileting"
+                            ),
+                            toileting_tray_geometry_prebound=(
+                                fallback_action == "toileting"
+                            ),
+                            blocks_job=False,
+                        )
+                        canonical_chroma = {
+                            "size": canonical_normalization["output_size"],
+                            "foreground_fraction": round(
+                                float(canonical_normalization["foreground_pixels"])
+                                / float(
+                                    canonical_normalization["source_size"][0]
+                                    * canonical_normalization["source_size"][1]
+                                ),
+                                6,
+                            ),
+                            "corners": canonical_normalization[
+                                "output_alpha_corners"
+                            ],
+                            "soft_alpha": True,
+                            "acceptable": True,
+                            "issues": [],
+                            "method": (
+                                "approved_upload_anchored_canonical_transparent_"
+                                "reference"
+                            ),
+                            "normalized_after_qwen": True,
+                            "matte_policy": (
+                                "approved_canonical_alpha_preserving_normalization_v1"
+                            ),
+                            "normalization_policy": (
+                                QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
+                            ),
+                            "final_reference_normalization": (
+                                canonical_normalization
+                            ),
+                            "final_reference_sha256": canonical_normalization[
+                                "output_sha256"
+                            ],
+                            "transparent_edge_quality": canonical_edge_quality,
+                        }
+                        canonical_similarity = {
+                            "available": True,
+                            "acceptable": True,
+                            "warning": False,
+                            "issues": [],
+                            "comparisons": [],
+                            "penalty": 0.0,
+                            "policy": (
+                                "approved_canonical_self_reuse_for_standing_"
+                                "identity_recovery_v1"
+                                if standing_fallback
+                                else "approved_canonical_self_reuse_for_dog_action_"
+                                "identity_recovery_v1"
+                            ),
+                            "canonical_self_reference_reuse": True,
+                            "action_geometry_deferred_to_scail": (
+                                fallback_action != "toileting"
+                            ),
+                            "toileting_tray_geometry_prebound": (
+                                fallback_action == "toileting"
+                            ),
+                        }
+                        best_attempt = {
+                            **rejected_attempt,
+                            "attempt": len(active_pose_profiles) + 1,
+                            "profile": (
+                                "upload_anchored_canonical_standing_recovery"
+                                if standing_fallback
+                                else f"upload_anchored_canonical_{fallback_action}_recovery"
+                            ),
+                            "keyframe": canonical_fallback.name,
+                            "cutout": canonical_fallback.name,
+                            "chroma": canonical_chroma,
+                            "quality": canonical_quality,
+                            "similarity": canonical_similarity,
+                            "identity_palette": canonical_palette_quality,
+                            "candidate_identity_palette": canonical_palette[
+                                "candidate"
+                            ],
+                            "candidate_upper_body_identity_palette": (
+                                canonical_palette["upper_body_candidate"]
+                            ),
+                            "fur_silhouette": None,
+                            "fur_surface_gate": None,
+                            "combined_penalty": round(
+                                float(canonical_quality.get("penalty", 0.0))
+                                + float(
+                                    canonical_palette_quality.get("penalty", 0.0)
+                                )
+                                + float(canonical_edge_quality.get("penalty", 0.0)),
+                                6,
+                            ),
+                            "transparent": True,
+                            "background_removal_failed": False,
+                            "action_candidate_gate": selected_candidate_gate,
+                            "candidate_gate_degraded_fallback": True,
+                            "canonical_identity_fallback": {
+                                "policy": (
+                                    canonical_fallback_policy
+                                ),
+                                "source": str(cartoon_output),
+                                "source_sha256": file_sha256(cartoon_output),
+                                "selected_path": str(canonical_fallback),
+                                "selected_sha256": file_sha256(canonical_fallback),
+                                "rejected_generated_attempt": rejected_attempt[
+                                    "attempt"
+                                ],
+                                "rejected_identity_palette": rejected_attempt.get(
+                                    "identity_palette"
+                                ),
+                                "identity_only_path": str(
+                                    canonical_identity_fallback
+                                ),
+                                "identity_only_sha256": file_sha256(
+                                    canonical_identity_fallback
+                                ),
+                                "action_geometry_deferred_to_scail": (
+                                    fallback_action != "toileting"
+                                ),
+                                "toileting_tray_geometry_prebound": (
+                                    fallback_action == "toileting"
+                                ),
+                                "toileting_tray_fallback": (
+                                    toileting_tray_fallback
+                                ),
+                            },
+                        }
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "cartoon_keyframe",
+                                "pose_index": index,
+                                "attempt": best_attempt["attempt"],
+                                "reason": (
+                                    "all_generated_candidates_failed_identity_palette"
+                                ),
+                                "strategy": (
+                                    "reuse_upload_anchored_canonical_and_defer_"
+                                    "standing_geometry_to_scail"
+                                    if standing_fallback
+                                    else (
+                                        "reuse_upload_anchored_canonical_with_"
+                                        "deterministic_underbody_tray"
+                                        if fallback_action == "toileting"
+                                        else "reuse_upload_anchored_canonical_and_defer_"
+                                        f"{fallback_action}_geometry_to_scail"
+                                    )
+                                ),
+                                "profile": best_attempt["profile"],
+                                "result": "accepted_identity_safe_canonical",
+                                "action_candidate_gate": selected_candidate_gate,
+                                "canonical_identity_fallback": best_attempt[
+                                    "canonical_identity_fallback"
+                                ],
+                            },
+                        )
+                        update_job(
+                            job_id,
+                            action_candidate_gate_policy=(
+                                GENERATION_ACTION_CANDIDATE_GATE_POLICY
+                            ),
+                            action_candidate_gate_status=(
+                                "upload_anchored_canonical_selected"
+                            ),
+                            action_candidate_gate_action=action_key(pose),
+                            action_candidate_gate_attempt_budget=len(
+                                active_pose_profiles
+                            ),
+                            action_candidate_gate_selected_attempt=(
+                                best_attempt["attempt"]
+                            ),
+                            action_candidate_gate_degraded_fallback_used=True,
+                            action_candidate_gate_returns_original_upload=False,
+                            action_candidate_gate_returns_approved_canonical=True,
+                        )
+                if (
+                    best_attempt is None
+                    and advisory_grooming_minimum_gate_required
+                    and not strict_first_frame_required
+                    and best_advisory_grooming_degraded_attempt is not None
+                ):
+                    best_attempt = best_advisory_grooming_degraded_attempt
+                    selected_degraded_gate = best_attempt.get(
+                        "grooming_advisory_minimum_gate"
+                    )
+                    if not isinstance(selected_degraded_gate, dict):
+                        raise RuntimeError(
+                            "Internal grooming recovery error: selected fallback "
+                            "lost its recorded audit."
+                        )
+                    selected_degraded_gate = json.loads(
+                        json.dumps(selected_degraded_gate)
+                    )
+                    selected_degraded_gate[
+                        "degraded_fallback_accepted"
+                    ] = True
+                    selected_degraded_gate["strict_acceptable"] = bool(
+                        selected_degraded_gate.get("acceptable") is True
+                    )
+                    selected_degraded_gate["degraded_selection_policy"] = (
+                        "gross_pose_then_identity_lowest_risk_complete_chain_v2"
+                    )
+                    selected_degraded_gate["degraded_selection_key"] = list(
+                        advisory_grooming_degraded_candidate_selection_key(
+                            best_attempt
+                        )
+                    )
+                    selected_degraded_gate["degraded_reason"] = (
+                        "strict_action_identity_attempt_budget_exhausted"
+                    )
+                    selected_degraded_gate["blocks_scail"] = False
+                    best_attempt["grooming_advisory_minimum_gate"] = (
+                        selected_degraded_gate
+                    )
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_keyframe",
+                            "pose_index": index,
+                            "attempt": best_attempt["attempt"],
+                            "reason": (
+                                "grooming_minimum_contract_attempts_exhausted"
+                            ),
+                            "strategy": (
+                                "select_identity_first_lowest_risk_candidate_and_"
+                                "continue_scail"
+                            ),
+                            "profile": best_attempt["profile"],
+                            "result": "accepted_degraded",
+                            "grooming_advisory_minimum_gate": (
+                                selected_degraded_gate
+                            ),
+                        },
+                    )
+                    update_job(
+                        job_id,
+                        grooming_pose_gate_status=(
+                            "minimum_contract_degraded_candidate_selected"
+                        ),
+                        grooming_advisory_minimum_gate_status=(
+                            "degraded_candidate_selected"
+                        ),
+                        grooming_advisory_minimum_gate_attempts=(
+                            grooming_advisory_minimum_gate_attempts
+                        ),
+                        grooming_advisory_minimum_gate_degraded_fallback_used=True,
+                        grooming_advisory_minimum_gate_degraded_selected_attempt=(
+                            best_attempt["attempt"]
+                        ),
+                    )
+                if best_attempt is None and image_request and best_raw_attempt is not None:
+                    best_attempt = best_raw_attempt
+                    append_background_removal_failure(
+                        job_id,
+                        {
+                            "stage": "cartoon_keyframe",
+                            "pose_index": index,
+                            "attempt": best_attempt["attempt"],
+                            "reason": best_attempt.get(
+                                "background_removal_failure_reason",
+                                "unclean_chroma_background",
+                            ),
+                            "strategy": "return_best_distinct_raw_image_after_retries",
+                            "profile": best_attempt["profile"],
+                            "result": "returned_opaque_original",
+                            "chroma": best_attempt["chroma"],
+                            "similarity": best_attempt["similarity"],
+                            "identity_palette": best_attempt.get("identity_palette"),
+                        },
+                    )
+                if best_attempt is None and image_request:
+                    raise RuntimeError(
+                        f"Pose {index} remained invalid after "
+                        f"{len(active_pose_profiles)} attempts: "
+                        + pose_attempt_failure_summary(attempts)
+                    )
+                if (
+                    best_attempt is None
+                    and force_qwen_reference
+                    and not strict_first_frame_required
+                ):
+                    failed_action = action_key(pose)
+                    isolated_error = RuntimeError(
+                        f"Pose {index} remained invalid after "
+                        f"{len(active_pose_profiles)} attempts: "
+                        + pose_attempt_failure_summary(attempts)
+                    )
+                    degraded_result, degraded_source = (
+                        recover_subject_replacement_action_with_fallback(
+                            job_id,
+                            get_job(job_id),
+                            action=failed_action,
+                            pose_index=index,
+                            error=isolated_error,
+                        )
+                    )
+                    fallback_reference = Path(str(degraded_result["reference"]))
+                    if (
+                        not fallback_reference.is_file()
+                        or fallback_reference.parent != job_dir
+                    ):
+                        raise RuntimeError(
+                            "Isolated Qwen action fallback did not produce a local "
+                            "identity reference."
+                        )
+                    refreshed_results = [
+                        dict(item)
+                        for item in get_job(job_id).get(
+                            "subject_replacement_results",
+                            [],
+                        )
+                        if isinstance(item, dict)
+                        and str(item.get("action") or "") != failed_action
+                    ]
+                    refreshed_results.append(degraded_result)
+                    failure_record = {
+                        "action": failed_action,
+                        "pose_index": index,
+                        "error": f"RuntimeError: {str(isolated_error)[:4000]}",
+                        "attempt_count": len(active_pose_profiles),
+                        "fallback_reference": str(fallback_reference),
+                        "fallback_reference_sha256": file_sha256(fallback_reference),
+                        "fallback_source": degraded_source,
+                        "sibling_actions_continue": True,
+                        "scail_skipped": True,
+                    }
+                    reference_generation_degraded_actions[failed_action] = failure_record
+                    update_job(
+                        job_id,
+                        qwen_reference_degraded_actions=dict(
+                            reference_generation_degraded_actions
+                        ),
+                        qwen_reference_failure_isolation_policy=(
+                            "per_species_action_stage_barrier_v3"
+                        ),
+                        qwen_reference_degraded_fallback_policy=(
+                            "per_action_identity_anchored_fallback_continue_siblings_v1"
+                        ),
+                        subject_replacement_results=refreshed_results,
+                        degraded_output_actions=sorted(
+                            reference_generation_degraded_actions
+                        ),
+                    )
+                    append_recovery_event(
+                        job_id,
+                        {
+                            "stage": "cartoon_keyframe",
+                            "pose_index": index,
+                            "reason": failure_record["error"],
+                            "strategy": (
+                                "isolate_failed_action_and_continue_sibling_keyframes"
+                            ),
+                            "result": "accepted_identity_anchored_action_fallback",
+                            "action": failed_action,
+                            "fallback_reference": str(fallback_reference),
+                            "fallback_reference_sha256": failure_record[
+                                "fallback_reference_sha256"
+                            ],
+                        },
+                    )
+                    fallback_template = dict(record)
+                    best_attempt = {
+                        **fallback_template,
+                        "attempt": len(active_pose_profiles) + 1,
+                        "profile": "isolated_action_identity_fallback",
+                        "keyframe": fallback_reference.name,
+                        "cutout": fallback_reference.name,
+                        "chroma": {
+                            "acceptable": True,
+                            "issues": [],
+                            "method": "identity_anchored_action_fallback_rgba",
+                        },
+                        "quality": {
+                            "available": True,
+                            "acceptable": False,
+                            "issues": ["qwen_action_reference_generation_failed"],
+                            "penalty": 1000.0,
+                        },
+                        "similarity": {
+                            "available": True,
+                            "acceptable": True,
+                            "warning": True,
+                            "issues": ["degraded_identity_anchor_not_action_keyframe"],
+                            "comparisons": [],
+                            "penalty": 1000.0,
+                        },
+                        "identity_palette": None,
+                        "fur_silhouette": None,
+                        "fur_surface_gate": None,
+                        "grooming_pose_gate": None,
+                        "combined_penalty": 2000.0,
+                        "transparent": True,
+                        "background_removal_failed": False,
+                        "reference_generation_degraded": True,
+                        "reference_generation_failure": failure_record,
+                    }
+                if best_attempt is None:
+                    if best_semantic_source is None:
+                        evaluated_surface_attempts = [
+                            metrics
+                            for attempt_record in attempts
+                            for metrics in [attempt_record.get("fur_surface_gate")]
+                            if isinstance(metrics, dict)
+                            and metrics.get("evaluated") is True
+                        ]
+                        all_evaluated_surface_attempts_rejected = bool(
+                            evaluated_surface_attempts
+                        ) and all(
+                            metrics.get("acceptable") is not True
+                            for metrics in evaluated_surface_attempts
+                        )
+                        if (
+                            fur_surface_gate_required
+                            and all_evaluated_surface_attempts_rejected
+                        ):
+                            fur_surface_gate_status_by_action[action_key(pose)] = "failed"
+                            update_job(
+                                job_id,
+                                fur_surface_gate_status=dict(
+                                    fur_surface_gate_status_by_action
+                                ),
+                                fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+                                fur_surface_gate_final_quality={
+                                    "scope": "qwen_action_reference_pre_scail",
+                                    "status": "failed",
+                                    "actions": dict(fur_surface_gate_selected_metrics),
+                                    "failure": {
+                                        "action": action_key(pose),
+                                        "reason": "all_surface_candidates_rejected",
+                                        "blocks_scail": True,
+                                    },
+                                    "final_video_frame_audit": False,
+                                },
+                            )
+                            raise RuntimeError(
+                                "Main_case fur surface gate did not approve any "
+                                f"{action_key(pose)} Qwen candidate after "
+                                f"{len(active_pose_profiles)} attempts: "
+                                + pose_attempt_failure_summary(attempts)
+                            )
+                        if fur_surface_gate_required:
+                            passed_surface_attempts = [
+                                metrics
+                                for metrics in evaluated_surface_attempts
+                                if metrics.get("acceptable") is True
+                            ]
+                            surface_terminal_reason = (
+                                "no_selectable_candidate_after_surface_gate"
+                                if passed_surface_attempts
+                                else "no_candidate_reached_surface_gate"
+                            )
+                            fur_surface_gate_status_by_action[action_key(pose)] = (
+                                "passed_no_selectable_keyframe"
+                                if passed_surface_attempts
+                                else "not_evaluated_upstream_gate_failed"
+                            )
+                            update_job(
+                                job_id,
+                                fur_surface_gate_status=dict(
+                                    fur_surface_gate_status_by_action
+                                ),
+                                fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+                                fur_surface_gate_final_quality={
+                                    "scope": "qwen_action_reference_pre_scail",
+                                    "status": "failed",
+                                    "actions": dict(fur_surface_gate_selected_metrics),
+                                    "failure": {
+                                        "action": action_key(pose),
+                                        "reason": surface_terminal_reason,
+                                        "surface_candidates_evaluated": len(
+                                            evaluated_surface_attempts
+                                        ),
+                                        "surface_candidates_passed": len(
+                                            passed_surface_attempts
+                                        ),
+                                        "blocks_scail": True,
+                                    },
+                                    "final_video_frame_audit": False,
+                                },
+                            )
+                        if grooming_pose_gate_required:
+                            evaluated_grooming_attempts = [
+                                metrics
+                                for attempt_record in attempts
+                                for metrics in [attempt_record.get("grooming_pose_gate")]
+                                if isinstance(metrics, dict) and "acceptable" in metrics
+                            ]
+                            all_grooming_attempts_rejected = bool(
+                                evaluated_grooming_attempts
+                            ) and all(
+                                metrics.get("acceptable") is not True
+                                for metrics in evaluated_grooming_attempts
+                            )
+                            passed_grooming_attempts = [
+                                metrics
+                                for metrics in evaluated_grooming_attempts
+                                if metrics.get("acceptable") is True
+                            ]
+                            update_job(
+                                job_id,
+                                grooming_pose_gate_status=(
+                                    "failed"
+                                    if all_grooming_attempts_rejected
+                                    else (
+                                        "passed_no_selectable_keyframe"
+                                        if passed_grooming_attempts
+                                        else "not_evaluated_upstream_gate_failed"
+                                    )
+                                ),
+                                grooming_pose_gate_selected_metrics=(
+                                    grooming_pose_gate_selected_metrics
+                                ),
+                                grooming_pose_gate_attempts=(
+                                    grooming_pose_gate_attempt_audits
+                                ),
+                            )
+                            if all_grooming_attempts_rejected:
+                                raise RuntimeError(
+                                    "Main_case grooming pose gate rejected every Qwen "
+                                    f"candidate after {len(active_pose_profiles)} attempts: "
+                                    + pose_attempt_failure_summary(attempts)
+                                )
+                            evaluated_palette_attempts = [
+                                metrics
+                                for attempt_record in attempts
+                                for metrics in [attempt_record.get("identity_palette")]
+                                if isinstance(metrics, dict) and "acceptable" in metrics
+                            ]
+                            if evaluated_palette_attempts and all(
+                                metrics.get("acceptable") is not True
+                                for metrics in evaluated_palette_attempts
+                            ):
+                                raise RuntimeError(
+                                    "Grooming Qwen identity palette gate rejected every "
+                                    f"candidate after {len(active_pose_profiles)} attempts: "
+                                    + pose_attempt_failure_summary(attempts)
+                                )
+                        raise RuntimeError(
+                            f"Pose {index} remained invalid after "
+                            f"{len(active_pose_profiles)} attempts: "
+                            + pose_attempt_failure_summary(attempts)
+                        )
+                    fallback_record = best_semantic_source
+                    if fallback_record["chroma"].get("acceptable", False):
+                        raise RuntimeError(
+                            "Internal recovery error: semantic background recovery was "
+                            "selected for an already clean chroma candidate."
+                        )
+                    fallback_source = job_dir / fallback_record["keyframe"]
+                    fallback_green = job_dir / f"pose_{index:02d}_semantic_green.png"
+                    fallback_cutout = (
+                        job_dir / f"pose_{index:02d}_semantic_cutout_final.png"
+                    )
+                    fallback_semantic = (
+                        job_dir / f"pose_{index:02d}_semantic_cutout_raw.png"
+                    )
+                    action_semantic_strict_error: str | None = None
+                    try:
+                        chroma_metrics = semantic_background_recovery(
+                            fallback_source,
+                            fallback_green,
+                            fallback_cutout,
+                            fallback_semantic,
+                            pose=pose,
+                        )
+                    except Exception as exc:
+                        if not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED:
+                            raise
+                        action_semantic_strict_error = (
+                            f"{type(exc).__name__}: {str(exc)[:1000]}"
+                        )
+                        chroma_metrics = semantic_background_recovery(
+                            fallback_source,
+                            fallback_green,
+                            fallback_cutout,
+                            fallback_semantic,
+                            pose=pose,
+                            enforce_visual_quality=False,
+                        )
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "cartoon_keyframe_semantic_recovery",
+                                "pose_index": index,
+                                "attempt": fallback_record["attempt"],
+                                "reason": "strict_visual_semantic_matte_invalid",
+                                "strategy": (
+                                    "use_generated_semantic_matte_without_visual_block"
+                                ),
+                                "profile": fallback_record["profile"],
+                                "source": fallback_source.name,
+                                "result": "accepted_completion_fallback",
+                                "strict_error": action_semantic_strict_error,
+                                "policy": (
+                                    GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                                ),
+                            },
+                        )
+                    quality = (
+                        pose_cutout_quality(
+                            fallback_cutout,
+                            pose,
+                            require_eating_mouth_contact=(
+                                require_eating_mouth_contact
+                            ),
+                        )
+                        if GENERATION_VISUAL_AUDITS_BLOCKING
+                        else skipped_visual_audit("semantic_subject_quality")
+                    )
+                    similarity = (
+                        pose_similarity_quality(
+                            fallback_cutout,
+                            pose=pose,
+                            canonical_path=canonical_similarity_reference,
+                            previous_poses=accepted_pose_similarity_references,
+                        )
+                        if GENERATION_VISUAL_AUDITS_BLOCKING
+                        else skipped_visual_audit("semantic_pose_similarity")
+                    )
+                    semantic_palette = evaluate_pose_identity_palette(
+                        fallback_cutout,
+                        primary_reference=pose_reference_identity_palette,
+                        upper_body_reference=pose_reference_upper_body_identity_palette,
+                        bottom_exclusion=pose_palette_bottom_exclusion,
+                        bowl_action=bowl_action,
+                    )
+                    semantic_candidate_palette = semantic_palette["candidate"]
+                    semantic_upper_body_candidate_palette = semantic_palette[
+                        "upper_body_candidate"
+                    ]
+                    semantic_palette_quality = semantic_palette["quality"]
+                    semantic_color_recovery: dict[str, Any] | None = None
+                    warm_cast_issues = {
+                        "achromatic_source_recolored_with_warm_fur",
+                        "new_dominant_warm_brown_or_orange",
+                        "new_dominant_yellow_or_gold",
+                        "new_dominant_red_or_pink",
+                    }
+                    palette_issues = set(
+                        semantic_palette_quality.get("issues", [])
+                        if isinstance(semantic_palette_quality, dict)
+                        else []
+                    )
+                    source_upper_is_achromatic = bool(
+                        isinstance(pose_reference_upper_body_identity_palette, dict)
+                        and float(
+                            pose_reference_upper_body_identity_palette.get(
+                                "achromatic_fraction",
+                                0.0,
+                            )
+                        )
+                        >= 0.85
+                        and float(
+                            pose_reference_upper_body_identity_palette.get(
+                                "warm_fraction",
+                                1.0,
+                            )
+                        )
+                        <= 0.12
+                    )
+                    if (
+                        GENERATION_VISUAL_AUDITS_BLOCKING
+                        and palette_issues
+                        and palette_issues.issubset(warm_cast_issues)
+                        and source_upper_is_achromatic
+                        and canonical_similarity_reference is not None
+                    ):
+                        corrected_cutout = (
+                            job_dir
+                            / f"pose_{index:02d}_semantic_cutout_color_corrected.png"
+                        )
+                        corrected_green = (
+                            job_dir / f"pose_{index:02d}_semantic_green_color_corrected.png"
+                        )
+                        semantic_color_recovery = neutralize_achromatic_warm_cast(
+                            canonical_similarity_reference,
+                            fallback_cutout,
+                            corrected_cutout,
+                            green_target=corrected_green,
+                        )
+                        if semantic_color_recovery.get("applied"):
+                            corrected_validation_cutout = (
+                                job_dir
+                                / f"pose_{index:02d}_semantic_color_chroma_validation.png"
+                            )
+                            corrected_chroma = evaluate_chroma_cutout(
+                                corrected_green,
+                                corrected_validation_cutout,
+                            )
+                            corrected_quality = pose_cutout_quality(
+                                corrected_cutout,
+                                pose,
+                                require_eating_mouth_contact=(require_eating_mouth_contact),
+                            )
+                            corrected_similarity = pose_similarity_quality(
+                                corrected_cutout,
+                                pose=pose,
+                                canonical_path=canonical_similarity_reference,
+                                previous_poses=accepted_pose_similarity_references,
+                            )
+                            semantic_palette = evaluate_pose_identity_palette(
+                                corrected_cutout,
+                                primary_reference=pose_reference_identity_palette,
+                                upper_body_reference=(
+                                    pose_reference_upper_body_identity_palette
+                                ),
+                                bottom_exclusion=pose_palette_bottom_exclusion,
+                                bowl_action=bowl_action,
+                            )
+                            semantic_candidate_palette = semantic_palette["candidate"]
+                            semantic_upper_body_candidate_palette = semantic_palette[
+                                "upper_body_candidate"
+                            ]
+                            semantic_palette_quality = semantic_palette["quality"]
+                            semantic_color_recovery.update(
+                                {
+                                    "before_identity_palette_issues": sorted(
+                                        palette_issues
+                                    ),
+                                    "after_identity_palette_issues": (
+                                        list(semantic_palette_quality.get("issues", []))
+                                        if isinstance(
+                                            semantic_palette_quality,
+                                            dict,
+                                        )
+                                        else []
+                                    ),
+                                    "post_chroma_acceptable": bool(
+                                        corrected_chroma.get("acceptable")
+                                    ),
+                                    "post_quality_acceptable": bool(
+                                        corrected_quality.get("acceptable")
+                                    ),
+                                    "post_similarity_acceptable": bool(
+                                        corrected_similarity.get("acceptable")
+                                    ),
+                                }
+                            )
+                            fallback_cutout = corrected_cutout
+                            fallback_green = corrected_green
+                            chroma_metrics = {
+                                **corrected_chroma,
+                                "method": "rembg_then_lab_warm_cast_recovery",
+                                "semantic_cutout": fallback_semantic.name,
+                                "color_recovery": semantic_color_recovery,
+                            }
+                            quality = corrected_quality
+                            similarity = corrected_similarity
+                    fallback_reference = (
+                        job_dir / f"pose_{index:02d}_qwen_reference_semantic_final.png"
+                    )
+                    chroma_metrics, fallback_cutout = (
+                        finalize_qwen_action_reference_candidate(
+                            chroma_metrics,
+                            fallback_cutout,
+                            fallback_reference,
+                            action=action_key(pose),
+                        )
+                    )
+                    if chroma_metrics.get("acceptable") is not True:
+                        raise RuntimeError(
+                            "Semantic fallback final 512 RGBA normalization failed: "
+                            + str(
+                                chroma_metrics.get(
+                                    "final_reference_normalization_error",
+                                    "unknown normalization error",
+                                )
+                            )
+                        )
+                    fallback_cleanup = (
+                        neutralize_uploaded_identity_chroma_spill(
+                            fallback_cutout,
+                            source_identity_palette,
+                        )
+                        if GENERATION_VISUAL_AUDITS_BLOCKING
+                        else {
+                            "policy": UPLOADED_IDENTITY_CHROMA_SPILL_POLICY,
+                            "applied": False,
+                            "status": "skipped_advisory",
+                        }
+                    )
+                    chroma_metrics = merge_identity_chroma_spill_cleanup(
+                        chroma_metrics,
+                        fallback_cleanup,
+                        blocking=bool(GENERATION_VISUAL_AUDITS_BLOCKING),
+                    )
+                    quality = (
+                        pose_cutout_quality(
+                            fallback_cutout,
+                            pose,
+                            require_eating_mouth_contact=(
+                                require_eating_mouth_contact
+                            ),
+                        )
+                        if GENERATION_VISUAL_AUDITS_BLOCKING
+                        else skipped_visual_audit("semantic_subject_quality")
+                    )
+                    similarity = (
+                        pose_similarity_quality(
+                            fallback_cutout,
+                            pose=pose,
+                            canonical_path=canonical_similarity_reference,
+                            previous_poses=accepted_pose_similarity_references,
+                        )
+                        if GENERATION_VISUAL_AUDITS_BLOCKING
+                        else skipped_visual_audit("semantic_pose_similarity")
+                    )
+                    semantic_palette = evaluate_pose_identity_palette(
+                        fallback_cutout,
+                        primary_reference=pose_reference_identity_palette,
+                        upper_body_reference=(pose_reference_upper_body_identity_palette),
+                        bottom_exclusion=pose_palette_bottom_exclusion,
+                        bowl_action=bowl_action,
+                    )
+                    semantic_candidate_palette = semantic_palette["candidate"]
+                    semantic_upper_body_candidate_palette = semantic_palette[
+                        "upper_body_candidate"
+                    ]
+                    semantic_palette_quality = semantic_palette["quality"]
+                    semantic_fur_silhouette_quality = (
+                        eating_fur_silhouette_quality(
+                            fallback_cutout,
+                            pose_fur_reference_path,
+                        )
+                        if (
+                            GENERATION_VISUAL_AUDITS_BLOCKING
+                            and pose_fur_reference_path is not None
+                        )
+                        else None
+                    )
+                    semantic_fur_surface_quality: dict[str, Any] | None = None
+                    if fur_surface_gate_required:
+                        assert isinstance(pose_effective_subject_config, dict)
+                        semantic_fur_surface_quality = (
+                            evaluate_main_case_fur_surface_candidate(
+                                fallback_cutout,
+                                action=action_key(pose),
+                                alpha_provenance=str(chroma_metrics.get("method") or ""),
+                                effective_subject_config=(pose_effective_subject_config),
+                            )
+                        )
+                        semantic_attempt = int(fallback_record["attempt"])
+                        fur_surface_gate_attempt_audits.append(
+                            {
+                                "pose_index": index,
+                                "pose": pose,
+                                "action": action_key(pose),
+                                "attempt": semantic_attempt,
+                                "seed": fallback_record["seed"],
+                                "source": fallback_source.name,
+                                "alpha_cutout": fallback_cutout.name,
+                                "alpha_provenance": str(chroma_metrics.get("method") or ""),
+                                "semantic_recovery": True,
+                                "gate": semantic_fur_surface_quality,
+                                "consecutive_rejections": (
+                                    fur_surface_rejection_streak
+                                    + (
+                                        1
+                                        if semantic_fur_surface_quality.get("acceptable")
+                                        is not True
+                                        else 0
+                                    )
+                                ),
+                                "result": (
+                                    "passed"
+                                    if semantic_fur_surface_quality.get("acceptable")
+                                    is True
+                                    else "rejected"
+                                ),
+                            }
+                        )
+                        fur_surface_gate_status_by_action[action_key(pose)] = (
+                            "candidate_passed"
+                            if semantic_fur_surface_quality.get("acceptable") is True
+                            else "failed"
                         )
                         write_json_atomic(
                             job_dir
@@ -7889,17 +10439,17 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 "policy": FUR_SURFACE_GATE_POLICY,
                                 "gate_version": FUR_SURFACE_GATE_VERSION,
                                 "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
-                                "thresholds": (fur_surface_thresholds_payload()),
-                                "fail_closed": not strict_first_frame_required,
+                                "thresholds": fur_surface_thresholds_payload(),
+                                "fail_closed": True,
                                 "max_consecutive_rejections": (
                                     FUR_SURFACE_GATE_MAX_REJECTIONS
                                 ),
-                                "retry_policy": (FUR_SURFACE_GATE_RETRY_POLICY),
-                                "preserves_configured_eating_bowl_recovery": (True),
+                                "retry_policy": FUR_SURFACE_GATE_RETRY_POLICY,
+                                "preserves_configured_eating_bowl_recovery": True,
                                 "configured_eating_bowl_recovery_attempts": (
                                     QWEN_BOWL_POSE_EXTRA_ATTEMPTS
                                 ),
-                                "short_circuit": (fur_surface_gate_short_circuit),
+                                "short_circuit": fur_surface_gate_short_circuit,
                                 "attempts": [
                                     item
                                     for item in fur_surface_gate_attempt_audits
@@ -7907,1025 +10457,414 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 ],
                             },
                         )
-                        if not strict_first_frame_required:
-                            raise RuntimeError(
-                                "Main_case fur surface gate rejected "
-                                f"{fur_surface_rejection_streak} consecutive "
-                                f"{action_key(pose)} Qwen candidates after attempt "
-                                f"{attempt} of {len(active_pose_profiles)}; "
-                                "blocking SCAIL."
-                            )
-                        LOGGER.warning(
-                            "%s kept bounded first-frame candidate generation active "
-                            "after %s consecutive %s fur-surface rejections",
+                        update_job(
                             job_id,
-                            fur_surface_rejection_streak,
-                            action_key(pose),
+                            fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
+                            fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
                         )
-                    continue
-                if not chroma_metrics["acceptable"]:
-                    raw_similarity = (
-                        pose_similarity_quality(
-                            attempt_keyframe,
-                            pose=pose,
-                            canonical_path=canonical_similarity_reference,
-                            previous_poses=accepted_pose_similarity_references,
-                        )
-                        if GENERATION_VISUAL_AUDITS_BLOCKING
-                        else skipped_visual_audit("raw_pose_similarity")
+                    semantic_rejection_reason = semantic_recovery_gate_failure(
+                        chroma_metrics,
+                        quality,
+                        similarity,
+                        semantic_palette_quality,
+                        semantic_fur_silhouette_quality,
+                        semantic_fur_surface_quality,
+                        identity_palette_blocking=(
+                            advisory_action_candidate_gate_required
+                        ),
                     )
-                    record.update(
-                        {
-                            "profile": f"{profile['name']}_raw_image",
-                            "cutout": None,
-                            "transparent": False,
-                            "background_removal_failed": True,
-                            "background_removal_error": (
-                                "Generated image did not contain a clean removable green background."
-                            ),
-                            "background_removal_failure_reason": (
-                                "unclean_chroma_background"
-                            ),
-                            "similarity": raw_similarity,
-                            "combined_penalty": round(
-                                float(raw_similarity["penalty"])
-                                + (
-                                    float(palette_quality["penalty"])
-                                    if palette_quality is not None
-                                    else 0.0
-                                ),
-                                6,
-                            ),
-                        }
+                    semantic_identity_safe = bool(
+                        isinstance(semantic_palette_quality, dict)
+                        and semantic_palette_quality.get("acceptable") is True
                     )
-                    attempts.append(
-                        {
-                            key: value
-                            for key, value in record.items()
-                            if key != "workflow"
-                        }
+                    semantic_best_effort_issues: list[str] = (
+                        ["strict_visual_semantic_matte_invalid"]
+                        if action_semantic_strict_error is not None
+                        else []
                     )
-                    semantic_recovery_not_attempted = not chroma_metrics.get(
-                        "semantic_recovery_attempted",
-                        False,
-                    )
-                    if strict_first_frame_required and semantic_recovery_not_attempted:
-                        semantic_selection_key = (
-                            strict_first_frame_best_effort_selection_key(
-                                record,
-                                action=action_key(pose),
-                            )
-                        )
-                        record["strict_first_frame_semantic_selection_key"] = list(
-                            semantic_selection_key
-                        )
-                        if (
-                            best_semantic_source is None
-                            or semantic_selection_key
-                            < tuple(
-                                best_semantic_source.get(
-                                    "strict_first_frame_semantic_selection_key",
-                                    [float("inf")],
-                                )
-                            )
-                        ):
-                            best_semantic_source = record
-                    elif semantic_recovery_candidate_eligible(
-                        record
-                    ) and semantic_recovery_not_attempted:
-                        if (
-                            best_semantic_source is None
-                            or record["combined_penalty"]
-                            < best_semantic_source["combined_penalty"]
-                        ):
-                            best_semantic_source = record
-                    if (
-                        image_request
-                        and raw_similarity["acceptable"]
-                        and (palette_quality is None or palette_quality["acceptable"])
-                    ):
-                        if (
-                            best_raw_attempt is None
-                            or record["combined_penalty"]
-                            < best_raw_attempt["combined_penalty"]
-                        ):
-                            best_raw_attempt = record
+                    if semantic_rejection_reason is not None:
                         append_recovery_event(
                             job_id,
                             {
                                 "stage": "cartoon_keyframe",
                                 "pose_index": index,
-                                "attempt": attempt,
-                                "reason": "unclean_chroma_background",
-                                "strategy": "retry_pose_before_raw_fallback",
-                                "profile": profile["name"],
-                                "result": "rejected",
+                                "attempt": int(fallback_record["attempt"]),
+                                "reason": semantic_rejection_reason,
+                                "strategy": "rembg_u2net_fallback",
+                                "profile": "rembg_u2net_fallback",
+                                "result": (
+                                    "accepted_best_effort"
+                                    if strict_first_frame_required
+                                    and (
+                                        semantic_identity_safe
+                                        or GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                                    )
+                                    else "rejected"
+                                ),
                                 "chroma": chroma_metrics,
-                                "similarity": raw_similarity,
-                                "identity_palette": palette_quality,
+                                "quality": quality,
+                                "similarity": similarity,
+                                "identity_palette": semantic_palette_quality,
+                                "fur_silhouette": (semantic_fur_silhouette_quality),
+                                "fur_surface_gate": (semantic_fur_surface_quality),
+                                "color_recovery": semantic_color_recovery,
                             },
                         )
-                        LOGGER.warning(
-                            "%s pose %s attempt %s could not be reliably cut out; "
-                            "retrying before an opaque-image fallback",
-                            job_id,
-                            index,
-                            attempt,
+                        issues = list(chroma_metrics.get("issues", []))
+                        issues.extend(quality["issues"])
+                        issues.extend(similarity["issues"])
+                        if semantic_palette_quality is not None:
+                            issues.extend(semantic_palette_quality["issues"])
+                        if semantic_fur_silhouette_quality is not None:
+                            issues.extend(semantic_fur_silhouette_quality["issues"])
+                        if semantic_fur_surface_quality is not None:
+                            issues.extend(semantic_fur_surface_quality["issues"])
+                        semantic_best_effort_issues = list(
+                            dict.fromkeys([*semantic_best_effort_issues, *issues])
                         )
-                        continue
+                        if fur_surface_gate_required and not strict_first_frame_required:
+                            update_job(
+                                job_id,
+                                fur_surface_gate_final_quality={
+                                    "scope": "qwen_action_reference_pre_scail",
+                                    "status": "failed",
+                                    "actions": dict(fur_surface_gate_selected_metrics),
+                                    "failure": {
+                                        "action": action_key(pose),
+                                        "reason": semantic_rejection_reason,
+                                        "blocks_scail": True,
+                                    },
+                                    "final_video_frame_audit": False,
+                                },
+                            )
+                        if not strict_first_frame_required:
+                            raise RuntimeError(
+                                f"Pose {index} semantic recovery failed quality checks: "
+                                + ", ".join(issues)
+                            )
+                    best_attempt = {
+                        **{
+                            field: fallback_record.get(field)
+                            for field in POSE_ATTEMPT_PROVENANCE_FIELDS
+                        },
+                        "attempt": int(fallback_record["attempt"]),
+                        "profile": "rembg_u2net_fallback",
+                        "seed": fallback_record["seed"],
+                        "keyframe": fallback_green.name,
+                        "cutout": fallback_cutout.name,
+                        "chroma": chroma_metrics,
+                        "quality": quality,
+                        "similarity": similarity,
+                        "identity_palette": semantic_palette_quality,
+                        "fur_silhouette": semantic_fur_silhouette_quality,
+                        "fur_surface_gate": semantic_fur_surface_quality,
+                        "color_recovery": semantic_color_recovery,
+                        "candidate_identity_palette": semantic_candidate_palette,
+                        "candidate_upper_body_identity_palette": (
+                            semantic_upper_body_candidate_palette
+                        ),
+                        "combined_penalty": round(
+                            float(quality["penalty"])
+                            + float(similarity["penalty"])
+                            + (
+                                float(semantic_palette_quality["penalty"])
+                                if semantic_palette_quality is not None
+                                else 0.0
+                            )
+                            + (
+                                float(semantic_fur_silhouette_quality["penalty"])
+                                if semantic_fur_silhouette_quality is not None
+                                else 0.0
+                            )
+                            + (
+                                float(
+                                    semantic_fur_surface_quality.get(
+                                        "penalty",
+                                        1000.0,
+                                    )
+                                )
+                                if isinstance(
+                                    semantic_fur_surface_quality,
+                                    dict,
+                                )
+                                else (1000.0 if fur_surface_gate_required else 0.0)
+                            ),
+                            6,
+                        ),
+                        "settings": fallback_record["settings"],
+                        "workflow": fallback_record["workflow"],
+                        "transparent": True,
+                        "background_removal_failed": False,
+                    }
+                    if semantic_best_effort_issues and (
+                        semantic_identity_safe
+                        or GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                    ):
+                        best_attempt["strict_first_frame_best_effort_selected"] = True
+                        best_attempt["strict_first_frame_best_effort_issues"] = (
+                            semantic_best_effort_issues
+                        )
+                        best_attempt["strict_first_frame_best_effort_semantic_recovery"] = (
+                            True
+                        )
+                        best_attempt["visual_completion_fallback"] = bool(
+                            not semantic_identity_safe
+                        )
                     append_recovery_event(
                         job_id,
                         {
                             "stage": "cartoon_keyframe",
                             "pose_index": index,
-                            "attempt": attempt,
-                            "reason": "unclean_chroma_background",
-                            "strategy": "safe_qwen_retry",
-                            "profile": profile["name"],
-                            "result": "rejected",
+                            "attempt": best_attempt["attempt"],
+                            "reason": "qwen_chroma_retries_exhausted",
+                            "strategy": "rembg_u2net_fallback",
+                            "profile": "rembg_u2net_fallback",
+                            "result": (
+                                "accepted"
+                                if semantic_identity_safe
+                                else (
+                                    "accepted_visual_completion_fallback"
+                                    if GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                                    else "rejected_identity_unsafe"
+                                )
+                            ),
                             "chroma": chroma_metrics,
-                            "similarity": raw_similarity,
-                            "identity_palette": palette_quality,
+                            "quality": quality,
+                            "similarity": similarity,
+                            "identity_palette": semantic_palette_quality,
+                            "fur_silhouette": semantic_fur_silhouette_quality,
+                            "fur_surface_gate": semantic_fur_surface_quality,
+                            "color_recovery": semantic_color_recovery,
                         },
                     )
-                    LOGGER.warning(
-                        "%s pose %s attempt %s (%s) failed chroma checks: %s",
-                        job_id,
-                        index,
-                        attempt,
-                        profile["name"],
-                        chroma_metrics["issues"],
+                selected_attempt_number = int(best_attempt.get("attempt") or 0)
+                if not 1 <= selected_attempt_number <= QWEN_ACTION_CANDIDATE_ATTEMPTS:
+                    raise RuntimeError(
+                        "Selected action candidate is outside the five-attempt budget."
                     )
-                    continue
-                quality = (
-                    pre_surface_pose_quality
-                    or pose_cutout_quality(
-                        attempt_cutout,
-                        pose,
-                        require_eating_mouth_contact=(
-                            require_eating_mouth_contact
-                        ),
-                    )
-                    if action_candidate_audits_required
-                    else skipped_visual_audit("action_subject_quality")
-                )
-                similarity = (
-                    pose_similarity_quality(
-                        attempt_cutout,
-                        pose=pose,
-                        canonical_path=canonical_similarity_reference,
-                        previous_poses=accepted_pose_similarity_references,
-                    )
-                    if action_candidate_audits_required
-                    else skipped_visual_audit("action_pose_similarity")
-                )
-                fur_silhouette_quality = (
-                    eating_fur_silhouette_quality(
-                        attempt_cutout,
-                        pose_fur_reference_path,
-                    )
-                    if (
-                        action_candidate_audits_required
-                        and pose_fur_reference_path is not None
-                    )
-                    else None
-                )
-                record["quality"] = quality
-                record["similarity"] = similarity
-                record["fur_silhouette"] = fur_silhouette_quality
-                record["combined_penalty"] = round(
-                    float(quality["penalty"])
-                    + float(similarity["penalty"])
-                    + (
-                        float(palette_quality["penalty"])
-                        if palette_quality is not None
-                        else 0.0
-                    )
-                    + (
-                        float(fur_silhouette_quality["penalty"])
-                        if fur_silhouette_quality is not None
-                        else 0.0
-                    )
-                    + (
-                        float(fur_surface_gate_metrics.get("penalty", 1000.0))
-                        if isinstance(fur_surface_gate_metrics, dict)
-                        else (1000.0 if fur_surface_gate_required else 0.0)
-                    )
-                    + (
-                        float(
-                            advisory_grooming_minimum_gate_metrics.get(
-                                "penalty",
-                                1000.0,
-                            )
-                        )
-                        if isinstance(
-                            advisory_grooming_minimum_gate_metrics,
-                            dict,
-                        )
-                        else (
-                            1000.0
-                            if advisory_grooming_minimum_gate_required
-                            else 0.0
-                        )
-                    ),
-                    6,
-                )
-                record["transparent"] = True
-                eating_contact_quality = (
-                    quality.get("eating_mouth_bowl_contact")
-                    if isinstance(quality, dict)
-                    else None
-                )
-                eating_contact_issues = {
-                    str(issue)
-                    for issue in quality.get("issues", [])
-                    if str(issue).strip()
-                }
-                eating_contact_components = (
-                    list(eating_contact_quality.get("component_candidates", []))
-                    if isinstance(eating_contact_quality, dict)
-                    and isinstance(
-                        eating_contact_quality.get("component_candidates"),
-                        list,
-                    )
-                    else []
-                )
-                if isinstance(eating_contact_quality, dict) and isinstance(
-                    eating_contact_quality.get("selected_component"),
-                    dict,
-                ):
-                    eating_contact_components.append(
-                        eating_contact_quality["selected_component"]
-                    )
-                eating_contact_component_gaps = [
-                    int(component["gap_px"])
-                    for component in eating_contact_components
-                    if isinstance(component, dict)
-                    and isinstance(component.get("gap_px"), (int, float))
-                    and 0
-                    <= int(component["gap_px"])
-                    <= EATING_CONTACT_REPAIR_SOURCE_GAP_MAX_PX
-                    and not (
-                        {
-                            str(reason)
-                            for reason in component.get(
-                                "rejection_reasons",
-                                [],
-                            )
-                            if str(reason).strip()
-                        }
-                        - {"gap_outside_contact_range"}
-                    )
-                ]
-                eating_contact_gap_px = (
-                    min(eating_contact_component_gaps)
-                    if eating_contact_component_gaps
-                    else None
-                )
+                selected_keyframe_source = job_dir / str(best_attempt["keyframe"])
+                selected_cutout_source = job_dir / str(best_attempt["cutout"])
+                selected_palette_before_recovery = best_attempt.get("identity_palette")
+                warm_action_recovery: dict[str, Any] | None = None
                 if (
-                    canonical_action_reference
-                    and action_key(pose) == "eating"
-                    and attempt < QWEN_ACTION_CANDIDATE_ATTEMPTS
-                    and chroma_metrics.get("acceptable") is True
-                    and attempt_cutout.is_file()
-                    and eating_contact_issues
-                    == EATING_CONTACT_REPAIR_SOURCE_ISSUES
-                    and isinstance(eating_contact_quality, dict)
-                    and eating_contact_quality.get("available") is True
-                    and eating_contact_gap_px is not None
-                    and eating_contact_gap_px > EATING_MUZZLE_BOWL_GAP_MAX_PX
-                    and isinstance(palette_quality, dict)
-                    and palette_quality.get("acceptable") is True
-                    and (
-                        fur_silhouette_quality is None
-                        or fur_silhouette_quality.get("acceptable") is True
-                    )
+                    isinstance(selected_palette_before_recovery, dict)
+                    and isinstance(pose_reference_identity_palette, dict)
+                    and canonical_similarity_reference is not None
+                    and canonical_similarity_reference.is_file()
+                    and selected_cutout_source.is_file()
                 ):
-                    eating_contact_selection_key = (
-                        int(eating_contact_gap_px),
-                        float(record["combined_penalty"]),
-                        -attempt,
+                    recovered_action_cutout = (
+                        job_dir
+                        / f"pose_{index:02d}_selected_warm_palette_recovered.png"
                     )
-                    if (
-                        eating_contact_repair_source is None
-                        or eating_contact_selection_key
-                        < tuple(
-                            eating_contact_repair_source["selection_key"]
-                        )
-                    ):
-                        eating_contact_repair_source = {
-                            "attempt": attempt,
-                            "cutout_path": str(attempt_cutout),
-                            "cutout_sha256": file_sha256(attempt_cutout),
-                            "keyframe_path": str(attempt_keyframe),
-                            "keyframe_sha256": file_sha256(attempt_keyframe),
-                            "gap_px": int(eating_contact_gap_px),
-                            "contact_quality": eating_contact_quality,
-                            "identity_palette_quality": palette_quality,
-                            "fur_silhouette_quality": fur_silhouette_quality,
-                            "selection_key": list(
-                                eating_contact_selection_key
-                            ),
-                            "source_role": (
-                                "identity_safe_nearest_muzzle_to_bowl_candidate_"
-                                "for_local_contact_repair"
-                            ),
-                        }
-                        update_job(
-                            job_id,
-                            eating_contact_repair_candidate=(
-                                eating_contact_repair_source
-                            ),
-                        )
-                if (
-                    image_request
-                    and similarity["acceptable"]
-                    and (palette_quality is None or palette_quality["acceptable"])
-                    and not quality["acceptable"]
-                ):
-                    raw_record = {
-                        **record,
-                        "profile": f"{profile['name']}_raw_image",
-                        "cutout": None,
-                        "transparent": False,
-                        "background_removal_failed": True,
-                        "background_removal_error": (
-                            "Background removal could not preserve a complete pose subject; "
-                            "the original generated image was returned."
+                    recovered_action_green = (
+                        job_dir
+                        / f"pose_{index:02d}_selected_warm_palette_recovered_green.png"
+                    )
+                    warm_action_recovery = attempt_warm_action_palette_recovery(
+                        selected_cutout_source,
+                        canonical_similarity_reference,
+                        recovered_action_cutout,
+                        recovered_action_green,
+                        source_palette=pose_reference_identity_palette,
+                        source_upper_body_palette=(
+                            pose_reference_upper_body_identity_palette
                         ),
-                        "background_removal_failure_reason": (
-                            "subject_quality_invalid"
-                        ),
-                    }
-                    if (
-                        best_raw_attempt is None
-                        or raw_record["combined_penalty"]
-                        < best_raw_attempt["combined_penalty"]
-                    ):
-                        best_raw_attempt = raw_record
-                action_candidate_gate_acceptable = bool(
-                    quality.get("acceptable") is True
-                    and similarity.get("acceptable") is True
-                    and (
-                        not isinstance(
-                            chroma_metrics.get("transparent_edge_quality"),
-                            dict,
-                        )
-                        or chroma_metrics["transparent_edge_quality"].get(
-                            "acceptable"
-                        )
-                        is True
-                    )
-                    and (
-                        not pose_identity_palette_gate_required
-                        or (
-                            isinstance(palette_quality, dict)
-                            and palette_quality.get("acceptable") is True
-                        )
-                    )
-                    and (
-                        fur_silhouette_quality is None
-                        or fur_silhouette_quality.get("acceptable") is True
-                    )
-                    and (
-                        not fur_surface_gate_required
-                        or (
-                            isinstance(fur_surface_gate_metrics, dict)
-                            and fur_surface_gate_metrics.get("acceptable") is True
-                        )
-                    )
-                    and (
-                        not grooming_pose_gate_required
-                        or (
-                            isinstance(grooming_pose_gate_metrics, dict)
-                            and grooming_pose_gate_metrics.get("acceptable") is True
-                        )
-                    )
-                )
-                record["action_candidate_gate"] = {
-                    "policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
-                    "required": action_candidate_audits_required,
-                    "advisory_retry_gate": (
-                        advisory_action_candidate_gate_required
-                    ),
-                    "acceptable": action_candidate_gate_acceptable,
-                    "attempt": attempt,
-                    "transparent_edge_quality": chroma_metrics.get(
-                        "transparent_edge_quality"
-                    ),
-                }
-                if strict_first_frame_required:
-                    strict_selection_key = (
-                        strict_first_frame_best_effort_selection_key(
-                            record,
-                            action=action_key(pose),
-                        )
-                    )
-                    record["strict_first_frame_best_effort_selection_key"] = list(
-                        strict_selection_key
-                    )
-                    if (
-                        best_strict_first_frame_attempt is None
-                        or strict_selection_key
-                        < tuple(
-                            best_strict_first_frame_attempt[
-                                "strict_first_frame_best_effort_selection_key"
-                            ]
-                        )
-                    ):
-                        best_strict_first_frame_attempt = record
-                if advisory_action_candidate_gate_required:
-                    degraded_selection_key = action_candidate_degraded_selection_key(
-                        record,
+                        current_quality=selected_palette_before_recovery,
+                        bottom_exclusion=pose_palette_bottom_exclusion,
                         action=action_key(pose),
                     )
-                    record["action_candidate_degraded_selection_key"] = list(
-                        degraded_selection_key
-                    )
-                    if (
-                        best_action_candidate_degraded_attempt is None
-                        or degraded_selection_key
-                        < tuple(
-                            best_action_candidate_degraded_attempt[
-                                "action_candidate_degraded_selection_key"
+                    if warm_action_recovery.get("accepted") is True:
+                        recovered_pose_quality = pose_cutout_quality(
+                            recovered_action_cutout,
+                            pose,
+                            require_eating_mouth_contact=(
+                                require_eating_mouth_contact
+                            ),
+                        )
+                        previous_pose_quality = best_attempt.get("quality")
+                        pose_gate_non_regressed = bool(
+                            not isinstance(previous_pose_quality, dict)
+                            or previous_pose_quality.get("acceptable") is not True
+                            or recovered_pose_quality.get("acceptable") is True
+                        )
+                        warm_action_recovery.update(
+                            {
+                                "pre_recovery_pose_quality": previous_pose_quality,
+                                "post_recovery_pose_quality": recovered_pose_quality,
+                                "pose_gate_non_regressed": pose_gate_non_regressed,
+                            }
+                        )
+                        if not pose_gate_non_regressed:
+                            warm_action_recovery.update(
+                                {
+                                    "accepted": False,
+                                    "rejection_reason": (
+                                        "post_recovery_pose_gate_regressed"
+                                    ),
+                                    "completion_blocked": False,
+                                }
+                            )
+                        else:
+                            previous_palette_penalty = float(
+                                selected_palette_before_recovery.get(
+                                    "penalty",
+                                    0.0,
+                                )
+                                or 0.0
+                            )
+                            recovered_palette = warm_action_recovery[
+                                "post_recovery_quality"
                             ]
-                        )
-                    ):
-                        best_action_candidate_degraded_attempt = record
-                attempts.append(
-                    {key: value for key, value in record.items() if key != "workflow"}
-                )
-                if (
-                    advisory_grooming_minimum_gate_required
-                    and chroma_metrics.get("acceptable") is True
-                    and attempt_cutout.is_file()
-                    and isinstance(
-                        advisory_grooming_minimum_gate_metrics,
-                        dict,
-                    )
-                ):
-                    degraded_selection_key = (
-                        advisory_grooming_degraded_candidate_selection_key(
-                            record
-                        )
-                    )
-                    record["grooming_advisory_degraded_selection_key"] = list(
-                        degraded_selection_key
-                    )
-                    if (
-                        best_advisory_grooming_degraded_attempt is None
-                        or degraded_selection_key
-                        < advisory_grooming_degraded_candidate_selection_key(
-                            best_advisory_grooming_degraded_attempt
-                        )
-                    ):
-                        best_advisory_grooming_degraded_attempt = record
-                advisory_minimum_acceptable = bool(
-                    not advisory_grooming_minimum_gate_required
-                    or (
-                        isinstance(
-                            advisory_grooming_minimum_gate_metrics,
-                            dict,
-                        )
-                        and advisory_grooming_minimum_gate_metrics.get("acceptable")
-                        is True
-                        and not advisory_grooming_minimum_gate_metrics.get(
-                            "action_retry_requested",
-                            False,
-                        )
-                    )
-                )
-                advisory_repair_palette_quality = (
-                    advisory_grooming_minimum_gate_metrics.get(
-                        "identity_palette"
-                    )
-                    if isinstance(
-                        advisory_grooming_minimum_gate_metrics,
-                        dict,
-                    )
-                    and isinstance(
-                        advisory_grooming_minimum_gate_metrics.get(
-                            "identity_palette"
-                        ),
-                        dict,
-                    )
-                    else palette_quality
-                )
-                if (
-                    advisory_grooming_minimum_gate_required
-                    and not advisory_minimum_acceptable
-                    and not advisory_grooming_identity_refine_active
-                    and attempt < GROOMING_QWEN_FORELEG_REPAIR_ATTEMPT
-                    and chroma_metrics.get("acceptable")
-                    and attempt_cutout.is_file()
-                    and isinstance(advisory_repair_palette_quality, dict)
-                    and advisory_repair_palette_quality.get("available") is True
-                    and advisory_repair_palette_quality.get("acceptable") is True
-                    and isinstance(
-                        advisory_grooming_minimum_gate_metrics,
-                        dict,
-                    )
-                    and advisory_grooming_candidate_safe_for_masked_repair(
-                        advisory_grooming_minimum_gate_metrics
-                    )
-                ):
-                    advisory_repair_issues = [
-                        str(issue)
-                        for issue in advisory_grooming_minimum_gate_metrics.get(
-                            "issues",
-                            [],
-                        )
-                    ]
-                    advisory_repair_selection_key = (
-                        len(advisory_repair_issues),
-                        float(
-                            advisory_grooming_minimum_gate_metrics.get(
-                                "penalty",
-                                1000.0,
+                            recovered_palette_penalty = float(
+                                recovered_palette.get("penalty", 0.0) or 0.0
                             )
-                        ),
-                        float(
-                            advisory_repair_palette_quality.get("penalty", 0.0)
-                        ),
-                        attempt,
-                    )
-                    if (
-                        grooming_foreleg_repair_source is None
-                        or advisory_repair_selection_key
-                        < tuple(grooming_foreleg_repair_source["selection_key"])
-                    ):
-                        grooming_foreleg_repair_source = {
-                            "attempt": attempt,
-                            "cutout_path": str(attempt_cutout),
-                            "cutout_sha256": file_sha256(attempt_cutout),
-                            "keyframe_path": str(attempt_keyframe),
-                            "keyframe_sha256": file_sha256(attempt_keyframe),
-                            "gate_issues": advisory_repair_issues,
-                            "fur_surface_issues": [],
-                            "identity_palette_quality": (
-                                advisory_repair_palette_quality
-                            ),
-                            "selection_key": list(advisory_repair_selection_key),
-                            "selection_policy": (
-                                "advisory_minimum_identity_safe_candidate_for_"
-                                "masked_foreleg_completion_v1"
-                            ),
-                            "masked_repair_unsafe_issues_absent": True,
-                        }
-                        update_job(
-                            job_id,
-                            grooming_foreleg_repair_candidate={
-                                "policy": (
-                                    GROOMING_CANONICAL_FORELEG_COMPLETION_POLICY
-                                ),
-                                **grooming_foreleg_repair_source,
-                            },
-                        )
-                if (
-                    isinstance(palette_quality, dict)
-                    and palette_quality.get("acceptable") is True
-                    and (
-                        (
-                            advisory_action_candidate_gate_required
-                            and action_candidate_gate_acceptable
-                        )
-                        or (
-                            not advisory_action_candidate_gate_required
-                            and (
-                                (
-                                    not GENERATION_VISUAL_AUDITS_BLOCKING
-                                    and advisory_minimum_acceptable
-                                )
-                                or (
-                                    GENERATION_VISUAL_AUDITS_BLOCKING
-                                    and (
-                                        fur_silhouette_quality is None
-                                        or fur_silhouette_quality["acceptable"]
-                                    )
-                                    and (
-                                        not fur_surface_gate_required
-                                        or (
-                                            isinstance(
-                                                fur_surface_gate_metrics,
-                                                dict,
-                                            )
-                                            and fur_surface_gate_metrics.get(
-                                                "acceptable"
-                                            )
-                                            is True
-                                        )
-                                    )
-                                    and (
-                                        not grooming_pose_gate_required
-                                        or (
-                                            isinstance(
-                                                grooming_pose_gate_metrics,
-                                                dict,
-                                            )
-                                            and grooming_pose_gate_metrics.get(
-                                                "acceptable"
-                                            )
-                                        )
-                                    )
-                                )
+                            best_attempt["keyframe"] = recovered_action_green.name
+                            best_attempt["cutout"] = recovered_action_cutout.name
+                            best_attempt["quality"] = recovered_pose_quality
+                            best_attempt["identity_palette"] = recovered_palette
+                            best_attempt["candidate_identity_palette"] = (
+                                warm_action_recovery.get("candidate_palette")
                             )
-                        )
-                    )
-                    and (
-                        best_attempt is None
-                        or record["combined_penalty"] < best_attempt["combined_penalty"]
-                    )
-                ):
-                    best_attempt = record
-                advisory_identity_refine_source_eligible = bool(
-                    advisory_grooming_minimum_gate_required
-                    and GROOMING_ADVISORY_IDENTITY_REFINE_MAX_ATTEMPTS > 0
-                    and not advisory_grooming_identity_refine_active
-                    and attempt
-                    <= GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
-                    and (
-                        advisory_minimum_acceptable
-                        or attempt
-                        == GROOMING_ADVISORY_ACTION_TRANSFER_MAX_ATTEMPTS
-                    )
-                    and chroma_metrics.get("acceptable") is True
-                    and attempt_cutout.is_file()
-                    and advisory_grooming_candidate_safe_for_identity_refine(
-                        advisory_grooming_minimum_gate_metrics
-                    )
-                )
-                candidate_acceptable = bool(
-                    isinstance(palette_quality, dict)
-                    and palette_quality.get("acceptable") is True
-                    and (
-                        (
-                            advisory_action_candidate_gate_required
-                            and action_candidate_gate_acceptable
-                        )
-                        or (
-                            not advisory_action_candidate_gate_required
-                            and not GENERATION_VISUAL_AUDITS_BLOCKING
-                            and (
-                                advisory_minimum_acceptable
-                                or advisory_identity_refine_source_eligible
+                            best_attempt[
+                                "candidate_upper_body_identity_palette"
+                            ] = warm_action_recovery.get(
+                                "upper_body_candidate_palette"
                             )
-                        )
-                        or (
-                            GENERATION_VISUAL_AUDITS_BLOCKING
-                            and action_candidate_gate_acceptable
-                        )
+                            best_attempt["combined_penalty"] = round(
+                                max(
+                                    0.0,
+                                    float(
+                                        best_attempt.get("combined_penalty", 0.0)
+                                        or 0.0
+                                    )
+                                    - previous_palette_penalty
+                                    + recovered_palette_penalty,
+                                ),
+                                6,
+                            )
+                            prior_color_recovery = best_attempt.get("color_recovery")
+                            best_attempt["color_recovery"] = {
+                                **(
+                                    prior_color_recovery
+                                    if isinstance(prior_color_recovery, dict)
+                                    else {}
+                                ),
+                                "warm_action_palette_recovery": (
+                                    warm_action_recovery
+                                ),
+                            }
+                            best_attempt["warm_action_palette_recovery"] = (
+                                warm_action_recovery
+                            )
+                            best_attempt["chroma"] = {
+                                **best_attempt["chroma"],
+                                "warm_action_palette_recovery": (
+                                    warm_action_recovery
+                                ),
+                            }
+                            selected_keyframe_source = recovered_action_green
+                            selected_cutout_source = recovered_action_cutout
+                    action_recovery_records = get_job(job_id).get(
+                        "action_warm_palette_recovery"
                     )
-                )
-                if candidate_acceptable:
-                    if (
-                        advisory_grooming_minimum_gate_required
-                        and not advisory_grooming_identity_refine_active
-                        and advisory_identity_refine_source_eligible
-                        and attempt < len(active_pose_profiles)
-                        and attempt_cutout.is_file()
-                    ):
-                        grooming_advisory_identity_refine_source = {
-                            "attempt": attempt,
-                            "cutout_path": str(attempt_cutout),
-                            "cutout_sha256": file_sha256(attempt_cutout),
-                            "keyframe_path": str(attempt_keyframe),
-                            "keyframe_sha256": file_sha256(attempt_keyframe),
-                            "minimum_gate": (
-                                advisory_grooming_minimum_gate_metrics
-                            ),
-                            "identity_palette_quality": palette_quality,
-                            "minimum_gate_acceptable": (
-                                advisory_minimum_acceptable
-                            ),
-                            "identity_refine_source_eligible": (
-                                advisory_identity_refine_source_eligible
-                            ),
-                            "identity_refine_source_allowed_issues": sorted(
-                                GROOMING_ADVISORY_IDENTITY_REFINE_SOURCE_ALLOWED_ISSUES
-                            ),
-                            "fallback_eligible": advisory_minimum_acceptable,
-                            "selection_role": (
-                                "action_safe_face_drift_candidate_for_"
-                                "conditional_canonical_face_repair"
-                            ),
-                        }
-                        update_job(
-                            job_id,
-                            stage="restoring_grooming_identity",
-                            grooming_advisory_identity_refine_status="queued",
-                            grooming_advisory_identity_refine_policy=(
-                                GROOMING_ADVISORY_IDENTITY_REFINE_POLICY
-                            ),
-                            grooming_advisory_identity_refine_source=(
-                                grooming_advisory_identity_refine_source
-                            ),
-                            grooming_advisory_identity_refine_required=True,
-                            grooming_advisory_identity_refine_mode=(
-                                "conditional_detected_face_drift_only"
-                            ),
+                    if isinstance(action_recovery_records, dict):
+                        action_recovery_records = json.loads(
+                            json.dumps(action_recovery_records)
                         )
-                        append_recovery_event(
-                            job_id,
-                            {
-                                "stage": "cartoon_keyframe",
-                                "pose_index": index,
-                                "attempt": attempt,
-                                "reason": (
-                                    "grooming_action_draft_has_detected_repairable_"
-                                    "face_drift"
-                                ),
-                                "strategy": (
-                                    GROOMING_ADVISORY_IDENTITY_REFINE_POLICY
-                                ),
-                                "profile": profile["name"],
-                                "result": "queued_identity_refine",
-                                "grooming_advisory_minimum_gate": (
-                                    advisory_grooming_minimum_gate_metrics
-                                ),
-                            },
-                        )
-                        continue
-                    if advisory_action_candidate_gate_required:
-                        update_job(
-                            job_id,
-                            action_candidate_gate_policy=(
-                                GENERATION_ACTION_CANDIDATE_GATE_POLICY
-                            ),
-                            action_candidate_gate_status=(
-                                "eligible_candidate_found"
-                            ),
-                            action_candidate_gate_action=action_key(pose),
-                            action_candidate_gate_current_best_attempt=(
-                                best_attempt["attempt"]
-                                if best_attempt is not None
-                                else attempt
-                            ),
-                            action_candidate_gate_degraded_fallback_used=False,
-                        )
-                    if advisory_grooming_identity_refine_active:
-                        update_job(
-                            job_id,
-                            grooming_advisory_identity_refine_status="passed",
-                            grooming_advisory_identity_refine_selected_attempt=(
-                                attempt
-                            ),
-                            grooming_advisory_identity_refine_selected=(
-                                grooming_advisory_identity_refine_audit
-                            ),
-                        )
-                    if attempt > 1:
-                        append_recovery_event(
-                            job_id,
-                            {
-                                "stage": "cartoon_keyframe",
-                                "pose_index": index,
-                                "attempt": attempt,
-                                "reason": (
-                                    "candidate_added_to_best_of_five_pool"
-                                ),
-                                "strategy": "generate_five_then_select_best",
-                                "profile": profile["name"],
-                                "result": "eligible",
-                                "chroma": chroma_metrics,
-                                "quality": quality,
-                                "similarity": similarity,
-                                "identity_palette": palette_quality,
-                                "fur_silhouette": fur_silhouette_quality,
-                                "fur_surface_gate": fur_surface_gate_metrics,
-                                "grooming_pose_gate": grooming_pose_gate_metrics,
-                                "grooming_advisory_minimum_gate": (
-                                    advisory_grooming_minimum_gate_metrics
-                                ),
-                            },
-                        )
-                    continue
-                if (
-                    advisory_grooming_minimum_gate_required
-                    and not advisory_minimum_acceptable
-                ):
-                    rejection_reason = (
-                        "grooming_minimum_action_identity_contract_failed"
-                    )
-                elif palette_quality is not None and not palette_quality["acceptable"]:
-                    rejection_reason = "pose_identity_palette_drift"
-                elif (
-                    fur_silhouette_quality is not None
-                    and not fur_silhouette_quality["acceptable"]
-                ):
-                    rejection_reason = "fur_silhouette_expansion"
-                elif not quality["acceptable"]:
-                    rejection_reason = "subject_quality_invalid"
-                elif grooming_pose_gate_required and (
-                    not isinstance(grooming_pose_gate_metrics, dict)
-                    or not grooming_pose_gate_metrics.get("acceptable")
-                ):
-                    rejection_reason = "grooming_pose_gate_failed"
-                elif (
-                    fur_surface_gate_required
-                    and isinstance(fur_surface_gate_metrics, dict)
-                    and fur_surface_gate_metrics.get("evaluated") is True
-                    and fur_surface_gate_metrics.get("acceptable") is not True
-                ):
-                    rejection_reason = "fur_surface_gate_failed"
-                else:
-                    rejection_reason = "pose_too_similar"
-                append_recovery_event(
-                    job_id,
-                    {
-                        "stage": "cartoon_keyframe",
-                        "pose_index": index,
-                        "attempt": attempt,
-                        "reason": rejection_reason,
-                        "strategy": "pose_prompt_and_lora_retry",
-                        "profile": profile["name"],
-                        "result": "rejected",
-                        "chroma": chroma_metrics,
-                        "quality": quality,
-                        "similarity": similarity,
-                        "identity_palette": palette_quality,
-                        "fur_silhouette": fur_silhouette_quality,
-                        "fur_surface_gate": fur_surface_gate_metrics,
-                        "grooming_pose_gate": grooming_pose_gate_metrics,
-                        "grooming_advisory_minimum_gate": (
-                            advisory_grooming_minimum_gate_metrics
-                        ),
-                    },
-                )
-                LOGGER.warning(
-                    "%s pose %s attempt %s failed pose checks: quality=%s similarity=%s identity_palette=%s fur_silhouette=%s fur_surface=%s minimum_gate=%s",
-                    job_id,
-                    index,
-                    attempt,
-                    quality["issues"],
-                    similarity["issues"],
-                    palette_quality["issues"] if palette_quality else None,
-                    (
-                        fur_silhouette_quality["issues"]
-                        if fur_silhouette_quality
-                        else None
-                    ),
-                    (
-                        fur_surface_gate_metrics.get("issues")
-                        if isinstance(fur_surface_gate_metrics, dict)
-                        else None
-                    ),
-                    (
-                        advisory_grooming_minimum_gate_metrics.get("issues")
-                        if isinstance(
-                            advisory_grooming_minimum_gate_metrics,
-                            dict,
-                        )
-                        else None
-                    ),
-                )
-                if advisory_grooming_identity_refine_active:
-                    identity_refine_fallback_eligible = bool(
-                        isinstance(grooming_advisory_identity_refine_source, dict)
-                        and grooming_advisory_identity_refine_source.get(
-                            "fallback_eligible"
-                        )
-                        is True
-                    )
+                    else:
+                        action_recovery_records = {}
+                    action_recovery_records[action_key(pose)] = warm_action_recovery
                     update_job(
                         job_id,
-                        grooming_advisory_identity_refine_status=(
-                            "failed_fallback_to_accepted_action_draft"
-                            if identity_refine_fallback_eligible
-                            else "failed_without_acceptable_action_draft_fallback"
+                        action_warm_palette_recovery=action_recovery_records,
+                        action_warm_palette_recovery_policy=(
+                            WARM_ACTION_PALETTE_RECOVERY_POLICY
                         ),
-                        grooming_advisory_identity_refine_failed_attempt=attempt,
-                        grooming_advisory_identity_refine_failure_issues=(
-                            advisory_grooming_minimum_gate_metrics.get("issues", [])
-                            if isinstance(
-                                advisory_grooming_minimum_gate_metrics,
-                                dict,
-                            )
-                            else ["identity_refine_candidate_unavailable"]
-                        ),
+                        action_warm_palette_recovery_blocks_completion=False,
                     )
-                    if not identity_refine_fallback_eligible:
-                        best_attempt = None
-                    continue
-            if len(attempts) != QWEN_ACTION_CANDIDATE_ATTEMPTS:
-                raise RuntimeError(
-                    "Action candidate generation did not complete all five attempts."
-                )
-            if strict_first_frame_required:
-                first_frame_states = dict(
-                    get_job(job_id).get("qwen_first_frame_states") or {}
-                )
-                action_state = dict(first_frame_states.get(action_key(pose)) or {})
-                action_state.update(
-                    status="selecting_best_of_five",
-                    current_attempt=QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                    attempts_completed=QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                    attempt_budget=QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                    attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
-                )
-                first_frame_states[action_key(pose)] = action_state
-                update_job(
-                    job_id,
-                    qwen_first_frame_states=first_frame_states,
-                    qwen_first_frame_current_action=action_key(pose),
-                    qwen_first_frame_current_attempt=(
-                        QWEN_ACTION_CANDIDATE_ATTEMPTS
-                    ),
-                )
-
-            def fail_identity_budget_exhausted(
-                additional_palette: dict[str, Any] | None = None,
-            ) -> None:
-                issue_counts: dict[str, int] = {}
-                palette_records = [
-                    item.get("identity_palette")
-                    for item in attempts
-                    if isinstance(item, dict)
-                ]
-                if isinstance(additional_palette, dict) and not any(
-                    additional_palette == palette_record
-                    for palette_record in palette_records
-                    if isinstance(palette_record, dict)
-                ):
-                    palette_records.append(additional_palette)
-                for palette_record in palette_records:
-                    if not isinstance(palette_record, dict):
-                        issue_counts["identity_palette_signature_unavailable"] = (
-                            issue_counts.get(
-                                "identity_palette_signature_unavailable",
-                                0,
-                            )
-                            + 1
+                    if warm_action_recovery.get("attempted") is True:
+                        append_recovery_event(
+                            job_id,
+                            {
+                                "stage": "selected_action_warm_palette_recovery",
+                                "pose_index": index,
+                                "attempt": selected_attempt_number,
+                                "action": action_key(pose),
+                                "reason": "generated_action_invented_neutral_patch",
+                                "strategy": WARM_ACTION_PALETTE_RECOVERY_POLICY,
+                                "result": (
+                                    "accepted"
+                                    if warm_action_recovery.get("accepted") is True
+                                    else "skipped_nonblocking"
+                                ),
+                                "recovery": warm_action_recovery,
+                            },
                         )
-                        continue
-                    for issue in palette_record.get("issues", []):
-                        issue_name = str(issue).strip()
-                        if issue_name:
-                            issue_counts[issue_name] = (
-                                issue_counts.get(issue_name, 0) + 1
-                            )
-                ranked_issues = sorted(
-                    issue_counts.items(),
-                    key=lambda item: (-item[1], item[0]),
+                selected_palette = best_attempt.get("identity_palette")
+                selected_identity_palette_acceptable = bool(
+                    isinstance(selected_palette, dict)
+                    and selected_palette.get("acceptable") is True
                 )
-                first_frame_states = dict(
-                    get_job(job_id).get("qwen_first_frame_states") or {}
+                selected_visual_completion_fallback = bool(
+                    best_attempt.get("strict_first_frame_best_effort_selected")
+                    or not selected_identity_palette_acceptable
                 )
-                failed_state = dict(
-                    first_frame_states.get(action_key(pose)) or {}
-                )
-                failed_state.update(
-                    status="failed_identity_budget_exhausted",
-                    completed=True,
-                    quality_passed=False,
-                    published=False,
-                    current_attempt=QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                    attempts_completed=QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                    attempt_budget=QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                    attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
-                    selected_attempt=None,
-                    best_effort=False,
-                    best_effort_issues=[],
-                    identity_issue_counts=dict(ranked_issues),
-                    original_upload_fallback_published=False,
-                    action_removed=False,
-                )
-                first_frame_states[action_key(pose)] = failed_state
+                if (
+                    not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
+                    and (
+                    not isinstance(selected_palette, dict)
+                    or selected_palette.get("acceptable") is not True
+                    )
+                ):
+                    fail_identity_budget_exhausted(
+                        selected_palette
+                        if isinstance(selected_palette, dict)
+                        else None
+                    )
                 action_selection_records = get_job(job_id).get(
                     "action_candidate_selection_by_action"
                 )
-                action_selection_records = (
-                    json.loads(json.dumps(action_selection_records))
-                    if isinstance(action_selection_records, dict)
-                    else {}
-                )
-                failure_record = {
+                if isinstance(action_selection_records, dict):
+                    action_selection_records = json.loads(
+                        json.dumps(action_selection_records)
+                    )
+                else:
+                    action_selection_records = {}
+                action_selection_records[action_key(pose)] = {
                     "policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
-                    "source_kind": "qwen_generated_action_candidates",
-                    "result": "failed_identity_budget_exhausted",
+                    "source_kind": "qwen_generated_action_candidate",
                     "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
                     "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                    "selected_attempt": None,
-                    "identity_palette_acceptable": False,
-                    "identity_issue_counts": dict(ranked_issues),
+                    "selected_attempt": selected_attempt_number,
+                    "selected_penalty": best_attempt.get("combined_penalty"),
+                    "identity_palette_acceptable": (
+                        selected_identity_palette_acceptable
+                    ),
+                    "result": (
+                        "selected_best_of_five"
+                        if not selected_visual_completion_fallback
+                        else "selected_generated_completion_fallback"
+                    ),
+                    "visual_completion_fallback": (
+                        selected_visual_completion_fallback
+                    ),
+                    "selected_keyframe_sha256": file_sha256(
+                        selected_keyframe_source
+                    ),
+                    "selected_cutout_sha256": file_sha256(selected_cutout_source),
                     "original_upload_used": False,
                     "approved_canonical_used_as_output": False,
                 }
-                action_selection_records[action_key(pose)] = failure_record
-                write_json_atomic(
-                    job_dir
-                    / "workflows"
-                    / f"qwen_pose_{index:02d}_identity_budget_failure.json",
-                    failure_record,
-                )
                 update_job(
                     job_id,
-                    qwen_first_frame_states=first_frame_states,
-                    qwen_first_frame_best_effort_selected=False,
-                    qwen_first_frame_best_effort_action=None,
-                    qwen_first_frame_best_effort_attempt=None,
-                    qwen_first_frame_best_effort_issues=[],
+                    action_candidate_gate_policy=(
+                        GENERATION_ACTION_CANDIDATE_GATE_POLICY
+                    ),
                     action_candidate_gate_status=(
-                        "failed_identity_budget_exhausted"
+                        "best_of_five_selected"
+                        if not selected_visual_completion_fallback
+                        else "completion_first_best_of_five_selected"
                     ),
                     action_candidate_gate_action=action_key(pose),
                     action_candidate_gate_attempt_budget=(
@@ -8934,984 +10873,144 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                     action_candidate_gate_attempts_completed=(
                         QWEN_ACTION_CANDIDATE_ATTEMPTS
                     ),
-                    action_candidate_gate_selected_attempt=None,
+                    action_candidate_gate_selected_attempt=selected_attempt_number,
+                    action_candidate_gate_selected_penalty=(
+                        best_attempt.get("combined_penalty")
+                    ),
                     action_candidate_gate_returns_original_upload=False,
                     action_candidate_gate_returns_approved_canonical=False,
-                    action_candidate_selection_by_action=(
-                        action_selection_records
+                    action_candidate_selection_by_action=action_selection_records,
+                    visual_completion_fallback_used=(
+                        selected_visual_completion_fallback
                     ),
-                )
-                append_recovery_event(
-                    job_id,
-                    {
-                        "stage": "cartoon_keyframe",
-                        "pose_index": index,
-                        "reason": "five_candidate_identity_budget_exhausted",
-                        "strategy": (
-                            "fail_closed_without_original_or_canonical_output"
-                        ),
-                        "result": "rejected_identity_budget_exhausted",
-                        "action": action_key(pose),
-                        "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                        "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                        "identity_issue_counts": dict(ranked_issues),
-                        "original_upload_fallback_published": False,
-                        "approved_canonical_published": False,
-                        "action_removed": False,
-                    },
-                )
-                issue_summary = ", ".join(
-                    f"{name}={count}" for name, count in ranked_issues
-                ) or "identity_palette_signature_unavailable"
-                raise RuntimeError(
-                    "Best-of-five selection found no identity-safe generated "
-                    f"candidate: {issue_summary}."
-                )
-
-            identity_safe_attempt_exists = any(
-                isinstance(item.get("identity_palette"), dict)
-                and item["identity_palette"].get("acceptable") is True
-                for item in attempts
-                if isinstance(item, dict)
-            )
-            if (
-                strict_first_frame_required
-                and not identity_safe_attempt_exists
-                and best_semantic_source is None
-                and not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
-            ):
-                fail_identity_budget_exhausted()
-            if (
-                advisory_grooming_minimum_gate_required
-                and best_attempt is not None
-            ):
-                selected_identity_refine = best_attempt.get(
-                    "grooming_advisory_identity_refine"
-                )
-                identity_refine_was_queued = isinstance(
-                    grooming_advisory_identity_refine_source,
-                    dict,
-                )
-                update_job(
-                    job_id,
-                    grooming_advisory_identity_refine_status=(
-                        "passed"
-                        if isinstance(selected_identity_refine, dict)
-                        else (
-                            "fallback_to_accepted_action_draft"
-                            if identity_refine_was_queued
-                            else "not_required_identity_safe_draft_selected"
-                        )
-                    ),
-                    grooming_advisory_identity_refine_completed=(
-                        isinstance(selected_identity_refine, dict)
-                    ),
-                    grooming_advisory_identity_refine_fallback_used=(
-                        identity_refine_was_queued
-                        and not isinstance(selected_identity_refine, dict)
-                    ),
-                    grooming_advisory_identity_safe_draft_selected=(
-                        not identity_refine_was_queued
-                    ),
-                )
-            if GENERATION_VISUAL_AUDITS_BLOCKING and best_attempt is not None and (
-                not best_attempt["quality"]["acceptable"]
-                or not best_attempt["similarity"]["acceptable"]
-                or (
-                    isinstance(best_attempt.get("identity_palette"), dict)
-                    and not best_attempt["identity_palette"]["acceptable"]
-                )
-                or (
-                    fur_surface_gate_required
-                    and (
-                        not isinstance(
-                            best_attempt.get("fur_surface_gate"),
-                            dict,
-                        )
-                        or best_attempt["fur_surface_gate"].get("acceptable")
-                        is not True
-                    )
-                )
-                or (
-                    grooming_pose_gate_required
-                    and (
-                        not isinstance(
-                            best_attempt.get("grooming_pose_gate"),
-                            dict,
-                        )
-                        or not best_attempt["grooming_pose_gate"].get("acceptable")
-                    )
-                )
-            ):
-                if (
-                    fur_surface_gate_required
-                    and isinstance(
-                        best_attempt.get("fur_surface_gate"),
-                        dict,
-                    )
-                    and best_attempt["fur_surface_gate"].get("evaluated") is True
-                    and best_attempt["fur_surface_gate"].get("acceptable") is not True
-                ):
-                    rejection_reason = "all_keyframe_fur_surface_gate_attempts_rejected"
-                elif grooming_pose_gate_required and (
-                    not isinstance(
-                        best_attempt.get("grooming_pose_gate"),
-                        dict,
-                    )
-                    or not best_attempt["grooming_pose_gate"].get("acceptable")
-                ):
-                    rejection_reason = (
-                        "all_keyframe_grooming_pose_gate_attempts_rejected"
-                    )
-                elif (
-                    isinstance(best_attempt.get("identity_palette"), dict)
-                    and not best_attempt["identity_palette"]["acceptable"]
-                ):
-                    rejection_reason = "all_keyframe_identity_palette_attempts_rejected"
-                elif best_attempt["similarity"]["acceptable"]:
-                    rejection_reason = "all_keyframe_subject_quality_attempts_rejected"
-                else:
-                    rejection_reason = "all_keyframe_similarity_attempts_rejected"
-                recovery_strategy = (
-                    "return_distinct_raw_image_or_fail"
-                    if image_request
-                    else (
-                        "rembg_u2net_fallback"
-                        if best_semantic_source is not None
-                        else "fail_closed_without_background_recovery"
-                    )
-                )
-                append_recovery_event(
-                    job_id,
-                    {
-                        "stage": "cartoon_keyframe",
-                        "pose_index": index,
-                        "attempt": best_attempt["attempt"],
-                        "reason": rejection_reason,
-                        "strategy": recovery_strategy,
-                        "profile": best_attempt["profile"],
-                        "result": "rejected",
-                        "chroma": best_attempt["chroma"],
-                        "quality": best_attempt["quality"],
-                        "similarity": best_attempt["similarity"],
-                        "identity_palette": best_attempt.get("identity_palette"),
-                    },
-                )
-                best_attempt = None
-            if strict_first_frame_required and best_attempt is not None:
-                strict_selection_issues = strict_first_frame_record_issues(
-                    best_attempt,
-                    action=action_key(pose),
-                )
-                if strict_selection_issues:
-                    append_recovery_event(
-                        job_id,
-                        {
-                            "stage": "cartoon_keyframe",
-                            "pose_index": index,
-                            "attempt": best_attempt.get("attempt"),
-                            "reason": "selected_first_frame_failed_strict_publication_gate",
-                            "strategy": QWEN_VALIDATED_FIRST_FRAME_POLICY,
-                            "profile": best_attempt.get("profile"),
-                            "result": "rejected_before_bounded_best_effort_selection",
-                            "issues": strict_selection_issues,
-                            "action": action_key(pose),
-                        },
-                    )
-                    best_attempt = None
-            if (
-                best_attempt is None
-                and strict_first_frame_required
-                and best_strict_first_frame_attempt is not None
-                and bool(best_strict_first_frame_attempt.get("cutout"))
-                and (
-                    job_dir / str(best_strict_first_frame_attempt["cutout"])
-                ).is_file()
-                and (
-                    GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
-                    or (
-                        isinstance(
-                            best_strict_first_frame_attempt.get(
-                                "identity_palette"
-                            ),
-                            dict,
-                        )
-                        and best_strict_first_frame_attempt[
-                            "identity_palette"
-                        ].get("acceptable")
-                        is True
-                    )
-                )
-            ):
-                best_attempt = best_strict_first_frame_attempt
-                strict_best_effort_issues = strict_first_frame_record_issues(
-                    best_attempt,
-                    action=action_key(pose),
-                )
-                selected_candidate_gate = dict(
-                    best_attempt.get("action_candidate_gate") or {}
-                )
-                selected_candidate_gate.update(
-                    strict_acceptable=False,
-                    best_effort_accepted=True,
-                    degraded_fallback_accepted=True,
-                    degraded_reason="bounded_first_frame_attempt_budget_exhausted",
-                    degraded_selection_policy=(
-                        QWEN_GENERATED_COMPLETION_SELECTION_POLICY
-                    ),
-                    degraded_selection_key=list(
-                        best_attempt[
-                            "strict_first_frame_best_effort_selection_key"
-                        ]
-                    ),
-                    returns_original_upload=False,
-                    action_removed=False,
-                    blocks_job=False,
-                )
-                best_attempt["action_candidate_gate"] = selected_candidate_gate
-                best_attempt["strict_first_frame_best_effort_selected"] = True
-                best_attempt["strict_first_frame_best_effort_issues"] = (
-                    strict_best_effort_issues
-                )
-                append_recovery_event(
-                    job_id,
-                    {
-                        "stage": "cartoon_keyframe",
-                        "pose_index": index,
-                        "attempt": best_attempt["attempt"],
-                        "reason": "bounded_first_frame_attempt_budget_exhausted",
-                        "strategy": (
-                            "select_generated_visual_completion_best_of_five"
-                        ),
-                        "profile": best_attempt["profile"],
-                        "result": "accepted_best_effort",
-                        "issues": strict_best_effort_issues,
-                        "selection_key": best_attempt[
-                            "strict_first_frame_best_effort_selection_key"
-                        ],
-                        "attempt_count": len(attempts),
-                        "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
-                        "original_upload_fallback_published": False,
-                        "action_removed": False,
-                    },
-                )
-                update_job(
-                    job_id,
-                    qwen_first_frame_best_effort_selected=True,
-                    qwen_first_frame_best_effort_action=action_key(pose),
-                    qwen_first_frame_best_effort_attempt=best_attempt["attempt"],
-                    qwen_first_frame_best_effort_issues=(strict_best_effort_issues),
-                    qwen_first_frame_attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
-                    visual_completion_fallback_used=True,
                     visual_completion_fallback_policy=(
                         GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                        if selected_visual_completion_fallback
+                        else None
                     ),
                 )
-            if (
-                best_attempt is None
-                and advisory_action_candidate_gate_required
-                and not strict_first_frame_required
-                and best_action_candidate_degraded_attempt is not None
-            ):
-                fallback_action = action_key(pose)
-                approved_canonical_available = bool(
-                    species == "dog"
-                    and fallback_action
-                    in {
-                        "standing",
-                        "eating",
-                        "drinking",
-                        "running",
-                        "sleeping",
-                        "toileting",
-                    }
-                    and cartoon_is_transparent
-                    and cartoon_output.is_file()
+                append_recovery_event(
+                    job_id,
+                    {
+                        "stage": "cartoon_keyframe",
+                        "pose_index": index,
+                        "attempt": selected_attempt_number,
+                        "reason": "five_candidate_budget_completed",
+                        "strategy": (
+                            "select_lowest_penalty_identity_safe_generated_candidate"
+                            if not selected_visual_completion_fallback
+                            else "select_lowest_risk_generated_completion_candidate"
+                        ),
+                        "profile": best_attempt["profile"],
+                        "result": (
+                            "selected_best_of_five"
+                            if not selected_visual_completion_fallback
+                            else "selected_generated_completion_fallback"
+                        ),
+                        "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
+                        "combined_penalty": best_attempt.get("combined_penalty"),
+                    },
                 )
-                exhausted_recovery = exhausted_action_candidate_recovery_policy(
-                    best_action_candidate_degraded_attempt,
-                    action=action_key(pose),
-                    approved_canonical_available=approved_canonical_available,
+                shutil.copy2(job_dir / best_attempt["keyframe"], keyframe)
+                keyframe_is_transparent = bool(best_attempt.get("transparent", True))
+                if keyframe_is_transparent:
+                    keyframe_cutout = job_dir / f"pose_{index:02d}_qwen_cutout.png"
+                    shutil.copy2(job_dir / best_attempt["cutout"], keyframe_cutout)
+                    selected_keyframe = keyframe_cutout
+                else:
+                    selected_keyframe = keyframe
+                reference_generation_degraded = bool(
+                    best_attempt.get("reference_generation_degraded")
                 )
-                if exhausted_recovery in {
-                    "identity_safe_generated_candidate",
-                    "identity_safe_generated_candidate_requires_final_action_gate",
-                    "generated_completion_candidate",
-                }:
-                    best_attempt = best_action_candidate_degraded_attempt
-                    requires_final_action_gate = bool(
-                        exhausted_recovery
-                        == "identity_safe_generated_candidate_requires_final_action_gate"
-                    )
-                    completion_candidate = bool(
-                        exhausted_recovery == "generated_completion_candidate"
-                    )
-                    selected_candidate_gate = dict(
-                        best_attempt.get("action_candidate_gate") or {}
-                    )
-                    selected_candidate_gate.update(
-                        strict_acceptable=bool(
-                            selected_candidate_gate.get("acceptable") is True
-                        ),
-                        degraded_fallback_accepted=True,
-                        degraded_reason="candidate_attempt_budget_exhausted",
-                        degraded_selection_policy=(
-                            QWEN_GENERATED_COMPLETION_SELECTION_POLICY
-                            if completion_candidate
-                            else (
-                                "identity_safe_structural_action_generated_"
-                                "candidate_v3"
-                            )
-                        ),
-                        degraded_selection_key=list(
-                            best_attempt[
-                                "action_candidate_degraded_selection_key"
-                            ]
-                        ),
-                        returns_original_upload=False,
-                        returns_approved_canonical=False,
-                        blocks_job=False,
-                        requires_final_action_gate=requires_final_action_gate,
-                    )
-                    best_attempt["action_candidate_gate"] = (
-                        selected_candidate_gate
-                    )
-                    best_attempt["candidate_gate_degraded_fallback"] = True
-                    append_recovery_event(
-                        job_id,
-                        {
-                            "stage": "cartoon_keyframe",
-                            "pose_index": index,
-                            "attempt": best_attempt["attempt"],
-                            "reason": "action_candidate_gate_attempts_exhausted",
-                            "strategy": (
-                                "select_generated_visual_completion_candidate"
-                                if completion_candidate
-                                else (
-                                "select_identity_safe_structural_action_generated_"
-                                "candidate_with_required_final_action_gate"
-                                if requires_final_action_gate
-                                else "select_identity_safe_structural_action_generated_"
-                                "candidate"
-                                )
-                            ),
-                            "profile": best_attempt["profile"],
-                            "result": "accepted_degraded_generated_candidate",
-                            "action_candidate_gate": selected_candidate_gate,
-                            "identity_palette": best_attempt.get(
-                                "identity_palette"
-                            ),
-                            "quality": best_attempt.get("quality"),
-                            "similarity": best_attempt.get("similarity"),
-                        },
-                    )
-                    update_job(
-                        job_id,
-                        action_candidate_gate_policy=(
-                            GENERATION_ACTION_CANDIDATE_GATE_POLICY
-                        ),
-                        action_candidate_gate_status=(
-                            "generated_completion_candidate_selected"
-                            if completion_candidate
-                            else (
-                                "identity_safe_candidate_pending_final_action_gate"
-                                if requires_final_action_gate
-                                else "identity_safe_degraded_candidate_selected"
-                            )
-                        ),
-                        action_candidate_final_gate_required_actions=sorted(
-                            {
-                                *(
-                                    get_job(job_id).get(
-                                        "action_candidate_final_gate_required_actions",
-                                        [],
-                                    )
-                                    or []
-                                ),
-                                *(
-                                    [action_key(pose)]
-                                    if requires_final_action_gate
-                                    else []
-                                ),
-                            }
-                        ),
-                        action_candidate_gate_action=action_key(pose),
-                        action_candidate_gate_attempt_budget=len(
-                            active_pose_profiles
-                        ),
-                        action_candidate_gate_selected_attempt=(
-                            best_attempt["attempt"]
-                        ),
-                        action_candidate_gate_degraded_fallback_used=True,
-                        action_candidate_gate_returns_original_upload=False,
-                        action_candidate_gate_returns_approved_canonical=False,
-                        visual_completion_fallback_used=completion_candidate,
-                        visual_completion_fallback_policy=(
-                            GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
-                            if completion_candidate
-                            else None
-                        ),
-                    )
-                elif exhausted_recovery == "upload_anchored_canonical":
-                    standing_fallback = fallback_action == "standing"
-                    canonical_fallback_policy = (
-                        "upload_anchored_canonical_standing_reference_v1"
-                        if standing_fallback
-                        else (
-                            DOG_EATING_CANONICAL_IDENTITY_FALLBACK_POLICY
-                            if fallback_action == "eating"
-                            else (
-                                TOILETING_CANONICAL_TRAY_FALLBACK_POLICY
-                                if fallback_action == "toileting"
-                                else (
-                                    "upload_anchored_canonical_dog_action_"
-                                    "reference_v1"
-                                )
-                            )
-                        )
-                    )
-                    canonical_fallback = (
-                        job_dir
-                        / f"pose_{index:02d}_upload_anchored_canonical_fallback.png"
-                    )
-                    canonical_identity_fallback = (
-                        canonical_fallback
-                        if fallback_action != "toileting"
-                        else job_dir
-                        / f"pose_{index:02d}_upload_anchored_canonical_identity.png"
-                    )
-                    canonical_identity_normalization = (
-                        normalize_qwen_action_reference_rgba(
-                            cartoon_output,
-                            canonical_identity_fallback,
-                            action=action_key(pose),
-                        )
-                    )
-                    toileting_tray_fallback: dict[str, Any] | None = None
-                    if fallback_action == "toileting":
-                        tray_staging = (
-                            job_dir
-                            / f"pose_{index:02d}_canonical_toileting_tray_staging.png"
-                        )
-                        toileting_tray_fallback = (
-                            make_toileting_canonical_tray_fallback(
-                                canonical_identity_fallback,
-                                tray_staging,
-                            )
-                        )
-                        canonical_normalization = (
-                            normalize_qwen_action_reference_rgba(
-                                tray_staging,
-                                canonical_fallback,
-                                action=action_key(pose),
-                            )
+                if fur_surface_gate_required and not reference_generation_degraded:
+                    selected_surface = best_attempt.get("fur_surface_gate")
+                    selected_digest = file_sha256(selected_keyframe)
+                    selected_surface_issues: list[str] = []
+                    if (
+                        not isinstance(selected_surface, dict)
+                        or selected_surface.get("acceptable") is not True
+                        or selected_surface.get("status") != "passed"
+                    ):
+                        selected_surface_issues.append(
+                            "post_selection_fur_surface_gate_not_acceptable"
                         )
                     else:
-                        canonical_normalization = canonical_identity_normalization
-                    canonical_edge_quality = canonical_normalization[
-                        "transparent_edge_quality"
-                    ]
-                    canonical_quality = pose_cutout_quality(
-                        canonical_fallback,
-                        pose,
-                        require_eating_mouth_contact=False,
-                        validate_action_geometry=fallback_action == "toileting",
-                    )
-                    canonical_palette = evaluate_pose_identity_palette(
-                        canonical_identity_fallback,
-                        primary_reference=pose_reference_identity_palette,
-                        upper_body_reference=(
-                            pose_reference_upper_body_identity_palette
-                        ),
-                        bottom_exclusion=pose_palette_bottom_exclusion,
-                        bowl_action=False,
-                    )
-                    canonical_palette_quality = canonical_palette["quality"]
-                    if (
-                        canonical_edge_quality.get("acceptable") is not True
-                        or canonical_quality.get("acceptable") is not True
-                        or canonical_palette_quality.get("acceptable") is not True
-                    ):
-                        raise RuntimeError(
-                            "Upload-anchored canonical "
-                            f"{fallback_action} fallback failed "
-                            "its alpha, subject, or identity-palette contract."
-                        )
-                    rejected_attempt = best_action_candidate_degraded_attempt
-                    selected_candidate_gate = dict(
-                        rejected_attempt.get("action_candidate_gate") or {}
-                    )
-                    selected_candidate_gate.update(
-                        strict_acceptable=False,
-                        degraded_fallback_accepted=True,
-                        degraded_reason=(
-                            "all_generated_candidates_failed_identity_palette"
-                        ),
-                        degraded_selection_policy=(
-                            canonical_fallback_policy
-                        ),
-                        degraded_selection_key=list(
-                            rejected_attempt[
-                                "action_candidate_degraded_selection_key"
-                            ]
-                        ),
-                        returns_original_upload=False,
-                        returns_approved_canonical=True,
-                        action_geometry_deferred_to_scail=(
-                            fallback_action != "toileting"
-                        ),
-                        toileting_tray_geometry_prebound=(
-                            fallback_action == "toileting"
-                        ),
-                        blocks_job=False,
-                    )
-                    canonical_chroma = {
-                        "size": canonical_normalization["output_size"],
-                        "foreground_fraction": round(
-                            float(canonical_normalization["foreground_pixels"])
-                            / float(
-                                canonical_normalization["source_size"][0]
-                                * canonical_normalization["source_size"][1]
-                            ),
-                            6,
-                        ),
-                        "corners": canonical_normalization[
-                            "output_alpha_corners"
-                        ],
-                        "soft_alpha": True,
-                        "acceptable": True,
-                        "issues": [],
-                        "method": (
-                            "approved_upload_anchored_canonical_transparent_"
-                            "reference"
-                        ),
-                        "normalized_after_qwen": True,
-                        "matte_policy": (
-                            "approved_canonical_alpha_preserving_normalization_v1"
-                        ),
-                        "normalization_policy": (
-                            QWEN_ACTION_REFERENCE_NORMALIZATION_POLICY
-                        ),
-                        "final_reference_normalization": (
-                            canonical_normalization
-                        ),
-                        "final_reference_sha256": canonical_normalization[
-                            "output_sha256"
-                        ],
-                        "transparent_edge_quality": canonical_edge_quality,
-                    }
-                    canonical_similarity = {
-                        "available": True,
-                        "acceptable": True,
-                        "warning": False,
-                        "issues": [],
-                        "comparisons": [],
-                        "penalty": 0.0,
-                        "policy": (
-                            "approved_canonical_self_reuse_for_standing_"
-                            "identity_recovery_v1"
-                            if standing_fallback
-                            else "approved_canonical_self_reuse_for_dog_action_"
-                            "identity_recovery_v1"
-                        ),
-                        "canonical_self_reference_reuse": True,
-                        "action_geometry_deferred_to_scail": (
-                            fallback_action != "toileting"
-                        ),
-                        "toileting_tray_geometry_prebound": (
-                            fallback_action == "toileting"
-                        ),
-                    }
-                    best_attempt = {
-                        **rejected_attempt,
-                        "attempt": len(active_pose_profiles) + 1,
-                        "profile": (
-                            "upload_anchored_canonical_standing_recovery"
-                            if standing_fallback
-                            else f"upload_anchored_canonical_{fallback_action}_recovery"
-                        ),
-                        "keyframe": canonical_fallback.name,
-                        "cutout": canonical_fallback.name,
-                        "chroma": canonical_chroma,
-                        "quality": canonical_quality,
-                        "similarity": canonical_similarity,
-                        "identity_palette": canonical_palette_quality,
-                        "candidate_identity_palette": canonical_palette[
-                            "candidate"
-                        ],
-                        "candidate_upper_body_identity_palette": (
-                            canonical_palette["upper_body_candidate"]
-                        ),
-                        "fur_silhouette": None,
-                        "fur_surface_gate": None,
-                        "combined_penalty": round(
-                            float(canonical_quality.get("penalty", 0.0))
-                            + float(
-                                canonical_palette_quality.get("penalty", 0.0)
+                        selected_gate_metadata = selected_surface.get("gate")
+                        if (
+                            not isinstance(selected_gate_metadata, dict)
+                            or selected_gate_metadata.get("policy")
+                            != FUR_SURFACE_GATE_POLICY
+                            or selected_gate_metadata.get("gate_version")
+                            != FUR_SURFACE_GATE_VERSION
+                            or selected_gate_metadata.get("threshold_version")
+                            != FUR_SURFACE_THRESHOLD_VERSION
+                            or selected_gate_metadata.get("action") != action_key(pose)
+                            or selected_gate_metadata.get("candidate_sha256")
+                            != selected_digest
+                        ):
+                            selected_surface_issues.append(
+                                "post_selection_fur_surface_provenance_changed"
                             )
-                            + float(canonical_edge_quality.get("penalty", 0.0)),
-                            6,
-                        ),
-                        "transparent": True,
-                        "background_removal_failed": False,
-                        "action_candidate_gate": selected_candidate_gate,
-                        "candidate_gate_degraded_fallback": True,
-                        "canonical_identity_fallback": {
-                            "policy": (
-                                canonical_fallback_policy
-                            ),
-                            "source": str(cartoon_output),
-                            "source_sha256": file_sha256(cartoon_output),
-                            "selected_path": str(canonical_fallback),
-                            "selected_sha256": file_sha256(canonical_fallback),
-                            "rejected_generated_attempt": rejected_attempt[
-                                "attempt"
-                            ],
-                            "rejected_identity_palette": rejected_attempt.get(
-                                "identity_palette"
-                            ),
-                            "identity_only_path": str(
-                                canonical_identity_fallback
-                            ),
-                            "identity_only_sha256": file_sha256(
-                                canonical_identity_fallback
-                            ),
-                            "action_geometry_deferred_to_scail": (
-                                fallback_action != "toileting"
-                            ),
-                            "toileting_tray_geometry_prebound": (
-                                fallback_action == "toileting"
-                            ),
-                            "toileting_tray_fallback": (
-                                toileting_tray_fallback
-                            ),
-                        },
-                    }
-                    append_recovery_event(
-                        job_id,
-                        {
-                            "stage": "cartoon_keyframe",
-                            "pose_index": index,
-                            "attempt": best_attempt["attempt"],
-                            "reason": (
-                                "all_generated_candidates_failed_identity_palette"
-                            ),
-                            "strategy": (
-                                "reuse_upload_anchored_canonical_and_defer_"
-                                "standing_geometry_to_scail"
-                                if standing_fallback
-                                else (
-                                    "reuse_upload_anchored_canonical_with_"
-                                    "deterministic_underbody_tray"
-                                    if fallback_action == "toileting"
-                                    else "reuse_upload_anchored_canonical_and_defer_"
-                                    f"{fallback_action}_geometry_to_scail"
+                    if selected_surface_issues:
+                        fur_surface_gate_status_by_action[action_key(pose)] = "failed"
+                        if not strict_first_frame_required:
+                            update_job(
+                                job_id,
+                                fur_surface_gate_status=dict(
+                                    fur_surface_gate_status_by_action
+                                ),
+                                fur_surface_gate_attempts=(
+                                    fur_surface_gate_attempt_audits
+                                ),
+                            )
+                            raise RuntimeError(
+                                "Main_case fur surface gate selected an invalid "
+                                f"{action_key(pose)} candidate."
+                            )
+                        selected_surface = (
+                            json.loads(json.dumps(selected_surface))
+                            if isinstance(selected_surface, dict)
+                            else {}
+                        )
+                        selected_surface.update(
+                            acceptable=False,
+                            status="best_effort_selected",
+                            best_effort_accepted=True,
+                            strict_acceptable=False,
+                            blocks_scail=False,
+                            issues=list(
+                                dict.fromkeys(
+                                    [
+                                        *(selected_surface.get("issues") or []),
+                                        *selected_surface_issues,
+                                    ]
                                 )
                             ),
-                            "profile": best_attempt["profile"],
-                            "result": "accepted_identity_safe_canonical",
-                            "action_candidate_gate": selected_candidate_gate,
-                            "canonical_identity_fallback": best_attempt[
-                                "canonical_identity_fallback"
-                            ],
-                        },
-                    )
-                    update_job(
-                        job_id,
-                        action_candidate_gate_policy=(
-                            GENERATION_ACTION_CANDIDATE_GATE_POLICY
-                        ),
-                        action_candidate_gate_status=(
-                            "upload_anchored_canonical_selected"
-                        ),
-                        action_candidate_gate_action=action_key(pose),
-                        action_candidate_gate_attempt_budget=len(
-                            active_pose_profiles
-                        ),
-                        action_candidate_gate_selected_attempt=(
-                            best_attempt["attempt"]
-                        ),
-                        action_candidate_gate_degraded_fallback_used=True,
-                        action_candidate_gate_returns_original_upload=False,
-                        action_candidate_gate_returns_approved_canonical=True,
-                    )
-            if (
-                best_attempt is None
-                and advisory_grooming_minimum_gate_required
-                and not strict_first_frame_required
-                and best_advisory_grooming_degraded_attempt is not None
-            ):
-                best_attempt = best_advisory_grooming_degraded_attempt
-                selected_degraded_gate = best_attempt.get(
-                    "grooming_advisory_minimum_gate"
-                )
-                if not isinstance(selected_degraded_gate, dict):
-                    raise RuntimeError(
-                        "Internal grooming recovery error: selected fallback "
-                        "lost its recorded audit."
-                    )
-                selected_degraded_gate = json.loads(
-                    json.dumps(selected_degraded_gate)
-                )
-                selected_degraded_gate[
-                    "degraded_fallback_accepted"
-                ] = True
-                selected_degraded_gate["strict_acceptable"] = bool(
-                    selected_degraded_gate.get("acceptable") is True
-                )
-                selected_degraded_gate["degraded_selection_policy"] = (
-                    "gross_pose_then_identity_lowest_risk_complete_chain_v2"
-                )
-                selected_degraded_gate["degraded_selection_key"] = list(
-                    advisory_grooming_degraded_candidate_selection_key(
-                        best_attempt
-                    )
-                )
-                selected_degraded_gate["degraded_reason"] = (
-                    "strict_action_identity_attempt_budget_exhausted"
-                )
-                selected_degraded_gate["blocks_scail"] = False
-                best_attempt["grooming_advisory_minimum_gate"] = (
-                    selected_degraded_gate
-                )
-                append_recovery_event(
-                    job_id,
-                    {
-                        "stage": "cartoon_keyframe",
-                        "pose_index": index,
-                        "attempt": best_attempt["attempt"],
-                        "reason": (
-                            "grooming_minimum_contract_attempts_exhausted"
-                        ),
-                        "strategy": (
-                            "select_identity_first_lowest_risk_candidate_and_"
-                            "continue_scail"
-                        ),
-                        "profile": best_attempt["profile"],
-                        "result": "accepted_degraded",
-                        "grooming_advisory_minimum_gate": (
-                            selected_degraded_gate
-                        ),
-                    },
-                )
-                update_job(
-                    job_id,
-                    grooming_pose_gate_status=(
-                        "minimum_contract_degraded_candidate_selected"
-                    ),
-                    grooming_advisory_minimum_gate_status=(
-                        "degraded_candidate_selected"
-                    ),
-                    grooming_advisory_minimum_gate_attempts=(
-                        grooming_advisory_minimum_gate_attempts
-                    ),
-                    grooming_advisory_minimum_gate_degraded_fallback_used=True,
-                    grooming_advisory_minimum_gate_degraded_selected_attempt=(
-                        best_attempt["attempt"]
-                    ),
-                )
-            if best_attempt is None and image_request and best_raw_attempt is not None:
-                best_attempt = best_raw_attempt
-                append_background_removal_failure(
-                    job_id,
-                    {
-                        "stage": "cartoon_keyframe",
-                        "pose_index": index,
-                        "attempt": best_attempt["attempt"],
-                        "reason": best_attempt.get(
-                            "background_removal_failure_reason",
-                            "unclean_chroma_background",
-                        ),
-                        "strategy": "return_best_distinct_raw_image_after_retries",
-                        "profile": best_attempt["profile"],
-                        "result": "returned_opaque_original",
-                        "chroma": best_attempt["chroma"],
-                        "similarity": best_attempt["similarity"],
-                        "identity_palette": best_attempt.get("identity_palette"),
-                    },
-                )
-            if best_attempt is None and image_request:
-                raise RuntimeError(
-                    f"Pose {index} remained invalid after "
-                    f"{len(active_pose_profiles)} attempts: "
-                    + pose_attempt_failure_summary(attempts)
-                )
-            if (
-                best_attempt is None
-                and force_qwen_reference
-                and not strict_first_frame_required
-            ):
-                failed_action = action_key(pose)
-                isolated_error = RuntimeError(
-                    f"Pose {index} remained invalid after "
-                    f"{len(active_pose_profiles)} attempts: "
-                    + pose_attempt_failure_summary(attempts)
-                )
-                degraded_result, degraded_source = (
-                    recover_subject_replacement_action_with_fallback(
-                        job_id,
-                        get_job(job_id),
-                        action=failed_action,
-                        pose_index=index,
-                        error=isolated_error,
-                    )
-                )
-                fallback_reference = Path(str(degraded_result["reference"]))
-                if (
-                    not fallback_reference.is_file()
-                    or fallback_reference.parent != job_dir
-                ):
-                    raise RuntimeError(
-                        "Isolated Qwen action fallback did not produce a local "
-                        "identity reference."
-                    )
-                refreshed_results = [
-                    dict(item)
-                    for item in get_job(job_id).get(
-                        "subject_replacement_results",
-                        [],
-                    )
-                    if isinstance(item, dict)
-                    and str(item.get("action") or "") != failed_action
-                ]
-                refreshed_results.append(degraded_result)
-                failure_record = {
-                    "action": failed_action,
-                    "pose_index": index,
-                    "error": f"RuntimeError: {str(isolated_error)[:4000]}",
-                    "attempt_count": len(active_pose_profiles),
-                    "fallback_reference": str(fallback_reference),
-                    "fallback_reference_sha256": file_sha256(fallback_reference),
-                    "fallback_source": degraded_source,
-                    "sibling_actions_continue": True,
-                    "scail_skipped": True,
-                }
-                reference_generation_degraded_actions[failed_action] = failure_record
-                update_job(
-                    job_id,
-                    qwen_reference_degraded_actions=dict(
-                        reference_generation_degraded_actions
-                    ),
-                    qwen_reference_failure_isolation_policy=(
-                        "per_action_identity_anchored_fallback_continue_siblings_v1"
-                    ),
-                    subject_replacement_results=refreshed_results,
-                    degraded_output_actions=sorted(
-                        reference_generation_degraded_actions
-                    ),
-                )
-                append_recovery_event(
-                    job_id,
-                    {
-                        "stage": "cartoon_keyframe",
-                        "pose_index": index,
-                        "reason": failure_record["error"],
-                        "strategy": (
-                            "isolate_failed_action_and_continue_sibling_keyframes"
-                        ),
-                        "result": "accepted_identity_anchored_action_fallback",
-                        "action": failed_action,
-                        "fallback_reference": str(fallback_reference),
-                        "fallback_reference_sha256": failure_record[
-                            "fallback_reference_sha256"
-                        ],
-                    },
-                )
-                fallback_template = dict(record)
-                best_attempt = {
-                    **fallback_template,
-                    "attempt": len(active_pose_profiles) + 1,
-                    "profile": "isolated_action_identity_fallback",
-                    "keyframe": fallback_reference.name,
-                    "cutout": fallback_reference.name,
-                    "chroma": {
-                        "acceptable": True,
-                        "issues": [],
-                        "method": "identity_anchored_action_fallback_rgba",
-                    },
-                    "quality": {
-                        "available": True,
-                        "acceptable": False,
-                        "issues": ["qwen_action_reference_generation_failed"],
-                        "penalty": 1000.0,
-                    },
-                    "similarity": {
-                        "available": True,
-                        "acceptable": True,
-                        "warning": True,
-                        "issues": ["degraded_identity_anchor_not_action_keyframe"],
-                        "comparisons": [],
-                        "penalty": 1000.0,
-                    },
-                    "identity_palette": None,
-                    "fur_silhouette": None,
-                    "fur_surface_gate": None,
-                    "grooming_pose_gate": None,
-                    "combined_penalty": 2000.0,
-                    "transparent": True,
-                    "background_removal_failed": False,
-                    "reference_generation_degraded": True,
-                    "reference_generation_failure": failure_record,
-                }
-            if best_attempt is None:
-                if best_semantic_source is None:
-                    evaluated_surface_attempts = [
-                        metrics
-                        for attempt_record in attempts
-                        for metrics in [attempt_record.get("fur_surface_gate")]
-                        if isinstance(metrics, dict)
-                        and metrics.get("evaluated") is True
-                    ]
-                    all_evaluated_surface_attempts_rejected = bool(
-                        evaluated_surface_attempts
-                    ) and all(
-                        metrics.get("acceptable") is not True
-                        for metrics in evaluated_surface_attempts
-                    )
-                    if (
-                        fur_surface_gate_required
-                        and all_evaluated_surface_attempts_rejected
-                    ):
-                        fur_surface_gate_status_by_action[action_key(pose)] = "failed"
-                        update_job(
-                            job_id,
-                            fur_surface_gate_status=dict(
-                                fur_surface_gate_status_by_action
-                            ),
-                            fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
-                            fur_surface_gate_final_quality={
-                                "scope": "qwen_action_reference_pre_scail",
-                                "status": "failed",
-                                "actions": dict(fur_surface_gate_selected_metrics),
-                                "failure": {
-                                    "action": action_key(pose),
-                                    "reason": "all_surface_candidates_rejected",
-                                    "blocks_scail": True,
-                                },
-                                "final_video_frame_audit": False,
-                            },
+                            selected_candidate_path=str(selected_keyframe),
+                            selected_candidate_sha256=selected_digest,
+                            selected_attempt=best_attempt["attempt"],
                         )
-                        raise RuntimeError(
-                            "Main_case fur surface gate did not approve any "
-                            f"{action_key(pose)} Qwen candidate after "
-                            f"{len(active_pose_profiles)} attempts: "
-                            + pose_attempt_failure_summary(attempts)
+                        best_attempt["fur_surface_gate"] = selected_surface
+                        best_attempt["strict_first_frame_best_effort_selected"] = True
+                        best_attempt["strict_first_frame_best_effort_issues"] = list(
+                            dict.fromkeys(
+                                [
+                                    *(
+                                        best_attempt.get(
+                                            "strict_first_frame_best_effort_issues"
+                                        )
+                                        or []
+                                    ),
+                                    *selected_surface_issues,
+                                ]
+                            )
                         )
-                    if fur_surface_gate_required:
-                        passed_surface_attempts = [
-                            metrics
-                            for metrics in evaluated_surface_attempts
-                            if metrics.get("acceptable") is True
-                        ]
-                        surface_terminal_reason = (
-                            "no_selectable_candidate_after_surface_gate"
-                            if passed_surface_attempts
-                            else "no_candidate_reached_surface_gate"
+                        fur_surface_gate_selected_metrics[action_key(pose)] = (
+                            selected_surface
                         )
                         fur_surface_gate_status_by_action[action_key(pose)] = (
-                            "passed_no_selectable_keyframe"
-                            if passed_surface_attempts
-                            else "not_evaluated_upstream_gate_failed"
+                            "best_effort_selected"
                         )
                         update_job(
                             job_id,
@@ -9919,1764 +11018,776 @@ def run_job(job_id: str, *, force_qwen_reference: bool = False) -> None:
                                 fur_surface_gate_status_by_action
                             ),
                             fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+                            fur_surface_gate_selected_metrics=(
+                                fur_surface_gate_selected_metrics
+                            ),
                             fur_surface_gate_final_quality={
                                 "scope": "qwen_action_reference_pre_scail",
-                                "status": "failed",
+                                "status": "best_effort_selected",
+                                "policy": FUR_SURFACE_GATE_POLICY,
+                                "gate_version": FUR_SURFACE_GATE_VERSION,
+                                "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
                                 "actions": dict(fur_surface_gate_selected_metrics),
-                                "failure": {
-                                    "action": action_key(pose),
-                                    "reason": surface_terminal_reason,
-                                    "surface_candidates_evaluated": len(
-                                        evaluated_surface_attempts
-                                    ),
-                                    "surface_candidates_passed": len(
-                                        passed_surface_attempts
-                                    ),
-                                    "blocks_scail": True,
-                                },
+                                "blocks_scail": False,
                                 "final_video_frame_audit": False,
                             },
                         )
-                    if grooming_pose_gate_required:
-                        evaluated_grooming_attempts = [
-                            metrics
-                            for attempt_record in attempts
-                            for metrics in [attempt_record.get("grooming_pose_gate")]
-                            if isinstance(metrics, dict) and "acceptable" in metrics
-                        ]
-                        all_grooming_attempts_rejected = bool(
-                            evaluated_grooming_attempts
-                        ) and all(
-                            metrics.get("acceptable") is not True
-                            for metrics in evaluated_grooming_attempts
+                    else:
+                        selected_surface = json.loads(json.dumps(selected_surface))
+                        selected_surface["selected_candidate_path"] = str(
+                            selected_keyframe
                         )
-                        passed_grooming_attempts = [
-                            metrics
-                            for metrics in evaluated_grooming_attempts
-                            if metrics.get("acceptable") is True
-                        ]
+                        selected_surface["selected_candidate_sha256"] = selected_digest
+                        selected_surface["selected_attempt"] = best_attempt["attempt"]
+                        best_attempt["fur_surface_gate"] = selected_surface
+                        fur_surface_gate_selected_metrics[action_key(pose)] = (
+                            selected_surface
+                        )
+                        fur_surface_gate_status_by_action[action_key(pose)] = "passed"
                         update_job(
                             job_id,
-                            grooming_pose_gate_status=(
-                                "failed"
-                                if all_grooming_attempts_rejected
-                                else (
-                                    "passed_no_selectable_keyframe"
-                                    if passed_grooming_attempts
-                                    else "not_evaluated_upstream_gate_failed"
+                            fur_surface_gate_status=dict(
+                                fur_surface_gate_status_by_action
+                            ),
+                            fur_surface_gate_attempts=fur_surface_gate_attempt_audits,
+                            fur_surface_gate_selected_metrics=(
+                                fur_surface_gate_selected_metrics
+                            ),
+                            fur_surface_gate_final_quality={
+                                "scope": "qwen_action_reference_pre_scail",
+                                "status": "running",
+                                "policy": FUR_SURFACE_GATE_POLICY,
+                                "gate_version": FUR_SURFACE_GATE_VERSION,
+                                "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
+                                "actions": dict(fur_surface_gate_selected_metrics),
+                                "final_video_frame_audit": False,
+                            },
+                        )
+                if grooming_pose_gate_required and not reference_generation_degraded:
+                    selected_gate = best_attempt.get("grooming_pose_gate")
+                    if not isinstance(selected_gate, dict) or not selected_gate.get(
+                        "acceptable"
+                    ):
+                        if not strict_first_frame_required:
+                            update_job(
+                                job_id,
+                                grooming_pose_gate_status="failed",
+                                grooming_pose_gate_attempts=(
+                                    grooming_pose_gate_attempt_audits
+                                ),
+                            )
+                            raise RuntimeError(
+                                "Main_case grooming pose gate selected an invalid "
+                                "candidate."
+                            )
+                        selected_gate = (
+                            json.loads(json.dumps(selected_gate))
+                            if isinstance(selected_gate, dict)
+                            else {}
+                        )
+                        selected_gate.update(
+                            acceptable=False,
+                            status="best_effort_selected",
+                            best_effort_accepted=True,
+                            strict_acceptable=False,
+                            blocks_scail=False,
+                            issues=list(
+                                dict.fromkeys(
+                                    [
+                                        *(selected_gate.get("issues") or []),
+                                        "post_selection_grooming_pose_gate_not_acceptable",
+                                    ]
                                 )
+                            ),
+                        )
+                        best_attempt["grooming_pose_gate"] = selected_gate
+                        best_attempt["strict_first_frame_best_effort_selected"] = True
+                        best_attempt["strict_first_frame_best_effort_issues"] = list(
+                            dict.fromkeys(
+                                [
+                                    *(
+                                        best_attempt.get(
+                                            "strict_first_frame_best_effort_issues"
+                                        )
+                                        or []
+                                    ),
+                                    "post_selection_grooming_pose_gate_not_acceptable",
+                                ]
+                            )
+                        )
+                        grooming_pose_gate_selected_metrics[action_key(pose)] = (
+                            selected_gate
+                        )
+                        update_job(
+                            job_id,
+                            grooming_pose_gate_status="best_effort_selected",
+                            grooming_pose_gate_attempts=(
+                                grooming_pose_gate_attempt_audits
                             ),
                             grooming_pose_gate_selected_metrics=(
                                 grooming_pose_gate_selected_metrics
                             ),
+                        )
+                    else:
+                        grooming_pose_gate_selected_metrics[action_key(pose)] = (
+                            selected_gate
+                        )
+                        update_job(
+                            job_id,
+                            grooming_pose_gate_status="passed",
                             grooming_pose_gate_attempts=(
                                 grooming_pose_gate_attempt_audits
                             ),
-                        )
-                        if all_grooming_attempts_rejected:
-                            raise RuntimeError(
-                                "Main_case grooming pose gate rejected every Qwen "
-                                f"candidate after {len(active_pose_profiles)} attempts: "
-                                + pose_attempt_failure_summary(attempts)
-                            )
-                        evaluated_palette_attempts = [
-                            metrics
-                            for attempt_record in attempts
-                            for metrics in [attempt_record.get("identity_palette")]
-                            if isinstance(metrics, dict) and "acceptable" in metrics
-                        ]
-                        if evaluated_palette_attempts and all(
-                            metrics.get("acceptable") is not True
-                            for metrics in evaluated_palette_attempts
-                        ):
-                            raise RuntimeError(
-                                "Grooming Qwen identity palette gate rejected every "
-                                f"candidate after {len(active_pose_profiles)} attempts: "
-                                + pose_attempt_failure_summary(attempts)
-                            )
-                    raise RuntimeError(
-                        f"Pose {index} remained invalid after "
-                        f"{len(active_pose_profiles)} attempts: "
-                        + pose_attempt_failure_summary(attempts)
-                    )
-                fallback_record = best_semantic_source
-                if fallback_record["chroma"].get("acceptable", False):
-                    raise RuntimeError(
-                        "Internal recovery error: semantic background recovery was "
-                        "selected for an already clean chroma candidate."
-                    )
-                fallback_source = job_dir / fallback_record["keyframe"]
-                fallback_green = job_dir / f"pose_{index:02d}_semantic_green.png"
-                fallback_cutout = (
-                    job_dir / f"pose_{index:02d}_semantic_cutout_final.png"
-                )
-                fallback_semantic = (
-                    job_dir / f"pose_{index:02d}_semantic_cutout_raw.png"
-                )
-                action_semantic_strict_error: str | None = None
-                try:
-                    chroma_metrics = semantic_background_recovery(
-                        fallback_source,
-                        fallback_green,
-                        fallback_cutout,
-                        fallback_semantic,
-                        pose=pose,
-                    )
-                except Exception as exc:
-                    if not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED:
-                        raise
-                    action_semantic_strict_error = (
-                        f"{type(exc).__name__}: {str(exc)[:1000]}"
-                    )
-                    chroma_metrics = semantic_background_recovery(
-                        fallback_source,
-                        fallback_green,
-                        fallback_cutout,
-                        fallback_semantic,
-                        pose=pose,
-                        enforce_visual_quality=False,
-                    )
-                    append_recovery_event(
-                        job_id,
-                        {
-                            "stage": "cartoon_keyframe_semantic_recovery",
-                            "pose_index": index,
-                            "attempt": fallback_record["attempt"],
-                            "reason": "strict_visual_semantic_matte_invalid",
-                            "strategy": (
-                                "use_generated_semantic_matte_without_visual_block"
+                            grooming_pose_gate_selected_metrics=(
+                                grooming_pose_gate_selected_metrics
                             ),
-                            "profile": fallback_record["profile"],
-                            "source": fallback_source.name,
-                            "result": "accepted_completion_fallback",
-                            "strict_error": action_semantic_strict_error,
-                            "policy": (
-                                GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
+                        )
+                if (
+                    advisory_grooming_minimum_gate_required
+                    and not reference_generation_degraded
+                ):
+                    selected_minimum_gate = best_attempt.get(
+                        "grooming_advisory_minimum_gate"
+                    )
+                    selected_digest = file_sha256(selected_keyframe)
+                    selected_minimum_gate_passed = bool(
+                        isinstance(selected_minimum_gate, dict)
+                        and (
+                            selected_minimum_gate.get("acceptable") is True
+                            or selected_minimum_gate.get(
+                                "degraded_fallback_accepted"
+                            )
+                            is True
+                        )
+                    )
+                    if (
+                        not isinstance(selected_minimum_gate, dict)
+                        or not selected_minimum_gate_passed
+                        or selected_minimum_gate.get("policy")
+                        != GROOMING_ADVISORY_MINIMUM_GATE_POLICY
+                        or selected_minimum_gate.get("version")
+                        != GROOMING_ADVISORY_MINIMUM_GATE_VERSION
+                        or selected_minimum_gate.get("candidate_sha256")
+                        != selected_digest
+                        or pose_palette_reference_path is None
+                        or grooming_identity_contract_reference_path is None
+                        or selected_minimum_gate.get("identity_reference_path")
+                        != str(grooming_identity_contract_reference_path)
+                        or selected_minimum_gate.get("identity_reference_sha256")
+                        != file_sha256(grooming_identity_contract_reference_path)
+                        or selected_minimum_gate.get(
+                            "identity_palette_reference_path"
+                        )
+                        != str(pose_palette_reference_path)
+                        or selected_minimum_gate.get(
+                            "identity_palette_reference_sha256"
+                        )
+                        != file_sha256(pose_palette_reference_path)
+                    ):
+                        if strict_first_frame_required:
+                            invalid_minimum_gate = (
+                                dict(selected_minimum_gate)
+                                if isinstance(selected_minimum_gate, dict)
+                                else {}
+                            )
+                            invalid_minimum_issues = list(
+                                invalid_minimum_gate.get("issues") or []
+                            )
+                            invalid_minimum_issues.append(
+                                "post_selection_grooming_minimum_contract_invalid"
+                            )
+                            invalid_minimum_gate.update(
+                                policy=GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
+                                version=GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
+                                acceptable=False,
+                                issues=list(dict.fromkeys(invalid_minimum_issues)),
+                                candidate_sha256=selected_digest,
+                                degraded_fallback_accepted=True,
+                                strict_acceptable=False,
+                                best_effort_accepted=True,
+                                degraded_reason=(
+                                    "bounded_first_frame_attempt_budget_exhausted"
+                                ),
+                                blocks_scail=False,
+                            )
+                            if pose_palette_reference_path is not None:
+                                invalid_minimum_gate.update(
+                                    identity_palette_reference_path=str(
+                                        pose_palette_reference_path
+                                    ),
+                                    identity_palette_reference_sha256=file_sha256(
+                                        pose_palette_reference_path
+                                    ),
+                                )
+                            if grooming_identity_contract_reference_path is not None:
+                                invalid_minimum_gate.update(
+                                    identity_reference_path=str(
+                                        grooming_identity_contract_reference_path
+                                    ),
+                                    identity_reference_sha256=file_sha256(
+                                        grooming_identity_contract_reference_path
+                                    ),
+                                )
+                            selected_minimum_gate = invalid_minimum_gate
+                            best_attempt[
+                                "strict_first_frame_best_effort_selected"
+                            ] = True
+                            best_attempt[
+                                "strict_first_frame_best_effort_issues"
+                            ] = invalid_minimum_gate["issues"]
+                            update_job(
+                                job_id,
+                                grooming_pose_gate_status=(
+                                    "minimum_contract_best_effort_selected"
+                                ),
+                                grooming_advisory_minimum_gate_status=(
+                                    "best_effort_selected"
+                                ),
+                                grooming_advisory_minimum_gate_attempts=(
+                                    grooming_advisory_minimum_gate_attempts
+                                ),
+                            )
+                        else:
+                            update_job(
+                                job_id,
+                                grooming_pose_gate_status="minimum_contract_failed",
+                                grooming_advisory_minimum_gate_status="failed",
+                                grooming_advisory_minimum_gate_attempts=(
+                                    grooming_advisory_minimum_gate_attempts
+                                ),
+                            )
+                            raise RuntimeError(
+                                "Advisory grooming selected candidate lost its minimum "
+                                "action/identity contract."
+                            )
+                    selected_minimum_gate = json.loads(
+                        json.dumps(selected_minimum_gate)
+                    )
+                    selected_minimum_gate["selected_candidate_path"] = str(
+                        selected_keyframe
+                    )
+                    selected_minimum_gate["selected_candidate_sha256"] = (
+                        selected_digest
+                    )
+                    selected_minimum_gate["selected_attempt"] = best_attempt["attempt"]
+                    selected_minimum_gate["selection_status"] = (
+                        "degraded_passed"
+                        if selected_minimum_gate.get("degraded_fallback_accepted")
+                        is True
+                        else "passed"
+                    )
+                    best_attempt["grooming_advisory_minimum_gate"] = (
+                        selected_minimum_gate
+                    )
+                    grooming_advisory_minimum_gate_selected[action_key(pose)] = (
+                        selected_minimum_gate
+                    )
+                    selected_topology = grooming_foreleg_topology_selection_evidence(
+                        best_attempt
+                    )
+                    selected_topology_by_action = get_job(job_id).get(
+                        "grooming_foreleg_topology_selected"
+                    )
+                    selected_topology_by_action = (
+                        json.loads(json.dumps(selected_topology_by_action))
+                        if isinstance(selected_topology_by_action, dict)
+                        else {}
+                    )
+                    selected_topology_by_action[action_key(pose)] = selected_topology
+                    update_job(
+                        job_id,
+                        grooming_pose_gate_status=(
+                            "minimum_contract_degraded_passed"
+                            if selected_minimum_gate.get(
+                                "degraded_fallback_accepted"
+                            )
+                            is True
+                            else "minimum_contract_passed"
+                        ),
+                        grooming_advisory_minimum_gate_status=(
+                            "degraded_passed"
+                            if selected_minimum_gate.get(
+                                "degraded_fallback_accepted"
+                            )
+                            is True
+                            else "passed"
+                        ),
+                        grooming_advisory_minimum_gate_attempts=(
+                            grooming_advisory_minimum_gate_attempts
+                        ),
+                        grooming_advisory_minimum_gate_selected=(
+                            grooming_advisory_minimum_gate_selected
+                        ),
+                        grooming_foreleg_topology_policy=(
+                            selected_topology.get("policy")
+                        ),
+                        grooming_foreleg_topology_status=(
+                            "advisory_passed"
+                            if selected_topology.get("available") is True
+                            and selected_topology.get("acceptable") is True
+                            else "advisory_drift"
+                        ),
+                        grooming_foreleg_topology_selected=(
+                            selected_topology_by_action
+                        ),
+                        grooming_foreleg_topology_blocks_completion=False,
+                    )
+                selected_pose_provenance = pose_attempt_provenance(best_attempt)
+                if not selected_pose_provenance["complete"]:
+                    LOGGER.warning(
+                        "%s pose %s selected candidate has incomplete workflow "
+                        "provenance: %s",
+                        job_id,
+                        index,
+                        selected_pose_provenance["issues"],
+                    )
+                    record_nonblocking_job_anomaly(
+                        job_id,
+                        code=f"pose_{index:02d}_workflow_provenance_incomplete",
+                        message=(
+                            f"动作 {index} 已生成，但内部工作流来源记录不完整；"
+                            "生成继续，结果需保留降级审计。"
+                        ),
+                        stage="pose_workflow_provenance",
+                        details={
+                            "pose_index": index,
+                            "pose": pose,
+                            "selected_attempt": best_attempt.get("attempt"),
+                            "selected_profile": best_attempt.get("profile"),
+                            "missing_fields": selected_pose_provenance[
+                                "missing_fields"
+                            ],
+                            "unmapped_workflow_input_names": (
+                                selected_pose_provenance[
+                                    "unmapped_workflow_input_names"
+                                ]
                             ),
                         },
                     )
-                quality = (
-                    pose_cutout_quality(
-                        fallback_cutout,
-                        pose,
-                        require_eating_mouth_contact=(
-                            require_eating_mouth_contact
+                write_workflow(
+                    job_dir, f"qwen_pose_{index:02d}.json", best_attempt["workflow"]
+                )
+                selected_quality_record = {
+                        "selected_attempt": best_attempt["attempt"],
+                        "selected_profile": best_attempt["profile"],
+                        "identity_input_policy": (effective_pose_identity_input_policy),
+                        "image1_input_name": selected_pose_provenance[
+                            "image1_input_name"
+                        ],
+                        "image2_input_name": selected_pose_provenance[
+                            "image2_input_name"
+                        ],
+                        "image3_input_name": selected_pose_provenance[
+                            "image3_input_name"
+                        ],
+                        "sampler_latent_input_name": selected_pose_provenance[
+                            "sampler_latent_input_name"
+                        ],
+                        "identity_input_name": selected_pose_provenance[
+                            "identity_input_name"
+                        ],
+                        "geometry_input_name": selected_pose_provenance[
+                            "geometry_input_name"
+                        ],
+                        "workflow_input_provenance": selected_pose_provenance,
+                        "grooming_foreleg_repair": best_attempt.get(
+                            "grooming_foreleg_repair"
                         ),
-                    )
-                    if GENERATION_VISUAL_AUDITS_BLOCKING
-                    else skipped_visual_audit("semantic_subject_quality")
-                )
-                similarity = (
-                    pose_similarity_quality(
-                        fallback_cutout,
-                        pose=pose,
-                        canonical_path=canonical_similarity_reference,
-                        previous_poses=accepted_pose_similarity_references,
-                    )
-                    if GENERATION_VISUAL_AUDITS_BLOCKING
-                    else skipped_visual_audit("semantic_pose_similarity")
-                )
-                semantic_palette = evaluate_pose_identity_palette(
-                    fallback_cutout,
-                    primary_reference=pose_reference_identity_palette,
-                    upper_body_reference=pose_reference_upper_body_identity_palette,
-                    bottom_exclusion=pose_palette_bottom_exclusion,
-                    bowl_action=bowl_action,
-                )
-                semantic_candidate_palette = semantic_palette["candidate"]
-                semantic_upper_body_candidate_palette = semantic_palette[
-                    "upper_body_candidate"
-                ]
-                semantic_palette_quality = semantic_palette["quality"]
-                semantic_color_recovery: dict[str, Any] | None = None
-                warm_cast_issues = {
-                    "achromatic_source_recolored_with_warm_fur",
-                    "new_dominant_warm_brown_or_orange",
-                    "new_dominant_yellow_or_gold",
-                    "new_dominant_red_or_pink",
-                }
-                palette_issues = set(
-                    semantic_palette_quality.get("issues", [])
-                    if isinstance(semantic_palette_quality, dict)
-                    else []
-                )
-                source_upper_is_achromatic = bool(
-                    isinstance(pose_reference_upper_body_identity_palette, dict)
-                    and float(
-                        pose_reference_upper_body_identity_palette.get(
-                            "achromatic_fraction",
-                            0.0,
-                        )
-                    )
-                    >= 0.85
-                    and float(
-                        pose_reference_upper_body_identity_palette.get(
-                            "warm_fraction",
-                            1.0,
-                        )
-                    )
-                    <= 0.12
-                )
-                if (
-                    GENERATION_VISUAL_AUDITS_BLOCKING
-                    and palette_issues
-                    and palette_issues.issubset(warm_cast_issues)
-                    and source_upper_is_achromatic
-                    and canonical_similarity_reference is not None
-                ):
-                    corrected_cutout = (
-                        job_dir
-                        / f"pose_{index:02d}_semantic_cutout_color_corrected.png"
-                    )
-                    corrected_green = (
-                        job_dir / f"pose_{index:02d}_semantic_green_color_corrected.png"
-                    )
-                    semantic_color_recovery = neutralize_achromatic_warm_cast(
-                        canonical_similarity_reference,
-                        fallback_cutout,
-                        corrected_cutout,
-                        green_target=corrected_green,
-                    )
-                    if semantic_color_recovery.get("applied"):
-                        corrected_validation_cutout = (
-                            job_dir
-                            / f"pose_{index:02d}_semantic_color_chroma_validation.png"
-                        )
-                        corrected_chroma = evaluate_chroma_cutout(
-                            corrected_green,
-                            corrected_validation_cutout,
-                        )
-                        corrected_quality = pose_cutout_quality(
-                            corrected_cutout,
-                            pose,
-                            require_eating_mouth_contact=(require_eating_mouth_contact),
-                        )
-                        corrected_similarity = pose_similarity_quality(
-                            corrected_cutout,
-                            pose=pose,
-                            canonical_path=canonical_similarity_reference,
-                            previous_poses=accepted_pose_similarity_references,
-                        )
-                        semantic_palette = evaluate_pose_identity_palette(
-                            corrected_cutout,
-                            primary_reference=pose_reference_identity_palette,
-                            upper_body_reference=(
-                                pose_reference_upper_body_identity_palette
-                            ),
-                            bottom_exclusion=pose_palette_bottom_exclusion,
-                            bowl_action=bowl_action,
-                        )
-                        semantic_candidate_palette = semantic_palette["candidate"]
-                        semantic_upper_body_candidate_palette = semantic_palette[
-                            "upper_body_candidate"
-                        ]
-                        semantic_palette_quality = semantic_palette["quality"]
-                        semantic_color_recovery.update(
-                            {
-                                "before_identity_palette_issues": sorted(
-                                    palette_issues
-                                ),
-                                "after_identity_palette_issues": (
-                                    list(semantic_palette_quality.get("issues", []))
-                                    if isinstance(
-                                        semantic_palette_quality,
-                                        dict,
-                                    )
-                                    else []
-                                ),
-                                "post_chroma_acceptable": bool(
-                                    corrected_chroma.get("acceptable")
-                                ),
-                                "post_quality_acceptable": bool(
-                                    corrected_quality.get("acceptable")
-                                ),
-                                "post_similarity_acceptable": bool(
-                                    corrected_similarity.get("acceptable")
-                                ),
-                            }
-                        )
-                        fallback_cutout = corrected_cutout
-                        fallback_green = corrected_green
-                        chroma_metrics = {
-                            **corrected_chroma,
-                            "method": "rembg_then_lab_warm_cast_recovery",
-                            "semantic_cutout": fallback_semantic.name,
-                            "color_recovery": semantic_color_recovery,
-                        }
-                        quality = corrected_quality
-                        similarity = corrected_similarity
-                fallback_reference = (
-                    job_dir / f"pose_{index:02d}_qwen_reference_semantic_final.png"
-                )
-                chroma_metrics, fallback_cutout = (
-                    finalize_qwen_action_reference_candidate(
-                        chroma_metrics,
-                        fallback_cutout,
-                        fallback_reference,
-                        action=action_key(pose),
-                    )
-                )
-                if chroma_metrics.get("acceptable") is not True:
-                    raise RuntimeError(
-                        "Semantic fallback final 512 RGBA normalization failed: "
-                        + str(
-                            chroma_metrics.get(
-                                "final_reference_normalization_error",
-                                "unknown normalization error",
+                        "palette_reference_role": (
+                            "uploaded_identity_source"
+                            if (
+                                (force_qwen_reference and upload_integrity is not None)
+                                or
+                                effective_pose_identity_input_policy
+                                in {
+                                    POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,
+                                    POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
+                                }
                             )
-                        )
-                    )
-                fallback_cleanup = (
-                    neutralize_uploaded_identity_chroma_spill(
-                        fallback_cutout,
-                        source_identity_palette,
-                    )
-                    if GENERATION_VISUAL_AUDITS_BLOCKING
-                    else {
-                        "policy": UPLOADED_IDENTITY_CHROMA_SPILL_POLICY,
-                        "applied": False,
-                        "status": "skipped_advisory",
-                    }
-                )
-                chroma_metrics = merge_identity_chroma_spill_cleanup(
-                    chroma_metrics,
-                    fallback_cleanup,
-                    blocking=bool(GENERATION_VISUAL_AUDITS_BLOCKING),
-                )
-                quality = (
-                    pose_cutout_quality(
-                        fallback_cutout,
-                        pose,
-                        require_eating_mouth_contact=(
-                            require_eating_mouth_contact
+                            else "approved_canonical_character"
                         ),
-                    )
-                    if GENERATION_VISUAL_AUDITS_BLOCKING
-                    else skipped_visual_audit("semantic_subject_quality")
-                )
-                similarity = (
-                    pose_similarity_quality(
-                        fallback_cutout,
-                        pose=pose,
-                        canonical_path=canonical_similarity_reference,
-                        previous_poses=accepted_pose_similarity_references,
-                    )
-                    if GENERATION_VISUAL_AUDITS_BLOCKING
-                    else skipped_visual_audit("semantic_pose_similarity")
-                )
-                semantic_palette = evaluate_pose_identity_palette(
-                    fallback_cutout,
-                    primary_reference=pose_reference_identity_palette,
-                    upper_body_reference=(pose_reference_upper_body_identity_palette),
-                    bottom_exclusion=pose_palette_bottom_exclusion,
-                    bowl_action=bowl_action,
-                )
-                semantic_candidate_palette = semantic_palette["candidate"]
-                semantic_upper_body_candidate_palette = semantic_palette[
-                    "upper_body_candidate"
-                ]
-                semantic_palette_quality = semantic_palette["quality"]
-                semantic_fur_silhouette_quality = (
-                    eating_fur_silhouette_quality(
-                        fallback_cutout,
-                        pose_fur_reference_path,
-                    )
-                    if (
-                        GENERATION_VISUAL_AUDITS_BLOCKING
-                        and pose_fur_reference_path is not None
-                    )
-                    else None
-                )
-                semantic_fur_surface_quality: dict[str, Any] | None = None
-                if fur_surface_gate_required:
-                    assert isinstance(pose_effective_subject_config, dict)
-                    semantic_fur_surface_quality = (
-                        evaluate_main_case_fur_surface_candidate(
-                            fallback_cutout,
-                            action=action_key(pose),
-                            alpha_provenance=str(chroma_metrics.get("method") or ""),
-                            effective_subject_config=(pose_effective_subject_config),
-                        )
-                    )
-                    semantic_attempt = int(fallback_record["attempt"])
-                    fur_surface_gate_attempt_audits.append(
-                        {
-                            "pose_index": index,
-                            "pose": pose,
-                            "action": action_key(pose),
-                            "attempt": semantic_attempt,
-                            "seed": fallback_record["seed"],
-                            "source": fallback_source.name,
-                            "alpha_cutout": fallback_cutout.name,
-                            "alpha_provenance": str(chroma_metrics.get("method") or ""),
-                            "semantic_recovery": True,
-                            "gate": semantic_fur_surface_quality,
-                            "consecutive_rejections": (
-                                fur_surface_rejection_streak
-                                + (
-                                    1
-                                    if semantic_fur_surface_quality.get("acceptable")
-                                    is not True
-                                    else 0
-                                )
-                            ),
-                            "result": (
-                                "passed"
-                                if semantic_fur_surface_quality.get("acceptable")
-                                is True
-                                else "rejected"
-                            ),
-                        }
-                    )
-                    fur_surface_gate_status_by_action[action_key(pose)] = (
-                        "candidate_passed"
-                        if semantic_fur_surface_quality.get("acceptable") is True
-                        else "failed"
+                        "selected_chroma": best_attempt["chroma"],
+                        "selected_quality": best_attempt["quality"],
+                        "selected_similarity": best_attempt["similarity"],
+                        "selected_identity_palette": best_attempt.get("identity_palette"),
+                        "selected_action_candidate_gate": best_attempt.get(
+                            "action_candidate_gate"
+                        ),
+                        "selected_canonical_identity_fallback": best_attempt.get(
+                            "canonical_identity_fallback"
+                        ),
+                        "selected_fur_silhouette": best_attempt.get("fur_silhouette"),
+                        "fur_surface_gate_policy": FUR_SURFACE_GATE_POLICY,
+                        "fur_surface_gate_version": FUR_SURFACE_GATE_VERSION,
+                        "fur_surface_threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
+                        "selected_fur_surface_gate": best_attempt.get("fur_surface_gate"),
+                        "grooming_pose_gate_policy": GROOMING_POSE_GATE_POLICY,
+                        "grooming_pose_gate_version": GROOMING_POSE_GATE_VERSION,
+                        "selected_grooming_pose_gate": best_attempt.get(
+                            "grooming_pose_gate"
+                        ),
+                        "selected_grooming_advisory_minimum_gate": best_attempt.get(
+                            "grooming_advisory_minimum_gate"
+                        ),
+                        "selected_color_recovery": best_attempt.get("color_recovery"),
+                        "selected_warm_palette_recovery": best_attempt.get(
+                            "warm_action_palette_recovery"
+                        ),
+                        "reference_identity_palette": pose_reference_identity_palette,
+                        "prompt_reference_identity_palette": (
+                            pose_identity_palette_prompt_signature
+                        ),
+                        "reference_upper_body_identity_palette": (
+                            pose_reference_upper_body_identity_palette
+                        ),
+                        "selected_candidate_identity_palette": best_attempt.get(
+                            "candidate_identity_palette"
+                        ),
+                        "selected_candidate_upper_body_identity_palette": best_attempt.get(
+                            "candidate_upper_body_identity_palette"
+                        ),
+                        "selected_settings": best_attempt["settings"],
+                        "transparent": keyframe_is_transparent,
+                        "background_removal_failed": best_attempt.get(
+                            "background_removal_failed", False
+                        ),
+                        "background_removal_error": best_attempt.get(
+                            "background_removal_error"
+                        ),
+                        "attempts": attempts,
+                    }
+
+                def persist_selected_quality_record() -> None:
+                    selected_quality_record.update(
+                        strict_first_frame_required=strict_first_frame_required,
+                        strict_first_frame_best_effort_selected=bool(
+                            best_attempt.get("strict_first_frame_best_effort_selected")
+                        ),
+                        strict_first_frame_best_effort_issues=list(
+                            best_attempt.get("strict_first_frame_best_effort_issues") or []
+                        ),
+                        strict_first_frame_best_effort_selection_key=(
+                            best_attempt.get(
+                                "strict_first_frame_best_effort_selection_key"
+                            )
+                        ),
+                        strict_first_frame_attempt_limit=(
+                            QWEN_FIRST_FRAME_MAX_ATTEMPTS
+                            if strict_first_frame_required
+                            else None
+                        ),
+                        selected_reference_path=str(selected_keyframe),
+                        selected_reference_sha256=file_sha256(selected_keyframe),
+                        original_upload_fallback_published=False,
+                        action_removed=False,
                     )
                     write_json_atomic(
                         job_dir
                         / "workflows"
-                        / f"qwen_pose_{index:02d}_fur_surface_gate.json",
-                        {
-                            "policy": FUR_SURFACE_GATE_POLICY,
-                            "gate_version": FUR_SURFACE_GATE_VERSION,
-                            "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
-                            "thresholds": fur_surface_thresholds_payload(),
-                            "fail_closed": True,
-                            "max_consecutive_rejections": (
-                                FUR_SURFACE_GATE_MAX_REJECTIONS
-                            ),
-                            "retry_policy": FUR_SURFACE_GATE_RETRY_POLICY,
-                            "preserves_configured_eating_bowl_recovery": True,
-                            "configured_eating_bowl_recovery_attempts": (
-                                QWEN_BOWL_POSE_EXTRA_ATTEMPTS
-                            ),
-                            "short_circuit": fur_surface_gate_short_circuit,
-                            "attempts": [
-                                item
-                                for item in fur_surface_gate_attempt_audits
-                                if item["pose_index"] == index
-                            ],
-                        },
+                        / f"qwen_pose_{index:02d}_quality.json",
+                        selected_quality_record,
                     )
-                    update_job(
-                        job_id,
-                        fur_surface_gate_status=dict(fur_surface_gate_status_by_action),
-                        fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
+
+                if strict_first_frame_required:
+                    strict_final_issues = strict_first_frame_record_issues(
+                        best_attempt,
+                        action=action_key(pose),
                     )
-                semantic_rejection_reason = semantic_recovery_gate_failure(
-                    chroma_metrics,
-                    quality,
-                    similarity,
-                    semantic_palette_quality,
-                    semantic_fur_silhouette_quality,
-                    semantic_fur_surface_quality,
-                    identity_palette_blocking=(
-                        advisory_action_candidate_gate_required
-                    ),
-                )
-                semantic_identity_safe = bool(
-                    isinstance(semantic_palette_quality, dict)
-                    and semantic_palette_quality.get("acceptable") is True
-                )
-                semantic_best_effort_issues: list[str] = (
-                    ["strict_visual_semantic_matte_invalid"]
-                    if action_semantic_strict_error is not None
-                    else []
-                )
-                if semantic_rejection_reason is not None:
-                    append_recovery_event(
-                        job_id,
-                        {
-                            "stage": "cartoon_keyframe",
-                            "pose_index": index,
-                            "attempt": int(fallback_record["attempt"]),
-                            "reason": semantic_rejection_reason,
-                            "strategy": "rembg_u2net_fallback",
-                            "profile": "rembg_u2net_fallback",
-                            "result": (
-                                "accepted_best_effort"
-                                if strict_first_frame_required
-                                and (
-                                    semantic_identity_safe
-                                    or GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
-                                )
-                                else "rejected"
-                            ),
-                            "chroma": chroma_metrics,
-                            "quality": quality,
-                            "similarity": similarity,
-                            "identity_palette": semantic_palette_quality,
-                            "fur_silhouette": (semantic_fur_silhouette_quality),
-                            "fur_surface_gate": (semantic_fur_surface_quality),
-                            "color_recovery": semantic_color_recovery,
-                        },
+                    best_effort_selected = bool(
+                        best_attempt.get("strict_first_frame_best_effort_selected")
+                        or strict_final_issues
                     )
-                    issues = list(chroma_metrics.get("issues", []))
-                    issues.extend(quality["issues"])
-                    issues.extend(similarity["issues"])
-                    if semantic_palette_quality is not None:
-                        issues.extend(semantic_palette_quality["issues"])
-                    if semantic_fur_silhouette_quality is not None:
-                        issues.extend(semantic_fur_silhouette_quality["issues"])
-                    if semantic_fur_surface_quality is not None:
-                        issues.extend(semantic_fur_surface_quality["issues"])
-                    semantic_best_effort_issues = list(
-                        dict.fromkeys([*semantic_best_effort_issues, *issues])
-                    )
-                    if fur_surface_gate_required and not strict_first_frame_required:
-                        update_job(
+                    if best_effort_selected:
+                        best_attempt["strict_first_frame_best_effort_selected"] = True
+                        best_attempt["strict_first_frame_best_effort_issues"] = list(
+                            dict.fromkeys(
+                                [
+                                    *(
+                                        best_attempt.get(
+                                            "strict_first_frame_best_effort_issues"
+                                        )
+                                        or []
+                                    ),
+                                    *strict_final_issues,
+                                ]
+                            )
+                        )
+                        append_recovery_event(
                             job_id,
-                            fur_surface_gate_final_quality={
-                                "scope": "qwen_action_reference_pre_scail",
-                                "status": "failed",
-                                "actions": dict(fur_surface_gate_selected_metrics),
-                                "failure": {
-                                    "action": action_key(pose),
-                                    "reason": semantic_rejection_reason,
-                                    "blocks_scail": True,
-                                },
-                                "final_video_frame_audit": False,
+                            {
+                                "stage": "cartoon_keyframe",
+                                "pose_index": index,
+                                "attempt": best_attempt.get("attempt"),
+                                "reason": "bounded_first_frame_best_effort_publication",
+                                "strategy": (
+                                    "publish_best_generated_candidate_and_continue_scail"
+                                ),
+                                "profile": best_attempt.get("profile"),
+                                "result": "published_best_effort",
+                                "issues": best_attempt[
+                                    "strict_first_frame_best_effort_issues"
+                                ],
+                                "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                                "original_upload_fallback_published": False,
+                                "action_removed": False,
                             },
                         )
-                    if not strict_first_frame_required:
-                        raise RuntimeError(
-                            f"Pose {index} semantic recovery failed quality checks: "
-                            + ", ".join(issues)
-                        )
-                best_attempt = {
-                    **{
-                        field: fallback_record.get(field)
-                        for field in POSE_ATTEMPT_PROVENANCE_FIELDS
-                    },
-                    "attempt": int(fallback_record["attempt"]),
-                    "profile": "rembg_u2net_fallback",
-                    "seed": fallback_record["seed"],
-                    "keyframe": fallback_green.name,
-                    "cutout": fallback_cutout.name,
-                    "chroma": chroma_metrics,
-                    "quality": quality,
-                    "similarity": similarity,
-                    "identity_palette": semantic_palette_quality,
-                    "fur_silhouette": semantic_fur_silhouette_quality,
-                    "fur_surface_gate": semantic_fur_surface_quality,
-                    "color_recovery": semantic_color_recovery,
-                    "candidate_identity_palette": semantic_candidate_palette,
-                    "candidate_upper_body_identity_palette": (
-                        semantic_upper_body_candidate_palette
-                    ),
-                    "combined_penalty": round(
-                        float(quality["penalty"])
-                        + float(similarity["penalty"])
-                        + (
-                            float(semantic_palette_quality["penalty"])
-                            if semantic_palette_quality is not None
-                            else 0.0
-                        )
-                        + (
-                            float(semantic_fur_silhouette_quality["penalty"])
-                            if semantic_fur_silhouette_quality is not None
-                            else 0.0
-                        )
-                        + (
-                            float(
-                                semantic_fur_surface_quality.get(
-                                    "penalty",
-                                    1000.0,
-                                )
-                            )
-                            if isinstance(
-                                semantic_fur_surface_quality,
-                                dict,
-                            )
-                            else (1000.0 if fur_surface_gate_required else 0.0)
-                        ),
-                        6,
-                    ),
-                    "settings": fallback_record["settings"],
-                    "workflow": fallback_record["workflow"],
-                    "transparent": True,
-                    "background_removal_failed": False,
-                }
-                if semantic_best_effort_issues and (
-                    semantic_identity_safe
-                    or GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
-                ):
-                    best_attempt["strict_first_frame_best_effort_selected"] = True
-                    best_attempt["strict_first_frame_best_effort_issues"] = (
-                        semantic_best_effort_issues
+                    # The validated cache is content-addressed from the selected audit.
+                    # Persist that audit before attempting to store a strict cache hit.
+                    persist_selected_quality_record()
+                    cache_info = best_attempt.get("validated_first_frame_cache")
+                    cache_status = (
+                        "best_effort_not_cached" if best_effort_selected else "hit"
                     )
-                    best_attempt["strict_first_frame_best_effort_semantic_recovery"] = (
-                        True
-                    )
-                    best_attempt["visual_completion_fallback"] = bool(
-                        not semantic_identity_safe
-                    )
-                append_recovery_event(
-                    job_id,
-                    {
-                        "stage": "cartoon_keyframe",
-                        "pose_index": index,
-                        "attempt": best_attempt["attempt"],
-                        "reason": "qwen_chroma_retries_exhausted",
-                        "strategy": "rembg_u2net_fallback",
-                        "profile": "rembg_u2net_fallback",
-                        "result": (
-                            "accepted"
-                            if semantic_identity_safe
-                            else (
-                                "accepted_visual_completion_fallback"
-                                if GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
-                                else "rejected_identity_unsafe"
-                            )
-                        ),
-                        "chroma": chroma_metrics,
-                        "quality": quality,
-                        "similarity": similarity,
-                        "identity_palette": semantic_palette_quality,
-                        "fur_silhouette": semantic_fur_silhouette_quality,
-                        "fur_surface_gate": semantic_fur_surface_quality,
-                        "color_recovery": semantic_color_recovery,
-                    },
-                )
-            selected_attempt_number = int(best_attempt.get("attempt") or 0)
-            if not 1 <= selected_attempt_number <= QWEN_ACTION_CANDIDATE_ATTEMPTS:
-                raise RuntimeError(
-                    "Selected action candidate is outside the five-attempt budget."
-                )
-            selected_keyframe_source = job_dir / str(best_attempt["keyframe"])
-            selected_cutout_source = job_dir / str(best_attempt["cutout"])
-            selected_palette_before_recovery = best_attempt.get("identity_palette")
-            warm_action_recovery: dict[str, Any] | None = None
-            if (
-                isinstance(selected_palette_before_recovery, dict)
-                and isinstance(pose_reference_identity_palette, dict)
-                and canonical_similarity_reference is not None
-                and canonical_similarity_reference.is_file()
-                and selected_cutout_source.is_file()
-            ):
-                recovered_action_cutout = (
-                    job_dir
-                    / f"pose_{index:02d}_selected_warm_palette_recovered.png"
-                )
-                recovered_action_green = (
-                    job_dir
-                    / f"pose_{index:02d}_selected_warm_palette_recovered_green.png"
-                )
-                warm_action_recovery = attempt_warm_action_palette_recovery(
-                    selected_cutout_source,
-                    canonical_similarity_reference,
-                    recovered_action_cutout,
-                    recovered_action_green,
-                    source_palette=pose_reference_identity_palette,
-                    source_upper_body_palette=(
-                        pose_reference_upper_body_identity_palette
-                    ),
-                    current_quality=selected_palette_before_recovery,
-                    bottom_exclusion=pose_palette_bottom_exclusion,
-                    action=action_key(pose),
-                )
-                if warm_action_recovery.get("accepted") is True:
-                    recovered_pose_quality = pose_cutout_quality(
-                        recovered_action_cutout,
-                        pose,
-                        require_eating_mouth_contact=(
-                            require_eating_mouth_contact
-                        ),
-                    )
-                    previous_pose_quality = best_attempt.get("quality")
-                    pose_gate_non_regressed = bool(
-                        not isinstance(previous_pose_quality, dict)
-                        or previous_pose_quality.get("acceptable") is not True
-                        or recovered_pose_quality.get("acceptable") is True
-                    )
-                    warm_action_recovery.update(
-                        {
-                            "pre_recovery_pose_quality": previous_pose_quality,
-                            "post_recovery_pose_quality": recovered_pose_quality,
-                            "pose_gate_non_regressed": pose_gate_non_regressed,
-                        }
-                    )
-                    if not pose_gate_non_regressed:
-                        warm_action_recovery.update(
-                            {
-                                "accepted": False,
-                                "rejection_reason": (
-                                    "post_recovery_pose_gate_regressed"
-                                ),
-                                "completion_blocked": False,
-                            }
-                        )
-                    else:
-                        previous_palette_penalty = float(
-                            selected_palette_before_recovery.get(
-                                "penalty",
-                                0.0,
-                            )
-                            or 0.0
-                        )
-                        recovered_palette = warm_action_recovery[
-                            "post_recovery_quality"
-                        ]
-                        recovered_palette_penalty = float(
-                            recovered_palette.get("penalty", 0.0) or 0.0
-                        )
-                        best_attempt["keyframe"] = recovered_action_green.name
-                        best_attempt["cutout"] = recovered_action_cutout.name
-                        best_attempt["quality"] = recovered_pose_quality
-                        best_attempt["identity_palette"] = recovered_palette
-                        best_attempt["candidate_identity_palette"] = (
-                            warm_action_recovery.get("candidate_palette")
-                        )
-                        best_attempt[
-                            "candidate_upper_body_identity_palette"
-                        ] = warm_action_recovery.get(
-                            "upper_body_candidate_palette"
-                        )
-                        best_attempt["combined_penalty"] = round(
-                            max(
-                                0.0,
-                                float(
-                                    best_attempt.get("combined_penalty", 0.0)
-                                    or 0.0
-                                )
-                                - previous_palette_penalty
-                                + recovered_palette_penalty,
-                            ),
-                            6,
-                        )
-                        prior_color_recovery = best_attempt.get("color_recovery")
-                        best_attempt["color_recovery"] = {
-                            **(
-                                prior_color_recovery
-                                if isinstance(prior_color_recovery, dict)
-                                else {}
-                            ),
-                            "warm_action_palette_recovery": (
-                                warm_action_recovery
-                            ),
-                        }
-                        best_attempt["warm_action_palette_recovery"] = (
-                            warm_action_recovery
-                        )
-                        best_attempt["chroma"] = {
-                            **best_attempt["chroma"],
-                            "warm_action_palette_recovery": (
-                                warm_action_recovery
-                            ),
-                        }
-                        selected_keyframe_source = recovered_action_green
-                        selected_cutout_source = recovered_action_cutout
-                action_recovery_records = get_job(job_id).get(
-                    "action_warm_palette_recovery"
-                )
-                if isinstance(action_recovery_records, dict):
-                    action_recovery_records = json.loads(
-                        json.dumps(action_recovery_records)
-                    )
-                else:
-                    action_recovery_records = {}
-                action_recovery_records[action_key(pose)] = warm_action_recovery
-                update_job(
-                    job_id,
-                    action_warm_palette_recovery=action_recovery_records,
-                    action_warm_palette_recovery_policy=(
-                        WARM_ACTION_PALETTE_RECOVERY_POLICY
-                    ),
-                    action_warm_palette_recovery_blocks_completion=False,
-                )
-                if warm_action_recovery.get("attempted") is True:
-                    append_recovery_event(
-                        job_id,
-                        {
-                            "stage": "selected_action_warm_palette_recovery",
-                            "pose_index": index,
-                            "attempt": selected_attempt_number,
-                            "action": action_key(pose),
-                            "reason": "generated_action_invented_neutral_patch",
-                            "strategy": WARM_ACTION_PALETTE_RECOVERY_POLICY,
-                            "result": (
-                                "accepted"
-                                if warm_action_recovery.get("accepted") is True
-                                else "skipped_nonblocking"
-                            ),
-                            "recovery": warm_action_recovery,
-                        },
-                    )
-            selected_palette = best_attempt.get("identity_palette")
-            selected_identity_palette_acceptable = bool(
-                isinstance(selected_palette, dict)
-                and selected_palette.get("acceptable") is True
-            )
-            selected_visual_completion_fallback = bool(
-                best_attempt.get("strict_first_frame_best_effort_selected")
-                or not selected_identity_palette_acceptable
-            )
-            if (
-                not GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_ENABLED
-                and (
-                not isinstance(selected_palette, dict)
-                or selected_palette.get("acceptable") is not True
-                )
-            ):
-                fail_identity_budget_exhausted(
-                    selected_palette
-                    if isinstance(selected_palette, dict)
-                    else None
-                )
-            action_selection_records = get_job(job_id).get(
-                "action_candidate_selection_by_action"
-            )
-            if isinstance(action_selection_records, dict):
-                action_selection_records = json.loads(
-                    json.dumps(action_selection_records)
-                )
-            else:
-                action_selection_records = {}
-            action_selection_records[action_key(pose)] = {
-                "policy": GENERATION_ACTION_CANDIDATE_GATE_POLICY,
-                "source_kind": "qwen_generated_action_candidate",
-                "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                "selected_attempt": selected_attempt_number,
-                "selected_penalty": best_attempt.get("combined_penalty"),
-                "identity_palette_acceptable": (
-                    selected_identity_palette_acceptable
-                ),
-                "result": (
-                    "selected_best_of_five"
-                    if not selected_visual_completion_fallback
-                    else "selected_generated_completion_fallback"
-                ),
-                "visual_completion_fallback": (
-                    selected_visual_completion_fallback
-                ),
-                "selected_keyframe_sha256": file_sha256(
-                    selected_keyframe_source
-                ),
-                "selected_cutout_sha256": file_sha256(selected_cutout_source),
-                "original_upload_used": False,
-                "approved_canonical_used_as_output": False,
-            }
-            update_job(
-                job_id,
-                action_candidate_gate_policy=(
-                    GENERATION_ACTION_CANDIDATE_GATE_POLICY
-                ),
-                action_candidate_gate_status=(
-                    "best_of_five_selected"
-                    if not selected_visual_completion_fallback
-                    else "completion_first_best_of_five_selected"
-                ),
-                action_candidate_gate_action=action_key(pose),
-                action_candidate_gate_attempt_budget=(
-                    QWEN_ACTION_CANDIDATE_ATTEMPTS
-                ),
-                action_candidate_gate_attempts_completed=(
-                    QWEN_ACTION_CANDIDATE_ATTEMPTS
-                ),
-                action_candidate_gate_selected_attempt=selected_attempt_number,
-                action_candidate_gate_selected_penalty=(
-                    best_attempt.get("combined_penalty")
-                ),
-                action_candidate_gate_returns_original_upload=False,
-                action_candidate_gate_returns_approved_canonical=False,
-                action_candidate_selection_by_action=action_selection_records,
-                visual_completion_fallback_used=(
-                    selected_visual_completion_fallback
-                ),
-                visual_completion_fallback_policy=(
-                    GENERATION_COMPLETION_FIRST_VISUAL_FALLBACK_POLICY
-                    if selected_visual_completion_fallback
-                    else None
-                ),
-            )
-            append_recovery_event(
-                job_id,
-                {
-                    "stage": "cartoon_keyframe",
-                    "pose_index": index,
-                    "attempt": selected_attempt_number,
-                    "reason": "five_candidate_budget_completed",
-                    "strategy": (
-                        "select_lowest_penalty_identity_safe_generated_candidate"
-                        if not selected_visual_completion_fallback
-                        else "select_lowest_risk_generated_completion_candidate"
-                    ),
-                    "profile": best_attempt["profile"],
-                    "result": (
-                        "selected_best_of_five"
-                        if not selected_visual_completion_fallback
-                        else "selected_generated_completion_fallback"
-                    ),
-                    "attempt_budget": QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                    "attempts_completed": QWEN_ACTION_CANDIDATE_ATTEMPTS,
-                    "combined_penalty": best_attempt.get("combined_penalty"),
-                },
-            )
-            shutil.copy2(job_dir / best_attempt["keyframe"], keyframe)
-            keyframe_is_transparent = bool(best_attempt.get("transparent", True))
-            if keyframe_is_transparent:
-                keyframe_cutout = job_dir / f"pose_{index:02d}_qwen_cutout.png"
-                shutil.copy2(job_dir / best_attempt["cutout"], keyframe_cutout)
-                selected_keyframe = keyframe_cutout
-            else:
-                selected_keyframe = keyframe
-            reference_generation_degraded = bool(
-                best_attempt.get("reference_generation_degraded")
-            )
-            if fur_surface_gate_required and not reference_generation_degraded:
-                selected_surface = best_attempt.get("fur_surface_gate")
-                selected_digest = file_sha256(selected_keyframe)
-                selected_surface_issues: list[str] = []
-                if (
-                    not isinstance(selected_surface, dict)
-                    or selected_surface.get("acceptable") is not True
-                    or selected_surface.get("status") != "passed"
-                ):
-                    selected_surface_issues.append(
-                        "post_selection_fur_surface_gate_not_acceptable"
-                    )
-                else:
-                    selected_gate_metadata = selected_surface.get("gate")
-                    if (
-                        not isinstance(selected_gate_metadata, dict)
-                        or selected_gate_metadata.get("policy")
-                        != FUR_SURFACE_GATE_POLICY
-                        or selected_gate_metadata.get("gate_version")
-                        != FUR_SURFACE_GATE_VERSION
-                        or selected_gate_metadata.get("threshold_version")
-                        != FUR_SURFACE_THRESHOLD_VERSION
-                        or selected_gate_metadata.get("action") != action_key(pose)
-                        or selected_gate_metadata.get("candidate_sha256")
-                        != selected_digest
-                    ):
-                        selected_surface_issues.append(
-                            "post_selection_fur_surface_provenance_changed"
-                        )
-                if selected_surface_issues:
-                    fur_surface_gate_status_by_action[action_key(pose)] = "failed"
-                    if not strict_first_frame_required:
-                        update_job(
-                            job_id,
-                            fur_surface_gate_status=dict(
-                                fur_surface_gate_status_by_action
-                            ),
-                            fur_surface_gate_attempts=(
-                                fur_surface_gate_attempt_audits
-                            ),
-                        )
-                        raise RuntimeError(
-                            "Main_case fur surface gate selected an invalid "
-                            f"{action_key(pose)} candidate."
-                        )
-                    selected_surface = (
-                        json.loads(json.dumps(selected_surface))
-                        if isinstance(selected_surface, dict)
-                        else {}
-                    )
-                    selected_surface.update(
-                        acceptable=False,
-                        status="best_effort_selected",
-                        best_effort_accepted=True,
-                        strict_acceptable=False,
-                        blocks_scail=False,
-                        issues=list(
-                            dict.fromkeys(
-                                [
-                                    *(selected_surface.get("issues") or []),
-                                    *selected_surface_issues,
-                                ]
-                            )
-                        ),
-                        selected_candidate_path=str(selected_keyframe),
-                        selected_candidate_sha256=selected_digest,
-                        selected_attempt=best_attempt["attempt"],
-                    )
-                    best_attempt["fur_surface_gate"] = selected_surface
-                    best_attempt["strict_first_frame_best_effort_selected"] = True
-                    best_attempt["strict_first_frame_best_effort_issues"] = list(
-                        dict.fromkeys(
-                            [
-                                *(
-                                    best_attempt.get(
-                                        "strict_first_frame_best_effort_issues"
-                                    )
-                                    or []
-                                ),
-                                *selected_surface_issues,
-                            ]
-                        )
-                    )
-                    fur_surface_gate_selected_metrics[action_key(pose)] = (
-                        selected_surface
-                    )
-                    fur_surface_gate_status_by_action[action_key(pose)] = (
-                        "best_effort_selected"
-                    )
-                    update_job(
-                        job_id,
-                        fur_surface_gate_status=dict(
-                            fur_surface_gate_status_by_action
-                        ),
-                        fur_surface_gate_attempts=(fur_surface_gate_attempt_audits),
-                        fur_surface_gate_selected_metrics=(
-                            fur_surface_gate_selected_metrics
-                        ),
-                        fur_surface_gate_final_quality={
-                            "scope": "qwen_action_reference_pre_scail",
-                            "status": "best_effort_selected",
-                            "policy": FUR_SURFACE_GATE_POLICY,
-                            "gate_version": FUR_SURFACE_GATE_VERSION,
-                            "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
-                            "actions": dict(fur_surface_gate_selected_metrics),
-                            "blocks_scail": False,
-                            "final_video_frame_audit": False,
-                        },
-                    )
-                else:
-                    selected_surface = json.loads(json.dumps(selected_surface))
-                    selected_surface["selected_candidate_path"] = str(
-                        selected_keyframe
-                    )
-                    selected_surface["selected_candidate_sha256"] = selected_digest
-                    selected_surface["selected_attempt"] = best_attempt["attempt"]
-                    best_attempt["fur_surface_gate"] = selected_surface
-                    fur_surface_gate_selected_metrics[action_key(pose)] = (
-                        selected_surface
-                    )
-                    fur_surface_gate_status_by_action[action_key(pose)] = "passed"
-                    update_job(
-                        job_id,
-                        fur_surface_gate_status=dict(
-                            fur_surface_gate_status_by_action
-                        ),
-                        fur_surface_gate_attempts=fur_surface_gate_attempt_audits,
-                        fur_surface_gate_selected_metrics=(
-                            fur_surface_gate_selected_metrics
-                        ),
-                        fur_surface_gate_final_quality={
-                            "scope": "qwen_action_reference_pre_scail",
-                            "status": "running",
-                            "policy": FUR_SURFACE_GATE_POLICY,
-                            "gate_version": FUR_SURFACE_GATE_VERSION,
-                            "threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
-                            "actions": dict(fur_surface_gate_selected_metrics),
-                            "final_video_frame_audit": False,
-                        },
-                    )
-            if grooming_pose_gate_required and not reference_generation_degraded:
-                selected_gate = best_attempt.get("grooming_pose_gate")
-                if not isinstance(selected_gate, dict) or not selected_gate.get(
-                    "acceptable"
-                ):
-                    if not strict_first_frame_required:
-                        update_job(
-                            job_id,
-                            grooming_pose_gate_status="failed",
-                            grooming_pose_gate_attempts=(
-                                grooming_pose_gate_attempt_audits
-                            ),
-                        )
-                        raise RuntimeError(
-                            "Main_case grooming pose gate selected an invalid "
-                            "candidate."
-                        )
-                    selected_gate = (
-                        json.loads(json.dumps(selected_gate))
-                        if isinstance(selected_gate, dict)
-                        else {}
-                    )
-                    selected_gate.update(
-                        acceptable=False,
-                        status="best_effort_selected",
-                        best_effort_accepted=True,
-                        strict_acceptable=False,
-                        blocks_scail=False,
-                        issues=list(
-                            dict.fromkeys(
-                                [
-                                    *(selected_gate.get("issues") or []),
-                                    "post_selection_grooming_pose_gate_not_acceptable",
-                                ]
-                            )
-                        ),
-                    )
-                    best_attempt["grooming_pose_gate"] = selected_gate
-                    best_attempt["strict_first_frame_best_effort_selected"] = True
-                    best_attempt["strict_first_frame_best_effort_issues"] = list(
-                        dict.fromkeys(
-                            [
-                                *(
-                                    best_attempt.get(
-                                        "strict_first_frame_best_effort_issues"
-                                    )
-                                    or []
-                                ),
-                                "post_selection_grooming_pose_gate_not_acceptable",
-                            ]
-                        )
-                    )
-                    grooming_pose_gate_selected_metrics[action_key(pose)] = (
-                        selected_gate
-                    )
-                    update_job(
-                        job_id,
-                        grooming_pose_gate_status="best_effort_selected",
-                        grooming_pose_gate_attempts=(
-                            grooming_pose_gate_attempt_audits
-                        ),
-                        grooming_pose_gate_selected_metrics=(
-                            grooming_pose_gate_selected_metrics
-                        ),
-                    )
-                else:
-                    grooming_pose_gate_selected_metrics[action_key(pose)] = (
-                        selected_gate
-                    )
-                    update_job(
-                        job_id,
-                        grooming_pose_gate_status="passed",
-                        grooming_pose_gate_attempts=(
-                            grooming_pose_gate_attempt_audits
-                        ),
-                        grooming_pose_gate_selected_metrics=(
-                            grooming_pose_gate_selected_metrics
-                        ),
-                    )
-            if (
-                advisory_grooming_minimum_gate_required
-                and not reference_generation_degraded
-            ):
-                selected_minimum_gate = best_attempt.get(
-                    "grooming_advisory_minimum_gate"
-                )
-                selected_digest = file_sha256(selected_keyframe)
-                selected_minimum_gate_passed = bool(
-                    isinstance(selected_minimum_gate, dict)
-                    and (
-                        selected_minimum_gate.get("acceptable") is True
-                        or selected_minimum_gate.get(
-                            "degraded_fallback_accepted"
-                        )
-                        is True
-                    )
-                )
-                if (
-                    not isinstance(selected_minimum_gate, dict)
-                    or not selected_minimum_gate_passed
-                    or selected_minimum_gate.get("policy")
-                    != GROOMING_ADVISORY_MINIMUM_GATE_POLICY
-                    or selected_minimum_gate.get("version")
-                    != GROOMING_ADVISORY_MINIMUM_GATE_VERSION
-                    or selected_minimum_gate.get("candidate_sha256")
-                    != selected_digest
-                    or pose_palette_reference_path is None
-                    or grooming_identity_contract_reference_path is None
-                    or selected_minimum_gate.get("identity_reference_path")
-                    != str(grooming_identity_contract_reference_path)
-                    or selected_minimum_gate.get("identity_reference_sha256")
-                    != file_sha256(grooming_identity_contract_reference_path)
-                    or selected_minimum_gate.get(
-                        "identity_palette_reference_path"
-                    )
-                    != str(pose_palette_reference_path)
-                    or selected_minimum_gate.get(
-                        "identity_palette_reference_sha256"
-                    )
-                    != file_sha256(pose_palette_reference_path)
-                ):
-                    if strict_first_frame_required:
-                        invalid_minimum_gate = (
-                            dict(selected_minimum_gate)
-                            if isinstance(selected_minimum_gate, dict)
-                            else {}
-                        )
-                        invalid_minimum_issues = list(
-                            invalid_minimum_gate.get("issues") or []
-                        )
-                        invalid_minimum_issues.append(
-                            "post_selection_grooming_minimum_contract_invalid"
-                        )
-                        invalid_minimum_gate.update(
-                            policy=GROOMING_ADVISORY_MINIMUM_GATE_POLICY,
-                            version=GROOMING_ADVISORY_MINIMUM_GATE_VERSION,
-                            acceptable=False,
-                            issues=list(dict.fromkeys(invalid_minimum_issues)),
-                            candidate_sha256=selected_digest,
-                            degraded_fallback_accepted=True,
-                            strict_acceptable=False,
-                            best_effort_accepted=True,
-                            degraded_reason=(
-                                "bounded_first_frame_attempt_budget_exhausted"
-                            ),
-                            blocks_scail=False,
-                        )
-                        if pose_palette_reference_path is not None:
-                            invalid_minimum_gate.update(
-                                identity_palette_reference_path=str(
-                                    pose_palette_reference_path
-                                ),
-                                identity_palette_reference_sha256=file_sha256(
-                                    pose_palette_reference_path
-                                ),
-                            )
-                        if grooming_identity_contract_reference_path is not None:
-                            invalid_minimum_gate.update(
-                                identity_reference_path=str(
-                                    grooming_identity_contract_reference_path
-                                ),
-                                identity_reference_sha256=file_sha256(
-                                    grooming_identity_contract_reference_path
-                                ),
-                            )
-                        selected_minimum_gate = invalid_minimum_gate
-                        best_attempt[
-                            "strict_first_frame_best_effort_selected"
-                        ] = True
-                        best_attempt[
-                            "strict_first_frame_best_effort_issues"
-                        ] = invalid_minimum_gate["issues"]
-                        update_job(
-                            job_id,
-                            grooming_pose_gate_status=(
-                                "minimum_contract_best_effort_selected"
-                            ),
-                            grooming_advisory_minimum_gate_status=(
-                                "best_effort_selected"
-                            ),
-                            grooming_advisory_minimum_gate_attempts=(
-                                grooming_advisory_minimum_gate_attempts
-                            ),
-                        )
-                    else:
-                        update_job(
-                            job_id,
-                            grooming_pose_gate_status="minimum_contract_failed",
-                            grooming_advisory_minimum_gate_status="failed",
-                            grooming_advisory_minimum_gate_attempts=(
-                                grooming_advisory_minimum_gate_attempts
-                            ),
-                        )
-                        raise RuntimeError(
-                            "Advisory grooming selected candidate lost its minimum "
-                            "action/identity contract."
-                        )
-                selected_minimum_gate = json.loads(
-                    json.dumps(selected_minimum_gate)
-                )
-                selected_minimum_gate["selected_candidate_path"] = str(
-                    selected_keyframe
-                )
-                selected_minimum_gate["selected_candidate_sha256"] = (
-                    selected_digest
-                )
-                selected_minimum_gate["selected_attempt"] = best_attempt["attempt"]
-                selected_minimum_gate["selection_status"] = (
-                    "degraded_passed"
-                    if selected_minimum_gate.get("degraded_fallback_accepted")
-                    is True
-                    else "passed"
-                )
-                best_attempt["grooming_advisory_minimum_gate"] = (
-                    selected_minimum_gate
-                )
-                grooming_advisory_minimum_gate_selected[action_key(pose)] = (
-                    selected_minimum_gate
-                )
-                selected_topology = grooming_foreleg_topology_selection_evidence(
-                    best_attempt
-                )
-                selected_topology_by_action = get_job(job_id).get(
-                    "grooming_foreleg_topology_selected"
-                )
-                selected_topology_by_action = (
-                    json.loads(json.dumps(selected_topology_by_action))
-                    if isinstance(selected_topology_by_action, dict)
-                    else {}
-                )
-                selected_topology_by_action[action_key(pose)] = selected_topology
-                update_job(
-                    job_id,
-                    grooming_pose_gate_status=(
-                        "minimum_contract_degraded_passed"
-                        if selected_minimum_gate.get(
-                            "degraded_fallback_accepted"
-                        )
-                        is True
-                        else "minimum_contract_passed"
-                    ),
-                    grooming_advisory_minimum_gate_status=(
-                        "degraded_passed"
-                        if selected_minimum_gate.get(
-                            "degraded_fallback_accepted"
-                        )
-                        is True
-                        else "passed"
-                    ),
-                    grooming_advisory_minimum_gate_attempts=(
-                        grooming_advisory_minimum_gate_attempts
-                    ),
-                    grooming_advisory_minimum_gate_selected=(
-                        grooming_advisory_minimum_gate_selected
-                    ),
-                    grooming_foreleg_topology_policy=(
-                        selected_topology.get("policy")
-                    ),
-                    grooming_foreleg_topology_status=(
-                        "advisory_passed"
-                        if selected_topology.get("available") is True
-                        and selected_topology.get("acceptable") is True
-                        else "advisory_drift"
-                    ),
-                    grooming_foreleg_topology_selected=(
-                        selected_topology_by_action
-                    ),
-                    grooming_foreleg_topology_blocks_completion=False,
-                )
-            selected_pose_provenance = pose_attempt_provenance(best_attempt)
-            if not selected_pose_provenance["complete"]:
-                LOGGER.warning(
-                    "%s pose %s selected candidate has incomplete workflow "
-                    "provenance: %s",
-                    job_id,
-                    index,
-                    selected_pose_provenance["issues"],
-                )
-                record_nonblocking_job_anomaly(
-                    job_id,
-                    code=f"pose_{index:02d}_workflow_provenance_incomplete",
-                    message=(
-                        f"动作 {index} 已生成，但内部工作流来源记录不完整；"
-                        "生成继续，结果需保留降级审计。"
-                    ),
-                    stage="pose_workflow_provenance",
-                    details={
-                        "pose_index": index,
-                        "pose": pose,
-                        "selected_attempt": best_attempt.get("attempt"),
-                        "selected_profile": best_attempt.get("profile"),
-                        "missing_fields": selected_pose_provenance[
-                            "missing_fields"
-                        ],
-                        "unmapped_workflow_input_names": (
-                            selected_pose_provenance[
-                                "unmapped_workflow_input_names"
-                            ]
-                        ),
-                    },
-                )
-            write_workflow(
-                job_dir, f"qwen_pose_{index:02d}.json", best_attempt["workflow"]
-            )
-            selected_quality_record = {
-                    "selected_attempt": best_attempt["attempt"],
-                    "selected_profile": best_attempt["profile"],
-                    "identity_input_policy": (effective_pose_identity_input_policy),
-                    "image1_input_name": selected_pose_provenance[
-                        "image1_input_name"
-                    ],
-                    "image2_input_name": selected_pose_provenance[
-                        "image2_input_name"
-                    ],
-                    "image3_input_name": selected_pose_provenance[
-                        "image3_input_name"
-                    ],
-                    "sampler_latent_input_name": selected_pose_provenance[
-                        "sampler_latent_input_name"
-                    ],
-                    "identity_input_name": selected_pose_provenance[
-                        "identity_input_name"
-                    ],
-                    "geometry_input_name": selected_pose_provenance[
-                        "geometry_input_name"
-                    ],
-                    "workflow_input_provenance": selected_pose_provenance,
-                    "grooming_foreleg_repair": best_attempt.get(
-                        "grooming_foreleg_repair"
-                    ),
-                    "palette_reference_role": (
-                        "uploaded_identity_source"
-                        if (
-                            (force_qwen_reference and upload_integrity is not None)
-                            or
-                            effective_pose_identity_input_policy
-                            in {
-                                POSE_IDENTITY_INPUT_POLICY_DIRECT_UPLOAD,
-                                POSE_IDENTITY_INPUT_POLICY_PROFILE_GEOMETRY_FIRST,
-                            }
-                        )
-                        else "approved_canonical_character"
-                    ),
-                    "selected_chroma": best_attempt["chroma"],
-                    "selected_quality": best_attempt["quality"],
-                    "selected_similarity": best_attempt["similarity"],
-                    "selected_identity_palette": best_attempt.get("identity_palette"),
-                    "selected_action_candidate_gate": best_attempt.get(
-                        "action_candidate_gate"
-                    ),
-                    "selected_canonical_identity_fallback": best_attempt.get(
-                        "canonical_identity_fallback"
-                    ),
-                    "selected_fur_silhouette": best_attempt.get("fur_silhouette"),
-                    "fur_surface_gate_policy": FUR_SURFACE_GATE_POLICY,
-                    "fur_surface_gate_version": FUR_SURFACE_GATE_VERSION,
-                    "fur_surface_threshold_version": (FUR_SURFACE_THRESHOLD_VERSION),
-                    "selected_fur_surface_gate": best_attempt.get("fur_surface_gate"),
-                    "grooming_pose_gate_policy": GROOMING_POSE_GATE_POLICY,
-                    "grooming_pose_gate_version": GROOMING_POSE_GATE_VERSION,
-                    "selected_grooming_pose_gate": best_attempt.get(
-                        "grooming_pose_gate"
-                    ),
-                    "selected_grooming_advisory_minimum_gate": best_attempt.get(
-                        "grooming_advisory_minimum_gate"
-                    ),
-                    "selected_color_recovery": best_attempt.get("color_recovery"),
-                    "selected_warm_palette_recovery": best_attempt.get(
-                        "warm_action_palette_recovery"
-                    ),
-                    "reference_identity_palette": pose_reference_identity_palette,
-                    "prompt_reference_identity_palette": (
-                        pose_identity_palette_prompt_signature
-                    ),
-                    "reference_upper_body_identity_palette": (
-                        pose_reference_upper_body_identity_palette
-                    ),
-                    "selected_candidate_identity_palette": best_attempt.get(
-                        "candidate_identity_palette"
-                    ),
-                    "selected_candidate_upper_body_identity_palette": best_attempt.get(
-                        "candidate_upper_body_identity_palette"
-                    ),
-                    "selected_settings": best_attempt["settings"],
-                    "transparent": keyframe_is_transparent,
-                    "background_removal_failed": best_attempt.get(
-                        "background_removal_failed", False
-                    ),
-                    "background_removal_error": best_attempt.get(
-                        "background_removal_error"
-                    ),
-                    "attempts": attempts,
-                }
-
-            def persist_selected_quality_record() -> None:
-                selected_quality_record.update(
-                    strict_first_frame_required=strict_first_frame_required,
-                    strict_first_frame_best_effort_selected=bool(
-                        best_attempt.get("strict_first_frame_best_effort_selected")
-                    ),
-                    strict_first_frame_best_effort_issues=list(
-                        best_attempt.get("strict_first_frame_best_effort_issues") or []
-                    ),
-                    strict_first_frame_best_effort_selection_key=(
-                        best_attempt.get(
-                            "strict_first_frame_best_effort_selection_key"
-                        )
-                    ),
-                    strict_first_frame_attempt_limit=(
-                        QWEN_FIRST_FRAME_MAX_ATTEMPTS
-                        if strict_first_frame_required
-                        else None
-                    ),
-                    selected_reference_path=str(selected_keyframe),
-                    selected_reference_sha256=file_sha256(selected_keyframe),
-                    original_upload_fallback_published=False,
-                    action_removed=False,
-                )
-                write_json_atomic(
-                    job_dir
-                    / "workflows"
-                    / f"qwen_pose_{index:02d}_quality.json",
-                    selected_quality_record,
-                )
-
-            if strict_first_frame_required:
-                strict_final_issues = strict_first_frame_record_issues(
-                    best_attempt,
-                    action=action_key(pose),
-                )
-                best_effort_selected = bool(
-                    best_attempt.get("strict_first_frame_best_effort_selected")
-                    or strict_final_issues
-                )
-                if best_effort_selected:
-                    best_attempt["strict_first_frame_best_effort_selected"] = True
-                    best_attempt["strict_first_frame_best_effort_issues"] = list(
-                        dict.fromkeys(
-                            [
-                                *(
-                                    best_attempt.get(
-                                        "strict_first_frame_best_effort_issues"
-                                    )
-                                    or []
-                                ),
-                                *strict_final_issues,
-                            ]
-                        )
-                    )
-                    append_recovery_event(
-                        job_id,
-                        {
-                            "stage": "cartoon_keyframe",
-                            "pose_index": index,
-                            "attempt": best_attempt.get("attempt"),
-                            "reason": "bounded_first_frame_best_effort_publication",
-                            "strategy": (
-                                "publish_best_generated_candidate_and_continue_scail"
-                            ),
-                            "profile": best_attempt.get("profile"),
-                            "result": "published_best_effort",
-                            "issues": best_attempt[
-                                "strict_first_frame_best_effort_issues"
-                            ],
-                            "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
-                            "original_upload_fallback_published": False,
-                            "action_removed": False,
-                        },
-                    )
-                # The validated cache is content-addressed from the selected audit.
-                # Persist that audit before attempting to store a strict cache hit.
-                persist_selected_quality_record()
-                cache_info = best_attempt.get("validated_first_frame_cache")
-                cache_status = (
-                    "best_effort_not_cached" if best_effort_selected else "hit"
-                )
-                if best_effort_selected:
-                    cache_info = None
-                elif not isinstance(cache_info, dict):
-                    try:
-                        cache_info = store_validated_first_frame_cache(
-                            job_id,
-                            get_job(job_id),
-                            action=action_key(pose),
-                            pose_index=index,
-                            reference_path=selected_keyframe,
-                        )
-                        cache_status = "stored"
-                    except (OSError, ValueError, KeyError, RuntimeError):
-                        LOGGER.warning(
-                            "%s could not persist validated first-frame cache for %s",
-                            job_id,
-                            action_key(pose),
-                            exc_info=True,
-                        )
+                    if best_effort_selected:
                         cache_info = None
-                        cache_status = "store_failed"
-                first_frame_states = dict(
-                    get_job(job_id).get("qwen_first_frame_states") or {}
-                )
-                first_frame_states[action_key(pose)] = {
-                    "status": (
-                        "best_effort_selected"
-                        if best_effort_selected
-                        else "validated"
-                    ),
-                    "completed": True,
-                    "quality_passed": not best_effort_selected,
-                    "published": True,
-                    "retry_wave": first_frame_retry_wave,
-                    "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
-                    "attempts_completed": min(
-                        len(attempts),
-                        QWEN_FIRST_FRAME_MAX_ATTEMPTS,
-                    ),
-                    "selected_attempt": best_attempt["attempt"],
-                    "selected_profile": best_attempt["profile"],
-                    "selection_policy": (
-                        QWEN_GENERATED_COMPLETION_SELECTION_POLICY
-                        if best_effort_selected
-                        else "strict_quality_gate_first_pass_v1"
-                    ),
-                    "best_effort": best_effort_selected,
-                    "best_effort_issues": best_attempt.get(
-                        "strict_first_frame_best_effort_issues",
-                        [],
-                    ),
-                    "reference": str(selected_keyframe),
-                    "reference_sha256": file_sha256(selected_keyframe),
-                    "cache_status": cache_status,
-                    "cache": cache_info,
-                    "original_upload_fallback_published": False,
-                    "action_removed": False,
-                }
-                validated_action_set = set(
-                    get_job(job_id).get(
-                        "qwen_first_frame_validated_actions",
-                        [],
-                    )
-                    or []
-                )
-                if best_effort_selected:
-                    validated_action_set.discard(action_key(pose))
-                else:
-                    validated_action_set.add(action_key(pose))
-                validated_actions = sorted(validated_action_set)
-                best_effort_actions = sorted(
-                    {
-                        *(
-                            get_job(job_id).get(
-                                "qwen_first_frame_best_effort_actions",
-                                [],
+                    elif not isinstance(cache_info, dict):
+                        try:
+                            cache_info = store_validated_first_frame_cache(
+                                job_id,
+                                get_job(job_id),
+                                action=action_key(pose),
+                                pose_index=index,
+                                reference_path=selected_keyframe,
                             )
-                            or []
+                            cache_status = "stored"
+                        except (OSError, ValueError, KeyError, RuntimeError):
+                            LOGGER.warning(
+                                "%s could not persist validated first-frame cache for %s",
+                                job_id,
+                                action_key(pose),
+                                exc_info=True,
+                            )
+                            cache_info = None
+                            cache_status = "store_failed"
+                    first_frame_states = dict(
+                        get_job(job_id).get("qwen_first_frame_states") or {}
+                    )
+                    first_frame_states[action_key(pose)] = {
+                        "status": (
+                            "best_effort_selected"
+                            if best_effort_selected
+                            else "validated"
                         ),
-                        *([action_key(pose)] if best_effort_selected else []),
+                        "completed": True,
+                        "quality_passed": not best_effort_selected,
+                        "published": True,
+                        "retry_wave": first_frame_retry_wave,
+                        "attempt_limit": QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                        "attempts_completed": min(
+                            len(attempts),
+                            QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                        ),
+                        "selected_attempt": best_attempt["attempt"],
+                        "selected_profile": best_attempt["profile"],
+                        "selection_policy": (
+                            QWEN_GENERATED_COMPLETION_SELECTION_POLICY
+                            if best_effort_selected
+                            else "strict_quality_gate_first_pass_v1"
+                        ),
+                        "best_effort": best_effort_selected,
+                        "best_effort_issues": best_attempt.get(
+                            "strict_first_frame_best_effort_issues",
+                            [],
+                        ),
+                        "reference": str(selected_keyframe),
+                        "reference_sha256": file_sha256(selected_keyframe),
+                        "cache_status": cache_status,
+                        "cache": cache_info,
+                        "original_upload_fallback_published": False,
+                        "action_removed": False,
                     }
-                )
-                update_job(
-                    job_id,
-                    qwen_first_frame_states=first_frame_states,
-                    qwen_first_frame_validated_actions=validated_actions,
-                    qwen_first_frame_best_effort_actions=best_effort_actions,
-                    qwen_first_frame_current_action=action_key(pose),
-                    qwen_first_frame_current_attempt=best_attempt["attempt"],
-                    qwen_first_frame_attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
-                    qwen_first_frame_cache_status=cache_status,
-                    qwen_first_frame_original_fallback_disabled=True,
-                    qwen_first_frame_action_removal_disabled=True,
-                )
-            else:
-                persist_selected_quality_record()
-            if not reference_generation_degraded:
-                accepted_pose_similarity_references.append(
+                    validated_action_set = set(
+                        get_job(job_id).get(
+                            "qwen_first_frame_validated_actions",
+                            [],
+                        )
+                        or []
+                    )
+                    if best_effort_selected:
+                        validated_action_set.discard(action_key(pose))
+                    else:
+                        validated_action_set.add(action_key(pose))
+                    validated_actions = sorted(validated_action_set)
+                    best_effort_actions = sorted(
+                        {
+                            *(
+                                get_job(job_id).get(
+                                    "qwen_first_frame_best_effort_actions",
+                                    [],
+                                )
+                                or []
+                            ),
+                            *([action_key(pose)] if best_effort_selected else []),
+                        }
+                    )
+                    update_job(
+                        job_id,
+                        qwen_first_frame_states=first_frame_states,
+                        qwen_first_frame_validated_actions=validated_actions,
+                        qwen_first_frame_best_effort_actions=best_effort_actions,
+                        qwen_first_frame_current_action=action_key(pose),
+                        qwen_first_frame_current_attempt=best_attempt["attempt"],
+                        qwen_first_frame_attempt_limit=QWEN_FIRST_FRAME_MAX_ATTEMPTS,
+                        qwen_first_frame_cache_status=cache_status,
+                        qwen_first_frame_original_fallback_disabled=True,
+                        qwen_first_frame_action_removal_disabled=True,
+                    )
+                else:
+                    persist_selected_quality_record()
+                if not reference_generation_degraded:
+                    accepted_pose_similarity_references.append(
+                        {
+                            "label": f"pose_{index}",
+                            "pose_index": index,
+                            "pose": pose,
+                            "path": selected_keyframe,
+                        }
+                    )
+                effective_pose_lora_attempts.append(
                     {
-                        "label": f"pose_{index}",
                         "pose_index": index,
                         "pose": pose,
-                        "path": selected_keyframe,
+                        "attempt": best_attempt["attempt"],
+                        "profile": best_attempt["profile"],
+                        "identity_input_policy": (effective_pose_identity_input_policy),
+                        "image1_input_name": selected_pose_provenance[
+                            "image1_input_name"
+                        ],
+                        "image2_input_name": selected_pose_provenance[
+                            "image2_input_name"
+                        ],
+                        "image3_input_name": selected_pose_provenance[
+                            "image3_input_name"
+                        ],
+                        "sampler_latent_input_name": selected_pose_provenance[
+                            "sampler_latent_input_name"
+                        ],
+                        "identity_input_name": selected_pose_provenance[
+                            "identity_input_name"
+                        ],
+                        "geometry_input_name": selected_pose_provenance[
+                            "geometry_input_name"
+                        ],
+                        "workflow_input_provenance_complete": (
+                            selected_pose_provenance["complete"]
+                        ),
+                        "workflow_input_provenance_missing_fields": (
+                            selected_pose_provenance["missing_fields"]
+                        ),
+                        "grooming_foreleg_repair": best_attempt.get(
+                            "grooming_foreleg_repair"
+                        ),
+                        "user_loras": best_attempt["settings"]["user_loras"],
+                        "user_lora_strength_scale": best_attempt["settings"][
+                            "user_lora_strength_scale"
+                        ],
+                        "user_lora_mode": best_attempt["settings"]["user_lora_mode"],
+                        "steps": best_attempt["settings"]["steps"],
+                        "cfg": best_attempt["settings"]["cfg"],
+                        "denoise": best_attempt["settings"]["denoise"],
+                        "quality_retry": best_attempt["settings"]["quality_retry"],
+                        "total_strength_cap": best_attempt["settings"][
+                            "total_strength_cap"
+                        ],
+                        "per_lora_strength_cap": best_attempt["settings"][
+                            "per_lora_strength_cap"
+                        ],
+                        "similarity": best_attempt["similarity"],
+                        "identity_palette": best_attempt.get("identity_palette"),
+                        "fur_silhouette": best_attempt.get("fur_silhouette"),
+                        "fur_surface_gate": best_attempt.get("fur_surface_gate"),
+                        "grooming_pose_gate": best_attempt.get("grooming_pose_gate"),
+                        "grooming_advisory_minimum_gate": best_attempt.get(
+                            "grooming_advisory_minimum_gate"
+                        ),
+                        "reference_generation_degraded": (
+                            reference_generation_degraded
+                        ),
+                        "reference_generation_failure": best_attempt.get(
+                            "reference_generation_failure"
+                        ),
                     }
                 )
-            effective_pose_lora_attempts.append(
-                {
-                    "pose_index": index,
-                    "pose": pose,
-                    "attempt": best_attempt["attempt"],
-                    "profile": best_attempt["profile"],
-                    "identity_input_policy": (effective_pose_identity_input_policy),
-                    "image1_input_name": selected_pose_provenance[
-                        "image1_input_name"
-                    ],
-                    "image2_input_name": selected_pose_provenance[
-                        "image2_input_name"
-                    ],
-                    "image3_input_name": selected_pose_provenance[
-                        "image3_input_name"
-                    ],
-                    "sampler_latent_input_name": selected_pose_provenance[
-                        "sampler_latent_input_name"
-                    ],
-                    "identity_input_name": selected_pose_provenance[
-                        "identity_input_name"
-                    ],
-                    "geometry_input_name": selected_pose_provenance[
-                        "geometry_input_name"
-                    ],
-                    "workflow_input_provenance_complete": (
-                        selected_pose_provenance["complete"]
+                if keyframe_is_transparent and best_attempt["attempt"] > 1:
+                    update_job(job_id, recovered=True)
+                update_job(
+                    job_id,
+                    recovery_active=False,
+                    recovery_attempt=None,
+                    quality_retry=None,
+                    effective_pose_lora_attempts=effective_pose_lora_attempts,
+                    pose_similarity_warning_count=sum(
+                        bool(item["similarity"].get("warning"))
+                        for item in effective_pose_lora_attempts
                     ),
-                    "workflow_input_provenance_missing_fields": (
-                        selected_pose_provenance["missing_fields"]
+                    pose_identity_palette_warning_count=sum(
+                        bool(
+                            isinstance(item.get("identity_palette"), dict)
+                            and item["identity_palette"].get("warning")
+                        )
+                        for item in effective_pose_lora_attempts
                     ),
-                    "grooming_foreleg_repair": best_attempt.get(
-                        "grooming_foreleg_repair"
-                    ),
-                    "user_loras": best_attempt["settings"]["user_loras"],
-                    "user_lora_strength_scale": best_attempt["settings"][
-                        "user_lora_strength_scale"
-                    ],
-                    "user_lora_mode": best_attempt["settings"]["user_lora_mode"],
-                    "steps": best_attempt["settings"]["steps"],
-                    "cfg": best_attempt["settings"]["cfg"],
-                    "denoise": best_attempt["settings"]["denoise"],
-                    "quality_retry": best_attempt["settings"]["quality_retry"],
-                    "total_strength_cap": best_attempt["settings"][
-                        "total_strength_cap"
-                    ],
-                    "per_lora_strength_cap": best_attempt["settings"][
-                        "per_lora_strength_cap"
-                    ],
-                    "similarity": best_attempt["similarity"],
-                    "identity_palette": best_attempt.get("identity_palette"),
-                    "fur_silhouette": best_attempt.get("fur_silhouette"),
-                    "fur_surface_gate": best_attempt.get("fur_surface_gate"),
-                    "grooming_pose_gate": best_attempt.get("grooming_pose_gate"),
-                    "grooming_advisory_minimum_gate": best_attempt.get(
-                        "grooming_advisory_minimum_gate"
-                    ),
-                    "reference_generation_degraded": (
-                        reference_generation_degraded
-                    ),
-                    "reference_generation_failure": best_attempt.get(
-                        "reference_generation_failure"
-                    ),
-                }
-            )
-            if keyframe_is_transparent and best_attempt["attempt"] > 1:
-                update_job(job_id, recovered=True)
-            update_job(
-                job_id,
-                recovery_active=False,
-                recovery_attempt=None,
-                quality_retry=None,
-                effective_pose_lora_attempts=effective_pose_lora_attempts,
-                pose_similarity_warning_count=sum(
-                    bool(item["similarity"].get("warning"))
-                    for item in effective_pose_lora_attempts
-                ),
-                pose_identity_palette_warning_count=sum(
-                    bool(
-                        isinstance(item.get("identity_palette"), dict)
-                        and item["identity_palette"].get("warning")
-                    )
-                    for item in effective_pose_lora_attempts
-                ),
-            )
-            keyframes.append(selected_keyframe)
-            keyframe_transparency.append(keyframe_is_transparent)
-        else:
-            prefix = f"local_video_api/{job_id}/qwen_pose_{index:02d}"
-            workflow = qwen_workflow(
-                pose_qwen_input_name,
-                prompt,
-                negative_prompt,
-                base_seed + pose_seed_offset(pose, index),
-                prefix,
-                user_lora=pose_profiles[0]["user_lora"],
-                user_lora_strength=pose_profiles[0]["user_lora_strength"],
-                user_lora_mode=pose_profiles[0]["user_lora_mode"],
-                user_loras=pose_profiles[0]["user_loras"],
-                steps=pose_profiles[0]["steps"],
-                cfg=pose_profiles[0]["cfg"],
-                denoise=pose_profiles[0]["denoise"],
-                builtin_style_strength=QWEN_POSE_STYLE_LORA_STRENGTH,
-                suppress_builtin_style=suppress_builtin_style,
-                pose_reference_input_name=pose_qwen_secondary_input_name,
-            )
-            write_workflow(job_dir, f"qwen_pose_{index:02d}.json", workflow)
-            entry = queue_and_wait(
-                workflow,
-                f"{job_id} keyframe {index}/{len(poses)}",
-                timeout=7200,
-                job_id=job_id,
-            )
-            source_output = first_output(
-                entry,
-                {".png", ".jpg", ".jpeg", ".webp"},
-                "Qwen keyframe",
-            )
-            with Image.open(source_output) as generated:
-                generated.convert("RGB").save(keyframe, format="PNG", optimize=True)
-            keyframes.append(keyframe)
-            keyframe_transparency.append(False)
-            append_output(
-                job_id,
-                {
-                    "type": "keyframe",
-                    "pose_index": index,
-                    "pose": pose,
-                    "filename": keyframe.name,
-                },
-            )
+                )
+                keyframes.append(selected_keyframe)
+                keyframe_transparency.append(keyframe_is_transparent)
+            else:
+                prefix = f"local_video_api/{job_id}/qwen_pose_{index:02d}"
+                workflow = qwen_workflow(
+                    pose_qwen_input_name,
+                    prompt,
+                    negative_prompt,
+                    base_seed + pose_seed_offset(pose, index),
+                    prefix,
+                    user_lora=pose_profiles[0]["user_lora"],
+                    user_lora_strength=pose_profiles[0]["user_lora_strength"],
+                    user_lora_mode=pose_profiles[0]["user_lora_mode"],
+                    user_loras=pose_profiles[0]["user_loras"],
+                    steps=pose_profiles[0]["steps"],
+                    cfg=pose_profiles[0]["cfg"],
+                    denoise=pose_profiles[0]["denoise"],
+                    builtin_style_strength=QWEN_POSE_STYLE_LORA_STRENGTH,
+                    suppress_builtin_style=suppress_builtin_style,
+                    pose_reference_input_name=pose_qwen_secondary_input_name,
+                )
+                write_workflow(job_dir, f"qwen_pose_{index:02d}.json", workflow)
+                entry = queue_and_wait(
+                    workflow,
+                    f"{job_id} keyframe {index}/{len(poses)}",
+                    timeout=7200,
+                    job_id=job_id,
+                )
+                source_output = first_output(
+                    entry,
+                    {".png", ".jpg", ".jpeg", ".webp"},
+                    "Qwen keyframe",
+                )
+                with Image.open(source_output) as generated:
+                    generated.convert("RGB").save(keyframe, format="PNG", optimize=True)
+                keyframes.append(keyframe)
+                keyframe_transparency.append(False)
+                append_output(
+                    job_id,
+                    {
+                        "type": "keyframe",
+                        "pose_index": index,
+                        "pose": pose,
+                        "filename": keyframe.name,
+                    },
+                )
+
+    if reference_action_failures:
+        update_job(
+            job_id,
+            qwen_reference_action_failures=(
+                _action_execution.failures_by_action(reference_action_failures)
+            ),
+        )
+        free_comfy_models()
+        _action_execution.raise_for_action_stage_failures(
+            "qwen_action_reference",
+            reference_action_failures,
+        )
 
     if fur_surface_gate_status_by_action:
         expected_surface_actions = [

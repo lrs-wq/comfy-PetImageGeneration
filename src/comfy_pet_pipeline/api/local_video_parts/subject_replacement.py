@@ -5,6 +5,7 @@ from __future__ import annotations
 # The extracted functions resolve the facade dependencies after runtime sync.
 # ruff: noqa: F821
 
+from . import action_execution as _action_execution
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 
 
@@ -2465,7 +2466,10 @@ def recover_subject_replacement_job_with_fallback(
         for output in job.get("outputs") or []
         if isinstance(output, dict)
     ]
-    existing_gifs: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    existing_gifs: dict[
+        str,
+        tuple[dict[str, Any], dict[str, Any], dict[str, Any]],
+    ] = {}
     for output in existing_outputs:
         action = str(output.get("action") or "")
         filename = str(output.get("filename") or "")
@@ -2498,7 +2502,7 @@ def recover_subject_replacement_job_with_fallback(
                 exc_info=True,
             )
             continue
-        existing_gifs[action] = (output, metrics)
+        existing_gifs[action] = (output, metrics, existing_action_timing)
     results_by_action = {
         str(result.get("action")): dict(result)
         for result in job.get("subject_replacement_results") or []
@@ -2508,7 +2512,11 @@ def recover_subject_replacement_job_with_fallback(
     recovery_sources: dict[str, dict[str, Any]] = {}
     for index, action in enumerate(actions, start=1):
         if action in existing_gifs:
-            existing_output, existing_metrics = existing_gifs[action]
+            (
+                existing_output,
+                existing_metrics,
+                existing_action_timing,
+            ) = existing_gifs[action]
             results_by_action.setdefault(
                 action,
                 {
@@ -3598,7 +3606,10 @@ def revalidate_uploaded_qwen_references_before_scail(
 
 
 def run_subject_replacement_job(job_id: str) -> None:
-    _sync_local_video_runtime(globals(), {"run_subject_replacement_job"})
+    _sync_local_video_runtime(
+        globals(),
+        {"run_subject_replacement_job", "_action_execution"},
+    )
     raise_if_cancelled(job_id)
     with JOBS_LOCK:
         job = dict(JOBS[job_id])
@@ -3866,13 +3877,17 @@ def run_subject_replacement_job(job_id: str) -> None:
     reference_generation_chain = bool(job.get("reference_generation_completed"))
     progress_base = 38.0 if reference_generation_chain else 3.0
     progress_total = 59.0 if reference_generation_chain else 94.0
-    # Dog eating has the strictest prop and contact path.  Run independent dog
-    # actions first so a later eating failure cannot discard an already valid
-    # standing animation; terminal recovery will preserve that output and fill
-    # only the failed/missing action.
+    species = str(job.get("species") or "cat").strip().lower()
+    # Action execution no longer relies on a protective order (formerly dog
+    # standing before eating).  Every species/action pair owns an immutable
+    # scope and an independent config snapshot, so request order is safe.
     execution_actions = list(scail_actions)
-    if str(job.get("species") or "").strip().lower() == "dog":
-        execution_actions.sort(key=lambda action: action == "eating")
+    action_execution_scopes = _action_execution.build_action_execution_scopes(
+        species=species,
+        requested_actions=actions,
+        execution_actions=execution_actions,
+    )
+    action_stage_failures: list[_action_execution.ActionStageFailure] = []
 
     update_job(
         job_id,
@@ -3887,772 +3902,873 @@ def run_subject_replacement_job(job_id: str) -> None:
         error=None,
         current_action=None,
         subject_replacement_execution_order=execution_actions,
+        subject_replacement_execution_plan=[
+            scope.public() for scope in action_execution_scopes
+        ],
         subject_replacement_failure_isolation_policy=(
-            "per_action_reference_and_output_isolation_v2"
-            if degraded_reference_actions
-            else (
-                "independent_dog_actions_before_strict_eating_v1"
-                if execution_actions != actions
-                else "requested_action_order_v1"
-            )
+            "per_species_action_stage_barrier_v3"
         ),
+        subject_replacement_action_failures={},
     )
     if execution_actions:
         wait_comfy_idle(timeout=21600, job_id=job_id)
         raise_if_cancelled(job_id)
         free_comfy_models()
 
-    for index, action in enumerate(execution_actions, start=1):
-        raise_if_cancelled(job_id)
-        action_config = effective_subject_config["actions"][action]
-        action_timing = subject_replacement_action_output_timing(
-            effective_subject_config,
-            action,
+    def record_isolated_action_failure(
+        failure: _action_execution.ActionStageFailure,
+        error: Exception,
+    ) -> None:
+        LOGGER.error(
+            "%s isolated %s action failed; sibling actions will continue: %s",
+            job_id,
+            failure.scope.isolation_key,
+            error,
+            exc_info=(type(error), error, error.__traceback__),
         )
-        video_timing = action_timing["video"]
-        gif_timing = action_timing["transparent_gif"]
-        driving_animation_path = Path(action_config["driving_animation"])
-        expected_driving_sha256 = str(
-            action_config.get("driving_animation_sha256") or ""
-        ).strip()
-        if (
-            expected_driving_sha256
-            and file_sha256(driving_animation_path) != expected_driving_sha256
-        ):
-            raise RuntimeError(f"Frozen {action} driving animation digest changed.")
-        if (
-            action == "eating"
-            and float(action_config["pose_strength"]) > SCAIL_EATING_POSE_STRENGTH_MAX
-        ):
-            raise RuntimeError(
-                "Persisted eating pose_strength exceeds the safe fur-silhouette "
-                f"limit {SCAIL_EATING_POSE_STRENGTH_MAX:.2f}."
-            )
-        action_label = SUBJECT_REPLACEMENT_ACTION_LABELS[action]
-        action_start = progress_base + (index - 1) * progress_total / total_actions
-        action_span = progress_total / total_actions
-        reference_path, reference_policy = selected_references[action]
-        if not reference_path.is_file():
-            raise FileNotFoundError(
-                f"SCAIL {action} reference is missing: {reference_path}"
-            )
-        run_id = available_scail_run_id(job_id, action)
-        experiment_dir = SCAIL_EXPERIMENT_ROOT / run_id
-        prepare_log = job_dir / f"{action}_prepare.log"
         update_job(
             job_id,
-            stage="preparing_subject_replacement",
-            progress=action_start,
-            current_action=action,
-            current_action_label=action_label,
-            current_action_index=index,
+            subject_replacement_action_failures=(
+                _action_execution.failures_by_action(action_stage_failures)
+            ),
+            subject_replacement_failure_isolation_policy=(
+                "per_species_action_stage_barrier_v3"
+            ),
         )
-        command = [
-            str(SCAIL_PYTHON),
-            str(SCAIL_RUNNER),
-            "--source",
-            str(action_config["driving_animation"]),
-            "--reference",
-            str(reference_path),
-            "--action",
-            action,
-            "--species",
-            str(job.get("species") or "cat"),
-            "--width",
-            "512",
-            "--height",
-            "512",
-            "--frames",
-            str(effective_subject_config["frames"]),
-            "--fps",
-            str(effective_subject_config["fps"]),
-            "--steps",
-            str(effective_subject_config["steps"]),
-            "--seed",
-            str(action_config["effective_seed"]),
-            "--pose-strength",
-            str(action_config["pose_strength"]),
-            "--run-id",
-            run_id,
-            "--prepare-only",
-        ]
-        canonical_full_driver_eating_fallback = bool(
-            action == "eating"
-            and str(job.get("species") or "").strip().lower() == "dog"
-            and action_config.get("scail_reference_mode")
-            == DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY
+        append_recovery_event(
+            job_id,
+            {
+                "stage": "subject_replacement_action",
+                "reason": f"{failure.error_type}: {failure.error}",
+                "strategy": "isolate_failed_action_and_continue_siblings",
+                "result": "sibling_actions_continued",
+                **failure.scope.public(),
+            },
         )
-        if canonical_full_driver_eating_fallback:
-            command.append(
-                "--canonical-identity-full-driver-eating-fallback"
+        try:
+            wait_comfy_idle(timeout=120, job_id=job_id)
+            free_comfy_models()
+        except JobCancelled:
+            raise
+        except Exception:  # noqa: BLE001 - sibling isolation cleanup is best effort
+            LOGGER.exception(
+                "%s cleanup after isolated %s failure also failed",
+                job_id,
+                failure.scope.isolation_key,
             )
-        # Subject-replacement identity, fur, action, camera, and prop rules are
-        # profile-locked. User prose is retained in task metadata but is never
-        # appended after the protected SCAIL prompt, where terms such as
-        # "fluffy" can otherwise override the close-lying fur standard.
-        prompt_suffix = str(job.get("prompt_en") or job.get("prompt") or "").strip()
-        if prompt_suffix:
+
+    for action_scope in action_execution_scopes:
+        index = action_scope.execution_index
+        action = action_scope.action
+        with _action_execution.isolate_action_stage(
+            scope=action_scope,
+            stage="scail_animation",
+            failures=action_stage_failures,
+            fatal_exceptions=(JobCancelled,),
+            on_failure=record_isolated_action_failure,
+        ):
+            raise_if_cancelled(job_id)
+            action_effective_subject_config = (
+                _action_execution.isolated_effective_action_config(
+                    effective_subject_config,
+                    action,
+                )
+            )
+            action_config = _action_execution.isolated_action_config(
+                action_effective_subject_config,
+                action,
+            )
+            action_timing = subject_replacement_action_output_timing(
+                action_effective_subject_config,
+                action,
+            )
+            video_timing = action_timing["video"]
+            gif_timing = action_timing["transparent_gif"]
+            driving_animation_path = Path(action_config["driving_animation"])
+            expected_driving_sha256 = str(
+                action_config.get("driving_animation_sha256") or ""
+            ).strip()
+            if (
+                expected_driving_sha256
+                and file_sha256(driving_animation_path) != expected_driving_sha256
+            ):
+                raise RuntimeError(f"Frozen {action} driving animation digest changed.")
+            if (
+                action == "eating"
+                and float(action_config["pose_strength"]) > SCAIL_EATING_POSE_STRENGTH_MAX
+            ):
+                raise RuntimeError(
+                    "Persisted eating pose_strength exceeds the safe fur-silhouette "
+                    f"limit {SCAIL_EATING_POSE_STRENGTH_MAX:.2f}."
+                )
+            action_label = SUBJECT_REPLACEMENT_ACTION_LABELS[action]
+            action_start = progress_base + (index - 1) * progress_total / total_actions
+            action_span = progress_total / total_actions
+            reference_path, reference_policy = selected_references[action]
+            if not reference_path.is_file():
+                raise FileNotFoundError(
+                    f"SCAIL {action} reference is missing: {reference_path}"
+                )
+            run_id = available_scail_run_id(job_id, action)
+            experiment_dir = SCAIL_EXPERIMENT_ROOT / run_id
+            prepare_log = job_dir / f"{action}_prepare.log"
             update_job(
                 job_id,
-                user_prompt_excluded_from_scail=True,
-                scail_prompt_source="protected_action_profile",
+                stage="preparing_subject_replacement",
+                progress=action_start,
+                current_action=action,
+                current_action_label=action_label,
+                current_action_index=index,
             )
-        if job.get("subject_source") == "qwen_generated_upload":
-            # The queue wait above can last hours, and earlier actions can also
-            # keep later references waiting.  Re-prove the immutable upload,
-            # canonical, per-action digest, alpha, and fur-surface contract at
-            # the last possible point before this SCAIL process reads it.
-            just_in_time_job = get_job(job_id)
-            just_in_time_config = just_in_time_job.get("effective_subject_config")
-            if not isinstance(just_in_time_config, dict):
-                raise RuntimeError(
-                    "Pre-SCAIL Qwen reference validation lost the effective "
-                    "subject config."
-                )
-            revalidate_uploaded_qwen_references_before_scail(
-                job_id,
-                just_in_time_job,
-                just_in_time_config,
-                actions,
+            command = [
+                str(SCAIL_PYTHON),
+                str(SCAIL_RUNNER),
+                "--source",
+                str(action_config["driving_animation"]),
+                "--reference",
+                str(reference_path),
+                "--action",
+                action,
+                "--species",
+                str(job.get("species") or "cat"),
+                "--width",
+                "512",
+                "--height",
+                "512",
+                "--frames",
+                str(action_effective_subject_config["frames"]),
+                "--fps",
+                str(action_effective_subject_config["fps"]),
+                "--steps",
+                str(action_effective_subject_config["steps"]),
+                "--seed",
+                str(action_config["effective_seed"]),
+                "--pose-strength",
+                str(action_config["pose_strength"]),
+                "--run-id",
+                run_id,
+                "--prepare-only",
+            ]
+            canonical_full_driver_eating_fallback = bool(
+                action == "eating"
+                and str(job.get("species") or "").strip().lower() == "dog"
+                and action_config.get("scail_reference_mode")
+                == DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY
             )
-            just_in_time_reference = Path(
-                str(just_in_time_config["actions"][action].get("reference") or "")
-            )
-            if just_in_time_reference != reference_path:
-                raise RuntimeError(
-                    f"Persisted Qwen {action} reference selection changed before SCAIL."
+            if canonical_full_driver_eating_fallback:
+                command.append(
+                    "--canonical-identity-full-driver-eating-fallback"
                 )
-        run_cancelable_process(
-            job_id,
-            command,
-            log_path=prepare_log,
-            stage_name=f"{action} SCAIL input preparation",
-            timeout=900,
-        )
-        workflow_path = experiment_dir / "workflow_api.json"
-        manifest_path = experiment_dir / "manifest.json"
-        workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest_input_files = manifest.get("input_files")
-        if not isinstance(manifest_input_files, dict):
-            raise RuntimeError(f"SCAIL {action} input manifest is incomplete")
-        pose_identity_mask_video_path = Path(
-            str(manifest_input_files.get("pose_mask_video") or "")
-        )
-        reference_identity_mask_path = Path(
-            str(manifest_input_files.get("reference_mask") or "")
-        )
-        for mask_role, mask_path in (
-            ("pose_mask_video", pose_identity_mask_video_path),
-            ("reference_mask", reference_identity_mask_path),
-        ):
-            if not mask_path.is_file():
-                raise FileNotFoundError(
-                    f"SCAIL {action} {mask_role} is missing: {mask_path}"
+            # Subject-replacement identity, fur, action, camera, and prop rules are
+            # profile-locked. User prose is retained in task metadata but is never
+            # appended after the protected SCAIL prompt, where terms such as
+            # "fluffy" can otherwise override the close-lying fur standard.
+            prompt_suffix = str(job.get("prompt_en") or job.get("prompt") or "").strip()
+            if prompt_suffix:
+                update_job(
+                    job_id,
+                    user_prompt_excluded_from_scail=True,
+                    scail_prompt_source="protected_action_profile",
                 )
-        pose_identity_mask_video_sha256 = file_sha256(pose_identity_mask_video_path)
-        reference_identity_mask_sha256 = file_sha256(reference_identity_mask_path)
-        manifest["input_files_sha256"] = {
-            "pose_mask_video": pose_identity_mask_video_sha256,
-            "reference_mask": reference_identity_mask_sha256,
-        }
-        manifest["reference_policy"] = reference_policy
-        manifest["reference_source_path"] = str(reference_path)
-        manifest["scail_reference_mode"] = action_config.get(
-            "scail_reference_mode"
-        )
-        manifest["qwen_canonical_identity_fallback"] = action_config.get(
-            "qwen_canonical_identity_fallback"
-        )
-        expected_pose_policy = expected_pose_policies.get(action)
-        require_expected_scail_pose_policy(
-            manifest,
-            action,
-            expected_pose_policy,
-        )
-        pose_metadata = manifest.get("pose_metadata")
-        final_gate_required_actions = {
-            str(value)
-            for value in (
-                get_job(job_id).get(
-                    "action_candidate_final_gate_required_actions",
-                    [],
-                )
-                or []
-            )
-        }
-        dog_bowl_motion_contract = bool(
-            action in {"eating", "drinking"}
-            and str(job.get("species") or "").strip().lower() == "dog"
-        )
-        bowl_motion_contract_issues: list[str] = []
-        drinking_pre_scail_motion_quality: dict[str, Any] | None = None
-        eating_pre_scail_motion_quality: dict[str, Any] | None = None
-        drinking_bowl_area_retention_ratio: float | None = None
-        if dog_bowl_motion_contract:
-            if not isinstance(pose_metadata, dict):
-                bowl_motion_contract_issues.append("pose_metadata_missing")
-            else:
-                full_driver_drinking_pose = bool(
-                    action == "drinking"
-                    and pose_metadata.get("policy")
-                    == DOG_DRINKING_FULL_DRIVER_POSE_POLICY
-                )
-                full_driver_eating_pose = bool(
-                    action == "eating"
-                    and pose_metadata.get("policy")
-                    in {
-                        DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
-                        DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
-                    }
-                )
-                if (
-                    pose_metadata.get("fallback_used") is True
-                    and not full_driver_eating_pose
-                    and not full_driver_drinking_pose
-                ):
-                    bowl_motion_contract_issues.append(
-                        "static_pose_fallback_forbidden"
+            if job.get("subject_source") == "qwen_generated_upload":
+                # The queue wait above can last hours, and earlier actions can also
+                # keep later references waiting.  Re-prove the immutable upload,
+                # canonical, per-action digest, alpha, and fur-surface contract at
+                # the last possible point before this SCAIL process reads it.
+                just_in_time_job = get_job(job_id)
+                just_in_time_config = just_in_time_job.get("effective_subject_config")
+                if not isinstance(just_in_time_config, dict):
+                    raise RuntimeError(
+                        "Pre-SCAIL Qwen reference validation lost the effective "
+                        "subject config."
                     )
-                if full_driver_eating_pose:
-                    if (
-                        pose_metadata.get("policy")
-                        not in {
+                revalidate_uploaded_qwen_references_before_scail(
+                    job_id,
+                    just_in_time_job,
+                    just_in_time_config,
+                    actions,
+                )
+                just_in_time_reference = Path(
+                    str(just_in_time_config["actions"][action].get("reference") or "")
+                )
+                if just_in_time_reference != reference_path:
+                    raise RuntimeError(
+                        f"Persisted Qwen {action} reference selection changed before SCAIL."
+                    )
+            run_cancelable_process(
+                job_id,
+                command,
+                log_path=prepare_log,
+                stage_name=f"{action} SCAIL input preparation",
+                timeout=900,
+            )
+            workflow_path = experiment_dir / "workflow_api.json"
+            manifest_path = experiment_dir / "manifest.json"
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_input_files = manifest.get("input_files")
+            if not isinstance(manifest_input_files, dict):
+                raise RuntimeError(f"SCAIL {action} input manifest is incomplete")
+            pose_identity_mask_video_path = Path(
+                str(manifest_input_files.get("pose_mask_video") or "")
+            )
+            reference_identity_mask_path = Path(
+                str(manifest_input_files.get("reference_mask") or "")
+            )
+            for mask_role, mask_path in (
+                ("pose_mask_video", pose_identity_mask_video_path),
+                ("reference_mask", reference_identity_mask_path),
+            ):
+                if not mask_path.is_file():
+                    raise FileNotFoundError(
+                        f"SCAIL {action} {mask_role} is missing: {mask_path}"
+                    )
+            pose_identity_mask_video_sha256 = file_sha256(pose_identity_mask_video_path)
+            reference_identity_mask_sha256 = file_sha256(reference_identity_mask_path)
+            manifest["input_files_sha256"] = {
+                "pose_mask_video": pose_identity_mask_video_sha256,
+                "reference_mask": reference_identity_mask_sha256,
+            }
+            manifest["reference_policy"] = reference_policy
+            manifest["reference_source_path"] = str(reference_path)
+            manifest["scail_reference_mode"] = action_config.get(
+                "scail_reference_mode"
+            )
+            manifest["qwen_canonical_identity_fallback"] = action_config.get(
+                "qwen_canonical_identity_fallback"
+            )
+            expected_pose_policy = expected_pose_policies.get(action)
+            require_expected_scail_pose_policy(
+                manifest,
+                action,
+                expected_pose_policy,
+            )
+            pose_metadata = manifest.get("pose_metadata")
+            final_gate_required_actions = {
+                str(value)
+                for value in (
+                    get_job(job_id).get(
+                        "action_candidate_final_gate_required_actions",
+                        [],
+                    )
+                    or []
+                )
+            }
+            dog_bowl_motion_contract = bool(
+                action in {"eating", "drinking"}
+                and str(job.get("species") or "").strip().lower() == "dog"
+            )
+            bowl_motion_contract_issues: list[str] = []
+            drinking_pre_scail_motion_quality: dict[str, Any] | None = None
+            eating_pre_scail_motion_quality: dict[str, Any] | None = None
+            drinking_bowl_area_retention_ratio: float | None = None
+            if dog_bowl_motion_contract:
+                if not isinstance(pose_metadata, dict):
+                    bowl_motion_contract_issues.append("pose_metadata_missing")
+                else:
+                    full_driver_drinking_pose = bool(
+                        action == "drinking"
+                        and pose_metadata.get("policy")
+                        == DOG_DRINKING_FULL_DRIVER_POSE_POLICY
+                    )
+                    full_driver_eating_pose = bool(
+                        action == "eating"
+                        and pose_metadata.get("policy")
+                        in {
                             DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
                             DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
                         }
+                    )
+                    if (
+                        pose_metadata.get("fallback_used") is True
+                        and not full_driver_eating_pose
+                        and not full_driver_drinking_pose
                     ):
                         bowl_motion_contract_issues.append(
-                            "eating_full_driver_pose_policy_missing"
+                            "static_pose_fallback_forbidden"
                         )
-                    if pose_metadata.get("driver_input_used") is not True:
+                    if full_driver_eating_pose:
+                        if (
+                            pose_metadata.get("policy")
+                            not in {
+                                DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
+                                DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
+                            }
+                        ):
+                            bowl_motion_contract_issues.append(
+                                "eating_full_driver_pose_policy_missing"
+                            )
+                        if pose_metadata.get("driver_input_used") is not True:
+                            bowl_motion_contract_issues.append(
+                                "eating_white_driver_not_used"
+                            )
+                        if (
+                            pose_metadata.get("full_white_driver_geometry")
+                            is not True
+                        ):
+                            bowl_motion_contract_issues.append(
+                                "full_white_driver_geometry_missing"
+                            )
+                        if pose_metadata.get("reference_identity_only") is not True:
+                            bowl_motion_contract_issues.append(
+                                "canonical_reference_not_identity_only"
+                            )
+                        if pose_metadata.get("driver_signal_only") is not False:
+                            bowl_motion_contract_issues.append(
+                                "full_white_driver_silhouette_not_preserved"
+                            )
+                    elif full_driver_drinking_pose:
+                        if pose_metadata.get("primary_policy") is not True:
+                            bowl_motion_contract_issues.append(
+                                "drinking_full_driver_not_primary_policy"
+                            )
+                        if pose_metadata.get("driver_input_used") is not True:
+                            bowl_motion_contract_issues.append(
+                                "drinking_white_driver_not_used"
+                            )
+                        if (
+                            pose_metadata.get("full_white_driver_geometry")
+                            is not True
+                        ):
+                            bowl_motion_contract_issues.append(
+                                "full_white_driver_geometry_missing"
+                            )
+                        if pose_metadata.get("driver_signal_only") is not False:
+                            bowl_motion_contract_issues.append(
+                                "full_white_driver_silhouette_not_preserved"
+                            )
+                        if pose_metadata.get("driver_silhouette_preserved") is not True:
+                            bowl_motion_contract_issues.append(
+                                "drinking_driver_silhouette_not_preserved"
+                            )
+                        if (
+                            pose_metadata.get("pose_geometry_scope")
+                            != "full_white_driver_subject_per_frame"
+                        ):
+                            bowl_motion_contract_issues.append(
+                                "drinking_full_driver_geometry_scope_missing"
+                            )
+                        if (
+                            pose_metadata.get("scene_prop_authority")
+                            != "digest_bound_white_maquette_video"
+                        ):
+                            bowl_motion_contract_issues.append(
+                                "drinking_bowl_not_sourced_from_white_driver"
+                            )
+                        if pose_metadata.get("static_bowl_mask") is not True:
+                            bowl_motion_contract_issues.append(
+                                "drinking_static_bowl_mask_missing"
+                            )
+                        if pose_metadata.get("static_bowl_rgb") is not True:
+                            bowl_motion_contract_issues.append(
+                                "drinking_static_bowl_rgb_missing"
+                            )
+                        try:
+                            source_bowl_fraction = float(
+                                pose_metadata["scene_prop_fraction"]
+                            )
+                            encoded_bowl_fraction = float(
+                                manifest["mask_codec_metadata"]["red_fraction"]
+                            )
+                            drinking_bowl_area_retention_ratio = (
+                                encoded_bowl_fraction / source_bowl_fraction
+                            )
+                        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                            bowl_motion_contract_issues.append(
+                                "drinking_bowl_area_retention_unavailable"
+                            )
+                        else:
+                            if (
+                                drinking_bowl_area_retention_ratio
+                                < DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN
+                            ):
+                                bowl_motion_contract_issues.append(
+                                    "drinking_bowl_area_retention_too_low"
+                                )
+                    elif action == "drinking":
                         bowl_motion_contract_issues.append(
-                            "eating_white_driver_not_used"
+                            "drinking_full_white_driver_primary_policy_missing"
+                        )
+                    elif pose_metadata.get("driver_signal_only") is not True:
+                        bowl_motion_contract_issues.append(
+                            "white_driver_motion_signal_missing"
+                        )
+                    if pose_metadata.get("scene_prop_separated") is not True:
+                        bowl_motion_contract_issues.append(
+                            "bowl_prop_not_separated"
                         )
                     if (
-                        pose_metadata.get("full_white_driver_geometry")
-                        is not True
+                        action == "drinking"
+                        and pose_metadata.get("driver_input_used") is not True
                     ):
-                        bowl_motion_contract_issues.append(
-                            "full_white_driver_geometry_missing"
-                        )
-                    if pose_metadata.get("reference_identity_only") is not True:
-                        bowl_motion_contract_issues.append(
-                            "canonical_reference_not_identity_only"
-                        )
-                    if pose_metadata.get("driver_signal_only") is not False:
-                        bowl_motion_contract_issues.append(
-                            "full_white_driver_silhouette_not_preserved"
-                        )
-                elif full_driver_drinking_pose:
-                    if pose_metadata.get("primary_policy") is not True:
-                        bowl_motion_contract_issues.append(
-                            "drinking_full_driver_not_primary_policy"
-                        )
-                    if pose_metadata.get("driver_input_used") is not True:
                         bowl_motion_contract_issues.append(
                             "drinking_white_driver_not_used"
                         )
-                    if (
-                        pose_metadata.get("full_white_driver_geometry")
-                        is not True
-                    ):
-                        bowl_motion_contract_issues.append(
-                            "full_white_driver_geometry_missing"
-                        )
-                    if pose_metadata.get("driver_signal_only") is not False:
-                        bowl_motion_contract_issues.append(
-                            "full_white_driver_silhouette_not_preserved"
-                        )
-                    if pose_metadata.get("driver_silhouette_preserved") is not True:
-                        bowl_motion_contract_issues.append(
-                            "drinking_driver_silhouette_not_preserved"
-                        )
-                    if (
-                        pose_metadata.get("pose_geometry_scope")
-                        != "full_white_driver_subject_per_frame"
-                    ):
-                        bowl_motion_contract_issues.append(
-                            "drinking_full_driver_geometry_scope_missing"
-                        )
-                    if (
-                        pose_metadata.get("scene_prop_authority")
-                        != "digest_bound_white_maquette_video"
-                    ):
-                        bowl_motion_contract_issues.append(
-                            "drinking_bowl_not_sourced_from_white_driver"
-                        )
-                    if pose_metadata.get("static_bowl_mask") is not True:
-                        bowl_motion_contract_issues.append(
-                            "drinking_static_bowl_mask_missing"
-                        )
-                    if pose_metadata.get("static_bowl_rgb") is not True:
-                        bowl_motion_contract_issues.append(
-                            "drinking_static_bowl_rgb_missing"
-                        )
-                    try:
-                        source_bowl_fraction = float(
-                            pose_metadata["scene_prop_fraction"]
-                        )
-                        encoded_bowl_fraction = float(
-                            manifest["mask_codec_metadata"]["red_fraction"]
-                        )
-                        drinking_bowl_area_retention_ratio = (
-                            encoded_bowl_fraction / source_bowl_fraction
-                        )
-                    except (KeyError, TypeError, ValueError, ZeroDivisionError):
-                        bowl_motion_contract_issues.append(
-                            "drinking_bowl_area_retention_unavailable"
-                        )
-                    else:
-                        if (
-                            drinking_bowl_area_retention_ratio
-                            < DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN
-                        ):
-                            bowl_motion_contract_issues.append(
-                                "drinking_bowl_area_retention_too_low"
-                            )
-                elif action == "drinking":
-                    bowl_motion_contract_issues.append(
-                        "drinking_full_white_driver_primary_policy_missing"
-                    )
-                elif pose_metadata.get("driver_signal_only") is not True:
-                    bowl_motion_contract_issues.append(
-                        "white_driver_motion_signal_missing"
-                    )
-                if pose_metadata.get("scene_prop_separated") is not True:
-                    bowl_motion_contract_issues.append(
-                        "bowl_prop_not_separated"
-                    )
-                if (
-                    action == "drinking"
-                    and pose_metadata.get("driver_input_used") is not True
-                ):
-                    bowl_motion_contract_issues.append(
-                        "drinking_white_driver_not_used"
-                    )
-                if action == "drinking":
-                    try:
-                        drinking_pre_scail_motion_quality = (
-                            evaluate_drinking_prepared_pose_motion(
-                                Path(manifest["input_files"]["pose_video"]),
-                                source_driver_video_path=Path(manifest["source"]),
-                            )
-                        )
-                    except Exception as exc:
-                        bowl_motion_contract_issues.append(
-                            "drinking_prepared_source_motion_quality_unavailable: "
-                            f"{str(exc)[:500]}"
-                        )
-                    else:
-                        if (
-                            drinking_pre_scail_motion_quality.get("acceptable")
-                            is not True
-                        ):
-                            bowl_motion_contract_issues.extend(
-                                str(issue)
-                                for issue in drinking_pre_scail_motion_quality.get(
-                                    "issues", []
+                    if action == "drinking":
+                        try:
+                            drinking_pre_scail_motion_quality = (
+                                evaluate_drinking_prepared_pose_motion(
+                                    Path(manifest["input_files"]["pose_video"]),
+                                    source_driver_video_path=Path(manifest["source"]),
                                 )
                             )
-                if (
-                    action == "eating"
-                    and pose_metadata.get("policy") == "reference_space_head_nod_food_overlap_v2"
-                ):
-                    try:
-                        eating_pre_scail_motion_quality = evaluate_eating_prepared_pose_motion(
-                            Path(manifest["input_files"]["pose_video"]),
-                            pose_metadata=pose_metadata,
-                        )
-                    except Exception as exc:
-                        bowl_motion_contract_issues.append(
-                            f"eating_prepared_muzzle_motion_quality_unavailable: {str(exc)[:500]}"
-                        )
-                    else:
-                        if eating_pre_scail_motion_quality.get("acceptable") is not True:
-                            bowl_motion_contract_issues.extend(
-                                str(issue)
-                                for issue in eating_pre_scail_motion_quality.get("issues", [])
+                        except Exception as exc:
+                            bowl_motion_contract_issues.append(
+                                "drinking_prepared_source_motion_quality_unavailable: "
+                                f"{str(exc)[:500]}"
                             )
-        manifest["final_action_gate"] = {
-            "required_by_candidate_gate": action in final_gate_required_actions,
-            "pre_scail_motion_contract_required": dog_bowl_motion_contract,
-            "pre_scail_motion_contract_passed": not bowl_motion_contract_issues,
-            "issues": bowl_motion_contract_issues,
-            "drinking_source_to_prepared_pose_quality": (
-                drinking_pre_scail_motion_quality
-            ),
-            "eating_prepared_muzzle_motion_quality": (
-                eating_pre_scail_motion_quality
-            ),
-            "drinking_bowl_area_retention_ratio": (
-                round(drinking_bowl_area_retention_ratio, 6)
-                if drinking_bowl_area_retention_ratio is not None
-                else None
-            ),
-            "drinking_bowl_area_retention_ratio_minimum": (
-                DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN
-                if action == "drinking"
-                else None
-            ),
-        }
-        final_video_comparison_scope = (
-            select_final_video_fur_surface_comparison_scope(
-                action=action,
-                action_config=action_config,
-                output_format=job.get("output_format"),
-                reference_policy=reference_policy,
-                pose_metadata=(
-                    pose_metadata if isinstance(pose_metadata, dict) else None
+                        else:
+                            if (
+                                drinking_pre_scail_motion_quality.get("acceptable")
+                                is not True
+                            ):
+                                bowl_motion_contract_issues.extend(
+                                    str(issue)
+                                    for issue in drinking_pre_scail_motion_quality.get(
+                                        "issues", []
+                                    )
+                                )
+                    if (
+                        action == "eating"
+                        and pose_metadata.get("policy") == "reference_space_head_nod_food_overlap_v2"
+                    ):
+                        try:
+                            eating_pre_scail_motion_quality = evaluate_eating_prepared_pose_motion(
+                                Path(manifest["input_files"]["pose_video"]),
+                                pose_metadata=pose_metadata,
+                            )
+                        except Exception as exc:
+                            bowl_motion_contract_issues.append(
+                                f"eating_prepared_muzzle_motion_quality_unavailable: {str(exc)[:500]}"
+                            )
+                        else:
+                            if eating_pre_scail_motion_quality.get("acceptable") is not True:
+                                bowl_motion_contract_issues.extend(
+                                    str(issue)
+                                    for issue in eating_pre_scail_motion_quality.get("issues", [])
+                                )
+            manifest["final_action_gate"] = {
+                "required_by_candidate_gate": action in final_gate_required_actions,
+                "pre_scail_motion_contract_required": dog_bowl_motion_contract,
+                "pre_scail_motion_contract_passed": not bowl_motion_contract_issues,
+                "issues": bowl_motion_contract_issues,
+                "drinking_source_to_prepared_pose_quality": (
+                    drinking_pre_scail_motion_quality
                 ),
-            )
-            if GENERATION_VISUAL_AUDITS_BLOCKING
-            else None
-        )
-        write_workflow(job_dir, f"scail_{action}.json", workflow)
-        write_json_atomic(job_dir / f"{action}_prepare_manifest.json", manifest)
-
-        if bowl_motion_contract_issues:
-            action_error = RuntimeError(
-                f"{action}_pre_scail_action_motion_contract_failed: "
-                + ", ".join(bowl_motion_contract_issues)
-            )
-            degraded_result, _fallback_source = (
-                recover_subject_replacement_action_with_fallback(
-                    job_id,
-                    get_job(job_id),
+                "eating_prepared_muzzle_motion_quality": (
+                    eating_pre_scail_motion_quality
+                ),
+                "drinking_bowl_area_retention_ratio": (
+                    round(drinking_bowl_area_retention_ratio, 6)
+                    if drinking_bowl_area_retention_ratio is not None
+                    else None
+                ),
+                "drinking_bowl_area_retention_ratio_minimum": (
+                    DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN
+                    if action == "drinking"
+                    else None
+                ),
+            }
+            final_video_comparison_scope = (
+                select_final_video_fur_surface_comparison_scope(
                     action=action,
-                    pose_index=actions.index(action) + 1,
-                    error=action_error,
+                    action_config=action_config,
+                    output_format=job.get("output_format"),
+                    reference_policy=reference_policy,
+                    pose_metadata=(
+                        pose_metadata if isinstance(pose_metadata, dict) else None
+                    ),
                 )
+                if GENERATION_VISUAL_AUDITS_BLOCKING
+                else None
             )
-            degraded_result["final_action_gate_required"] = bool(
-                action in final_gate_required_actions
-            )
-            degraded_result["pre_scail_action_motion_contract"] = (
-                manifest["final_action_gate"]
-            )
-            results.append(degraded_result)
-            update_job(
-                job_id,
-                progress=action_start + action_span,
-                subject_replacement_results=results,
-            )
-            continue
+            write_workflow(job_dir, f"scail_{action}.json", workflow)
+            write_json_atomic(job_dir / f"{action}_prepare_manifest.json", manifest)
 
-        normalized_reference = experiment_dir / "reference_normalized.png"
-        reference_target = job_dir / f"{action}_subject_reference.png"
-        shutil.copy2(normalized_reference, reference_target)
-        append_output(
-            job_id,
-            {
-                "type": "subject_reference",
-                "action": action,
-                "action_label": action_label,
-                "filename": reference_target.name,
-                "width": 512,
-                "height": 512,
-                "transparent": True,
-                "sha256": file_sha256(reference_target),
-                "role": (
-                    "qwen_action_keyframe_reference"
-                    if job.get("subject_source") == "qwen_generated_upload"
-                    else (
-                        "legacy_direct_uploaded_identity_reference"
-                        if job.get("subject_source") == "uploaded_identity_direct_scail"
-                        else "profile_action_reference"
-                    )
-                ),
-                "primary": False,
-            },
-        )
-        prepared_visuals = (
-            (
-                "reference_mask.png",
-                f"{action}_reference_identity_mask.png",
-                "reference_identity_mask",
-                "identity_and_prop_mapping",
-            ),
-            (
-                "pose_first_frame.png",
-                f"{action}_main_case_geometry_guide.png",
-                "main_case_geometry_guide",
-                "motion_pose_prop_camera_only",
-            ),
-            (
-                "pose_mask_first_frame.png",
-                f"{action}_main_case_geometry_mask.png",
-                "main_case_geometry_mask",
-                "driver_identity_and_prop_mapping",
-            ),
-        )
-        for source_name, target_name, output_type, role in prepared_visuals:
-            visual_source = experiment_dir / source_name
-            if not visual_source.is_file():
-                raise FileNotFoundError(
-                    f"SCAIL {action} prepared visual is missing: {visual_source}"
+            if bowl_motion_contract_issues:
+                action_error = RuntimeError(
+                    f"{action}_pre_scail_action_motion_contract_failed: "
+                    + ", ".join(bowl_motion_contract_issues)
                 )
-            visual_target = job_dir / target_name
-            shutil.copy2(visual_source, visual_target)
+                degraded_result, _fallback_source = (
+                    recover_subject_replacement_action_with_fallback(
+                        job_id,
+                        get_job(job_id),
+                        action=action,
+                        pose_index=action_scope.request_index,
+                        error=action_error,
+                    )
+                )
+                degraded_result["final_action_gate_required"] = bool(
+                    action in final_gate_required_actions
+                )
+                degraded_result["pre_scail_action_motion_contract"] = (
+                    manifest["final_action_gate"]
+                )
+                results.append(degraded_result)
+                update_job(
+                    job_id,
+                    progress=action_start + action_span,
+                    subject_replacement_results=results,
+                )
+                continue
+
+            normalized_reference = experiment_dir / "reference_normalized.png"
+            reference_target = job_dir / f"{action}_subject_reference.png"
+            shutil.copy2(normalized_reference, reference_target)
             append_output(
                 job_id,
                 {
-                    "type": output_type,
+                    "type": "subject_reference",
                     "action": action,
                     "action_label": action_label,
-                    "filename": visual_target.name,
+                    "filename": reference_target.name,
                     "width": 512,
                     "height": 512,
-                    "sha256": file_sha256(visual_target),
-                    "role": role,
+                    "transparent": True,
+                    "sha256": file_sha256(reference_target),
+                    "role": (
+                        "qwen_action_keyframe_reference"
+                        if job.get("subject_source") == "qwen_generated_upload"
+                        else (
+                            "legacy_direct_uploaded_identity_reference"
+                            if job.get("subject_source") == "uploaded_identity_direct_scail"
+                            else "profile_action_reference"
+                        )
+                    ),
                     "primary": False,
                 },
             )
-        scail_reference_policies[action] = reference_policy
-        if action == "toileting":
-            scail_scene_prop_policies[action] = (
-                "dog_toileting_lateral_tray_red_object_mapping_v2"
-            )
-        elif action in {"eating", "drinking"}:
-            scail_scene_prop_policies[action] = (
-                "dog_white_model_bowl_scail_object_mapping_v2"
-                if job.get("species") == "dog"
-                else "cat_blue_bowl_red_scail_object_mapping"
-            )
-        else:
-            scail_scene_prop_policies[action] = "no_scene_prop"
-        update_job(
-            job_id,
-            scail_reference_policy=dict(scail_reference_policies),
-            scail_scene_prop_policy=dict(scail_scene_prop_policies),
-        )
-
-        update_job(
-            job_id,
-            stage="generating_subject_replacement",
-            progress=action_start + action_span * 0.18,
-        )
-        video_target = job_dir / f"{action}_subject_replacement.mp4"
-        dog_toileting_temporal_gate = bool(
-            action == "toileting"
-            and str(job.get("species") or "").strip().lower() == "dog"
-        )
-        dog_drinking_motion_gate = bool(
-            action == "drinking"
-            and str(job.get("species") or "").strip().lower() == "dog"
-        )
-        dog_eating_motion_gate = bool(
-            action == "eating"
-            and str(job.get("species") or "").strip().lower() == "dog"
-        )
-        grooming_identity_gate = bool(action == "grooming")
-        maximum_scail_attempts = (
-            TOILETING_SCAIL_MAX_ATTEMPTS
-            if dog_toileting_temporal_gate
-            else DRINKING_SCAIL_MAX_ATTEMPTS
-            if dog_drinking_motion_gate
-            else EATING_SCAIL_MAX_ATTEMPTS
-            if dog_eating_motion_gate
-            else GROOMING_SCAIL_MAX_ATTEMPTS
-            if grooming_identity_gate
-            else 1
-        )
-        base_scail_seed = int(action_config["effective_seed"])
-        scail_attempt_records: list[dict[str, Any]] = []
-        selected_scail_candidate: Path | None = None
-        selected_scail_seed: int | None = None
-        selected_scail_best_effort = False
-        for scail_attempt in range(1, maximum_scail_attempts + 1):
-            attempt_seed = base_scail_seed + (
-                (scail_attempt - 1) * TOILETING_SCAIL_RETRY_SEED_STEP
-            )
-            candidate_workflow, updated_seed_nodes, retry_controls = (
-                scail_workflow_with_retry_controls(
-                    workflow,
-                    seed=attempt_seed,
-                    action=action,
-                    attempt=scail_attempt,
-                )
-            )
-            if scail_attempt > 1:
-                update_job(
-                    job_id,
-                    stage="retrying_subject_replacement",
-                    progress=action_start + action_span * 0.18,
-                    current_action=action,
-                    current_action_label=action_label,
-                    scail_retry_action=action,
-                    scail_retry_attempt=scail_attempt,
-                    scail_retry_max_attempts=maximum_scail_attempts,
-                    scail_retry_seed=attempt_seed,
-                    scail_retry_reason=(
-                        "toileting_temporal_lateral_dark_band_or_symbol"
-                        if dog_toileting_temporal_gate
-                        else (
-                            "drinking_motion_or_driver_silhouette_"
-                            "retention_too_low"
-                        )
-                        if dog_drinking_motion_gate
-                        else (
-                            "eating_muzzle_or_visible_motion_too_low"
-                            if dog_eating_motion_gate
-                            else "grooming_reference_identity_retention_too_low"
-                        )
-                    ),
-                )
-            write_workflow(
-                job_dir,
-                f"scail_{action}_attempt_{scail_attempt:02d}.json",
-                candidate_workflow,
-            )
-            entry = queue_and_wait(
-                candidate_workflow,
+            prepared_visuals = (
                 (
-                    f"SCAIL subject replacement {action} for {job_id} "
-                    f"attempt {scail_attempt}/{maximum_scail_attempts}"
+                    "reference_mask.png",
+                    f"{action}_reference_identity_mask.png",
+                    "reference_identity_mask",
+                    "identity_and_prop_mapping",
                 ),
-                timeout=7200,
-                job_id=job_id,
+                (
+                    "pose_first_frame.png",
+                    f"{action}_main_case_geometry_guide.png",
+                    "main_case_geometry_guide",
+                    "motion_pose_prop_camera_only",
+                ),
+                (
+                    "pose_mask_first_frame.png",
+                    f"{action}_main_case_geometry_mask.png",
+                    "main_case_geometry_mask",
+                    "driver_identity_and_prop_mapping",
+                ),
             )
-            generated_candidate = first_output(
-                entry,
-                {".mp4"},
-                f"SCAIL {action} subject replacement attempt {scail_attempt}",
-            )
-            attempt_target = (
-                job_dir
-                / f"{action}_subject_replacement_attempt_{scail_attempt:02d}.mp4"
-                if maximum_scail_attempts > 1
-                else video_target
-            )
-            shutil.copy2(generated_candidate, attempt_target)
-            if dog_toileting_temporal_gate:
-                temporal_identity_quality = (
-                    evaluate_toileting_scail_video_identity_artifacts(
-                        attempt_target,
+            for source_name, target_name, output_type, role in prepared_visuals:
+                visual_source = experiment_dir / source_name
+                if not visual_source.is_file():
+                    raise FileNotFoundError(
+                        f"SCAIL {action} prepared visual is missing: {visual_source}"
                     )
+                visual_target = job_dir / target_name
+                shutil.copy2(visual_source, visual_target)
+                append_output(
+                    job_id,
+                    {
+                        "type": output_type,
+                        "action": action,
+                        "action_label": action_label,
+                        "filename": visual_target.name,
+                        "width": 512,
+                        "height": 512,
+                        "sha256": file_sha256(visual_target),
+                        "role": role,
+                        "primary": False,
+                    },
                 )
-            elif dog_drinking_motion_gate:
-                temporal_identity_quality = (
-                    evaluate_drinking_scail_video_motion(
-                        attempt_target,
-                        expected_pose_video_path=Path(
-                            manifest["input_files"]["pose_video"]
-                        ),
-                        source_driver_video_path=Path(manifest["source"]),
-                    )
+            scail_reference_policies[action] = reference_policy
+            if action == "toileting":
+                scail_scene_prop_policies[action] = (
+                    "dog_toileting_lateral_tray_red_object_mapping_v2"
                 )
-            elif dog_eating_motion_gate:
-                temporal_identity_quality = evaluate_eating_scail_video_motion(
-                    attempt_target,
-                    pose_metadata=(
-                        pose_metadata
-                        if isinstance(pose_metadata, dict)
-                        else None
-                    ),
-                )
-            elif grooming_identity_gate:
-                temporal_identity_quality = (
-                    evaluate_grooming_scail_video_identity(
-                        attempt_target,
-                        reference_path=reference_path,
-                        reference_identity_mask_path=reference_identity_mask_path,
-                        pose_identity_mask_video_path=pose_identity_mask_video_path,
-                        source_driver_video_path=Path(manifest["source"]),
-                    )
+            elif action in {"eating", "drinking"}:
+                scail_scene_prop_policies[action] = (
+                    "dog_white_model_bowl_scail_object_mapping_v2"
+                    if job.get("species") == "dog"
+                    else "cat_blue_bowl_red_scail_object_mapping"
                 )
             else:
-                temporal_identity_quality = {
-                    "policy": "not_applicable",
-                    "available": True,
-                    "acceptable": True,
-                    "issues": [],
-                }
-            attempt_record = {
-                "attempt": scail_attempt,
-                "seed": attempt_seed,
-                "seed_step": TOILETING_SCAIL_RETRY_SEED_STEP,
-                "workflow_seed_nodes": updated_seed_nodes,
-                "retry_controls": retry_controls,
-                "video": attempt_target.name,
-                "video_sha256": file_sha256(attempt_target),
-                "temporal_identity_quality": temporal_identity_quality,
-                "selected": False,
-            }
-            if dog_eating_motion_gate:
-                attempt_record["best_effort_score"] = (
-                    eating_scail_best_effort_score(
-                        temporal_identity_quality,
-                    )
-                )
-            elif grooming_identity_gate:
-                attempt_record["best_effort_score"] = (
-                    grooming_scail_best_effort_score(
-                        temporal_identity_quality,
-                    )
-                )
-            scail_attempt_records.append(attempt_record)
-            if temporal_identity_quality.get("acceptable") is True:
-                selected_scail_candidate = attempt_target
-                selected_scail_seed = attempt_seed
-                attempt_record["selected"] = True
-                break
-            LOGGER.warning(
-                "%s SCAIL %s attempt %d/%d rejected: %s",
+                scail_scene_prop_policies[action] = "no_scene_prop"
+            update_job(
                 job_id,
-                action,
-                scail_attempt,
-                maximum_scail_attempts,
-                temporal_identity_quality.get("issues"),
+                scail_reference_policy=dict(scail_reference_policies),
+                scail_scene_prop_policy=dict(scail_scene_prop_policies),
             )
 
-        if (
-            selected_scail_candidate is None
-            and selected_scail_seed is None
-            and (dog_eating_motion_gate or grooming_identity_gate)
-            and scail_attempt_records
-        ):
-            best_attempt = max(
-                scail_attempt_records,
-                key=lambda record: float(
-                    (record.get("best_effort_score") or {}).get("score")
-                    or 0.0
-                ),
+            update_job(
+                job_id,
+                stage="generating_subject_replacement",
+                progress=action_start + action_span * 0.18,
             )
-            best_attempt_path = job_dir / str(best_attempt["video"])
-            if best_attempt_path.is_file():
-                selected_scail_candidate = best_attempt_path
-                selected_scail_seed = int(best_attempt["seed"])
-                selected_scail_best_effort = True
-                best_attempt["selected"] = True
-                best_attempt["selected_best_effort"] = True
-                best_attempt["best_effort_policy"] = (
-                    EATING_SCAIL_BEST_EFFORT_POLICY
-                    if dog_eating_motion_gate
-                    else GROOMING_SCAIL_BEST_EFFORT_POLICY
+            video_target = job_dir / f"{action}_subject_replacement.mp4"
+            dog_toileting_temporal_gate = bool(
+                action == "toileting"
+                and str(job.get("species") or "").strip().lower() == "dog"
+            )
+            dog_drinking_motion_gate = bool(
+                action == "drinking"
+                and str(job.get("species") or "").strip().lower() == "dog"
+            )
+            dog_eating_motion_gate = bool(
+                action == "eating"
+                and str(job.get("species") or "").strip().lower() == "dog"
+            )
+            grooming_identity_gate = bool(action == "grooming")
+            maximum_scail_attempts = (
+                TOILETING_SCAIL_MAX_ATTEMPTS
+                if dog_toileting_temporal_gate
+                else DRINKING_SCAIL_MAX_ATTEMPTS
+                if dog_drinking_motion_gate
+                else EATING_SCAIL_MAX_ATTEMPTS
+                if dog_eating_motion_gate
+                else GROOMING_SCAIL_MAX_ATTEMPTS
+                if grooming_identity_gate
+                else 1
+            )
+            base_scail_seed = int(action_config["effective_seed"])
+            scail_attempt_records: list[dict[str, Any]] = []
+            selected_scail_candidate: Path | None = None
+            selected_scail_seed: int | None = None
+            selected_scail_best_effort = False
+            for scail_attempt in range(1, maximum_scail_attempts + 1):
+                attempt_seed = base_scail_seed + (
+                    (scail_attempt - 1) * TOILETING_SCAIL_RETRY_SEED_STEP
                 )
-                update_job(
+                candidate_workflow, updated_seed_nodes, retry_controls = (
+                    scail_workflow_with_retry_controls(
+                        workflow,
+                        seed=attempt_seed,
+                        action=action,
+                        attempt=scail_attempt,
+                    )
+                )
+                if scail_attempt > 1:
+                    update_job(
+                        job_id,
+                        stage="retrying_subject_replacement",
+                        progress=action_start + action_span * 0.18,
+                        current_action=action,
+                        current_action_label=action_label,
+                        scail_retry_action=action,
+                        scail_retry_attempt=scail_attempt,
+                        scail_retry_max_attempts=maximum_scail_attempts,
+                        scail_retry_seed=attempt_seed,
+                        scail_retry_reason=(
+                            "toileting_temporal_lateral_dark_band_or_symbol"
+                            if dog_toileting_temporal_gate
+                            else (
+                                "drinking_motion_or_driver_silhouette_"
+                                "retention_too_low"
+                            )
+                            if dog_drinking_motion_gate
+                            else (
+                                "eating_muzzle_or_visible_motion_too_low"
+                                if dog_eating_motion_gate
+                                else "grooming_reference_identity_retention_too_low"
+                            )
+                        ),
+                    )
+                write_workflow(
+                    job_dir,
+                    f"scail_{action}_attempt_{scail_attempt:02d}.json",
+                    candidate_workflow,
+                )
+                entry = queue_and_wait(
+                    candidate_workflow,
+                    (
+                        f"SCAIL subject replacement {action} for {job_id} "
+                        f"attempt {scail_attempt}/{maximum_scail_attempts}"
+                    ),
+                    timeout=7200,
+                    job_id=job_id,
+                )
+                generated_candidate = first_output(
+                    entry,
+                    {".mp4"},
+                    f"SCAIL {action} subject replacement attempt {scail_attempt}",
+                )
+                attempt_target = (
+                    job_dir
+                    / f"{action}_subject_replacement_attempt_{scail_attempt:02d}.mp4"
+                    if maximum_scail_attempts > 1
+                    else video_target
+                )
+                shutil.copy2(generated_candidate, attempt_target)
+                if dog_toileting_temporal_gate:
+                    temporal_identity_quality = (
+                        evaluate_toileting_scail_video_identity_artifacts(
+                            attempt_target,
+                        )
+                    )
+                elif dog_drinking_motion_gate:
+                    temporal_identity_quality = (
+                        evaluate_drinking_scail_video_motion(
+                            attempt_target,
+                            expected_pose_video_path=Path(
+                                manifest["input_files"]["pose_video"]
+                            ),
+                            source_driver_video_path=Path(manifest["source"]),
+                        )
+                    )
+                elif dog_eating_motion_gate:
+                    temporal_identity_quality = evaluate_eating_scail_video_motion(
+                        attempt_target,
+                        pose_metadata=(
+                            pose_metadata
+                            if isinstance(pose_metadata, dict)
+                            else None
+                        ),
+                    )
+                elif grooming_identity_gate:
+                    temporal_identity_quality = (
+                        evaluate_grooming_scail_video_identity(
+                            attempt_target,
+                            reference_path=reference_path,
+                            reference_identity_mask_path=reference_identity_mask_path,
+                            pose_identity_mask_video_path=pose_identity_mask_video_path,
+                            source_driver_video_path=Path(manifest["source"]),
+                        )
+                    )
+                else:
+                    temporal_identity_quality = {
+                        "policy": "not_applicable",
+                        "available": True,
+                        "acceptable": True,
+                        "issues": [],
+                    }
+                attempt_record = {
+                    "attempt": scail_attempt,
+                    "seed": attempt_seed,
+                    "seed_step": TOILETING_SCAIL_RETRY_SEED_STEP,
+                    "workflow_seed_nodes": updated_seed_nodes,
+                    "retry_controls": retry_controls,
+                    "video": attempt_target.name,
+                    "video_sha256": file_sha256(attempt_target),
+                    "temporal_identity_quality": temporal_identity_quality,
+                    "selected": False,
+                }
+                if dog_eating_motion_gate:
+                    attempt_record["best_effort_score"] = (
+                        eating_scail_best_effort_score(
+                            temporal_identity_quality,
+                        )
+                    )
+                elif grooming_identity_gate:
+                    attempt_record["best_effort_score"] = (
+                        grooming_scail_best_effort_score(
+                            temporal_identity_quality,
+                        )
+                    )
+                scail_attempt_records.append(attempt_record)
+                if temporal_identity_quality.get("acceptable") is True:
+                    selected_scail_candidate = attempt_target
+                    selected_scail_seed = attempt_seed
+                    attempt_record["selected"] = True
+                    break
+                LOGGER.warning(
+                    "%s SCAIL %s attempt %d/%d rejected: %s",
                     job_id,
-                    stage="selecting_best_effort_subject_replacement",
-                    progress=action_start + action_span * 0.72,
-                    scail_retry_action=action,
-                    scail_retry_attempt=len(scail_attempt_records),
-                    scail_retry_max_attempts=maximum_scail_attempts,
-                    scail_best_effort_selected_attempt=int(
-                        best_attempt["attempt"]
+                    action,
+                    scail_attempt,
+                    maximum_scail_attempts,
+                    temporal_identity_quality.get("issues"),
+                )
+
+            if (
+                selected_scail_candidate is None
+                and selected_scail_seed is None
+                and (dog_eating_motion_gate or grooming_identity_gate)
+                and scail_attempt_records
+            ):
+                best_attempt = max(
+                    scail_attempt_records,
+                    key=lambda record: float(
+                        (record.get("best_effort_score") or {}).get("score")
+                        or 0.0
                     ),
-                    scail_best_effort_selection=(
-                        best_attempt["best_effort_score"]
-                    ),
-                    scail_best_effort_policy=(
+                )
+                best_attempt_path = job_dir / str(best_attempt["video"])
+                if best_attempt_path.is_file():
+                    selected_scail_candidate = best_attempt_path
+                    selected_scail_seed = int(best_attempt["seed"])
+                    selected_scail_best_effort = True
+                    best_attempt["selected"] = True
+                    best_attempt["selected_best_effort"] = True
+                    best_attempt["best_effort_policy"] = (
                         EATING_SCAIL_BEST_EFFORT_POLICY
                         if dog_eating_motion_gate
                         else GROOMING_SCAIL_BEST_EFFORT_POLICY
-                    ),
-                )
+                    )
+                    update_job(
+                        job_id,
+                        stage="selecting_best_effort_subject_replacement",
+                        progress=action_start + action_span * 0.72,
+                        scail_retry_action=action,
+                        scail_retry_attempt=len(scail_attempt_records),
+                        scail_retry_max_attempts=maximum_scail_attempts,
+                        scail_best_effort_selected_attempt=int(
+                            best_attempt["attempt"]
+                        ),
+                        scail_best_effort_selection=(
+                            best_attempt["best_effort_score"]
+                        ),
+                        scail_best_effort_policy=(
+                            EATING_SCAIL_BEST_EFFORT_POLICY
+                            if dog_eating_motion_gate
+                            else GROOMING_SCAIL_BEST_EFFORT_POLICY
+                        ),
+                    )
 
-        scail_video_attempts_by_action[action] = scail_attempt_records
-        if selected_scail_candidate is None or selected_scail_seed is None:
+            scail_video_attempts_by_action[action] = scail_attempt_records
+            if selected_scail_candidate is None or selected_scail_seed is None:
+                update_job(
+                    job_id,
+                    scail_video_attempts=dict(scail_video_attempts_by_action),
+                    scail_video_temporal_identity_status={
+                        selected_action: scail_action_attempt_status(records)
+                        for selected_action, records in (
+                            scail_video_attempts_by_action.items()
+                        )
+                    },
+                )
+                action_error = RuntimeError(
+                    f"{action}_scail_temporal_identity_gate_failed_after_"
+                    f"{maximum_scail_attempts}_attempts"
+                )
+                degraded_result, _fallback_source = (
+                    recover_subject_replacement_action_with_fallback(
+                        job_id,
+                        get_job(job_id),
+                        action=action,
+                        pose_index=action_scope.request_index,
+                        error=action_error,
+                    )
+                )
+                degraded_result["scail_attempt_count"] = len(
+                    scail_attempt_records
+                )
+                degraded_result["scail_video_attempts"] = scail_attempt_records
+                degraded_result["temporal_identity_quality"] = (
+                    scail_attempt_records[-1].get("temporal_identity_quality")
+                    if scail_attempt_records
+                    else None
+                )
+                results.append(degraded_result)
+                update_job(
+                    job_id,
+                    progress=action_start + action_span,
+                    subject_replacement_results=results,
+                )
+                continue
+            selected_scail_seeds[action] = selected_scail_seed
+            if selected_scail_candidate != video_target:
+                shutil.copy2(selected_scail_candidate, video_target)
+            generated_video = video_target
             update_job(
                 job_id,
                 scail_video_attempts=dict(scail_video_attempts_by_action),
@@ -4662,589 +4778,151 @@ def run_subject_replacement_job(job_id: str) -> None:
                         scail_video_attempts_by_action.items()
                     )
                 },
+                effective_action_selected_seeds=dict(selected_scail_seeds),
             )
-            action_error = RuntimeError(
-                f"{action}_scail_temporal_identity_gate_failed_after_"
-                f"{maximum_scail_attempts}_attempts"
-            )
-            degraded_result, _fallback_source = (
-                recover_subject_replacement_action_with_fallback(
-                    job_id,
-                    get_job(job_id),
-                    action=action,
-                    pose_index=actions.index(action) + 1,
-                    error=action_error,
-                )
-            )
-            degraded_result["scail_attempt_count"] = len(
-                scail_attempt_records
-            )
-            degraded_result["scail_video_attempts"] = scail_attempt_records
-            degraded_result["temporal_identity_quality"] = (
-                scail_attempt_records[-1].get("temporal_identity_quality")
-                if scail_attempt_records
-                else None
-            )
-            results.append(degraded_result)
-            update_job(
-                job_id,
-                progress=action_start + action_span,
-                subject_replacement_results=results,
-            )
-            continue
-        selected_scail_seeds[action] = selected_scail_seed
-        if selected_scail_candidate != video_target:
-            shutil.copy2(selected_scail_candidate, video_target)
-        generated_video = video_target
-        update_job(
-            job_id,
-            scail_video_attempts=dict(scail_video_attempts_by_action),
-            scail_video_temporal_identity_status={
-                selected_action: scail_action_attempt_status(records)
-                for selected_action, records in (
-                    scail_video_attempts_by_action.items()
-                )
-            },
-            effective_action_selected_seeds=dict(selected_scail_seeds),
-        )
-        final_video_fur_surface: dict[str, Any] | None = None
-        fur_surface_config = action_config.get("fur_surface_gate")
-        if (
-            GENERATION_VISUAL_AUDITS_BLOCKING
-            and isinstance(fur_surface_config, dict)
-            and fur_surface_config.get("enabled")
-        ):
-            update_job(
-                job_id,
-                stage="auditing_final_video_fur_surface",
-                progress=action_start + action_span * 0.76,
-            )
-            selected_surface_metrics = job.get("fur_surface_gate_selected_metrics")
-            validated_action_reference_gate = (
-                selected_surface_metrics.get(action)
-                if isinstance(selected_surface_metrics, dict)
-                else None
-            )
-            final_video_fur_surface = evaluate_final_video_fur_surface(
-                video_target,
-                action=action,
-                effective_subject_config=effective_subject_config,
-                comparison_scope=final_video_comparison_scope,
-                validated_action_reference_path=(
-                    reference_path
-                    if final_video_comparison_scope
-                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
-                    else None
-                ),
-                validated_action_reference_sha256=(
-                    str(action_config.get("reference_sha256") or "")
-                    if final_video_comparison_scope
-                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
-                    else None
-                ),
-                validated_action_reference_gate=(
-                    validated_action_reference_gate
-                    if final_video_comparison_scope
-                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
-                    else None
-                ),
-                reference_policy=reference_policy,
-                pose_identity_mask_video_path=(
-                    pose_identity_mask_video_path
-                    if final_video_comparison_scope
-                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
-                    else None
-                ),
-                pose_identity_mask_video_sha256=(
-                    pose_identity_mask_video_sha256
-                    if final_video_comparison_scope
-                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
-                    else None
-                ),
-                reference_identity_mask_path=(
-                    reference_identity_mask_path
-                    if final_video_comparison_scope
-                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
-                    else None
-                ),
-                reference_identity_mask_sha256=(
-                    reference_identity_mask_sha256
-                    if final_video_comparison_scope
-                    == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
-                    else None
-                ),
-                grooming_pose_gate_composite_recovery=(
-                    job.get("grooming_pose_gate_composite_recovery")
-                    if (
-                        action == "grooming"
-                        and final_video_comparison_scope
-                        == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
-                    )
-                    else None
-                ),
-            )
-            final_video_fur_surface_by_action[action] = final_video_fur_surface
-            audit_target = job_dir / f"{action}_final_video_fur_surface.json"
-            write_json_atomic(audit_target, final_video_fur_surface)
-            update_job(
-                job_id,
-                final_video_fur_surface_status={
-                    audit_action: (
-                        "passed" if audit.get("passed") is True else "failed"
-                    )
-                    for audit_action, audit in (
-                        final_video_fur_surface_by_action.items()
-                    )
-                },
-                final_video_fur_surface_quality=dict(final_video_fur_surface_by_action),
-                fur_surface_gate_final_quality={
-                    "scope": "candidate_reference_and_final_video",
-                    "status": (
-                        "passed"
-                        if all(
-                            audit.get("passed") is True
-                            for audit in final_video_fur_surface_by_action.values()
-                        )
-                        else "failed"
-                    ),
-                    "policy": FUR_SURFACE_GATE_POLICY,
-                    "gate_version": FUR_SURFACE_GATE_VERSION,
-                    "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
-                    "final_video_policy": FINAL_VIDEO_FUR_AUDIT_POLICY,
-                    "final_video_version": FINAL_VIDEO_FUR_AUDIT_VERSION,
-                    "actions": dict(final_video_fur_surface_by_action),
-                    "final_video_frame_audit": True,
-                },
-            )
-            if final_video_fur_surface.get("passed") is not True:
-                failed_frames = final_video_fur_surface.get("failed_frame_indices")
-                failed_issues = sorted(
-                    {
-                        str(issue)
-                        for frame in final_video_fur_surface.get("frames", [])
-                        if isinstance(frame, dict)
-                        for issue in (
-                            frame.get("decision", {}).get(
-                                "blocking_issues_action_reference_scope"
-                            )
-                            or frame.get("decision", {}).get(
-                                "blocking_issues",
-                                [],
-                            )
-                            if isinstance(frame.get("decision"), dict)
-                            else []
-                        )
-                    }
-                )
-                detail = (
-                    f"frames={failed_frames}; issues={failed_issues}"
-                    if isinstance(failed_frames, list)
-                    else str(final_video_fur_surface.get("error") or "unknown")
-                )
-                action_error = RuntimeError(
-                    f"{action}_final_video_fur_surface_gate_failed: {detail}"
-                )
-                degraded_result, _fallback_source = (
-                    recover_subject_replacement_action_with_fallback(
-                        job_id,
-                        get_job(job_id),
-                        action=action,
-                        pose_index=actions.index(action) + 1,
-                        error=action_error,
-                    )
-                )
-                degraded_result.update(
-                    {
-                        "scail_attempt_count": len(scail_attempt_records),
-                        "scail_video_attempts": scail_attempt_records,
-                        "scail_generation_succeeded": True,
-                        "scail_video_filename": generated_video.name,
-                        "final_video_fur_surface": final_video_fur_surface,
-                        "final_video_fur_surface_failed": True,
-                    }
-                )
-                results.append(degraded_result)
+            final_video_fur_surface: dict[str, Any] | None = None
+            fur_surface_config = action_config.get("fur_surface_gate")
+            if (
+                GENERATION_VISUAL_AUDITS_BLOCKING
+                and isinstance(fur_surface_config, dict)
+                and fur_surface_config.get("enabled")
+            ):
                 update_job(
                     job_id,
-                    progress=action_start + action_span,
-                    subject_replacement_results=results,
+                    stage="auditing_final_video_fur_surface",
+                    progress=action_start + action_span * 0.76,
                 )
-                continue
-            append_output(
-                job_id,
-                {
-                    "type": "final_video_fur_surface_audit",
-                    "action": action,
-                    "action_label": action_label,
-                    "filename": audit_target.name,
-                    "primary": False,
-                },
-            )
-        elif isinstance(fur_surface_config, dict) and fur_surface_config.get(
-            "enabled"
-        ):
-            final_video_fur_surface = {
-                "status": "skipped_advisory",
-                "passed": None,
-                "blocking": False,
-                "action": action,
-                "policy": FINAL_VIDEO_FUR_AUDIT_POLICY,
-                "version": FINAL_VIDEO_FUR_AUDIT_VERSION,
-                "generation_audit_policy": GENERATION_AUDIT_POLICY,
-                "reason": "visual_content_audits_are_non_blocking",
-            }
-            final_video_fur_surface_by_action[action] = final_video_fur_surface
-            update_job(
-                job_id,
-                final_video_fur_surface_status={
-                    audit_action: str(audit.get("status") or "skipped_advisory")
-                    for audit_action, audit in final_video_fur_surface_by_action.items()
-                },
-                final_video_fur_surface_quality=dict(
-                    final_video_fur_surface_by_action
-                ),
-                fur_surface_gate_final_quality={
-                    "scope": "candidate_reference_and_final_video",
-                    "status": "skipped_advisory",
-                    "blocking": False,
-                    "generation_audit_policy": GENERATION_AUDIT_POLICY,
-                    "actions": dict(final_video_fur_surface_by_action),
-                    "final_video_frame_audit": False,
-                },
-            )
-        video_playback_contract: dict[str, Any] | None = None
-        if job.get("output_format") != "transparent_gif":
-            if float(action_timing["playback_rate"]) != 1.0:
-                video_playback_contract = retime_video_playback(
+                selected_surface_metrics = job.get("fur_surface_gate_selected_metrics")
+                validated_action_reference_gate = (
+                    selected_surface_metrics.get(action)
+                    if isinstance(selected_surface_metrics, dict)
+                    else None
+                )
+                final_video_fur_surface = evaluate_final_video_fur_surface(
                     video_target,
-                    video_target,
-                    ffmpeg_bin=FFMPEG_BIN,
-                    source_fps=float(action_timing["generation"]["fps"]),
-                    output_fps=float(video_timing["fps"]),
-                    frame_count=int(video_timing["frames"]),
-                )
-            video_contract = validate_standard_direct_runtime_video(
-                video_target,
-                expected_frames=int(video_timing["frames"]),
-                expected_fps=float(video_timing["fps"]),
-            )
-            if video_playback_contract is None:
-                video_playback_contract = {
-                    "policy": action_timing["policy"],
-                    **video_contract,
-                }
-
-        video_output = {
-            "type": "subject_replacement_video",
-            "action": action,
-            "action_label": action_label,
-            "filename": video_target.name,
-            "width": 512,
-            "height": 512,
-            "frames": int(video_timing["frames"]),
-            "fps": float(video_timing["fps"]),
-            "duration_seconds": float(video_timing["duration_seconds"]),
-            "output_playback": action_timing,
-            "playback_contract": video_playback_contract,
-            "video_engine": "scail2-14b-fp8",
-            "output_exists": True,
-            "generation_succeeded": True,
-            "quality_passed": not selected_scail_best_effort,
-            "degraded": selected_scail_best_effort,
-            "best_effort": selected_scail_best_effort,
-            "best_effort_policy": (
-                EATING_SCAIL_BEST_EFFORT_POLICY
-                if selected_scail_best_effort
-                else None
-            ),
-            "requested_effective_seed": base_scail_seed,
-            "selected_effective_seed": selected_scail_seed,
-            "scail_attempt_count": len(scail_attempt_records),
-            "temporal_identity_quality": next(
-                (
-                    record.get("temporal_identity_quality")
-                    for record in scail_attempt_records
-                    if record.get("selected") is True
-                ),
-                None,
-            ),
-            "driving_template": Path(action_config["driving_animation"]).name,
-            "final_video_fur_surface_audit": (
-                f"{action}_final_video_fur_surface.json"
-                if (
-                    final_video_fur_surface is not None
-                    and final_video_fur_surface.get("status")
-                    != "skipped_advisory"
-                )
-                else None
-            ),
-            "primary": job.get("output_format") != "transparent_gif",
-        }
-        if job.get("output_format") != "transparent_gif":
-            append_output(job_id, video_output)
-
-        transparent_metrics: dict[str, Any] | None = None
-        temporal_cycle_output: dict[str, Any] | None = None
-        if job.get("output_format") == "transparent_gif":
-            raise_if_cancelled(job_id)
-            update_job(
-                job_id,
-                stage="extracting_transparent_animation",
-                progress=action_start + action_span * 0.82,
-            )
-            transparent_guidance_plan = select_transparent_guidance_policy(
-                action,
-                manifest,
-            )
-            guidance_source_key = str(
-                transparent_guidance_plan["source_key"]
-            )
-            guidance_path = Path(
-                str(manifest["input_files"][guidance_source_key])
-            )
-            if transparent_guidance_plan["static_reference_mask"]:
-                static_guidance_path = (
-                    job_dir
-                    / f"{action}_transparent_reference_guidance_mask.mp4"
-                )
-                static_guidance_log = (
-                    job_dir
-                    / f"{action}_transparent_reference_guidance_mask.log"
-                )
-                run_cancelable_process(
-                    job_id,
-                    [
-                        str(SCAIL_PYTHON),
-                        str(SCAIL_STATIC_MASK_RUNNER),
-                        str(guidance_path),
-                        str(static_guidance_path),
-                        "--frames",
-                        str(effective_subject_config["frames"]),
-                        "--fps",
-                        str(effective_subject_config["fps"]),
-                    ],
-                    log_path=static_guidance_log,
-                    stage_name=(
-                        f"{action} static reference guidance encoding"
+                    action=action,
+                    effective_subject_config=action_effective_subject_config,
+                    comparison_scope=final_video_comparison_scope,
+                    validated_action_reference_path=(
+                        reference_path
+                        if final_video_comparison_scope
+                        == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                        else None
                     ),
-                    timeout=180,
-                )
-                if not static_guidance_path.is_file():
-                    raise RuntimeError(
-                        f"{action} static reference guidance produced no video."
-                    )
-                static_guidance_metrics = logged_json(
-                    static_guidance_log
-                )
-                guidance_path = static_guidance_path
-                transparent_guidance_plan = {
-                    **transparent_guidance_plan,
-                    "static_mask_video": static_guidance_path.name,
-                    "static_mask_video_sha256": file_sha256(
-                        static_guidance_path
+                    validated_action_reference_sha256=(
+                        str(action_config.get("reference_sha256") or "")
+                        if final_video_comparison_scope
+                        == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                        else None
                     ),
-                    "static_mask_video_metrics": static_guidance_metrics,
-                }
-                append_output(
+                    validated_action_reference_gate=(
+                        validated_action_reference_gate
+                        if final_video_comparison_scope
+                        == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                        else None
+                    ),
+                    reference_policy=reference_policy,
+                    pose_identity_mask_video_path=(
+                        pose_identity_mask_video_path
+                        if final_video_comparison_scope
+                        == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                        else None
+                    ),
+                    pose_identity_mask_video_sha256=(
+                        pose_identity_mask_video_sha256
+                        if final_video_comparison_scope
+                        == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                        else None
+                    ),
+                    reference_identity_mask_path=(
+                        reference_identity_mask_path
+                        if final_video_comparison_scope
+                        == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                        else None
+                    ),
+                    reference_identity_mask_sha256=(
+                        reference_identity_mask_sha256
+                        if final_video_comparison_scope
+                        == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                        else None
+                    ),
+                    grooming_pose_gate_composite_recovery=(
+                        job.get("grooming_pose_gate_composite_recovery")
+                        if (
+                            action == "grooming"
+                            and final_video_comparison_scope
+                            == FINAL_VIDEO_VALIDATED_ACTION_SURFACE_SCOPE
+                        )
+                        else None
+                    ),
+                )
+                final_video_fur_surface_by_action[action] = final_video_fur_surface
+                audit_target = job_dir / f"{action}_final_video_fur_surface.json"
+                write_json_atomic(audit_target, final_video_fur_surface)
+                update_job(
                     job_id,
-                    {
-                        "type": "transparent_guidance_mask_video",
-                        "action": action,
-                        "action_label": action_label,
-                        "filename": static_guidance_path.name,
-                        "frames": int(effective_subject_config["frames"]),
-                        "fps": float(effective_subject_config["fps"]),
-                        "sha256": file_sha256(static_guidance_path),
-                        "policy": transparent_guidance_plan["policy"],
-                        "primary": False,
+                    final_video_fur_surface_status={
+                        audit_action: (
+                            "passed" if audit.get("passed") is True else "failed"
+                        )
+                        for audit_action, audit in (
+                            final_video_fur_surface_by_action.items()
+                        )
+                    },
+                    final_video_fur_surface_quality=dict(final_video_fur_surface_by_action),
+                    fur_surface_gate_final_quality={
+                        "scope": "candidate_reference_and_final_video",
+                        "status": (
+                            "passed"
+                            if all(
+                                audit.get("passed") is True
+                                for audit in final_video_fur_surface_by_action.values()
+                            )
+                            else "failed"
+                        ),
+                        "policy": FUR_SURFACE_GATE_POLICY,
+                        "gate_version": FUR_SURFACE_GATE_VERSION,
+                        "threshold_version": FUR_SURFACE_THRESHOLD_VERSION,
+                        "final_video_policy": FINAL_VIDEO_FUR_AUDIT_POLICY,
+                        "final_video_version": FINAL_VIDEO_FUR_AUDIT_VERSION,
+                        "actions": dict(final_video_fur_surface_by_action),
+                        "final_video_frame_audit": True,
                     },
                 )
-            transparent_guidance_policies[action] = transparent_guidance_plan
-            manifest["transparent_guidance"] = transparent_guidance_plan
-            write_json_atomic(
-                job_dir / f"{action}_prepare_manifest.json",
-                manifest,
-            )
-            gif_target = job_dir / f"{action}_subject_replacement_transparent_512.gif"
-            apng_target = (
-                job_dir
-                / f"{action}_subject_replacement_transparent_512_soft.png"
-            )
-            transparent_log = job_dir / f"{action}_transparent.log"
-            transparent_phase_start_index = (
-                resolve_transparent_output_phase_start_index(
-                    job,
-                    action=action,
-                    source_frames=int(effective_subject_config["frames"]),
-                )
-            )
-            transparent_command = [
-                str(SCAIL_PYTHON),
-                str(SCAIL_TRANSPARENT_RUNNER),
-                str(generated_video),
-                str(guidance_path),
-                str(gif_target),
-                "--action",
-                action,
-                "--white-mp4-target",
-                str(video_target),
-                "--soft-apng-target",
-                str(apng_target),
-                "--start-frame-index",
-                str(transparent_phase_start_index),
-                "--source-fps",
-                str(video_timing["fps"]),
-                "--gif-fps",
-                str(gif_timing["fps"]),
-                "--gif-frames",
-                str(gif_timing["frames"]),
-            ]
-            if transparent_guidance_plan[
-                "reference_aligned_uniform_background"
-            ]:
-                transparent_command.append(
-                    "--reference-aligned-adaptive-extraction"
-                )
-            update_job(
-                job_id,
-                transparent_output_phase_policy=(
-                    "validated_action_contact_phase_rotation_v1"
-                ),
-                transparent_output_phase_start_index=(
-                    transparent_phase_start_index
-                ),
-                transparent_output_phase_action=action,
-                transparent_guidance_policy=dict(
-                    transparent_guidance_policies
-                ),
-            )
-            gif_target.unlink(missing_ok=True)
-            apng_target.unlink(missing_ok=True)
-            try:
-                run_cancelable_process(
-                    job_id,
-                    transparent_command,
-                    log_path=transparent_log,
-                    stage_name=f"{action} transparent GIF extraction",
-                    timeout=1800,
-                )
-                if not gif_target.is_file():
-                    raise RuntimeError(
-                        f"{action} transparent GIF extraction produced no file."
+                if final_video_fur_surface.get("passed") is not True:
+                    failed_frames = final_video_fur_surface.get("failed_frame_indices")
+                    failed_issues = sorted(
+                        {
+                            str(issue)
+                            for frame in final_video_fur_surface.get("frames", [])
+                            if isinstance(frame, dict)
+                            for issue in (
+                                frame.get("decision", {}).get(
+                                    "blocking_issues_action_reference_scope"
+                                )
+                                or frame.get("decision", {}).get(
+                                    "blocking_issues",
+                                    [],
+                                )
+                                if isinstance(frame.get("decision"), dict)
+                                else []
+                            )
+                        }
                     )
-                transparent_metrics = logged_json(transparent_log)
-            except JobCancelled:
-                raise
-            except Exception as exc:
-                degraded_result, _fallback_source = (
-                    recover_subject_replacement_action_with_fallback(
-                        job_id,
-                        get_job(job_id),
-                        action=action,
-                        pose_index=actions.index(action) + 1,
-                        error=exc,
+                    detail = (
+                        f"frames={failed_frames}; issues={failed_issues}"
+                        if isinstance(failed_frames, list)
+                        else str(final_video_fur_surface.get("error") or "unknown")
                     )
-                )
-                degraded_result.update(
-                    {
-                        "scail_attempt_count": len(scail_attempt_records),
-                        "scail_video_attempts": scail_attempt_records,
-                        "scail_generation_succeeded": True,
-                        "scail_video_filename": generated_video.name,
-                        "transparent_extraction_failed": True,
-                        "transparent_guidance_policy": (
-                            transparent_guidance_plan
-                        ),
-                    }
-                )
-                results.append(degraded_result)
-                update_job(
-                    job_id,
-                    progress=action_start + action_span,
-                    subject_replacement_results=results,
-                )
-                continue
-            apng_available = apng_target.is_file()
-            transparent_metrics["guidance_policy"] = (
-                transparent_guidance_plan
-            )
-            if action in {"eating", "drinking"}:
-                bowl_temporal_cycle = transparent_metrics.get(
-                    "temporal_cycle"
-                )
-                bowl_published_loop = (
-                    bowl_temporal_cycle.get("published_loop_quality")
-                    if isinstance(bowl_temporal_cycle, dict)
-                    else None
-                )
-                if not (
-                    isinstance(bowl_published_loop, dict)
-                    and bowl_published_loop.get("acceptable") is True
-                ):
                     action_error = RuntimeError(
-                        f"{action}_transparent_loop_quality_failed"
+                        f"{action}_final_video_fur_surface_gate_failed: {detail}"
                     )
                     degraded_result, _fallback_source = (
                         recover_subject_replacement_action_with_fallback(
                             job_id,
                             get_job(job_id),
                             action=action,
-                            pose_index=actions.index(action) + 1,
-                            error=action_error,
-                        )
-                    )
-                    degraded_result["scail_attempt_count"] = len(
-                        scail_attempt_records
-                    )
-                    degraded_result["scail_video_attempts"] = (
-                        scail_attempt_records
-                    )
-                    degraded_result["transparent_loop_quality"] = (
-                        bowl_temporal_cycle
-                    )
-                    results.append(degraded_result)
-                    update_job(
-                        job_id,
-                        progress=action_start + action_span,
-                        subject_replacement_results=results,
-                    )
-                    continue
-            if action == "grooming":
-                temporal_cycle = transparent_metrics.get("temporal_cycle")
-                published_loop_quality = (
-                    temporal_cycle.get("published_loop_quality")
-                    if isinstance(temporal_cycle, dict)
-                    else None
-                )
-                temporal_cycle_acceptable = (
-                    isinstance(temporal_cycle, dict)
-                    and temporal_cycle.get("policy")
-                    == GROOMING_TEMPORAL_LOOP_POLICY
-                    and temporal_cycle.get("applied") is True
-                    and temporal_cycle.get("closed_loop") is True
-                    and temporal_cycle.get("acceptable") is True
-                    and isinstance(published_loop_quality, dict)
-                    and published_loop_quality.get("acceptable") is True
-                )
-                if not temporal_cycle_acceptable:
-                    update_job(
-                        job_id,
-                        grooming_temporal_loop_status="failed",
-                        grooming_temporal_loop_policy=(
-                            GROOMING_TEMPORAL_LOOP_POLICY
-                        ),
-                        grooming_temporal_loop_quality=temporal_cycle,
-                    )
-                    action_error = RuntimeError(
-                        "grooming_temporal_loop_failed: the published animation "
-                        "did not preserve the closed-loop action contract"
-                    )
-                    degraded_result, _fallback_source = (
-                        recover_subject_replacement_action_with_fallback(
-                            job_id,
-                            get_job(job_id),
-                            action=action,
-                            pose_index=actions.index(action) + 1,
+                            pose_index=action_scope.request_index,
                             error=action_error,
                         )
                     )
@@ -5254,8 +4932,8 @@ def run_subject_replacement_job(job_id: str) -> None:
                             "scail_video_attempts": scail_attempt_records,
                             "scail_generation_succeeded": True,
                             "scail_video_filename": generated_video.name,
-                            "grooming_temporal_loop": temporal_cycle,
-                            "grooming_temporal_loop_failed": True,
+                            "final_video_fur_surface": final_video_fur_surface,
+                            "final_video_fur_surface_failed": True,
                         }
                     )
                     results.append(degraded_result)
@@ -5265,205 +4943,568 @@ def run_subject_replacement_job(job_id: str) -> None:
                         subject_replacement_results=results,
                     )
                     continue
-                temporal_cycle_output = {
-                    "policy": GROOMING_TEMPORAL_LOOP_POLICY,
-                    "playback": temporal_cycle.get("playback"),
-                    "pivot_source_frame_index": temporal_cycle.get(
-                        "pivot_source_frame_index"
-                    ),
-                    "closed_loop": True,
-                    "published_loop_quality": published_loop_quality,
-                }
-                video_output["temporal_cycle"] = temporal_cycle_output
-                update_job(
-                    job_id,
-                    grooming_temporal_loop_status="passed",
-                    grooming_temporal_loop_policy=(
-                        GROOMING_TEMPORAL_LOOP_POLICY
-                    ),
-                    grooming_temporal_loop_quality=temporal_cycle_output,
-                )
-            video_playback_contract = validate_standard_direct_runtime_video(
-                video_target,
-                expected_frames=int(video_timing["frames"]),
-                expected_fps=float(video_timing["fps"]),
-            )
-            transparent_metrics["output_playback"] = action_timing
-            transparent_metrics["video_playback_contract"] = (
-                video_playback_contract
-            )
-            video_output["playback_contract"] = video_playback_contract
-            fur_contour_quality: dict[str, Any] | None = None
-            fur_gate = action_config.get("fur_silhouette_gate")
-            if (
-                GENERATION_VISUAL_AUDITS_BLOCKING
-                and isinstance(fur_gate, dict)
-                and fur_gate.get("enabled")
-            ):
-                pose_metadata = manifest.get("pose_metadata")
-                full_driver_pose = isinstance(
-                    pose_metadata, dict
-                ) and uses_full_driver_eating_pose(pose_metadata.get("policy"))
-                absolute_upload_gate = (
-                    fur_gate.get("policy") == UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY
-                )
-                if absolute_upload_gate:
-                    if action == "eating" and not full_driver_pose:
-                        raise RuntimeError(
-                            "eating_fur_contour_gate_failed: full-driver pose "
-                            "policy changed"
-                        )
-                    fur_contour_quality = evaluate_animation_fur_quality(
-                        gif_target,
-                    )
-                    fur_contour_quality["reference_policy"] = reference_policy
-                    fur_contour_quality["gate_policy"] = (
-                        UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY
-                    )
-                elif action == "eating" and full_driver_pose:
-                    fur_contour_quality = evaluate_animation_fur_quality(
-                        gif_target,
-                    )
-                    fur_contour_quality["reference_policy"] = reference_policy
-                elif action == "eating":
-                    baseline_config = action_config.get("fur_contour_baseline")
-                    if not isinstance(baseline_config, dict):
-                        raise RuntimeError(
-                            "eating_fur_contour_gate_failed: frozen baseline is missing"
-                        )
-                    baseline_path = Path(str(baseline_config.get("path") or ""))
-                    if not baseline_path.is_file():
-                        raise FileNotFoundError(
-                            "Frozen eating fur-contour baseline is missing: "
-                            f"{baseline_path}"
-                        )
-                    expected_baseline_sha = str(
-                        baseline_config.get("sha256") or ""
-                    ).strip()
-                    if (
-                        expected_baseline_sha
-                        and file_sha256(baseline_path) != expected_baseline_sha
-                    ):
-                        raise RuntimeError(
-                            "eating_fur_contour_gate_failed: "
-                            "frozen baseline digest changed"
-                        )
-                    fur_contour_quality = compare_fur_contours(
-                        gif_target,
-                        baseline_path,
-                    )
-                transparent_metrics["fur_contour"] = fur_contour_quality
-            elif isinstance(fur_gate, dict) and fur_gate.get("enabled"):
-                transparent_metrics["fur_contour"] = {
-                    "status": "skipped_advisory",
-                    "acceptable": None,
-                    "blocking": False,
-                    "generation_audit_policy": GENERATION_AUDIT_POLICY,
-                }
-                update_job(
-                    job_id,
-                    fur_contour_gate_status="skipped_advisory",
-                    fur_contour_gate_action=action,
-                    fur_contour_gate_quality=transparent_metrics["fur_contour"],
-                )
-            write_json_atomic(
-                job_dir / f"{action}_transparent_metrics.json",
-                transparent_metrics,
-            )
-            if (
-                fur_contour_quality is not None
-                and not fur_contour_quality["acceptable"]
-            ):
-                update_job(
-                    job_id,
-                    fur_contour_gate_status="failed",
-                    fur_contour_gate_action=action,
-                    fur_contour_gate_quality=fur_contour_quality,
-                )
-                action_error = RuntimeError(
-                    "eating_fur_contour_gate_failed: "
-                    + ", ".join(fur_contour_quality["issues"])
-                )
-                degraded_result, _fallback_source = (
-                    recover_subject_replacement_action_with_fallback(
-                        job_id,
-                        get_job(job_id),
-                        action=action,
-                        pose_index=actions.index(action) + 1,
-                        error=action_error,
-                    )
-                )
-                degraded_result.update(
-                    {
-                        "scail_attempt_count": len(scail_attempt_records),
-                        "scail_video_attempts": scail_attempt_records,
-                        "scail_generation_succeeded": True,
-                        "scail_video_filename": generated_video.name,
-                        "fur_contour_quality": fur_contour_quality,
-                        "fur_contour_gate_failed": True,
-                    }
-                )
-                results.append(degraded_result)
-                update_job(
-                    job_id,
-                    progress=action_start + action_span,
-                    subject_replacement_results=results,
-                )
-                continue
-            if fur_contour_quality is not None:
-                update_job(
-                    job_id,
-                    fur_contour_gate_status="passed",
-                    fur_contour_gate_action=action,
-                    fur_contour_gate_quality=fur_contour_quality,
-                )
-            append_output(job_id, video_output)
-            append_output(
-                job_id,
-                {
-                    "type": "transparent_gif",
-                    "action": action,
-                    "action_label": action_label,
-                    "filename": gif_target.name,
-                    "width": TRANSPARENT_GIF_SIZE,
-                    "height": TRANSPARENT_GIF_SIZE,
-                    "frames": int(gif_timing["frames"]),
-                    "fps": int(gif_timing["fps"]),
-                    "duration_seconds": float(gif_timing["duration_seconds"]),
-                    "output_playback": action_timing,
-                    "transparent": True,
-                    "video_engine": "scail2-14b-fp8",
-                    "output_exists": True,
-                    "generation_succeeded": True,
-                    "quality_passed": not selected_scail_best_effort,
-                    "degraded": selected_scail_best_effort,
-                    "best_effort": selected_scail_best_effort,
-                    "best_effort_policy": (
-                        EATING_SCAIL_BEST_EFFORT_POLICY
-                        if selected_scail_best_effort
-                        else None
-                    ),
-                    "driving_template": Path(action_config["driving_animation"]).name,
-                    "edge_mode": "clean_hard_alpha_no_dither",
-                    "temporal_cycle": temporal_cycle_output,
-                    "primary": not apng_available,
-                },
-            )
-            if apng_available:
                 append_output(
                     job_id,
                     {
-                        "type": "transparent_apng",
+                        "type": "final_video_fur_surface_audit",
                         "action": action,
                         "action_label": action_label,
-                        "filename": apng_target.name,
+                        "filename": audit_target.name,
+                        "primary": False,
+                    },
+                )
+            elif isinstance(fur_surface_config, dict) and fur_surface_config.get(
+                "enabled"
+            ):
+                final_video_fur_surface = {
+                    "status": "skipped_advisory",
+                    "passed": None,
+                    "blocking": False,
+                    "action": action,
+                    "policy": FINAL_VIDEO_FUR_AUDIT_POLICY,
+                    "version": FINAL_VIDEO_FUR_AUDIT_VERSION,
+                    "generation_audit_policy": GENERATION_AUDIT_POLICY,
+                    "reason": "visual_content_audits_are_non_blocking",
+                }
+                final_video_fur_surface_by_action[action] = final_video_fur_surface
+                update_job(
+                    job_id,
+                    final_video_fur_surface_status={
+                        audit_action: str(audit.get("status") or "skipped_advisory")
+                        for audit_action, audit in final_video_fur_surface_by_action.items()
+                    },
+                    final_video_fur_surface_quality=dict(
+                        final_video_fur_surface_by_action
+                    ),
+                    fur_surface_gate_final_quality={
+                        "scope": "candidate_reference_and_final_video",
+                        "status": "skipped_advisory",
+                        "blocking": False,
+                        "generation_audit_policy": GENERATION_AUDIT_POLICY,
+                        "actions": dict(final_video_fur_surface_by_action),
+                        "final_video_frame_audit": False,
+                    },
+                )
+            video_playback_contract: dict[str, Any] | None = None
+            if job.get("output_format") != "transparent_gif":
+                if float(action_timing["playback_rate"]) != 1.0:
+                    video_playback_contract = retime_video_playback(
+                        video_target,
+                        video_target,
+                        ffmpeg_bin=FFMPEG_BIN,
+                        source_fps=float(action_timing["generation"]["fps"]),
+                        output_fps=float(video_timing["fps"]),
+                        frame_count=int(video_timing["frames"]),
+                    )
+                video_contract = validate_standard_direct_runtime_video(
+                    video_target,
+                    expected_frames=int(video_timing["frames"]),
+                    expected_fps=float(video_timing["fps"]),
+                )
+                if video_playback_contract is None:
+                    video_playback_contract = {
+                        "policy": action_timing["policy"],
+                        **video_contract,
+                    }
+
+            video_output = {
+                "type": "subject_replacement_video",
+                "action": action,
+                "action_label": action_label,
+                "filename": video_target.name,
+                "width": 512,
+                "height": 512,
+                "frames": int(video_timing["frames"]),
+                "fps": float(video_timing["fps"]),
+                "duration_seconds": float(video_timing["duration_seconds"]),
+                "output_playback": action_timing,
+                "playback_contract": video_playback_contract,
+                "video_engine": "scail2-14b-fp8",
+                "output_exists": True,
+                "generation_succeeded": True,
+                "quality_passed": not selected_scail_best_effort,
+                "degraded": selected_scail_best_effort,
+                "best_effort": selected_scail_best_effort,
+                "best_effort_policy": (
+                    EATING_SCAIL_BEST_EFFORT_POLICY
+                    if selected_scail_best_effort
+                    else None
+                ),
+                "requested_effective_seed": base_scail_seed,
+                "selected_effective_seed": selected_scail_seed,
+                "scail_attempt_count": len(scail_attempt_records),
+                "temporal_identity_quality": next(
+                    (
+                        record.get("temporal_identity_quality")
+                        for record in scail_attempt_records
+                        if record.get("selected") is True
+                    ),
+                    None,
+                ),
+                "driving_template": Path(action_config["driving_animation"]).name,
+                "final_video_fur_surface_audit": (
+                    f"{action}_final_video_fur_surface.json"
+                    if (
+                        final_video_fur_surface is not None
+                        and final_video_fur_surface.get("status")
+                        != "skipped_advisory"
+                    )
+                    else None
+                ),
+                "primary": job.get("output_format") != "transparent_gif",
+            }
+            if job.get("output_format") != "transparent_gif":
+                append_output(job_id, video_output)
+
+            transparent_metrics: dict[str, Any] | None = None
+            temporal_cycle_output: dict[str, Any] | None = None
+            if job.get("output_format") == "transparent_gif":
+                raise_if_cancelled(job_id)
+                update_job(
+                    job_id,
+                    stage="extracting_transparent_animation",
+                    progress=action_start + action_span * 0.82,
+                )
+                transparent_guidance_plan = select_transparent_guidance_policy(
+                    action,
+                    manifest,
+                )
+                guidance_source_key = str(
+                    transparent_guidance_plan["source_key"]
+                )
+                guidance_path = Path(
+                    str(manifest["input_files"][guidance_source_key])
+                )
+                if transparent_guidance_plan["static_reference_mask"]:
+                    static_guidance_path = (
+                        job_dir
+                        / f"{action}_transparent_reference_guidance_mask.mp4"
+                    )
+                    static_guidance_log = (
+                        job_dir
+                        / f"{action}_transparent_reference_guidance_mask.log"
+                    )
+                    run_cancelable_process(
+                        job_id,
+                        [
+                            str(SCAIL_PYTHON),
+                            str(SCAIL_STATIC_MASK_RUNNER),
+                            str(guidance_path),
+                            str(static_guidance_path),
+                            "--frames",
+                            str(action_effective_subject_config["frames"]),
+                            "--fps",
+                            str(action_effective_subject_config["fps"]),
+                        ],
+                        log_path=static_guidance_log,
+                        stage_name=(
+                            f"{action} static reference guidance encoding"
+                        ),
+                        timeout=180,
+                    )
+                    if not static_guidance_path.is_file():
+                        raise RuntimeError(
+                            f"{action} static reference guidance produced no video."
+                        )
+                    static_guidance_metrics = logged_json(
+                        static_guidance_log
+                    )
+                    guidance_path = static_guidance_path
+                    transparent_guidance_plan = {
+                        **transparent_guidance_plan,
+                        "static_mask_video": static_guidance_path.name,
+                        "static_mask_video_sha256": file_sha256(
+                            static_guidance_path
+                        ),
+                        "static_mask_video_metrics": static_guidance_metrics,
+                    }
+                    append_output(
+                        job_id,
+                        {
+                            "type": "transparent_guidance_mask_video",
+                            "action": action,
+                            "action_label": action_label,
+                            "filename": static_guidance_path.name,
+                            "frames": int(action_effective_subject_config["frames"]),
+                            "fps": float(action_effective_subject_config["fps"]),
+                            "sha256": file_sha256(static_guidance_path),
+                            "policy": transparent_guidance_plan["policy"],
+                            "primary": False,
+                        },
+                    )
+                transparent_guidance_policies[action] = transparent_guidance_plan
+                manifest["transparent_guidance"] = transparent_guidance_plan
+                write_json_atomic(
+                    job_dir / f"{action}_prepare_manifest.json",
+                    manifest,
+                )
+                gif_target = job_dir / f"{action}_subject_replacement_transparent_512.gif"
+                apng_target = (
+                    job_dir
+                    / f"{action}_subject_replacement_transparent_512_soft.png"
+                )
+                transparent_log = job_dir / f"{action}_transparent.log"
+                transparent_phase_start_index = (
+                    resolve_transparent_output_phase_start_index(
+                        job,
+                        action=action,
+                        source_frames=int(action_effective_subject_config["frames"]),
+                    )
+                )
+                transparent_command = [
+                    str(SCAIL_PYTHON),
+                    str(SCAIL_TRANSPARENT_RUNNER),
+                    str(generated_video),
+                    str(guidance_path),
+                    str(gif_target),
+                    "--action",
+                    action,
+                    "--white-mp4-target",
+                    str(video_target),
+                    "--soft-apng-target",
+                    str(apng_target),
+                    "--start-frame-index",
+                    str(transparent_phase_start_index),
+                    "--source-fps",
+                    str(video_timing["fps"]),
+                    "--gif-fps",
+                    str(gif_timing["fps"]),
+                    "--gif-frames",
+                    str(gif_timing["frames"]),
+                ]
+                if transparent_guidance_plan[
+                    "reference_aligned_uniform_background"
+                ]:
+                    transparent_command.append(
+                        "--reference-aligned-adaptive-extraction"
+                    )
+                update_job(
+                    job_id,
+                    transparent_output_phase_policy=(
+                        "validated_action_contact_phase_rotation_v1"
+                    ),
+                    transparent_output_phase_start_index=(
+                        transparent_phase_start_index
+                    ),
+                    transparent_output_phase_action=action,
+                    transparent_guidance_policy=dict(
+                        transparent_guidance_policies
+                    ),
+                )
+                gif_target.unlink(missing_ok=True)
+                apng_target.unlink(missing_ok=True)
+                try:
+                    run_cancelable_process(
+                        job_id,
+                        transparent_command,
+                        log_path=transparent_log,
+                        stage_name=f"{action} transparent GIF extraction",
+                        timeout=1800,
+                    )
+                    if not gif_target.is_file():
+                        raise RuntimeError(
+                            f"{action} transparent GIF extraction produced no file."
+                        )
+                    transparent_metrics = logged_json(transparent_log)
+                except JobCancelled:
+                    raise
+                except Exception as exc:
+                    degraded_result, _fallback_source = (
+                        recover_subject_replacement_action_with_fallback(
+                            job_id,
+                            get_job(job_id),
+                            action=action,
+                            pose_index=action_scope.request_index,
+                            error=exc,
+                        )
+                    )
+                    degraded_result.update(
+                        {
+                            "scail_attempt_count": len(scail_attempt_records),
+                            "scail_video_attempts": scail_attempt_records,
+                            "scail_generation_succeeded": True,
+                            "scail_video_filename": generated_video.name,
+                            "transparent_extraction_failed": True,
+                            "transparent_guidance_policy": (
+                                transparent_guidance_plan
+                            ),
+                        }
+                    )
+                    results.append(degraded_result)
+                    update_job(
+                        job_id,
+                        progress=action_start + action_span,
+                        subject_replacement_results=results,
+                    )
+                    continue
+                apng_available = apng_target.is_file()
+                transparent_metrics["guidance_policy"] = (
+                    transparent_guidance_plan
+                )
+                if action in {"eating", "drinking"}:
+                    bowl_temporal_cycle = transparent_metrics.get(
+                        "temporal_cycle"
+                    )
+                    bowl_published_loop = (
+                        bowl_temporal_cycle.get("published_loop_quality")
+                        if isinstance(bowl_temporal_cycle, dict)
+                        else None
+                    )
+                    if not (
+                        isinstance(bowl_published_loop, dict)
+                        and bowl_published_loop.get("acceptable") is True
+                    ):
+                        action_error = RuntimeError(
+                            f"{action}_transparent_loop_quality_failed"
+                        )
+                        degraded_result, _fallback_source = (
+                            recover_subject_replacement_action_with_fallback(
+                                job_id,
+                                get_job(job_id),
+                                action=action,
+                                pose_index=action_scope.request_index,
+                                error=action_error,
+                            )
+                        )
+                        degraded_result["scail_attempt_count"] = len(
+                            scail_attempt_records
+                        )
+                        degraded_result["scail_video_attempts"] = (
+                            scail_attempt_records
+                        )
+                        degraded_result["transparent_loop_quality"] = (
+                            bowl_temporal_cycle
+                        )
+                        results.append(degraded_result)
+                        update_job(
+                            job_id,
+                            progress=action_start + action_span,
+                            subject_replacement_results=results,
+                        )
+                        continue
+                if action == "grooming":
+                    temporal_cycle = transparent_metrics.get("temporal_cycle")
+                    published_loop_quality = (
+                        temporal_cycle.get("published_loop_quality")
+                        if isinstance(temporal_cycle, dict)
+                        else None
+                    )
+                    temporal_cycle_acceptable = (
+                        isinstance(temporal_cycle, dict)
+                        and temporal_cycle.get("policy")
+                        == GROOMING_TEMPORAL_LOOP_POLICY
+                        and temporal_cycle.get("applied") is True
+                        and temporal_cycle.get("closed_loop") is True
+                        and temporal_cycle.get("acceptable") is True
+                        and isinstance(published_loop_quality, dict)
+                        and published_loop_quality.get("acceptable") is True
+                    )
+                    if not temporal_cycle_acceptable:
+                        update_job(
+                            job_id,
+                            grooming_temporal_loop_status="failed",
+                            grooming_temporal_loop_policy=(
+                                GROOMING_TEMPORAL_LOOP_POLICY
+                            ),
+                            grooming_temporal_loop_quality=temporal_cycle,
+                        )
+                        action_error = RuntimeError(
+                            "grooming_temporal_loop_failed: the published animation "
+                            "did not preserve the closed-loop action contract"
+                        )
+                        degraded_result, _fallback_source = (
+                            recover_subject_replacement_action_with_fallback(
+                                job_id,
+                                get_job(job_id),
+                                action=action,
+                                pose_index=action_scope.request_index,
+                                error=action_error,
+                            )
+                        )
+                        degraded_result.update(
+                            {
+                                "scail_attempt_count": len(scail_attempt_records),
+                                "scail_video_attempts": scail_attempt_records,
+                                "scail_generation_succeeded": True,
+                                "scail_video_filename": generated_video.name,
+                                "grooming_temporal_loop": temporal_cycle,
+                                "grooming_temporal_loop_failed": True,
+                            }
+                        )
+                        results.append(degraded_result)
+                        update_job(
+                            job_id,
+                            progress=action_start + action_span,
+                            subject_replacement_results=results,
+                        )
+                        continue
+                    temporal_cycle_output = {
+                        "policy": GROOMING_TEMPORAL_LOOP_POLICY,
+                        "playback": temporal_cycle.get("playback"),
+                        "pivot_source_frame_index": temporal_cycle.get(
+                            "pivot_source_frame_index"
+                        ),
+                        "closed_loop": True,
+                        "published_loop_quality": published_loop_quality,
+                    }
+                    video_output["temporal_cycle"] = temporal_cycle_output
+                    update_job(
+                        job_id,
+                        grooming_temporal_loop_status="passed",
+                        grooming_temporal_loop_policy=(
+                            GROOMING_TEMPORAL_LOOP_POLICY
+                        ),
+                        grooming_temporal_loop_quality=temporal_cycle_output,
+                    )
+                video_playback_contract = validate_standard_direct_runtime_video(
+                    video_target,
+                    expected_frames=int(video_timing["frames"]),
+                    expected_fps=float(video_timing["fps"]),
+                )
+                transparent_metrics["output_playback"] = action_timing
+                transparent_metrics["video_playback_contract"] = (
+                    video_playback_contract
+                )
+                video_output["playback_contract"] = video_playback_contract
+                fur_contour_quality: dict[str, Any] | None = None
+                fur_gate = action_config.get("fur_silhouette_gate")
+                if (
+                    GENERATION_VISUAL_AUDITS_BLOCKING
+                    and isinstance(fur_gate, dict)
+                    and fur_gate.get("enabled")
+                ):
+                    pose_metadata = manifest.get("pose_metadata")
+                    full_driver_pose = isinstance(
+                        pose_metadata, dict
+                    ) and uses_full_driver_eating_pose(pose_metadata.get("policy"))
+                    absolute_upload_gate = (
+                        fur_gate.get("policy") == UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY
+                    )
+                    if absolute_upload_gate:
+                        if action == "eating" and not full_driver_pose:
+                            raise RuntimeError(
+                                "eating_fur_contour_gate_failed: full-driver pose "
+                                "policy changed"
+                            )
+                        fur_contour_quality = evaluate_animation_fur_quality(
+                            gif_target,
+                        )
+                        fur_contour_quality["reference_policy"] = reference_policy
+                        fur_contour_quality["gate_policy"] = (
+                            UPLOADED_ABSOLUTE_FUR_CONTOUR_POLICY
+                        )
+                    elif action == "eating" and full_driver_pose:
+                        fur_contour_quality = evaluate_animation_fur_quality(
+                            gif_target,
+                        )
+                        fur_contour_quality["reference_policy"] = reference_policy
+                    elif action == "eating":
+                        baseline_config = action_config.get("fur_contour_baseline")
+                        if not isinstance(baseline_config, dict):
+                            raise RuntimeError(
+                                "eating_fur_contour_gate_failed: frozen baseline is missing"
+                            )
+                        baseline_path = Path(str(baseline_config.get("path") or ""))
+                        if not baseline_path.is_file():
+                            raise FileNotFoundError(
+                                "Frozen eating fur-contour baseline is missing: "
+                                f"{baseline_path}"
+                            )
+                        expected_baseline_sha = str(
+                            baseline_config.get("sha256") or ""
+                        ).strip()
+                        if (
+                            expected_baseline_sha
+                            and file_sha256(baseline_path) != expected_baseline_sha
+                        ):
+                            raise RuntimeError(
+                                "eating_fur_contour_gate_failed: "
+                                "frozen baseline digest changed"
+                            )
+                        fur_contour_quality = compare_fur_contours(
+                            gif_target,
+                            baseline_path,
+                        )
+                    transparent_metrics["fur_contour"] = fur_contour_quality
+                elif isinstance(fur_gate, dict) and fur_gate.get("enabled"):
+                    transparent_metrics["fur_contour"] = {
+                        "status": "skipped_advisory",
+                        "acceptable": None,
+                        "blocking": False,
+                        "generation_audit_policy": GENERATION_AUDIT_POLICY,
+                    }
+                    update_job(
+                        job_id,
+                        fur_contour_gate_status="skipped_advisory",
+                        fur_contour_gate_action=action,
+                        fur_contour_gate_quality=transparent_metrics["fur_contour"],
+                    )
+                write_json_atomic(
+                    job_dir / f"{action}_transparent_metrics.json",
+                    transparent_metrics,
+                )
+                if (
+                    fur_contour_quality is not None
+                    and not fur_contour_quality["acceptable"]
+                ):
+                    update_job(
+                        job_id,
+                        fur_contour_gate_status="failed",
+                        fur_contour_gate_action=action,
+                        fur_contour_gate_quality=fur_contour_quality,
+                    )
+                    action_error = RuntimeError(
+                        "eating_fur_contour_gate_failed: "
+                        + ", ".join(fur_contour_quality["issues"])
+                    )
+                    degraded_result, _fallback_source = (
+                        recover_subject_replacement_action_with_fallback(
+                            job_id,
+                            get_job(job_id),
+                            action=action,
+                            pose_index=action_scope.request_index,
+                            error=action_error,
+                        )
+                    )
+                    degraded_result.update(
+                        {
+                            "scail_attempt_count": len(scail_attempt_records),
+                            "scail_video_attempts": scail_attempt_records,
+                            "scail_generation_succeeded": True,
+                            "scail_video_filename": generated_video.name,
+                            "fur_contour_quality": fur_contour_quality,
+                            "fur_contour_gate_failed": True,
+                        }
+                    )
+                    results.append(degraded_result)
+                    update_job(
+                        job_id,
+                        progress=action_start + action_span,
+                        subject_replacement_results=results,
+                    )
+                    continue
+                if fur_contour_quality is not None:
+                    update_job(
+                        job_id,
+                        fur_contour_gate_status="passed",
+                        fur_contour_gate_action=action,
+                        fur_contour_gate_quality=fur_contour_quality,
+                    )
+                append_output(job_id, video_output)
+                append_output(
+                    job_id,
+                    {
+                        "type": "transparent_gif",
+                        "action": action,
+                        "action_label": action_label,
+                        "filename": gif_target.name,
                         "width": TRANSPARENT_GIF_SIZE,
                         "height": TRANSPARENT_GIF_SIZE,
-                        "frames": TRANSPARENT_GIF_FRAMES,
-                        "fps": TRANSPARENT_GIF_FPS,
-                        "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                        "frames": int(gif_timing["frames"]),
+                        "fps": int(gif_timing["fps"]),
+                        "duration_seconds": float(gif_timing["duration_seconds"]),
+                        "output_playback": action_timing,
                         "transparent": True,
-                        "soft_alpha": True,
                         "video_engine": "scail2-14b-fp8",
                         "output_exists": True,
                         "generation_succeeded": True,
@@ -5475,66 +5516,111 @@ def run_subject_replacement_job(job_id: str) -> None:
                             if selected_scail_best_effort
                             else None
                         ),
-                        "driving_template": Path(
-                            action_config["driving_animation"]
-                        ).name,
-                        "recommended_for_quality": True,
+                        "driving_template": Path(action_config["driving_animation"]).name,
+                        "edge_mode": "clean_hard_alpha_no_dither",
                         "temporal_cycle": temporal_cycle_output,
-                        "primary": True,
+                        "primary": not apng_available,
                     },
                 )
-        results.append(
-            {
-                "action": action,
-                "action_label": action_label,
-                "reference": str(reference_path),
-                "reference_sha256": file_sha256(reference_path),
-                "driving_template": str(action_config["driving_animation"]),
-                "requested_effective_seed": base_scail_seed,
-                "effective_seed": int(selected_scail_seed),
-                "scail_attempt_count": len(scail_attempt_records),
-                "scail_video_attempts": scail_attempt_records,
-                "temporal_identity_quality": next(
-                    (
-                        record.get("temporal_identity_quality")
-                        for record in scail_attempt_records
-                        if record.get("selected") is True
+                if apng_available:
+                    append_output(
+                        job_id,
+                        {
+                            "type": "transparent_apng",
+                            "action": action,
+                            "action_label": action_label,
+                            "filename": apng_target.name,
+                            "width": TRANSPARENT_GIF_SIZE,
+                            "height": TRANSPARENT_GIF_SIZE,
+                            "frames": TRANSPARENT_GIF_FRAMES,
+                            "fps": TRANSPARENT_GIF_FPS,
+                            "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                            "transparent": True,
+                            "soft_alpha": True,
+                            "video_engine": "scail2-14b-fp8",
+                            "output_exists": True,
+                            "generation_succeeded": True,
+                            "quality_passed": not selected_scail_best_effort,
+                            "degraded": selected_scail_best_effort,
+                            "best_effort": selected_scail_best_effort,
+                            "best_effort_policy": (
+                                EATING_SCAIL_BEST_EFFORT_POLICY
+                                if selected_scail_best_effort
+                                else None
+                            ),
+                            "driving_template": Path(
+                                action_config["driving_animation"]
+                            ).name,
+                            "recommended_for_quality": True,
+                            "temporal_cycle": temporal_cycle_output,
+                            "primary": True,
+                        },
+                    )
+            results.append(
+                {
+                    "action": action,
+                    "action_label": action_label,
+                    "reference": str(reference_path),
+                    "reference_sha256": file_sha256(reference_path),
+                    "driving_template": str(action_config["driving_animation"]),
+                    "requested_effective_seed": base_scail_seed,
+                    "effective_seed": int(selected_scail_seed),
+                    "scail_attempt_count": len(scail_attempt_records),
+                    "scail_video_attempts": scail_attempt_records,
+                    "temporal_identity_quality": next(
+                        (
+                            record.get("temporal_identity_quality")
+                            for record in scail_attempt_records
+                            if record.get("selected") is True
+                        ),
+                        None,
                     ),
-                    None,
-                ),
-                "effective_pose_strength": float(action_config["pose_strength"]),
-                "video": video_target.name,
-                "transparent_gif": (
-                    f"{action}_subject_replacement_transparent_512.gif"
-                    if transparent_metrics is not None
-                    else None
-                ),
-                "transparent_apng": (
-                    f"{action}_subject_replacement_transparent_512_soft.png"
-                    if transparent_metrics is not None
-                    and apng_target.is_file()
-                    else None
-                ),
-                "transparent_metrics": transparent_metrics,
-                "temporal_cycle": temporal_cycle_output,
-                "final_video_fur_surface": final_video_fur_surface,
-                "output_playback": action_timing,
-                "output_exists": True,
-                "generation_succeeded": True,
-                "quality_passed": not selected_scail_best_effort,
-                "degraded": selected_scail_best_effort,
-                "best_effort": selected_scail_best_effort,
-                "best_effort_policy": (
-                    EATING_SCAIL_BEST_EFFORT_POLICY
-                    if selected_scail_best_effort
-                    else None
-                ),
-            }
-        )
+                    "effective_pose_strength": float(action_config["pose_strength"]),
+                    "video": video_target.name,
+                    "transparent_gif": (
+                        f"{action}_subject_replacement_transparent_512.gif"
+                        if transparent_metrics is not None
+                        else None
+                    ),
+                    "transparent_apng": (
+                        f"{action}_subject_replacement_transparent_512_soft.png"
+                        if transparent_metrics is not None
+                        and apng_target.is_file()
+                        else None
+                    ),
+                    "transparent_metrics": transparent_metrics,
+                    "temporal_cycle": temporal_cycle_output,
+                    "final_video_fur_surface": final_video_fur_surface,
+                    "output_playback": action_timing,
+                    "output_exists": True,
+                    "generation_succeeded": True,
+                    "quality_passed": not selected_scail_best_effort,
+                    "degraded": selected_scail_best_effort,
+                    "best_effort": selected_scail_best_effort,
+                    "best_effort_policy": (
+                        EATING_SCAIL_BEST_EFFORT_POLICY
+                        if selected_scail_best_effort
+                        else None
+                    ),
+                }
+            )
+            update_job(
+                job_id,
+                progress=action_start + action_span,
+                subject_replacement_results=results,
+            )
+
+    if action_stage_failures:
         update_job(
             job_id,
-            progress=action_start + action_span,
-            subject_replacement_results=results,
+            subject_replacement_action_failures=(
+                _action_execution.failures_by_action(action_stage_failures)
+            ),
+        )
+        free_comfy_models()
+        _action_execution.raise_for_action_stage_failures(
+            "scail_animation",
+            action_stage_failures,
         )
 
     raise_if_cancelled(job_id)

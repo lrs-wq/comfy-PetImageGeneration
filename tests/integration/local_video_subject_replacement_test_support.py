@@ -12,8 +12,8 @@ from PIL import Image, ImageDraw
 import local_video_api as pipeline
 
 
-class _PoseWorkflowCaptured(RuntimeError):
-    """Stop a mocked Qwen run immediately after its first action workflow."""
+class _PoseWorkflowCaptured(BaseException):
+    """Test-only control flow; ordinary action failures still use Exception."""
 
 
 def _write_test_upload_identity(job_dir: Path) -> dict[str, str]:
