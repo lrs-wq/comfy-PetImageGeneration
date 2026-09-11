@@ -1887,17 +1887,18 @@ class SemanticCleanupComponentTests(unittest.TestCase):
 
 
 class DrivingAnimationDecodeTests(unittest.TestCase):
-    def test_grooming_loop_keeps_action_half_and_closes_at_contact(self) -> None:
+    def test_grooming_source_retains_full_forward_order(self) -> None:
         self.assertEqual(
             scail.grooming_closed_loop_source_indices(9),
-            [4, 5, 6, 7, 8, 7, 6, 5, 4],
+            list(range(9)),
         )
+        self.assertEqual(scail.grooming_closed_loop_source_indices(8), list(range(8)))
 
     def test_grooming_loop_rejects_non_scail_frame_counts(self) -> None:
-        for frame_count in (0, 2, 8):
+        for frame_count in (0, 1, 2):
             with self.subTest(frame_count=frame_count), self.assertRaisesRegex(
                 ValueError,
-                "odd source frame count",
+                "at least 3 source frames",
             ):
                 scail.grooming_closed_loop_source_indices(frame_count)
 

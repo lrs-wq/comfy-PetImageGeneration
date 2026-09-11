@@ -3,6 +3,36 @@
   "project": "comfy-pet-pipeline",
   "nodes": [
     {
+      "id": "comfy.decision.grooming_forward_source_chronology",
+      "type": "decision",
+      "name": "舔毛输出保持原始时间方向",
+      "status": "accepted",
+      "tags": [
+        "ADR-0010",
+        "no-ping-pong",
+        "forward-only",
+        "source-frame-map"
+      ],
+      "evidence": "docs/knowledge/DECISIONS/0010-grooming-forward-source-chronology.md"
+    },
+    {
+      "id": "comfy.media.grooming_forward_timeline",
+      "type": "module",
+      "name": "舔毛正向自然周期导出与源顺序校验",
+      "status": "active",
+      "tags": [
+        "grooming",
+        "forward-only",
+        "natural-cycle",
+        "head-paw-motion",
+        "shared-gif-apng-mp4-timeline",
+        "raw-source-preserved",
+        "seam-advisory",
+        "chronology-fail-closed"
+      ],
+      "evidence": "src/comfy_pet_pipeline/media/grooming_temporal.py"
+    },
+    {
       "id": "comfy.project",
       "type": "project",
       "name": "Comfy Pet Pipeline",
@@ -617,6 +647,30 @@
     }
   ],
   "edges": [
+    {
+      "from": "comfy.decision.grooming_forward_source_chronology",
+      "relation": "verified_under",
+      "to": "comfy.decision.post_change_cat_dog_two_action_smoke",
+      "evidence": "docs/knowledge/DECISIONS/0006-post-change-cat-dog-two-action-smoke.md"
+    },
+    {
+      "from": "comfy.media.grooming_forward_timeline",
+      "relation": "governed_by",
+      "to": "comfy.decision.grooming_forward_source_chronology",
+      "evidence": "docs/knowledge/DECISIONS/0010-grooming-forward-source-chronology.md"
+    },
+    {
+      "from": "comfy.api.local_video",
+      "relation": "validates",
+      "to": "comfy.media.grooming_forward_timeline",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"
+    },
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "uses",
+      "to": "comfy.media.grooming_forward_timeline",
+      "evidence": "src/comfy_pet_pipeline/media/grooming_temporal.py"
+    },
     {
       "from": "comfy.project",
       "relation": "contains",

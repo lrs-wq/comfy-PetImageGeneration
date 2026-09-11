@@ -41,6 +41,11 @@ from ..media.transparent_animation import (
     _subject_mask,
     validate_animation,
 )
+from ..media.grooming_temporal import (
+    GROOMING_TEMPORAL_LOOP_POLICY,
+    grooming_forward_order_quality,
+    select_grooming_forward_timeline,
+)
 
 COMFY_URL = "http://127.0.0.1:8188"
 COMFY_INPUT = Path("/data/comfy-pet-pipeline/comfyui/input")
@@ -91,9 +96,6 @@ DRINKING_REFERENCE_HEAD_LIFT_PX = 36.0
 DRINKING_REFERENCE_HEAD_LIFT_MIN_PX = 14.0
 DRINKING_REFERENCE_LAP_CYCLES = 3
 EATING_REFERENCE_HEAD_LIFT_PX = 36.0
-GROOMING_TEMPORAL_LOOP_POLICY = (
-    "grooming_second_half_ping_pong_closed_loop_v1"
-)
 ACTION_TAIL_GEOMETRY_SAFE_LOOP_POLICY = (
     "drinking_eating_terminal_phase_snap_to_first_v2"
 )
@@ -6843,18 +6845,12 @@ def _remove_dark_silhouette_halo(
 
 
 def grooming_closed_loop_source_indices(frame_count: int) -> list[int]:
-    """Keep the validated grooming half and return to its contact frame."""
-    if frame_count < 3 or frame_count % 2 == 0:
+    """Compatibility helper: retain chronological source frames, never reverse."""
+    if frame_count < 3:
         raise ValueError(
-            "Grooming closed-loop publication requires an odd source frame "
-            f"count of at least 3, got {frame_count}."
+            f"Grooming publication requires at least 3 source frames, got {frame_count}."
         )
-    pivot = frame_count // 2
-    indices = list(range(pivot, frame_count))
-    indices.extend(range(frame_count - 2, pivot - 1, -1))
-    if len(indices) != frame_count or indices[0] != indices[-1]:
-        raise RuntimeError("Grooming closed-loop index construction failed.")
-    return indices
+    return list(range(frame_count))
 
 
 def _transparent_frame_transition_score(
@@ -7765,6 +7761,8 @@ def build_unstabilized_transparent_gif(
         source_frame_count = len(source_frames)
         source_index_map = list(range(source_frame_count))
         phase_start_index = int(start_frame_index)
+        if normalized_action == "grooming" and phase_start_index:
+            raise ValueError("Grooming must retain the unrotated chronological source")
         if not 0 <= phase_start_index < source_frame_count:
             raise ValueError(
                 "Transparent animation phase start is outside the source: "
@@ -7808,32 +7806,6 @@ def build_unstabilized_transparent_gif(
             "preserves_source_frame_count": True,
             "preserves_duration": True,
         }
-        if action == "grooming":
-            loop_indices = grooming_closed_loop_source_indices(
-                len(source_frames)
-            )
-            source_frames = [source_frames[index] for index in loop_indices]
-            source_index_map = [
-                source_index_map[index] for index in loop_indices
-            ]
-            if guidance_frames is not None:
-                guidance_frames = [
-                    guidance_frames[index] for index in loop_indices
-                ]
-            temporal_cycle = {
-                "policy": GROOMING_TEMPORAL_LOOP_POLICY,
-                "action": action,
-                "applied": True,
-                "playback": "validated_second_half_forward_then_reverse",
-                "pivot_source_frame_index": source_index_map[0],
-                "source_index_map": source_index_map,
-                "closed_loop": source_index_map[0] == source_index_map[-1],
-                "preserves_source_frame_count": (
-                    len(source_frames) == source_frame_count
-                ),
-                "preserves_duration": True,
-            }
-
         def normalized_rgb(frame: np.ndarray) -> np.ndarray:
             if (frame.shape[1], frame.shape[0]) == output_size:
                 return frame
@@ -8816,6 +8788,22 @@ def build_unstabilized_transparent_gif(
             )
             for index in range(gif_frames)
         ]
+        video_indices = list(range(len(source_frames)))
+        if action == "grooming":
+            forward_plan = select_grooming_forward_timeline(
+                extracted_frames, source_fps=source_fps,
+                animation_fps=gif_fps, animation_frames=gif_frames,
+            )
+            sampled_indices = forward_plan["animation_source_indices"]
+            video_indices = forward_plan["video_source_indices"]
+            temporal_cycle = {
+                **temporal_cycle, **forward_plan, "applied": True,
+                "playback": "forward_only", "source_index_map": video_indices,
+                "pixels_blended": False, "frames_reversed": False,
+                "seam_quality_blocking": False,
+            }
+            if not grooming_forward_order_quality(temporal_cycle)["acceptable"]:
+                raise RuntimeError("Grooming publication reversed or corrupted source time")
         if action in {"drinking", "eating"}:
             extracted_frames, action_loop_metadata = (
                 close_transparent_action_tail_loop(
@@ -8840,7 +8828,9 @@ def build_unstabilized_transparent_gif(
             sampled_indices,
         )
         temporal_cycle["sampled_loop_quality"] = sampled_loop_quality
-        loop_required = action in {"grooming", "drinking", "eating"}
+        # Grooming chronology is mandatory. An unavailable natural seam remains
+        # advisory; it must never restore the old palindrome or a static fallback.
+        loop_required = action in {"drinking", "eating"}
         sampled_loop_acceptable = (
             bool(temporal_cycle["closed_loop"])
             and bool(temporal_cycle["preserves_source_frame_count"])
@@ -8955,6 +8945,11 @@ def build_unstabilized_transparent_gif(
             if loop_required
             else None
         )
+        if action == "grooming":
+            temporal_cycle["acceptable"] = grooming_forward_order_quality(temporal_cycle)["acceptable"]
+            if published_loop_quality["acceptable"] is not True:
+                temporal_cycle["closed_loop"] = False
+                temporal_cycle["warnings"].append("published_forward_loop_seam_warning")
         if loop_required and temporal_cycle["acceptable"] is not True:
             raise RuntimeError(
                 "Action published temporal loop failed its continuity contract: "
@@ -8987,7 +8982,8 @@ def build_unstabilized_transparent_gif(
         white_mp4_validation: dict[str, Any] | None = None
         if white_mp4_target is not None and white_temporary is not None:
             white_frames: list[Image.Image] = []
-            for rgb, soft_alpha in extracted_frames:
+            for source_index in video_indices:
+                rgb, soft_alpha = extracted_frames[source_index]
                 alpha_float = (
                     soft_alpha.astype(np.float32)[..., None] / 255.0
                 )

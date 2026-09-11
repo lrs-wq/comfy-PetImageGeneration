@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from . import action_execution as _action_execution
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
+from ...media.grooming_temporal import grooming_forward_order_quality
 
 
 def resolve_transparent_output_phase_start_index(
@@ -4769,6 +4770,15 @@ def run_subject_replacement_job(job_id: str) -> None:
             if selected_scail_candidate != video_target:
                 shutil.copy2(selected_scail_candidate, video_target)
             generated_video = video_target
+            if action == "grooming":
+                # Publication creates a white-background derivative. Preserve the
+                # selected chronological model output even if it has one attempt.
+                generated_video = job_dir / "grooming_subject_replacement_source.mp4"
+                shutil.copy2(selected_scail_candidate, generated_video)
+                update_job(
+                    job_id, grooming_source_video=generated_video.name,
+                    grooming_source_video_sha256=file_sha256(generated_video),
+                )
             update_job(
                 job_id,
                 scail_video_attempts=dict(scail_video_attempts_by_action),
@@ -5294,10 +5304,8 @@ def run_subject_replacement_job(job_id: str) -> None:
                         and temporal_cycle.get("policy")
                         == GROOMING_TEMPORAL_LOOP_POLICY
                         and temporal_cycle.get("applied") is True
-                        and temporal_cycle.get("closed_loop") is True
                         and temporal_cycle.get("acceptable") is True
-                        and isinstance(published_loop_quality, dict)
-                        and published_loop_quality.get("acceptable") is True
+                        and grooming_forward_order_quality(temporal_cycle)["acceptable"]
                     )
                     if not temporal_cycle_acceptable:
                         update_job(
@@ -5310,7 +5318,7 @@ def run_subject_replacement_job(job_id: str) -> None:
                         )
                         action_error = RuntimeError(
                             "grooming_temporal_loop_failed: the published animation "
-                            "did not preserve the closed-loop action contract"
+                            "did not preserve forward source chronology"
                         )
                         degraded_result, _fallback_source = (
                             recover_subject_replacement_action_with_fallback(
@@ -5341,16 +5349,23 @@ def run_subject_replacement_job(job_id: str) -> None:
                     temporal_cycle_output = {
                         "policy": GROOMING_TEMPORAL_LOOP_POLICY,
                         "playback": temporal_cycle.get("playback"),
-                        "pivot_source_frame_index": temporal_cycle.get(
-                            "pivot_source_frame_index"
-                        ),
-                        "closed_loop": True,
+                        "selected_source_window": temporal_cycle.get("selected_source_window"),
+                        "repetitions": temporal_cycle.get("repetitions"),
+                        "speed_ratio": temporal_cycle.get("speed_ratio"),
+                        "closed_loop": temporal_cycle.get("closed_loop") is True,
+                        "temporal_order_quality": temporal_cycle.get("temporal_order_quality"),
+                        "warnings": temporal_cycle.get("warnings", []),
+                        "raw_source_video": generated_video.name,
+                        "raw_source_sha256": file_sha256(generated_video),
                         "published_loop_quality": published_loop_quality,
                     }
                     video_output["temporal_cycle"] = temporal_cycle_output
                     update_job(
                         job_id,
-                        grooming_temporal_loop_status="passed",
+                        grooming_temporal_loop_status=(
+                            "passed" if temporal_cycle.get("closed_loop") is True
+                            else "forward_with_seam_warning"
+                        ),
                         grooming_temporal_loop_policy=(
                             GROOMING_TEMPORAL_LOOP_POLICY
                         ),
