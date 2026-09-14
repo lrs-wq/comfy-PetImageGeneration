@@ -31,6 +31,8 @@ try:
 except ModuleNotFoundError:  # CPU-only guide/tests do not decode video containers.
     av = None
 
+from .grooming_anchors import apply_reviewed_grooming_anchors
+
 from ..media.transparent_animation import (
     GIF_ALPHA_SMOOTHING_SIGMA,
     GIF_ALPHA_THRESHOLD,
@@ -3230,6 +3232,7 @@ def make_grooming_geometry_guide_from_animation(
             ),
         }
     )
+    apply_reviewed_grooming_anchors(guide, metadata)
     return guide, metadata
 
 

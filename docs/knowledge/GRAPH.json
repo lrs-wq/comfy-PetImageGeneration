@@ -3,6 +3,26 @@
   "project": "comfy-pet-pipeline",
   "nodes": [
     {
+      "id": "comfy.decision.grooming_reviewed_driver_anchors",
+      "type": "decision",
+      "name": "舔毛白模关节标注替代胸部高亮误检",
+      "status": "accepted",
+      "evidence": "docs/knowledge/DECISIONS/0012-grooming-reviewed-driver-anchors.md"
+    },
+    {
+      "id": "comfy.pipeline.grooming_reviewed_driver_anchors",
+      "type": "module",
+      "name": "固定舔毛驱动的摘要绑定关节坐标",
+      "status": "active",
+      "tags": [
+        "grooming",
+        "viewer-left-raised-paw",
+        "driver-sha-bound",
+        "shared-guide-audit-coordinates"
+      ],
+      "evidence": "src/comfy_pet_pipeline/pipeline/grooming_anchors.py"
+    },
+    {
       "id": "comfy.decision.grooming_forward_source_chronology",
       "type": "decision",
       "name": "舔毛输出保持原始时间方向",
@@ -647,6 +667,18 @@
     }
   ],
   "edges": [
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "uses",
+      "to": "comfy.pipeline.grooming_reviewed_driver_anchors",
+      "evidence": "src/comfy_pet_pipeline/pipeline/subject_replacement.py"
+    },
+    {
+      "from": "comfy.pipeline.grooming_reviewed_driver_anchors",
+      "relation": "implements",
+      "to": "comfy.decision.grooming_reviewed_driver_anchors",
+      "evidence": "src/comfy_pet_pipeline/pipeline/grooming_anchors.py"
+    },
     {
       "from": "comfy.decision.grooming_forward_source_chronology",
       "relation": "verified_under",

@@ -995,16 +995,15 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             profile_fur_lock=pipeline.UPLOADED_IDENTITY_FUR_LOCK,
         )
 
-        self.assertLess(len(prompt.split()), 190)
+        self.assertLess(len(prompt.split()), 260)
         self.assertTrue(prompt.startswith("Image 1 is the only cat identity"))
         self.assertIn("Image 2 is an appearance-free", prompt)
-        self.assertIn("Regardless of Image 1's current pose", prompt)
-        self.assertIn("complete upright seated grooming layout", prompt)
-        self.assertIn("zero color, value, material, texture", prompt)
-        self.assertIn("Exactly two attached front legs remain", prompt)
-        self.assertIn("one rounded furry paw touching", prompt)
-        self.assertIn("tiny pink tongue", prompt)
-        self.assertIn("Preserve Image 1's exact face", prompt)
+        self.assertIn("never render the gray guide surface", prompt)
+        self.assertIn("which appears on the LEFT side of the picture", prompt)
+        self.assertIn("remove its original down-going leg and ground paw", prompt)
+        self.assertIn("planted on the RIGHT side of the picture", prompt)
+        self.assertIn("Exactly TWO front legs and TWO hind legs total", prompt)
+        self.assertIn("One paw at the mouth, one front paw on the ground", prompt)
         for forbidden_token in ("white maquette", "video frame"):
             self.assertNotIn(forbidden_token.lower(), prompt.lower())
 
@@ -1014,10 +1013,11 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             anatomy_priority_retry=True,
         )
         self.assertIn("Anatomical plausibility has priority", anatomy_retry)
-        self.assertIn("freely move the head, shoulders", anatomy_retry)
-        self.assertIn("Show exactly four attached legs total", anatomy_retry)
-        self.assertIn("Remove its old ground paw completely", anatomy_retry)
-        self.assertIn("must not resemble extra front legs", anatomy_retry)
+        self.assertIn("freely adjust shoulders, elbows", anatomy_retry)
+        # Late anatomy freedom cannot reverse the limb driven by SCAIL.
+        self.assertIn("which appears on the LEFT side of the picture", anatomy_retry)
+        self.assertIn("planted on the RIGHT side of the picture", anatomy_retry)
+        self.assertIn("Exactly TWO front legs and TWO hind legs total", anatomy_retry)
         self.assertNotEqual(prompt, anatomy_retry)
 
         refine_prompt = pipeline.build_advisory_grooming_identity_refine_prompt(
@@ -1379,8 +1379,8 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertNotIn(uploaded_input, load_images)
         self.assertTrue(action_prompt.startswith("Image 1 is the only cat identity"))
         self.assertIn("Image 2 is an appearance-free", action_prompt)
-        self.assertIn("complete upright seated grooming layout", action_prompt)
-        self.assertLess(len(action_prompt.split()), 190)
+        self.assertIn("natural seated paw-licking pose", action_prompt)
+        self.assertLess(len(action_prompt.split()), 260)
         self.assertIn("image2", workflow["6"]["inputs"])
         self.assertIn("image2", workflow["7"]["inputs"])
         self.assertNotIn("image3", workflow["6"]["inputs"])
@@ -1615,9 +1615,9 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertNotIn(uploaded_input, load_images)
         prompt = workflow["6"]["inputs"]["prompt"]
         self.assertIn("Anatomical plausibility has priority", prompt)
-        self.assertIn("freely move the head, shoulders", prompt)
-        self.assertIn("Show exactly four attached legs total", prompt)
-        self.assertIn("Remove its old ground paw completely", prompt)
+        self.assertIn("freely adjust shoulders, elbows", prompt)
+        self.assertIn("Exactly TWO front legs and TWO hind legs total", prompt)
+        self.assertIn("remove its original down-going leg and ground paw", prompt)
         self.assertEqual(workflow["14"]["inputs"]["steps"], 4)
 
     def test_advisory_grooming_hard_object_attempt3_restarts_from_clean_canonical(
@@ -1659,7 +1659,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         prompt = workflow["6"]["inputs"]["prompt"]
         self.assertTrue(prompt.startswith("Image 1 is the only cat identity"))
         self.assertNotIn("GROOMING RETRY CORRECTION", prompt)
-        self.assertLess(len(prompt.split()), 190)
+        self.assertLess(len(prompt.split()), 260)
         self.assertEqual(workflow["7"]["inputs"]["prompt"], "")
         self.assertEqual(workflow["14"]["inputs"]["steps"], 4)
 

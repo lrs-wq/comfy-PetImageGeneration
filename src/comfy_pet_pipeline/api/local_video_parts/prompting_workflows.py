@@ -644,45 +644,31 @@ def build_advisory_grooming_action_transfer_prompt(
     _sync_local_video_runtime(globals(), {"build_advisory_grooming_action_transfer_prompt"})
 
     del pose, profile_fur_lock
-    if anatomy_priority_retry:
-        return (
-            "Image 1 is the cat identity reference. Image 2 is only a rough, "
-            "appearance-free grooming layout. Create one clean full-body frame of "
-            "the same cat naturally licking one raised front paw. Anatomical "
-            "plausibility has priority over exact guide alignment and exact pixel "
-            "identity: freely move the head, shoulders, elbows, wrists, paws, hips, "
-            "body proportions, framing, and minor markings whenever needed to make "
-            "a coherent living cat. Show exactly four attached legs total. The "
-            "viewer-left front leg must visibly begin at its shoulder, remain "
-            "continuous through one bent elbow and wrist, and end in exactly one "
-            "rounded paw at the tongue. Remove its old ground paw completely; do "
-            "not leave or invent a duplicate. The viewer-right front leg ends in "
-            "exactly one planted paw. Both hind legs attach at the hips and may be "
-            "partly hidden by the seated torso, but they must not resemble extra "
-            "front legs. Count the four legs and the two front paws before returning. "
-            "Keep recognizable colors, face, ears, natural fur, markings, and one "
-            "tail from Image 1 as well as anatomy allows. Use a flat pure #00FF00 "
-            "background with generous clearance. No floor, shadow, prop, clothing, "
-            "text, watermark, detached paw, fused limb, ghost limb, extra limb, or "
-            "extra subject."
-        )
+    identity_freedom = (
+        "Anatomical plausibility has priority: freely adjust shoulders, elbows, "
+        "wrists, framing, body proportions and minor markings as needed. "
+        if anatomy_priority_retry else ""
+    )
     return (
-        "Image 1 is the only cat identity and appearance authority. Image 2 is "
-        "an appearance-free single-tone action-geometry guide, not a second cat. "
-        "Regardless of Image 1's current pose, orientation, or crop, redraw the "
-        "exact same cat into Image 2's complete upright seated grooming layout. "
-        "Copy only Image 2's joint placement, body pose, camera layout, subject "
-        "scale, and raised-paw-to-mouth contact. Treat every gray Image 2 pixel "
-        "as a coordinate with zero color, value, material, texture, lighting, "
-        "face, breed, body-proportion, or identity meaning. Never render the gray "
-        "guide surface or its internal green separator. Preserve Image 1's exact "
-        "face, eyes, ears, muzzle, body proportions, coat colors, markings, natural "
-        "fur, tail, and rendering style. Exactly two attached front legs remain: "
-        "one bends naturally from shoulder through elbow and wrist to one rounded "
-        "furry paw touching a tiny pink tongue at the mouth; the other paw stays "
-        "planted. Keep the complete cat visible on flat pure #00FF00 green with "
-        "generous edge clearance. No floor, shadow, scenery, prop, clothing, text, "
-        "watermark, extra limb, or extra subject."
+        "Image 1 is the only cat identity and appearance authority. "
+        "Image 2 is an appearance-free single-tone action-geometry guide, not a "
+        "second cat. Copy only its pose; never render the gray guide surface or "
+        "its internal green separator. "
+        "Edit the cat in Image 1 into a natural seated paw-licking pose, facing "
+        "slightly toward the LEFT edge of the picture. Lift its RIGHT front leg, "
+        "which appears on the LEFT side of the picture, all the way off the ground. "
+        "Its right forepaw touches its mouth on the LEFT side of the picture. "
+        "The whole right foreleg bends UP from its right shoulder; remove its "
+        "original down-going leg and ground paw. Its LEFT front leg is the ONLY "
+        "straight front leg, planted on the RIGHT side of the picture. Both hind "
+        "paws are tucked beside the hips. Exactly TWO front legs and TWO hind "
+        "legs total. One paw at the mouth, one front paw on the ground. "
+        + identity_freedom
+        + "Keep the same face, eyes, ears, muzzle, coat colors, markings, natural "
+        "fur and tail from Image 1. Show the complete cat on flat pure #00FF00 "
+        "green with generous edge clearance. No floor, shadow, scenery, prop, "
+        "clothing, text, watermark, detached paw, fused limb, ghost limb, extra "
+        "limb, or extra subject."
     )
 
 
