@@ -1,4 +1,4 @@
-# 0012：固定舔毛白模使用摘要绑定的人工复核关节坐标
+# 0012：固定舔毛白模使用摘要绑定的图像复核关节坐标
 
 - 状态：accepted
 - 日期：2026-09-14
@@ -27,3 +27,5 @@ Qwen 提示明确动物右前肢对应画面左侧，向上弯到嘴边，并移
 - `src/comfy_pet_pipeline/api/local_video_parts/prompting_workflows.py`
 - `tests/unit/test_grooming_driver_anchors.py`
 - `tests/integration/test_local_video_qwen_prompt_workflows.py`
+
+生产整链路校验还要求私有图像的 `output_encoding` 与 `black_or_tool_semantics_preserved=false`。坐标替换必须保留这些未变化的像素编码事实；新增单元回归防止仅坐标正确却在 Qwen 前置协议校验失败。

@@ -93,6 +93,10 @@ Other drivers retain their own geometry extraction.
         "minimum_semantic_contact_pixels": 5,
         "regions_disjoint": True,
         "source_luma_values_preserved": False,
+        "black_or_tool_semantics_preserved": False,
+        "c_hook_component_preserved": False,
+        # The private guide pixels retain their existing neutral encoding.
+        "output_encoding": dict(old_relation.get("output_encoding") or {}),
         "passed": True,
         "superseded_luma_anchor": {
             "policy": old_relation.get("policy"),

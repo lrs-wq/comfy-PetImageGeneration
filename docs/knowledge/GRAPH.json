@@ -18,7 +18,8 @@
         "grooming",
         "viewer-left-raised-paw",
         "driver-sha-bound",
-        "shared-guide-audit-coordinates"
+        "shared-guide-audit-coordinates",
+        "private-neutral-encoding-contract-preserved"
       ],
       "evidence": "src/comfy_pet_pipeline/pipeline/grooming_anchors.py"
     },
