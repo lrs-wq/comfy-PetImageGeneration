@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.67"
+API_VERSION = "2.26.68"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -7077,6 +7077,15 @@ evaluate_eating_scail_video_motion = (
 )
 evaluate_eating_prepared_pose_motion = (
     _local_video_subject_replacement.evaluate_eating_prepared_pose_motion
+)
+eating_reference_motion_recovery_required = (
+    _local_video_subject_replacement.eating_reference_motion_recovery_required
+)
+evaluate_standing_scail_video_motion = (
+    _local_video_subject_replacement.evaluate_standing_scail_video_motion
+)
+standing_scail_best_effort_score = (
+    _local_video_subject_replacement.standing_scail_best_effort_score
 )
 eating_scail_best_effort_score = (
     _local_video_subject_replacement.eating_scail_best_effort_score

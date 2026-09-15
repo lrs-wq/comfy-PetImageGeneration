@@ -232,14 +232,7 @@
       "tags": ["canonical", "512-normalization", "scale-dependent-hole", "candidate-only", "bounded-medial-roi", "alpha-inpaint", "same-gate-revalidation", "visual-non-blocking", "runtime-integrity-required"],
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
     },
-    {
-      "id": "comfy.recovery.eating_full_driver_motion",
-      "type": "business_rule",
-      "name": "犬吃饭缺口或食盆吞口鼻参考的完整白膜动作恢复",
-      "status": "active",
-      "tags": ["dog", "eating", "no-face-muzzle-anchor", "reference-bowl-mask-occludes-muzzle", "bowl-aspect-ratio-below-1.40", "selected-qwen-identity", "digest-bound-white-driver", "81-frame-full-body-motion", "fixed-bowl", "static-fallback-forbidden", "action-motion-degraded-gif"],
-      "evidence": "src/comfy_pet_pipeline/pipeline/subject_replacement.py"
-    },
+    {"id": "comfy.recovery.eating_full_driver_motion", "type": "business_rule", "name": "犬吃饭参考不可靠或局部运动前置失败的完整白模恢复", "status": "active", "tags": ["dog", "eating", "no-face-muzzle-anchor", "reference-bowl-mask-occludes-muzzle", "bowl-aspect-ratio-below-1.40", "selected-qwen-identity", "digest-bound-white-driver", "81-frame-full-body-motion", "fixed-bowl", "static-fallback-forbidden", "action-motion-degraded-gif", "pre-scail-reference-motion-reprepare-once", "immutable-selected-reference", "original-failure-audit"], "evidence": "src/comfy_pet_pipeline/pipeline/subject_replacement.py"},
     {
       "id": "comfy.quality.eating_muzzle_motion_gate",
       "type": "business_rule",
@@ -665,7 +658,10 @@
       "status": "accepted",
       "tags": ["canonical", "identity-first", "subdued-mixed-coat", "source-safe-matte", "low-denoise", "uploaded-identity-fallback", "partial-completion-first-exception", "actions-remain-generated"],
       "evidence": "docs/knowledge/DECISIONS/0009-canonical-identity-safe-anchor.md"
-    }
+    },
+    {"id": "comfy.recovery.eating_bowl_anchored_degraded_motion", "type": "business_rule", "name": "吃饭降级按食盆和低头口鼻定位接触周期", "status": "active", "tags": ["eating", "degraded", "bowl-and-muzzle", "no-fixed-72-percent-freeze", "contact-then-observed-pose", "static-bowl", "selected-generated-only"], "evidence": "src/comfy_pet_pipeline/media/action_motion.py"},
+    {"id": "comfy.quality.standing_motion_identity", "type": "business_rule", "name": "站立连通尾部相对运动与头部身份三轮选优", "status": "active", "tags": ["standing", "tail-wag", "body-relative-motion", "reject-camera-shake", "reject-detached-wisps", "head-chroma-retention", "three-attempts", "best-effort"], "evidence": "src/comfy_pet_pipeline/media/action_motion.py"},
+    {"id": "comfy.decision.local_action_motion_recovery", "type": "decision", "name": "局部动作失败恢复真实驱动并按动作区域选优", "status": "accepted", "tags": ["eating", "standing", "motion-recovery", "completion-first"], "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"}
   ],
   "edges": [
     {
@@ -1501,6 +1497,11 @@
       "relation": "verified_under",
       "to": "comfy.decision.post_change_cat_dog_two_action_smoke",
       "evidence": "docs/knowledge/DECISIONS/0006-post-change-cat-dog-two-action-smoke.md"
-    }
+    },
+    {"from": "comfy.module.pipeline", "relation": "recovers_with", "to": "comfy.recovery.eating_bowl_anchored_degraded_motion", "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"},
+    {"from": "comfy.recovery.eating_bowl_anchored_degraded_motion", "relation": "governed_by", "to": "comfy.decision.local_action_motion_recovery", "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"},
+    {"from": "comfy.module.pipeline", "relation": "checked_by", "to": "comfy.quality.standing_motion_identity", "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"},
+    {"from": "comfy.quality.standing_motion_identity", "relation": "governed_by", "to": "comfy.decision.local_action_motion_recovery", "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"},
+    {"from": "comfy.recovery.eating_full_driver_motion", "relation": "governed_by", "to": "comfy.decision.local_action_motion_recovery", "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"}
   ]
 }

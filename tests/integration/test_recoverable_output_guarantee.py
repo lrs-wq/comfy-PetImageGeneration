@@ -619,7 +619,7 @@ class RecoverableOutputGuaranteeTests(unittest.TestCase):
             ]
             self.assertEqual(
                 eating_animation["motion_policy"],
-                "localized_eating_head_nod_low_high_low_v1",
+                "bowl_anchored_eating_contact_cycle_v2",
             )
             self.assertFalse(eating_animation["forced_position_jitter"])
             with Image.open(

@@ -248,8 +248,9 @@ DOG_STANDING_PROMPT = (
     "breed traits, apparent age, face, muzzle, eyes, ears, nose, coat colors and "
     "markings, natural coat length and volume, body proportions, paws, and complete "
     "tail. Use the neutral-white dog anatomy driver only for the standing action's "
-    "joint trajectories, driver-defined seated-or-upright idle geometry, gentle tail "
-    "motion, relaxed panting mouth motion, camera, scale and framing. The standing "
+    "joint trajectories, driver-defined seated-or-upright idle geometry, clearly "
+    "visible continuous side-to-side tail wagging, relaxed panting mouth motion, "
+    "camera, scale and framing. The standing "
     "idle has a visibly open natural mouth with a readable dark mouth cavity and "
     "an anatomically attached pink tongue. Follow the driver so the tongue gently "
     "extends, retracts and softly bobs in a periodic cycle; never freeze it, paste "
@@ -258,8 +259,12 @@ DOG_STANDING_PROMPT = (
     "proportions, material, or lighting. Keep one complete unclothed dog, stable "
     "identity, coherent anatomy and a static camera. No prop, collar, harness, "
     "clothing, floor, shadow, text, logo, or extra subject. Preserve the exact muzzle "
-    "length, head-to-body ratio, eye size and apparent age while allowing only this "
-    "action-required open-mouth panting motion; never make an adult look like a puppy. "
+    "length, head-to-body ratio, eye size and apparent age while allowing the "
+    "driver-required tail wagging and open-mouth panting motion; never make an adult "
+    "look like a puppy. The pelvis and planted paws stay fixed while the single "
+    "attached tail visibly sweeps outward and returns through the full driver "
+    "trajectory several times. Preserve the tail root, fur and volume during the "
+    "swing. Do not replace the tail motion with detached thin fur streaks. "
     "The entire background remains "
     "perfectly uniform pure #00FF00 chroma-key green in every frame, with no floor, "
     "horizon, shadow, reflection, gradient, texture, flicker, or green spill on fur."
@@ -370,7 +375,8 @@ DOG_STANDING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT.replace(
 ) + (
     ", closed lips around visible tongue, tongue through closed mouth, no mouth cavity, "
     "static tongue, frozen tongue, pasted tongue, detached tongue, rigid tongue, "
-    "melting tongue, disappearing tongue"
+    "melting tongue, disappearing tongue, static tail, frozen tail, motionless tail, "
+    "detached moving tail streaks"
 )
 DOG_DRINKING_NEGATIVE_PROMPT = DOG_NEGATIVE_PROMPT.replace(
     "panting smile, tongue out, ",
@@ -461,6 +467,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=int, default=7200)
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument(
+        "--reference-full-driver-eating-recovery-reason",
+        help="Rebuild an unreliable dog eating reference motion with the digest-bound full driver.",
+    )
+    parser.add_argument(
         "--canonical-identity-full-driver-eating-fallback",
         action="store_true",
         help=(
@@ -496,6 +506,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional JSON metadata path for --grooming-geometry-guide-output.",
     )
     args = parser.parse_args()
+    if args.reference_full_driver_eating_recovery_reason and not (
+        args.species == "dog" and args.action == "eating"
+        and not args.canonical_identity_full_driver_eating_fallback
+    ):
+        parser.error("Reference full-driver recovery requires dog eating and the selected action reference.")
     if args.canonical_identity_full_driver_eating_fallback and not (
         args.species == "dog" and args.action == "eating"
     ):
@@ -9914,6 +9929,14 @@ def main() -> int:
                     make_dog_eating_canonical_full_driver_pose_frames(
                         sampled,
                         (args.width, args.height),
+                    )
+                )
+            elif args.reference_full_driver_eating_recovery_reason:
+                pose_frames, pose_masks, pose_metadata = (
+                    make_dog_eating_reference_full_driver_recovery_pose_frames(
+                        sampled,
+                        (args.width, args.height),
+                        fallback_reason=args.reference_full_driver_eating_recovery_reason,
                     )
                 )
             else:

@@ -8,6 +8,7 @@ from __future__ import annotations
 from . import action_execution as _action_execution
 from .runtime import sync_local_video_runtime as _sync_local_video_runtime
 from ...media.grooming_temporal import grooming_forward_order_quality
+from ...media.action_motion import eating_fallback_motion, standing_motion_quality
 
 
 def resolve_transparent_output_phase_start_index(
@@ -53,6 +54,9 @@ def resolve_transparent_output_phase_start_index(
 
 
 RECOVERABLE_OUTPUT_FALLBACK_POLICY = "best_generated_candidate_action_motion_gif_v2"
+STANDING_SCAIL_MAX_ATTEMPTS = 3
+STANDING_SCAIL_POSE_STRENGTH_MULTIPLIERS = (1.0, 1.04, 1.08)
+STANDING_SCAIL_BEST_EFFORT_POLICY = "standing_motion_and_head_identity_best_of_three_v1"
 
 TOILETING_TRANSPARENT_REFERENCE_GUIDANCE_POLICY = (
     "reference_aligned_static_subject_and_tray_mask_with_"
@@ -1808,6 +1812,57 @@ def evaluate_eating_prepared_pose_motion(
     }
 
 
+def eating_reference_motion_recovery_required(
+    action: str, species: str, pose_metadata: dict | None, issues: list[str],
+) -> bool:
+    return bool(
+        action == "eating" and species == "dog" and isinstance(pose_metadata, dict)
+        and pose_metadata.get("policy") == "reference_space_head_nod_food_overlap_v2"
+        and issues and set(issues) <= {"eating_muzzle_motion_too_low", "eating_muzzle_motion_unavailable"}
+    )
+
+
+def evaluate_standing_scail_video_motion(
+    video_path: Path, *, prepared_pose_video_path: Path, reference_path: Path,
+) -> dict[str, Any]:
+    _sync_local_video_runtime(globals(), {"evaluate_standing_scail_video_motion"})
+    def read(path: Path) -> list[np.ndarray]:
+        capture = cv2.VideoCapture(str(path))
+        frames = []
+        try:
+            while True:
+                ok, bgr = capture.read()
+                if not ok:
+                    break
+                frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+        finally:
+            capture.release()
+        return frames
+    try:
+        with Image.open(reference_path) as loaded:
+            reference = loaded.convert("RGBA")
+            canvas = Image.new("RGBA", reference.size, (255, 255, 255, 255))
+            canvas.alpha_composite(reference)
+            reference_rgb = np.asarray(canvas.convert("RGB"))
+        quality = standing_motion_quality(
+            read(video_path), read(prepared_pose_video_path), reference_frame=reference_rgb,
+        )
+        return {**quality, "video_path": str(video_path), "video_sha256": file_sha256(video_path)}
+    except Exception as exc:  # advisory motion/identity ranking must not abort completion
+        return {"policy": "standing_connected_tail_motion_relative_to_body_v1",
+                "available": False, "acceptable": False, "blocking": False,
+                "issues": ["standing_motion_audit_unavailable"], "motion_ratio": 0.0,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+
+def standing_scail_best_effort_score(quality: dict[str, Any]) -> dict[str, Any]:
+    identity_safe = (quality.get("head_identity") or {}).get("acceptable") is True
+    motion = min(2.0, max(0.0, float(quality.get("motion_ratio") or 0.0)))
+    return {"policy": STANDING_SCAIL_BEST_EFFORT_POLICY,
+            "score": round((10.0 if identity_safe else 0.0) + motion, 6),
+            "identity_safe": identity_safe, "motion_ratio": motion}
+
+
 def scail_workflow_with_retry_seed(
     workflow: dict[str, Any],
     *,
@@ -1852,6 +1907,8 @@ def scail_workflow_with_retry_controls(
         if normalized_action == "eating"
         else GROOMING_SCAIL_POSE_STRENGTH_MULTIPLIERS
         if normalized_action == "grooming"
+        else STANDING_SCAIL_POSE_STRENGTH_MULTIPLIERS
+        if normalized_action == "standing"
         else (1.0,)
     )
     multiplier = float(multipliers[min(max(1, attempt), len(multipliers)) - 1])
@@ -2119,21 +2176,9 @@ def _write_recoverable_breathing_gif(
         (subject.height, subject.width)
     )
     eating_head_weight: np.ndarray | None = None
+    eating_motion_metadata: dict[str, Any] | None = None
     if normalized_action == "eating":
-        head_center_x = (subject.width - 1) * 0.50
-        head_center_y = (subject.height - 1) * 0.34
-        radius_x = max(12.0, subject.width * 0.34)
-        radius_y = max(12.0, subject.height * 0.30)
-        eating_head_weight = np.exp(
-            -0.5
-            * (
-                ((subject_columns - head_center_x) / radius_x) ** 2
-                + ((subject_rows - head_center_y) / radius_y) ** 2
-            )
-        ).astype(np.float32)
-        eating_head_weight[
-            subject_rows > int(round(subject.height * 0.72))
-        ] = 0.0
+        eating_head_weight, eating_motion_metadata = eating_fallback_motion(subject_rgba)
     frame_dir = target.parent / f".{target.stem}.{uuid4().hex}.frames"
     temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp.gif")
     frame_dir.mkdir(parents=True)
@@ -2144,12 +2189,12 @@ def _write_recoverable_breathing_gif(
             phase = 2.0 * np.pi * frame_index / denominator
             breath = (1.0 - float(np.cos(phase))) * 0.5
             if eating_head_weight is not None:
-                # Keep the bowl and planted lower body fixed while the head and
-                # upper torso complete a visible low-high-low eating cycle.
+                # Press into the food and return to the observed pose. Lifting
+                # above it would expose the occluded muzzle's missing pixels.
                 head_lift_px = max(6.0, min(12.0, subject.height * 0.045))
                 map_x = subject_columns.astype(np.float32)
                 map_y = (
-                    subject_rows + head_lift_px * breath * eating_head_weight
+                    subject_rows - head_lift_px * (1.0 - breath) * eating_head_weight
                 ).astype(np.float32)
                 animated_rgba = cv2.remap(
                     subject_rgba,
@@ -2161,7 +2206,7 @@ def _write_recoverable_breathing_gif(
                 )
                 animated_subject = Image.fromarray(animated_rgba, mode="RGBA")
                 frame_size = animated_subject.size
-                motion_policy = "localized_eating_head_nod_low_high_low_v1"
+                motion_policy = "bowl_anchored_eating_contact_cycle_v2"
             else:
                 frame_scale = 1.0 + 0.012 * breath
                 frame_size = (
@@ -2284,6 +2329,7 @@ def _write_recoverable_breathing_gif(
         return {
             "policy": RECOVERABLE_OUTPUT_FALLBACK_POLICY,
             "motion_policy": motion_policy,
+            "eating_motion_geometry": eating_motion_metadata,
             "action": normalized_action,
             "forced_position_jitter": False,
             "encoding": encoding,
@@ -4096,295 +4142,325 @@ def run_subject_replacement_job(job_id: str) -> None:
                     raise RuntimeError(
                         f"Persisted Qwen {action} reference selection changed before SCAIL."
                     )
-            run_cancelable_process(
-                job_id,
-                command,
-                log_path=prepare_log,
-                stage_name=f"{action} SCAIL input preparation",
-                timeout=900,
-            )
-            workflow_path = experiment_dir / "workflow_api.json"
-            manifest_path = experiment_dir / "manifest.json"
-            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest_input_files = manifest.get("input_files")
-            if not isinstance(manifest_input_files, dict):
-                raise RuntimeError(f"SCAIL {action} input manifest is incomplete")
-            pose_identity_mask_video_path = Path(
-                str(manifest_input_files.get("pose_mask_video") or "")
-            )
-            reference_identity_mask_path = Path(
-                str(manifest_input_files.get("reference_mask") or "")
-            )
-            for mask_role, mask_path in (
-                ("pose_mask_video", pose_identity_mask_video_path),
-                ("reference_mask", reference_identity_mask_path),
-            ):
-                if not mask_path.is_file():
-                    raise FileNotFoundError(
-                        f"SCAIL {action} {mask_role} is missing: {mask_path}"
-                    )
-            pose_identity_mask_video_sha256 = file_sha256(pose_identity_mask_video_path)
-            reference_identity_mask_sha256 = file_sha256(reference_identity_mask_path)
-            manifest["input_files_sha256"] = {
-                "pose_mask_video": pose_identity_mask_video_sha256,
-                "reference_mask": reference_identity_mask_sha256,
-            }
-            manifest["reference_policy"] = reference_policy
-            manifest["reference_source_path"] = str(reference_path)
-            manifest["scail_reference_mode"] = action_config.get(
-                "scail_reference_mode"
-            )
-            manifest["qwen_canonical_identity_fallback"] = action_config.get(
-                "qwen_canonical_identity_fallback"
-            )
-            expected_pose_policy = expected_pose_policies.get(action)
-            require_expected_scail_pose_policy(
-                manifest,
-                action,
-                expected_pose_policy,
-            )
-            pose_metadata = manifest.get("pose_metadata")
-            final_gate_required_actions = {
-                str(value)
-                for value in (
-                    get_job(job_id).get(
-                        "action_candidate_final_gate_required_actions",
-                        [],
-                    )
-                    or []
+            preparation_recovery = None
+            for preparation_attempt in range(2):
+                run_cancelable_process(
+                    job_id,
+                    command,
+                    log_path=prepare_log,
+                    stage_name=f"{action} SCAIL input preparation",
+                    timeout=900,
                 )
-            }
-            dog_bowl_motion_contract = bool(
-                action in {"eating", "drinking"}
-                and str(job.get("species") or "").strip().lower() == "dog"
-            )
-            bowl_motion_contract_issues: list[str] = []
-            drinking_pre_scail_motion_quality: dict[str, Any] | None = None
-            eating_pre_scail_motion_quality: dict[str, Any] | None = None
-            drinking_bowl_area_retention_ratio: float | None = None
-            if dog_bowl_motion_contract:
-                if not isinstance(pose_metadata, dict):
-                    bowl_motion_contract_issues.append("pose_metadata_missing")
-                else:
-                    full_driver_drinking_pose = bool(
-                        action == "drinking"
-                        and pose_metadata.get("policy")
-                        == DOG_DRINKING_FULL_DRIVER_POSE_POLICY
-                    )
-                    full_driver_eating_pose = bool(
-                        action == "eating"
-                        and pose_metadata.get("policy")
-                        in {
-                            DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
-                            DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
-                        }
-                    )
-                    if (
-                        pose_metadata.get("fallback_used") is True
-                        and not full_driver_eating_pose
-                        and not full_driver_drinking_pose
-                    ):
-                        bowl_motion_contract_issues.append(
-                            "static_pose_fallback_forbidden"
+                if (preparation_recovery is not None
+                        and file_sha256(reference_path) != preparation_recovery["reference_sha256"]):
+                    raise RuntimeError("Selected eating reference changed during full-driver recovery.")
+                workflow_path = experiment_dir / "workflow_api.json"
+                manifest_path = experiment_dir / "manifest.json"
+                workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest_input_files = manifest.get("input_files")
+                if not isinstance(manifest_input_files, dict):
+                    raise RuntimeError(f"SCAIL {action} input manifest is incomplete")
+                pose_identity_mask_video_path = Path(
+                    str(manifest_input_files.get("pose_mask_video") or "")
+                )
+                reference_identity_mask_path = Path(
+                    str(manifest_input_files.get("reference_mask") or "")
+                )
+                for mask_role, mask_path in (
+                    ("pose_mask_video", pose_identity_mask_video_path),
+                    ("reference_mask", reference_identity_mask_path),
+                ):
+                    if not mask_path.is_file():
+                        raise FileNotFoundError(
+                            f"SCAIL {action} {mask_role} is missing: {mask_path}"
                         )
-                    if full_driver_eating_pose:
-                        if (
-                            pose_metadata.get("policy")
-                            not in {
+                pose_identity_mask_video_sha256 = file_sha256(pose_identity_mask_video_path)
+                reference_identity_mask_sha256 = file_sha256(reference_identity_mask_path)
+                manifest["input_files_sha256"] = {
+                    "pose_mask_video": pose_identity_mask_video_sha256,
+                    "reference_mask": reference_identity_mask_sha256,
+                }
+                manifest["reference_policy"] = reference_policy
+                manifest["reference_source_path"] = str(reference_path)
+                manifest["scail_reference_mode"] = action_config.get(
+                    "scail_reference_mode"
+                )
+                manifest["qwen_canonical_identity_fallback"] = action_config.get(
+                    "qwen_canonical_identity_fallback"
+                )
+                expected_pose_policy = expected_pose_policies.get(action)
+                require_expected_scail_pose_policy(
+                    manifest,
+                    action,
+                    expected_pose_policy,
+                )
+                pose_metadata = manifest.get("pose_metadata")
+                final_gate_required_actions = {
+                    str(value)
+                    for value in (
+                        get_job(job_id).get(
+                            "action_candidate_final_gate_required_actions",
+                            [],
+                        )
+                        or []
+                    )
+                }
+                dog_bowl_motion_contract = bool(
+                    action in {"eating", "drinking"}
+                    and str(job.get("species") or "").strip().lower() == "dog"
+                )
+                bowl_motion_contract_issues: list[str] = []
+                drinking_pre_scail_motion_quality: dict[str, Any] | None = None
+                eating_pre_scail_motion_quality: dict[str, Any] | None = None
+                drinking_bowl_area_retention_ratio: float | None = None
+                if dog_bowl_motion_contract:
+                    if not isinstance(pose_metadata, dict):
+                        bowl_motion_contract_issues.append("pose_metadata_missing")
+                    else:
+                        full_driver_drinking_pose = bool(
+                            action == "drinking"
+                            and pose_metadata.get("policy")
+                            == DOG_DRINKING_FULL_DRIVER_POSE_POLICY
+                        )
+                        full_driver_eating_pose = bool(
+                            action == "eating"
+                            and pose_metadata.get("policy")
+                            in {
                                 DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
                                 DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
                             }
+                        )
+                        if (
+                            pose_metadata.get("fallback_used") is True
+                            and not full_driver_eating_pose
+                            and not full_driver_drinking_pose
                         ):
                             bowl_motion_contract_issues.append(
-                                "eating_full_driver_pose_policy_missing"
+                                "static_pose_fallback_forbidden"
                             )
-                        if pose_metadata.get("driver_input_used") is not True:
+                        if full_driver_eating_pose:
+                            if (
+                                pose_metadata.get("policy")
+                                not in {
+                                    DOG_EATING_CANONICAL_FULL_DRIVER_POSE_POLICY,
+                                    DOG_EATING_REFERENCE_FULL_DRIVER_RECOVERY_POSE_POLICY,
+                                }
+                            ):
+                                bowl_motion_contract_issues.append(
+                                    "eating_full_driver_pose_policy_missing"
+                                )
+                            if pose_metadata.get("driver_input_used") is not True:
+                                bowl_motion_contract_issues.append(
+                                    "eating_white_driver_not_used"
+                                )
+                            if (
+                                pose_metadata.get("full_white_driver_geometry")
+                                is not True
+                            ):
+                                bowl_motion_contract_issues.append(
+                                    "full_white_driver_geometry_missing"
+                                )
+                            if pose_metadata.get("reference_identity_only") is not True:
+                                bowl_motion_contract_issues.append(
+                                    "canonical_reference_not_identity_only"
+                                )
+                            if pose_metadata.get("driver_signal_only") is not False:
+                                bowl_motion_contract_issues.append(
+                                    "full_white_driver_silhouette_not_preserved"
+                                )
+                        elif full_driver_drinking_pose:
+                            if pose_metadata.get("primary_policy") is not True:
+                                bowl_motion_contract_issues.append(
+                                    "drinking_full_driver_not_primary_policy"
+                                )
+                            if pose_metadata.get("driver_input_used") is not True:
+                                bowl_motion_contract_issues.append(
+                                    "drinking_white_driver_not_used"
+                                )
+                            if (
+                                pose_metadata.get("full_white_driver_geometry")
+                                is not True
+                            ):
+                                bowl_motion_contract_issues.append(
+                                    "full_white_driver_geometry_missing"
+                                )
+                            if pose_metadata.get("driver_signal_only") is not False:
+                                bowl_motion_contract_issues.append(
+                                    "full_white_driver_silhouette_not_preserved"
+                                )
+                            if pose_metadata.get("driver_silhouette_preserved") is not True:
+                                bowl_motion_contract_issues.append(
+                                    "drinking_driver_silhouette_not_preserved"
+                                )
+                            if (
+                                pose_metadata.get("pose_geometry_scope")
+                                != "full_white_driver_subject_per_frame"
+                            ):
+                                bowl_motion_contract_issues.append(
+                                    "drinking_full_driver_geometry_scope_missing"
+                                )
+                            if (
+                                pose_metadata.get("scene_prop_authority")
+                                != "digest_bound_white_maquette_video"
+                            ):
+                                bowl_motion_contract_issues.append(
+                                    "drinking_bowl_not_sourced_from_white_driver"
+                                )
+                            if pose_metadata.get("static_bowl_mask") is not True:
+                                bowl_motion_contract_issues.append(
+                                    "drinking_static_bowl_mask_missing"
+                                )
+                            if pose_metadata.get("static_bowl_rgb") is not True:
+                                bowl_motion_contract_issues.append(
+                                    "drinking_static_bowl_rgb_missing"
+                                )
+                            try:
+                                source_bowl_fraction = float(
+                                    pose_metadata["scene_prop_fraction"]
+                                )
+                                encoded_bowl_fraction = float(
+                                    manifest["mask_codec_metadata"]["red_fraction"]
+                                )
+                                drinking_bowl_area_retention_ratio = (
+                                    encoded_bowl_fraction / source_bowl_fraction
+                                )
+                            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                                bowl_motion_contract_issues.append(
+                                    "drinking_bowl_area_retention_unavailable"
+                                )
+                            else:
+                                if (
+                                    drinking_bowl_area_retention_ratio
+                                    < DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN
+                                ):
+                                    bowl_motion_contract_issues.append(
+                                        "drinking_bowl_area_retention_too_low"
+                                    )
+                        elif action == "drinking":
                             bowl_motion_contract_issues.append(
-                                "eating_white_driver_not_used"
+                                "drinking_full_white_driver_primary_policy_missing"
+                            )
+                        elif pose_metadata.get("driver_signal_only") is not True:
+                            bowl_motion_contract_issues.append(
+                                "white_driver_motion_signal_missing"
+                            )
+                        if pose_metadata.get("scene_prop_separated") is not True:
+                            bowl_motion_contract_issues.append(
+                                "bowl_prop_not_separated"
                             )
                         if (
-                            pose_metadata.get("full_white_driver_geometry")
-                            is not True
+                            action == "drinking"
+                            and pose_metadata.get("driver_input_used") is not True
                         ):
-                            bowl_motion_contract_issues.append(
-                                "full_white_driver_geometry_missing"
-                            )
-                        if pose_metadata.get("reference_identity_only") is not True:
-                            bowl_motion_contract_issues.append(
-                                "canonical_reference_not_identity_only"
-                            )
-                        if pose_metadata.get("driver_signal_only") is not False:
-                            bowl_motion_contract_issues.append(
-                                "full_white_driver_silhouette_not_preserved"
-                            )
-                    elif full_driver_drinking_pose:
-                        if pose_metadata.get("primary_policy") is not True:
-                            bowl_motion_contract_issues.append(
-                                "drinking_full_driver_not_primary_policy"
-                            )
-                        if pose_metadata.get("driver_input_used") is not True:
                             bowl_motion_contract_issues.append(
                                 "drinking_white_driver_not_used"
                             )
-                        if (
-                            pose_metadata.get("full_white_driver_geometry")
-                            is not True
-                        ):
-                            bowl_motion_contract_issues.append(
-                                "full_white_driver_geometry_missing"
-                            )
-                        if pose_metadata.get("driver_signal_only") is not False:
-                            bowl_motion_contract_issues.append(
-                                "full_white_driver_silhouette_not_preserved"
-                            )
-                        if pose_metadata.get("driver_silhouette_preserved") is not True:
-                            bowl_motion_contract_issues.append(
-                                "drinking_driver_silhouette_not_preserved"
-                            )
-                        if (
-                            pose_metadata.get("pose_geometry_scope")
-                            != "full_white_driver_subject_per_frame"
-                        ):
-                            bowl_motion_contract_issues.append(
-                                "drinking_full_driver_geometry_scope_missing"
-                            )
-                        if (
-                            pose_metadata.get("scene_prop_authority")
-                            != "digest_bound_white_maquette_video"
-                        ):
-                            bowl_motion_contract_issues.append(
-                                "drinking_bowl_not_sourced_from_white_driver"
-                            )
-                        if pose_metadata.get("static_bowl_mask") is not True:
-                            bowl_motion_contract_issues.append(
-                                "drinking_static_bowl_mask_missing"
-                            )
-                        if pose_metadata.get("static_bowl_rgb") is not True:
-                            bowl_motion_contract_issues.append(
-                                "drinking_static_bowl_rgb_missing"
-                            )
-                        try:
-                            source_bowl_fraction = float(
-                                pose_metadata["scene_prop_fraction"]
-                            )
-                            encoded_bowl_fraction = float(
-                                manifest["mask_codec_metadata"]["red_fraction"]
-                            )
-                            drinking_bowl_area_retention_ratio = (
-                                encoded_bowl_fraction / source_bowl_fraction
-                            )
-                        except (KeyError, TypeError, ValueError, ZeroDivisionError):
-                            bowl_motion_contract_issues.append(
-                                "drinking_bowl_area_retention_unavailable"
-                            )
-                        else:
-                            if (
-                                drinking_bowl_area_retention_ratio
-                                < DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN
-                            ):
-                                bowl_motion_contract_issues.append(
-                                    "drinking_bowl_area_retention_too_low"
-                                )
-                    elif action == "drinking":
-                        bowl_motion_contract_issues.append(
-                            "drinking_full_white_driver_primary_policy_missing"
-                        )
-                    elif pose_metadata.get("driver_signal_only") is not True:
-                        bowl_motion_contract_issues.append(
-                            "white_driver_motion_signal_missing"
-                        )
-                    if pose_metadata.get("scene_prop_separated") is not True:
-                        bowl_motion_contract_issues.append(
-                            "bowl_prop_not_separated"
-                        )
-                    if (
-                        action == "drinking"
-                        and pose_metadata.get("driver_input_used") is not True
-                    ):
-                        bowl_motion_contract_issues.append(
-                            "drinking_white_driver_not_used"
-                        )
-                    if action == "drinking":
-                        try:
-                            drinking_pre_scail_motion_quality = (
-                                evaluate_drinking_prepared_pose_motion(
-                                    Path(manifest["input_files"]["pose_video"]),
-                                    source_driver_video_path=Path(manifest["source"]),
-                                )
-                            )
-                        except Exception as exc:
-                            bowl_motion_contract_issues.append(
-                                "drinking_prepared_source_motion_quality_unavailable: "
-                                f"{str(exc)[:500]}"
-                            )
-                        else:
-                            if (
-                                drinking_pre_scail_motion_quality.get("acceptable")
-                                is not True
-                            ):
-                                bowl_motion_contract_issues.extend(
-                                    str(issue)
-                                    for issue in drinking_pre_scail_motion_quality.get(
-                                        "issues", []
+                        if action == "drinking":
+                            try:
+                                drinking_pre_scail_motion_quality = (
+                                    evaluate_drinking_prepared_pose_motion(
+                                        Path(manifest["input_files"]["pose_video"]),
+                                        source_driver_video_path=Path(manifest["source"]),
                                     )
                                 )
-                    if (
-                        action == "eating"
-                        and pose_metadata.get("policy") == "reference_space_head_nod_food_overlap_v2"
-                    ):
-                        try:
-                            eating_pre_scail_motion_quality = evaluate_eating_prepared_pose_motion(
-                                Path(manifest["input_files"]["pose_video"]),
-                                pose_metadata=pose_metadata,
-                            )
-                        except Exception as exc:
-                            bowl_motion_contract_issues.append(
-                                f"eating_prepared_muzzle_motion_quality_unavailable: {str(exc)[:500]}"
-                            )
-                        else:
-                            if eating_pre_scail_motion_quality.get("acceptable") is not True:
-                                bowl_motion_contract_issues.extend(
-                                    str(issue)
-                                    for issue in eating_pre_scail_motion_quality.get("issues", [])
+                            except Exception as exc:
+                                bowl_motion_contract_issues.append(
+                                    "drinking_prepared_source_motion_quality_unavailable: "
+                                    f"{str(exc)[:500]}"
                                 )
-            manifest["final_action_gate"] = {
-                "required_by_candidate_gate": action in final_gate_required_actions,
-                "pre_scail_motion_contract_required": dog_bowl_motion_contract,
-                "pre_scail_motion_contract_passed": not bowl_motion_contract_issues,
-                "issues": bowl_motion_contract_issues,
-                "drinking_source_to_prepared_pose_quality": (
-                    drinking_pre_scail_motion_quality
-                ),
-                "eating_prepared_muzzle_motion_quality": (
-                    eating_pre_scail_motion_quality
-                ),
-                "drinking_bowl_area_retention_ratio": (
-                    round(drinking_bowl_area_retention_ratio, 6)
-                    if drinking_bowl_area_retention_ratio is not None
-                    else None
-                ),
-                "drinking_bowl_area_retention_ratio_minimum": (
-                    DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN
-                    if action == "drinking"
-                    else None
-                ),
-            }
-            final_video_comparison_scope = (
-                select_final_video_fur_surface_comparison_scope(
-                    action=action,
-                    action_config=action_config,
-                    output_format=job.get("output_format"),
-                    reference_policy=reference_policy,
-                    pose_metadata=(
-                        pose_metadata if isinstance(pose_metadata, dict) else None
+                            else:
+                                if (
+                                    drinking_pre_scail_motion_quality.get("acceptable")
+                                    is not True
+                                ):
+                                    bowl_motion_contract_issues.extend(
+                                        str(issue)
+                                        for issue in drinking_pre_scail_motion_quality.get(
+                                            "issues", []
+                                        )
+                                    )
+                        if (
+                            action == "eating"
+                            and pose_metadata.get("policy") == "reference_space_head_nod_food_overlap_v2"
+                        ):
+                            try:
+                                eating_pre_scail_motion_quality = evaluate_eating_prepared_pose_motion(
+                                    Path(manifest["input_files"]["pose_video"]),
+                                    pose_metadata=pose_metadata,
+                                )
+                            except Exception as exc:
+                                bowl_motion_contract_issues.append(
+                                    f"eating_prepared_muzzle_motion_quality_unavailable: {str(exc)[:500]}"
+                                )
+                            else:
+                                if eating_pre_scail_motion_quality.get("acceptable") is not True:
+                                    bowl_motion_contract_issues.extend(
+                                        str(issue)
+                                        for issue in eating_pre_scail_motion_quality.get("issues", [])
+                                    )
+                manifest["final_action_gate"] = {
+                    "required_by_candidate_gate": action in final_gate_required_actions,
+                    "pre_scail_motion_contract_required": dog_bowl_motion_contract,
+                    "pre_scail_motion_contract_passed": not bowl_motion_contract_issues,
+                    "issues": bowl_motion_contract_issues,
+                    "drinking_source_to_prepared_pose_quality": (
+                        drinking_pre_scail_motion_quality
                     ),
+                    "eating_prepared_muzzle_motion_quality": (
+                        eating_pre_scail_motion_quality
+                    ),
+                    "drinking_bowl_area_retention_ratio": (
+                        round(drinking_bowl_area_retention_ratio, 6)
+                        if drinking_bowl_area_retention_ratio is not None
+                        else None
+                    ),
+                    "drinking_bowl_area_retention_ratio_minimum": (
+                        DRINKING_PREPARED_BOWL_AREA_RETENTION_RATIO_MIN
+                        if action == "drinking"
+                        else None
+                    ),
+                }
+                final_video_comparison_scope = (
+                    select_final_video_fur_surface_comparison_scope(
+                        action=action,
+                        action_config=action_config,
+                        output_format=job.get("output_format"),
+                        reference_policy=reference_policy,
+                        pose_metadata=(
+                            pose_metadata if isinstance(pose_metadata, dict) else None
+                        ),
+                    )
+                    if GENERATION_VISUAL_AUDITS_BLOCKING
+                    else None
                 )
-                if GENERATION_VISUAL_AUDITS_BLOCKING
-                else None
-            )
-            write_workflow(job_dir, f"scail_{action}.json", workflow)
-            write_json_atomic(job_dir / f"{action}_prepare_manifest.json", manifest)
+                write_workflow(job_dir, f"scail_{action}.json", workflow)
+                if preparation_recovery is not None:
+                    manifest["reference_motion_recovery"] = preparation_recovery
+                write_json_atomic(job_dir / f"{action}_prepare_manifest.json", manifest)
+                if preparation_attempt == 0 and eating_reference_motion_recovery_required(
+                    action, str(job.get("species") or "").strip().lower(),
+                    pose_metadata, bowl_motion_contract_issues,
+                ):
+                    preparation_recovery = {
+                        "policy": "reference_motion_rejected_then_full_driver_reprepare_v1",
+                        "original_run_id": run_id,
+                        "original_manifest": str(manifest_path),
+                        "original_gate": manifest["final_action_gate"],
+                        "reference_path": str(reference_path),
+                        "reference_sha256": file_sha256(reference_path),
+                    }
+                    run_id += "-full-driver-motion-recovery"
+                    experiment_dir = experiment_dir.with_name(run_id)
+                    command = list(command)
+                    command[command.index("--run-id") + 1] = run_id
+                    command.extend([
+                        "--reference-full-driver-eating-recovery-reason",
+                        "eating_reference_motion_unreliable: " + ", ".join(bowl_motion_contract_issues),
+                    ])
+                    prepare_log = job_dir / f"{action}_full_driver_recovery_prepare.log"
+                    continue
+                break
 
             if bowl_motion_contract_issues:
                 action_error = RuntimeError(
@@ -4519,6 +4595,9 @@ def run_subject_replacement_job(job_id: str) -> None:
                 action == "eating"
                 and str(job.get("species") or "").strip().lower() == "dog"
             )
+            dog_standing_motion_gate = bool(
+                action == "standing" and str(job.get("species") or "").strip().lower() == "dog"
+            )
             grooming_identity_gate = bool(action == "grooming")
             maximum_scail_attempts = (
                 TOILETING_SCAIL_MAX_ATTEMPTS
@@ -4527,6 +4606,8 @@ def run_subject_replacement_job(job_id: str) -> None:
                 if dog_drinking_motion_gate
                 else EATING_SCAIL_MAX_ATTEMPTS
                 if dog_eating_motion_gate
+                else STANDING_SCAIL_MAX_ATTEMPTS
+                if dog_standing_motion_gate
                 else GROOMING_SCAIL_MAX_ATTEMPTS
                 if grooming_identity_gate
                 else 1
@@ -4570,6 +4651,8 @@ def run_subject_replacement_job(job_id: str) -> None:
                             else (
                                 "eating_muzzle_or_visible_motion_too_low"
                                 if dog_eating_motion_gate
+                                else "standing_tail_motion_or_head_identity_too_low"
+                                if dog_standing_motion_gate
                                 else "grooming_reference_identity_retention_too_low"
                             )
                         ),
@@ -4625,6 +4708,12 @@ def run_subject_replacement_job(job_id: str) -> None:
                             else None
                         ),
                     )
+                elif dog_standing_motion_gate:
+                    temporal_identity_quality = evaluate_standing_scail_video_motion(
+                        attempt_target,
+                        prepared_pose_video_path=Path(manifest["input_files"]["pose_video"]),
+                        reference_path=reference_target,
+                    )
                 elif grooming_identity_gate:
                     temporal_identity_quality = (
                         evaluate_grooming_scail_video_identity(
@@ -4659,6 +4748,10 @@ def run_subject_replacement_job(job_id: str) -> None:
                             temporal_identity_quality,
                         )
                     )
+                elif dog_standing_motion_gate:
+                    attempt_record["best_effort_score"] = standing_scail_best_effort_score(
+                        temporal_identity_quality
+                    )
                 elif grooming_identity_gate:
                     attempt_record["best_effort_score"] = (
                         grooming_scail_best_effort_score(
@@ -4683,7 +4776,7 @@ def run_subject_replacement_job(job_id: str) -> None:
             if (
                 selected_scail_candidate is None
                 and selected_scail_seed is None
-                and (dog_eating_motion_gate or grooming_identity_gate)
+                and (dog_eating_motion_gate or grooming_identity_gate or dog_standing_motion_gate)
                 and scail_attempt_records
             ):
                 best_attempt = max(
@@ -4703,6 +4796,8 @@ def run_subject_replacement_job(job_id: str) -> None:
                     best_attempt["best_effort_policy"] = (
                         EATING_SCAIL_BEST_EFFORT_POLICY
                         if dog_eating_motion_gate
+                        else STANDING_SCAIL_BEST_EFFORT_POLICY
+                        if dog_standing_motion_gate
                         else GROOMING_SCAIL_BEST_EFFORT_POLICY
                     )
                     update_job(
@@ -4721,6 +4816,8 @@ def run_subject_replacement_job(job_id: str) -> None:
                         scail_best_effort_policy=(
                             EATING_SCAIL_BEST_EFFORT_POLICY
                             if dog_eating_motion_gate
+                            else STANDING_SCAIL_BEST_EFFORT_POLICY
+                            if dog_standing_motion_gate
                             else GROOMING_SCAIL_BEST_EFFORT_POLICY
                         ),
                     )
