@@ -232,7 +232,7 @@
       "tags": ["canonical", "512-normalization", "scale-dependent-hole", "candidate-only", "bounded-medial-roi", "alpha-inpaint", "same-gate-revalidation", "visual-non-blocking", "runtime-integrity-required"],
       "evidence": "src/comfy_pet_pipeline/api/local_video_parts/identity_quality.py"
     },
-    {"id": "comfy.recovery.eating_full_driver_motion", "type": "business_rule", "name": "犬吃饭参考不可靠或局部运动前置失败的完整白模恢复", "status": "active", "tags": ["dog", "eating", "no-face-muzzle-anchor", "reference-bowl-mask-occludes-muzzle", "bowl-aspect-ratio-below-1.40", "selected-qwen-identity", "digest-bound-white-driver", "81-frame-full-body-motion", "fixed-bowl", "static-fallback-forbidden", "action-motion-degraded-gif", "pre-scail-reference-motion-reprepare-once", "immutable-selected-reference", "original-failure-audit"], "evidence": "src/comfy_pet_pipeline/pipeline/subject_replacement.py"},
+    {"id": "comfy.recovery.eating_full_driver_motion", "type": "business_rule", "name": "犬吃饭参考运动或向上接触形变不安全时的完整白模恢复", "status": "active", "tags": ["dog", "eating", "no-face-muzzle-anchor", "reference-bowl-mask-occludes-muzzle", "bowl-aspect-ratio-below-1.40", "selected-qwen-identity", "digest-bound-white-driver", "81-frame-full-body-motion", "fixed-bowl", "static-fallback-forbidden", "action-motion-degraded-gif", "pre-scail-reference-motion-reprepare-once", "reject-upward-contact-warp", "immutable-selected-reference", "original-failure-audit"], "evidence": "src/comfy_pet_pipeline/pipeline/subject_replacement.py"},
     {
       "id": "comfy.quality.eating_muzzle_motion_gate",
       "type": "business_rule",
@@ -661,7 +661,7 @@
     },
     {"id": "comfy.recovery.eating_bowl_anchored_degraded_motion", "type": "business_rule", "name": "吃饭降级按食盆和低头口鼻定位接触周期", "status": "active", "tags": ["eating", "degraded", "bowl-and-muzzle", "no-fixed-72-percent-freeze", "contact-then-observed-pose", "static-bowl", "selected-generated-only"], "evidence": "src/comfy_pet_pipeline/media/action_motion.py"},
     {"id": "comfy.quality.standing_motion_identity", "type": "business_rule", "name": "站立连通尾部相对运动与头部身份三轮选优", "status": "active", "tags": ["standing", "tail-wag", "body-relative-motion", "reject-camera-shake", "reject-detached-wisps", "head-chroma-retention", "three-attempts", "best-effort"], "evidence": "src/comfy_pet_pipeline/media/action_motion.py"},
-    {"id": "comfy.decision.local_action_motion_recovery", "type": "decision", "name": "局部动作失败恢复真实驱动并按动作区域选优", "status": "accepted", "tags": ["eating", "standing", "motion-recovery", "completion-first"], "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"}
+    {"id": "comfy.decision.local_action_motion_recovery", "type": "decision", "name": "局部动作或向上接触形变失败恢复真实驱动并按动作区域选优", "status": "accepted", "tags": ["eating", "standing", "motion-recovery", "reject-upward-contact-warp", "completion-first"], "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"}
   ],
   "edges": [
     {

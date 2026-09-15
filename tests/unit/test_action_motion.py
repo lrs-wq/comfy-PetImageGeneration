@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+import pytest
 
 from src.comfy_pet_pipeline.media.action_motion import (
     eating_fallback_motion, standing_motion_quality,
@@ -78,3 +79,23 @@ def test_reference_motion_failure_can_reprepare_but_integrity_failure_cannot():
     assert not eating_reference_motion_recovery_required('eating','cat',metadata,issues)
     assert not eating_reference_motion_recovery_required('eating','dog',metadata,issues+['source_digest_changed'])
     assert not eating_reference_motion_recovery_required('eating','dog',{'full_white_driver_geometry':True},issues)
+
+
+@pytest.mark.parametrize('controls,unsafe', [([-12, 0, -12], False), ([-13.558, 22.442, -13.558], True)])
+def test_prepared_muzzle_motion_pass_does_not_hide_upward_bowl_contact_tear(monkeypatch, controls, unsafe):
+    from pathlib import Path
+    from src.comfy_pet_pipeline.api import local_video as api
+    from src.comfy_pet_pipeline.api.local_video_parts import subject_replacement as replacement
+
+    monkeypatch.setattr(api, 'evaluate_eating_scail_video_motion', lambda *args, **kwargs: {
+        'available': True, 'acceptable': True, 'issues': [],
+    })
+    monkeypatch.setattr(replacement, 'evaluate_eating_scail_video_motion', api.evaluate_eating_scail_video_motion)
+    metadata = {'policy': 'reference_space_head_nod_food_overlap_v2', 'vertical_control_px_by_frame': controls}
+    quality = replacement.evaluate_eating_prepared_pose_motion(Path('unused.mp4'), pose_metadata=metadata)
+    assert quality['acceptable'] is not unsafe
+    assert eating_reference_motion_recovery_required('eating', 'dog', metadata, quality['issues']) is unsafe
+    if unsafe:
+        assert quality['issues'] == ['eating_reference_upward_contact_warp_unsafe']
+        assert quality['upward_contact_warp_px_max'] == 22.442
+        assert not eating_reference_motion_recovery_required('eating', 'dog', metadata, quality['issues'] + ['source_digest_changed'])

@@ -1802,13 +1802,26 @@ def evaluate_eating_prepared_pose_motion(
     retained_issues = [
         str(issue) for issue in quality.get("issues", []) if issue != "eating_motion_energy_too_low"
     ]
+    # The reference prop mask can omit food/rim pixels touching the muzzle.
+    # Lifting that single-image layer pulls those pixels away from the static
+    # bowl and exposes an unobserved white seam. SCAIL can reproduce the seam
+    # even when the muzzle-motion threshold passes. Use the full driver before
+    # generation; a downward-only contact cycle does not expose this gap.
+    upward_contact_warp_px = 0.0
+    if pose_metadata.get("policy") == "reference_space_head_nod_food_overlap_v2":
+        upward_contact_warp_px = max(
+            [0.0, *(float(value) for value in pose_metadata.get("vertical_control_px_by_frame", []))]
+        )
+        if upward_contact_warp_px > 0.0:
+            retained_issues.append("eating_reference_upward_contact_warp_unsafe")
     return {
         **quality,
         "policy": "eating_prepared_muzzle_motion_gate_v1",
         "acceptable": not retained_issues,
         "issues": retained_issues,
         "whole_frame_adjacent_energy_blocking": False,
-        "validation_scope": "prepared_reference_muzzle_motion_before_scail",
+        "upward_contact_warp_px_max": round(upward_contact_warp_px, 4),
+        "validation_scope": "prepared_reference_muzzle_motion_and_contact_integrity_before_scail",
     }
 
 
@@ -1818,7 +1831,10 @@ def eating_reference_motion_recovery_required(
     return bool(
         action == "eating" and species == "dog" and isinstance(pose_metadata, dict)
         and pose_metadata.get("policy") == "reference_space_head_nod_food_overlap_v2"
-        and issues and set(issues) <= {"eating_muzzle_motion_too_low", "eating_muzzle_motion_unavailable"}
+        and issues and set(issues) <= {
+            "eating_muzzle_motion_too_low", "eating_muzzle_motion_unavailable",
+            "eating_reference_upward_contact_warp_unsafe",
+        }
     )
 
 
