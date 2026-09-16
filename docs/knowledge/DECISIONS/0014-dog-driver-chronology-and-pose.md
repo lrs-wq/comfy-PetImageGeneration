@@ -31,3 +31,7 @@
 - `src/comfy_pet_pipeline/pipeline/subject_replacement.py`
 - `tests/integration/test_local_video_qwen_service_inputs.py`
 - `tests/integration/test_local_video_qwen_prompt_workflows.py`
+
+## v2.26.71 正式复跑校正
+
+v2.26.70 压缩后的名词短句在正式五个候选中仍保留 canonical 的俯拍相机和肩后尾位，SCAIL 因而仍生成双尾。相同正式 canonical、第五轮种子和工作流，仅替换为最初实验的完整命令式段落后恢复胸高坐姿及髋部单尾；保留或移除原有被毛色素补充的两组对照均改善。正式犬站立提示采用这段完整姿态转移指令，保留原有身份色素补充、canonical 单图及固定五轮；不能为满足旧的 370 单词格式上限再次压缩关键坐姿和相机句。其他犬动作提示不因此改写。

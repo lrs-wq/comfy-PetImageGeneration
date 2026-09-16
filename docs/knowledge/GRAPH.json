@@ -3,12 +3,22 @@
   "project": "comfy-pet-pipeline",
   "nodes": [
     {
+      "id": "comfy.decision.eating_bowl_shadow_separation",
+      "type": "decision",
+      "name": "吃饭深色碗壁与碗下薄阴影分离",
+      "status": "accepted",
+      "tags": ["v2.26.71", "eating", "dark-bowl-retention", "external-neutral-shadow"],
+      "evidence": "docs/knowledge/DECISIONS/0015-eating-dark-bowl-shadow-separation.md"
+    },
+    {
       "id": "comfy.decision.dog_driver_chronology_and_pose",
       "type": "decision",
       "name": "犬驱动时间起点与单尾文字姿态",
       "status": "accepted",
       "tags": [
         "v2.26.70",
+        "v2.26.71",
+        "literal-seated-camera-transfer",
         "dog",
         "eating",
         "standing",

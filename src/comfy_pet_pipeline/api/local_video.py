@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.70"
+API_VERSION = "2.26.71"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -4380,11 +4380,36 @@ def build_dog_qwen_prompt(
     pose_reference_available: bool,
     profile_fur_lock: str,
 ) -> str:
-    """Build a concise dog action prompt with no feline appearance leakage."""
+    """Build a dog action prompt with explicit pose and no feline leakage."""
 
     del quality_retry
     action = action_key(pose)
     first_frame_spec = qwen_first_frame_spec(pose)
+    if action == "standing":
+        # The short noun-list formulation retained the canonical overhead
+        # camera and high tail across all five candidates. Keep the tested
+        # imperative pose transfer intact; the existing palette supplement
+        # still supplies source-grounded coat constraints afterwards.
+        geometry_role = (
+            "Image 2 supplies only action pose, joint layout, camera and framing; "
+            "it supplies no identity or appearance. "
+            if pose_reference_available else ""
+        )
+        background = (
+            "Flat pure #00FF00 green background with at least 12% empty margin "
+            "around the complete dog and allowed bowl."
+            if transparent_gif else
+            "One clean, simple, evenly lit background with no scenery or text."
+        )
+        return f"""Repose the exact real dog in Image 1 into this precise action first frame.
+
+POSE AND CAMERA: {geometry_role}{first_frame_spec}
+
+IDENTITY: Image 1 supplies only this dog's breed, age, face, muzzle proportions, natural eyes, ears, nose, coat color and markings, fur length and volume, and anatomical body proportions. Preserve these identity features while changing the pose, camera angle and tail position. The old silhouette, old limb locations and old tail location in Image 1 are not pose instructions. Move each existing limb and the single tail to its new position; never retain an old appendage in addition to its repositioned version.
+
+NATURAL FUR: Render a photorealistic real living dog photographed with a high-resolution professional animal camera under soft neutral-white light. Show realistic eyes, moist nose, mouth, and physically plausible anatomy. Match Image 1's exact coat length, volume, strand direction, and strand texture. {DOG_NATURAL_COAT_SURFACE_PROMPT} Never invent a color or marking.
+
+OUTPUT: One complete photorealistic living dog, exactly four anatomically attached legs and one connected tail from pelvis to tip. {background} No floor, shadow, reflection, extra appendage, accessory, collar, clothing, text or crop.""".strip()
     action_rules = action_first_frame_rules(pose, species="dog")
     if action == "eating":
         action_rules = (

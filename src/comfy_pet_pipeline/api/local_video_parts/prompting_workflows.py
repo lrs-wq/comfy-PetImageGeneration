@@ -94,14 +94,18 @@ def subject_replacement_pose_prompt(action: str, *, species: str = "cat") -> str
         return SUBJECT_REPLACEMENT_GROOMING_POSE_PROMPT
     if action == "standing" and species == "dog":
         return (
-            "standing | Seated idle, pelvis low, hind legs folded beside hips, "
-            "chest upright and straight forelegs planted. Three-quarter front view, "
-            "chest left and rear hips right, visible flank, head facing viewer. "
-            "Camera at chest height, never overhead. Exactly one tail attaches "
-            "at the rear pelvis and lies low beside the hind feet, near paw level; "
-            "never behind the shoulder or above the back. Relaxed panting: the "
-            "mouth is visibly open with a dark mouth cavity and one anatomically "
-            "attached pink tongue. Never paste the tongue onto a closed muzzle. No prop."
+            "standing | The action is a SEATED idle. Sit the pelvis low with both "
+            "hind legs folded beside the hips. Keep the chest upright and both "
+            "straight forelegs planted in front. Use a three-quarter front view: "
+            "head and chest at image center-left, seated rear hips at image "
+            "center-right, showing the visible right-side flank. The camera is "
+            "level with the chest, never looking down from above; the forelegs "
+            "retain their full natural length. The head faces the viewer. Show "
+            "relaxed panting with an open mouth and one small attached pink tongue. "
+            "Exactly ONE tail connects to the rear pelvis at image lower right. "
+            "Its entire visible curve lies low beside the folded hind feet, close "
+            "to paw level. The tail does not rise behind the shoulder, head or "
+            "back. There is no second tail or retained upright tail from Image 1. No prop."
         )
     if action == "drinking" and species == "dog":
         return (

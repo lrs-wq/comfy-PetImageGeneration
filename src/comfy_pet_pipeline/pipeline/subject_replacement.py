@@ -6327,7 +6327,7 @@ def _remove_eating_contact_shadow(
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Remove only a thin neutral shadow attached below the detected bowl."""
     unchanged = {
-        "policy": "eating_bowl_contact_shadow_v1",
+        "policy": "eating_bowl_external_thin_neutral_shadow_v2",
         "applied": False,
         "removed_pixels": 0,
         "component_count": 0,
@@ -6363,7 +6363,7 @@ def _remove_eating_contact_shadow(
     dark_neutral = (
         (alpha >= 24)
         & (luma <= 68.0)
-        & (chroma <= 44)
+        & (chroma <= 16)
     )
     component_count, labels, stats, _ = cv2.connectedComponentsWithStats(
         dark_neutral.astype(np.uint8),
@@ -6381,11 +6381,18 @@ def _remove_eating_contact_shadow(
         overlap = int(np.count_nonzero(component & lower_prop))
         overlap_fraction = float(overlap) / float(max(1, area))
         aspect_ratio = float(width) / float(max(1, height))
+        below_prop_pixels = int(np.count_nonzero(component & (row_grid >= y1)))
+        below_prop_fraction = below_prop_pixels / float(max(1, area))
+        # A dark bowl wall is foreground, even when its colour and aspect
+        # resemble a contact shadow. Require a thin, neutral component with
+        # actual support below the detected prop. The white-driver protection
+        # core can end above a generated bowl's base and is not sufficient to
+        # distinguish the two on its own.
         if (
             area >= 12
             and overlap_fraction >= 0.18
-            and y + height
-            >= y1 - max(4, int(round(prop_height * 0.12)))
+            and below_prop_fraction >= 0.15
+            and height <= max(3, int(round(prop_height * 0.25)))
             and width >= max(12, int(round(prop_width * 0.08)))
             and aspect_ratio >= 1.7
         ):
@@ -6398,6 +6405,7 @@ def _remove_eating_contact_shadow(
                     "height": height,
                     "pixels": area,
                     "prop_overlap_pixels": overlap,
+                    "below_prop_pixels": below_prop_pixels,
                     "aspect_ratio": round(aspect_ratio, 6),
                 }
             )
@@ -6428,7 +6436,7 @@ def _remove_eating_contact_shadow(
     cleaned_alpha = alpha.copy()
     cleaned_alpha[removal] = 0
     return cleaned_alpha, {
-        "policy": "eating_bowl_contact_shadow_v1",
+        "policy": "eating_bowl_external_thin_neutral_shadow_v2",
         "applied": True,
         "removed_pixels": int(np.count_nonzero(removal)),
         "component_count": len(selected_components),
@@ -6474,7 +6482,7 @@ def clean_transparent_edge_halo(
             raise ValueError("Protected alpha core must match transparent edge dimensions.")
 
     contact_shadow = {
-        "policy": "eating_bowl_contact_shadow_v1",
+        "policy": "eating_bowl_external_thin_neutral_shadow_v2",
         "applied": False,
         "removed_pixels": 0,
         "component_count": 0,

@@ -453,22 +453,23 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertNotIn("stylized 3D", canonical)
         self.assertIn("NATURAL DOG COAT SURFACE", action_prompt)
         self.assertIn("photorealistic real living dog", action_prompt)
-        self.assertLess(len(action_prompt.split()), 370)
-        self.assertIn("Seated idle, pelvis low", standing_pose)
-        self.assertIn("near paw level", standing_pose)
+        self.assertLess(len(action_prompt.split()), 500)
+        self.assertIn("Sit the pelvis low", standing_pose)
+        self.assertIn("close to paw level", standing_pose)
         self.assertNotIn("stable upright", standing_pose)
-        self.assertIn("mouth is visibly open", standing_pose)
-        self.assertIn("anatomically attached pink tongue", standing_pose)
+        self.assertIn("an open mouth", standing_pose)
+        self.assertIn("attached pink tongue", standing_pose)
         self.assertIn("seated-or-upright torso state", standing_rules)
         self.assertIn("explicitly requires relaxed panting", standing_rules)
         self.assertIn("readable dark mouth cavity", standing_rules)
         self.assertIn("uninterrupted green band below", standing_rules)
         self.assertIn("Never draw a floor", standing_rules)
-        self.assertTrue(action_prompt.startswith("DOG ACTION TRANSFER"))
-        self.assertIn("Image 1 is the only identity and appearance", action_prompt)
+        self.assertTrue(action_prompt.startswith("Repose the exact real dog"))
+        self.assertIn("Image 1 supplies only this dog's breed, age", action_prompt)
         self.assertIn("Image 2 supplies only action pose", action_prompt)
-        self.assertIn("Never make an adult a puppy", action_prompt)
-        self.assertIn("Never paste the tongue onto a closed muzzle", action_prompt)
+        self.assertIn("anatomical body proportions", action_prompt)
+        self.assertIn("the forelegs retain their full natural length", action_prompt)
+        self.assertIn("never retain an old appendage", action_prompt)
         standing_retry = pipeline.build_qwen_prompt(
             "",
             standing_pose,
@@ -488,7 +489,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
             species="dog",
         )
         self.assertIn(
-            "The written action rules are the only pose authority",
+            "POSE AND CAMERA: The action is a SEATED idle",
             single_image_prompt,
         )
         self.assertNotIn("Image 2", single_image_prompt)
@@ -2143,7 +2144,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertIn("seated with tail low beside the hind feet", prompt)
         self.assertNotIn("wag later", prompt)
         self.assertNotIn("Image 2", prompt)
-        self.assertIn("tail position are not pose instructions", prompt)
+        self.assertIn("old tail location in Image 1 are not pose instructions", prompt)
 
     def test_dog_eating_workflow_uses_only_photoreal_canonical_image(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2268,7 +2269,7 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertNotIn(pose_input, load_images.values())
         self.assertNotIn("image2", workflow["6"]["inputs"])
         self.assertIn(
-            "The written action rules are the only pose authority",
+            "POSE AND CAMERA: The action is a SEATED idle",
             workflow["6"]["inputs"]["prompt"],
         )
         self.assertIn(

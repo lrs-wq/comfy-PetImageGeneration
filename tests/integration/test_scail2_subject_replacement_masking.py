@@ -1820,6 +1820,47 @@ class SemanticCleanupComponentTests(unittest.TestCase):
         self.assertEqual(int(cleaned_alpha[105, 50]), 0)
         self.assertEqual(int(cleaned_alpha[100, 110]), 255)
 
+    def test_eating_dark_bowl_wall_is_not_a_contact_shadow(self) -> None:
+        # The generated bowl extends below the white-driver protected core.
+        # Both a brown wall and a neutral dark ceramic wall are real objects.
+        prop = Image.new("L", (128, 128), 0)
+        ImageDraw.Draw(prop).rectangle((24, 64, 104, 112), fill=255)
+        for color in ((65, 39, 24), (28, 28, 28)):
+            with self.subTest(color=color):
+                rgb = np.full((128, 128, 3), 238, dtype=np.uint8)
+                alpha = np.zeros((128, 128), dtype=np.uint8)
+                alpha[64:113, 24:105] = 255
+                rgb[90:113, 30:99] = color
+                protected = np.zeros((128, 128), dtype=bool)
+                protected[66:88, 26:103] = True
+                with patch.object(
+                    scail, "make_eating_reference_identity_mask",
+                    return_value=(Image.new("RGB", (128, 128)), prop,
+                                  {"split_status": "strict"}),
+                ):
+                    cleaned_alpha, metrics = scail._remove_eating_contact_shadow(
+                        rgb, alpha, protected_alpha_core=protected,
+                    )
+                self.assertFalse(metrics["applied"])
+                self.assertTrue(np.array_equal(cleaned_alpha, alpha))
+
+    def test_eating_brown_foreground_below_prop_is_not_neutral_shadow(self) -> None:
+        rgb = np.full((128, 128, 3), 238, dtype=np.uint8)
+        alpha = np.zeros((128, 128), dtype=np.uint8)
+        alpha[70:105, 40:89] = 255
+        rgb[102:109, 34:94] = (65, 39, 24)
+        alpha[102:109, 34:94] = 255
+        prop = Image.new("L", (128, 128), 0)
+        ImageDraw.Draw(prop).rectangle((40, 70, 88, 104), fill=255)
+        with patch.object(
+            scail, "make_eating_reference_identity_mask",
+            return_value=(Image.new("RGB", (128, 128)), prop,
+                          {"split_status": "strict"}),
+        ):
+            cleaned_alpha, metrics = scail._remove_eating_contact_shadow(rgb, alpha)
+        self.assertFalse(metrics["applied"])
+        self.assertTrue(np.array_equal(cleaned_alpha, alpha))
+
     def test_high_confidence_subject_fragment_survives_guidance_cleanup(
         self,
     ) -> None:
