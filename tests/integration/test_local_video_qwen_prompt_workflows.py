@@ -454,7 +454,8 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
         self.assertIn("NATURAL DOG COAT SURFACE", action_prompt)
         self.assertIn("photorealistic real living dog", action_prompt)
         self.assertLess(len(action_prompt.split()), 370)
-        self.assertIn("seated or upright", standing_pose)
+        self.assertIn("Seated idle, pelvis low", standing_pose)
+        self.assertIn("near paw level", standing_pose)
         self.assertNotIn("stable upright", standing_pose)
         self.assertIn("mouth is visibly open", standing_pose)
         self.assertIn("anatomically attached pink tongue", standing_pose)
@@ -2133,6 +2134,16 @@ class SubjectReplacementQwenPromptWorkflowTests(SubjectReplacementQwenReferenceT
                 identity_drift
             ),
         )
+
+    def test_dog_action_prompt_carries_first_frame_geometry_without_video_prose(self) -> None:
+        prompt = pipeline.build_qwen_prompt(
+            "", "standing | first frame: seated with tail low beside the hind feet; video: wag later",
+            species="dog", transparent_gif=True, pose_reference_available=False,
+        )
+        self.assertIn("seated with tail low beside the hind feet", prompt)
+        self.assertNotIn("wag later", prompt)
+        self.assertNotIn("Image 2", prompt)
+        self.assertIn("tail position are not pose instructions", prompt)
 
     def test_dog_eating_workflow_uses_only_photoreal_canonical_image(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

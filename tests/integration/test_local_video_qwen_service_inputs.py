@@ -2474,6 +2474,35 @@ class SubjectReplacementQwenServiceAndInputTests(SubjectReplacementQwenReference
             0,
         )
 
+    def test_dog_eating_keeps_driver_origin_despite_late_contact_guide(self) -> None:
+        job = {
+            "species": "dog",
+            "pose_reference_metadata": {
+                "eating": {
+                    "generator_metadata": {
+                        "policy": "driving_eating_geometry_image2_v7",
+                        "selected_frame_index": 67,
+                        "head_lowering_selection": {"passed": True},
+                    }
+                }
+            },
+        }
+        self.assertEqual(
+            pipeline.resolve_transparent_output_phase_start_index(
+                job, action="eating", source_frames=81,
+            ),
+            0,
+        )
+        # The existing cat contact-guide contract is independent of the dog
+        # timeline, even when both species have the same guide metadata.
+        job["species"] = "cat"
+        self.assertEqual(
+            pipeline.resolve_transparent_output_phase_start_index(
+                job, action="eating", source_frames=81,
+            ),
+            67,
+        )
+
     def test_fur_surface_retry_preserves_only_configured_eating_recovery(
         self,
     ) -> None:

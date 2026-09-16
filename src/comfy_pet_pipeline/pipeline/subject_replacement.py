@@ -247,7 +247,13 @@ DOG_STANDING_PROMPT = (
     "in every frame. Preserve the exact "
     "breed traits, apparent age, face, muzzle, eyes, ears, nose, coat colors and "
     "markings, natural coat length and volume, body proportions, paws, and complete "
-    "tail. Use the neutral-white dog anatomy driver only for the standing action's "
+    "tail fur. Follow the supplied seated driver from the first frame. Exactly "
+    "one tail attaches at the low rear pelvis and sweeps beside the hind feet "
+    "at paw level with the same timing and direction as the driver. The tail "
+    "never rises behind the shoulder or above the back. Do not retain a second "
+    "tail in an old reference position. Match the chest-level camera and "
+    "three-quarter seated body angle. Use the neutral-white dog anatomy driver "
+    "only for the standing action's "
     "joint trajectories, driver-defined seated-or-upright idle geometry, clearly "
     "visible continuous side-to-side tail wagging, relaxed panting mouth motion, "
     "camera, scale and framing. The standing "
@@ -9251,7 +9257,10 @@ def build_unstabilized_transparent_gif(
             "source_frames": len(source_frames),
             "source_fps": source_fps,
             "source_phase": {
-                "policy": "validated_action_contact_phase_rotation_v1",
+                "policy": (
+                    "validated_action_contact_phase_rotation_v1"
+                    if phase_start_index else "chronological_source_timeline_v1"
+                ),
                 "start_frame_index": phase_start_index,
                 "rotated": bool(phase_start_index),
             },

@@ -80,28 +80,28 @@ def subject_replacement_pose_prompt(action: str, *, species: str = "cat") -> str
     if action == "eating":
         if species == "dog":
             return (
-                "eating | A complete full-body dog in a natural low-head eating "
-                "pose at a three-quarter front angle. Exactly one shallow food bowl "
-                "contains a small, low, level layer of ordinary brown dry kibble "
-                "fully below the rim. The food is never a heap, mound, cone, pyramid, "
-                "fused mass, oversized pile, or overflow. The lower muzzle enters and "
-                "overlaps the low food layer while all four anatomically attached legs "
-                "remain stable and the complete tail stays visible."
+                "eating | Three-quarter side view, camera level with the torso. "
+                "Head at image lower left, horizontal ribcage and rear hips toward "
+                "image right; no overhead or frontal chest-only view. Plant two "
+                "separate forepaws behind one shallow bowl and two hindpaws beneath "
+                "the hips. One tail extends rightward from the rear pelvis below "
+                "the back. Lower the head below the shoulders until the muzzle "
+                "contacts a small, low, level layer of ordinary brown kibble fully "
+                "below the bowl rim. No heap, mound, cone, pyramid, overflow or spill."
             )
         return f"eating | {MULTIPOSE_PRESET_BY_ACTION['eating']['prompt_en']}"
     if action == "grooming":
         return SUBJECT_REPLACEMENT_GROOMING_POSE_PROMPT
     if action == "standing" and species == "dog":
         return (
-            "standing | A complete full-body dog in the stable idle pose shown by "
-            "the supplied action geometry. The geometry, rather than the action "
-            "label, controls whether the torso is seated or upright. Keep all "
-            "visible legs anatomically attached, both ears and the complete tail "
-            "readable. Show a relaxed natural panting expression: the mouth is "
-            "visibly open with a dark mouth cavity, separated lower jaw and one "
-            "anatomically attached pink tongue at a neutral mid-extension. Never "
-            "place a tongue through closed lips. No prop, clothing, collar, harness, "
-            "floor, or extra subject."
+            "standing | Seated idle, pelvis low, hind legs folded beside hips, "
+            "chest upright and straight forelegs planted. Three-quarter front view, "
+            "chest left and rear hips right, visible flank, head facing viewer. "
+            "Camera at chest height, never overhead. Exactly one tail attaches "
+            "at the rear pelvis and lies low beside the hind feet, near paw level; "
+            "never behind the shoulder or above the back. Relaxed panting: the "
+            "mouth is visibly open with a dark mouth cavity and one anatomically "
+            "attached pink tongue. Never paste the tongue onto a closed muzzle. No prop."
         )
     if action == "drinking" and species == "dog":
         return (

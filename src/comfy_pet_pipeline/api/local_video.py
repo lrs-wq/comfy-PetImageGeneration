@@ -130,7 +130,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.69"
+API_VERSION = "2.26.70"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -4384,7 +4384,15 @@ def build_dog_qwen_prompt(
 
     del quality_retry
     action = action_key(pose)
+    first_frame_spec = qwen_first_frame_spec(pose)
     action_rules = action_first_frame_rules(pose, species="dog")
+    if action == "eating":
+        action_rules = (
+            "Exactly one shallow bowl, kibble below rim, muzzle touching food; "
+            "four attached planted legs and one tail."
+        )
+    elif action == "standing":
+        action_rules = "No prop. Open mouth, attached tongue, four attached legs, one tail."
     geometry_role = (
         "Image 2 supplies only action pose, joint layout, allowed prop placement, "
         "camera, framing, and subject scale; it supplies no identity or appearance."
@@ -4397,9 +4405,9 @@ def build_dog_qwen_prompt(
         "toileting": "the dog and exactly one clean rectangular pet toilet tray",
     }.get(action, "the dog")
     coat_identity = (
-        "Match Image 1's exact coat length, volume, strand direction, and silhouette."
+        "Match Image 1's exact coat length, volume, and strand direction."
         if profile_fur_lock.strip()
-        else "Match Image 1's exact natural coat length, volume, and silhouette."
+        else "Match Image 1's exact natural coat length and volume."
     )
     expression_rule = ""
     if action == "eating":
@@ -4414,21 +4422,20 @@ def build_dog_qwen_prompt(
         )
     background_contract = (
         f"Every pixel outside {foreground} is flat uniform pure #00FF00 green. "
-        "Leave at least 12% uninterrupted green on every edge and beneath the complete "
-        "foreground. It is a digital plate with no gradient, texture, floor, light, "
-        "reflection, or color spill."
+        "Leave 12% empty green on every edge and beneath the foreground. "
+        "No gradient, texture, floor, reflection or color spill."
         if transparent_gif
         else "Use one clean, simple, evenly lit background with no scenery or text."
     )
     return f"""DOG ACTION TRANSFER - follow these priorities.
 
-1. IDENTITY: Image 1 is the only identity and appearance authority. Preserve this exact dog's age, breed, skull and cheeks, muzzle length and taper, natural eyes, ears, nose, coat colors and markings, coat length, body proportions, paws, and full tail. Never make an adult a puppy, enlarge the head or eyes, copy the white model's appearance, or add a collar, harness, clothing, or accessory.
+1. POSE AND CAMERA: {geometry_role} {first_frame_spec}
 
-2. ACTION AND ANATOMY: {geometry_role} {action_rules} {expression_rule}
+2. IDENTITY: Image 1 is the only identity and appearance authority. Preserve breed, age, skull, muzzle length and taper, eyes, ears, nose, coat colors, markings, anatomical proportions and tail fur. Its old silhouette, limbs and tail position are not pose instructions. Reposition existing limbs and the single tail; never retain duplicate appendages. Never make an adult a puppy, enlarge eyes, copy white-model appearance or add accessories. {action_rules} {expression_rule}
 
-3. NATURAL FUR: Render a photorealistic real living dog photographed with a high-resolution professional animal camera under soft neutral-white light. Show realistic eyes, moist nose, mouth, and physically plausible anatomy. {coat_identity} {DOG_NATURAL_COAT_SURFACE_PROMPT} Never invent a color or marking.
+3. NATURAL FUR: Render a photorealistic real living dog under soft neutral-white light. {coat_identity} {DOG_NATURAL_COAT_SURFACE_PROMPT} Never invent a color or marking.
 
-4. OUTPUT: Show one complete dog, both ears, four attached legs and paws, and one tail continuous from base to tip. {background_contract} No extra animal or limb, floor, shadow, scenery, text, logo, watermark, border, or halo.""".strip()
+4. OUTPUT: One complete dog, both ears, four attached legs and paws, one continuous tail. {background_contract} No extra animal, limb, shadow, scenery, text, watermark or halo.""".strip()
 
 
 def build_qwen_prompt(

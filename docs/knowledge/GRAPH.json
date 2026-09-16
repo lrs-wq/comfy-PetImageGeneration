@@ -3,6 +3,22 @@
   "project": "comfy-pet-pipeline",
   "nodes": [
     {
+      "id": "comfy.decision.dog_driver_chronology_and_pose",
+      "type": "decision",
+      "name": "犬驱动时间起点与单尾文字姿态",
+      "status": "accepted",
+      "tags": [
+        "v2.26.70",
+        "dog",
+        "eating",
+        "standing",
+        "chronological-source",
+        "single-low-tail",
+        "action-specific-apng-timing"
+      ],
+      "evidence": "docs/knowledge/DECISIONS/0014-dog-driver-chronology-and-pose.md"
+    },
+    {
       "id": "comfy.decision.grooming_reviewed_driver_anchors",
       "type": "decision",
       "name": "舔毛白模关节标注替代胸部高亮误检",
@@ -664,6 +680,12 @@
     {"id": "comfy.decision.local_action_motion_recovery", "type": "decision", "name": "局部动作或向上接触形变失败恢复真实驱动并按动作区域选优", "status": "accepted", "tags": ["eating", "standing", "motion-recovery", "reject-upward-contact-warp", "completion-first"], "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"}
   ],
   "edges": [
+    {
+      "from": "comfy.module.pipeline",
+      "relation": "governed_by",
+      "to": "comfy.decision.dog_driver_chronology_and_pose",
+      "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"
+    },
     {
       "from": "comfy.module.pipeline",
       "relation": "uses",

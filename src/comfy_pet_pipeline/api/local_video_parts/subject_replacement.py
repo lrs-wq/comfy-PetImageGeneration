@@ -17,8 +17,14 @@ def resolve_transparent_output_phase_start_index(
     action: str,
     source_frames: int,
 ) -> int:
-    """Use the validated eating-contact guide frame as animation frame zero."""
+    """Keep dog driver chronology; legacy cat contact guides may choose frame zero."""
     if action != "eating":
+        return 0
+    # The dog guide selects a low-head still, sometimes near the end of the
+    # cycle. It is not the time origin of SCAIL's complete driver timeline.
+    # Rotating an 81-frame result at guide frame 67 moves 14 end frames ahead
+    # of the original start and delays the lift/return in every published format.
+    if str(job.get("species") or "").strip().lower() == "dog":
         return 0
     metadata_by_action = job.get("pose_reference_metadata")
     action_metadata = (
@@ -3089,9 +3095,10 @@ def run_profile_standard_direct_job(job_id: str) -> None:
                         "filename": apng_target.name,
                         "width": TRANSPARENT_GIF_SIZE,
                         "height": TRANSPARENT_GIF_SIZE,
-                        "frames": TRANSPARENT_GIF_FRAMES,
-                        "fps": TRANSPARENT_GIF_FPS,
-                        "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                        "frames": int(gif_timing["frames"]),
+                        "fps": int(gif_timing["fps"]),
+                        "duration_seconds": float(gif_timing["duration_seconds"]),
+                        "output_playback": action_timing,
                         "transparent": True,
                         "soft_alpha": True,
                         "video_engine": "deterministic-main-case-standard-direct",
@@ -5305,6 +5312,8 @@ def run_subject_replacement_job(job_id: str) -> None:
                     job_id,
                     transparent_output_phase_policy=(
                         "validated_action_contact_phase_rotation_v1"
+                        if transparent_phase_start_index
+                        else "chronological_source_timeline_v1"
                     ),
                     transparent_output_phase_start_index=(
                         transparent_phase_start_index
@@ -5660,9 +5669,10 @@ def run_subject_replacement_job(job_id: str) -> None:
                             "filename": apng_target.name,
                             "width": TRANSPARENT_GIF_SIZE,
                             "height": TRANSPARENT_GIF_SIZE,
-                            "frames": TRANSPARENT_GIF_FRAMES,
-                            "fps": TRANSPARENT_GIF_FPS,
-                            "duration_seconds": TRANSPARENT_GIF_DURATION_SECONDS,
+                            "frames": int(gif_timing["frames"]),
+                            "fps": int(gif_timing["fps"]),
+                            "duration_seconds": float(gif_timing["duration_seconds"]),
+                            "output_playback": action_timing,
                             "transparent": True,
                             "soft_alpha": True,
                             "video_engine": "scail2-14b-fp8",
