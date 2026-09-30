@@ -2,6 +2,7 @@
   "schema_version": 1,
   "project": "comfy-pet-pipeline",
   "nodes": [
+    {"id": "comfy.ui.generation_moderation_state", "type": "interface", "name": "生成页审核暂停提示和轮询终态", "evidence": "web/platform/index.html"},
     {
       "id": "comfy.module.content_moderation",
       "type": "module",
@@ -747,6 +748,7 @@
     {"id": "comfy.decision.local_action_motion_recovery", "type": "decision", "name": "局部动作或向上接触形变失败恢复真实驱动并按动作区域选优", "status": "accepted", "tags": ["eating", "standing", "motion-recovery", "reject-upward-contact-warp", "completion-first"], "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"}
   ],
   "edges": [
+    {"from": "comfy.ui.generation_moderation_state", "relation": "uses", "to": "comfy.module.content_moderation", "evidence": "web/platform/index.html"},
     {
       "from": "comfy.service.local_video_api",
       "relation": "uses",

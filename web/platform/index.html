@@ -491,6 +491,13 @@
       finalizing_subject_replacement: '正在整理主体替换结果',
       cancel_requested: '正在终止任务',
       cancelled: '任务已终止',
+      content_moderation_input: '正在审核输入',
+      content_moderation_input_pending_review: '输入待复核，请到历史页进行复核',
+      content_moderation_input_blocked: '输入审核未通过，已停止生成',
+      content_moderation_input_moderation_error: '输入审核异常，请到历史页重审',
+      content_moderation_input_retry: '正在重新审核输入',
+      content_moderation_output_blocked: '结果审核未通过，后续下载已拦截',
+      content_moderation_manual_reject: '审核已驳回，后续交付已拦截',
       completed: '生成完成',
       failed: '生成失败'
     };
@@ -1275,7 +1282,7 @@
         currentJob = job;
         showStatus(job);
         renderOutputsIfChanged(job.outputs);
-        if (['completed', 'failed', 'cancelled'].includes(job.status)) {
+        if (['completed', 'failed', 'cancelled', 'blocked', 'pending_review', 'moderation_error'].includes(job.status)) {
           currentJob = null;
           setBusy(false);
           return;
