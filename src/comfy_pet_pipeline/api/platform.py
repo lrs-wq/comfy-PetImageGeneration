@@ -11,6 +11,7 @@ import os
 import queue
 import secrets
 import shutil
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,8 @@ from PIL import Image
 from starlette.background import BackgroundTask
 
 from . import local_video as pipeline
+from .content_moderation import required as moderation_required
+from .content_moderation_platform import register_platform_moderation
 
 
 LOGGER = logging.getLogger("pet_generation_platform")
@@ -33,7 +36,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 
-VERSION = "1.13.2"
+VERSION = "1.14.0"
 PROJECT_ROOT = Path(
     os.environ.get(
         "PET_PIPELINE_PROJECT_ROOT",
@@ -580,6 +583,14 @@ def history_images(
             "generation_engine": output.get("generation_engine"),
         }
         result.append(item)
+    if source == "pipeline" and moderation_required(job):
+        for item in result:
+            item["download_url"] = f"{PUBLIC_BASE_PATH}/api/jobs/video/{job['job_id']}/review-files/{quote(item['filename'], safe='')}"
+        for role, view in (job.get("uploaded_identity_views") or {}).items():
+            filename = history_filename(view.get("moderation_filename") or view.get("source_filename"))
+            if filename and filename not in seen:
+                seen.add(filename)
+                result.append({"type": "moderation_input", "role": role, "media_kind": "image", "filename": filename, "download_url": f"{PUBLIC_BASE_PATH}/api/jobs/video/{job['job_id']}/review-files/{quote(filename, safe='')}", "available": (job_dir / filename).is_file()})
     return result
 
 
@@ -627,6 +638,9 @@ def history_videos(
                 "generation_engine": output.get("generation_engine"),
             }
         )
+    if source == "pipeline" and moderation_required(job):
+        for item in result:
+            item["download_url"] = f"{PUBLIC_BASE_PATH}/api/jobs/video/{job['job_id']}/review-files/{quote(item['filename'], safe='')}"
     return result
 
 
@@ -766,7 +780,9 @@ def history_item(
     return {
         "job_id": job_id,
         "source": source,
-        "status": str(job.get("status") or "unknown"),
+        "content_moderation": job.get("content_moderation"),
+        "status": (job.get("content_moderation", {}).get("state") if job.get("content_moderation", {}).get("state") in {"pending_review", "blocked", "moderation_error"} else str(job.get("status") or "unknown")),
+        "generation_status": job.get("status"),
         "stage": str(job.get("stage") or ""),
         "created_at": created_at,
         "started_at": job.get("started_at"),
@@ -1020,10 +1036,10 @@ def history(
     lora = lora.strip().lower()
     if kind not in {"all", "image", "video"}:
         raise HTTPException(status_code=422, detail="kind must be all, image, or video.")
-    if state not in {"all", "completed", "failed", "cancelled", "active"}:
+    if state not in {"all", "completed", "failed", "cancelled", "active", "pending_review", "blocked", "moderation_error"}:
         raise HTTPException(
             status_code=422,
-            detail="state must be all, completed, failed, cancelled, or active.",
+            detail="Unknown history state filter.",
         )
     if lora not in {"all", "used", "none"}:
         raise HTTPException(status_code=422, detail="lora must be all, used, or none.")
@@ -1506,3 +1522,6 @@ def video_file(
         headers={"Content-Disposition": "inline"},
         background=BackgroundTask(response.close),
     )
+
+
+register_platform_moderation(app, sys.modules[__name__])

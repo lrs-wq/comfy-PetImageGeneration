@@ -10,6 +10,8 @@ from typing import Any
 from urllib.parse import quote
 
 import requests
+
+from .content_moderation import released as content_released
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask
@@ -88,7 +90,7 @@ def raise_backend_error(response: requests.Response, *, query: bool = False) -> 
     if query and response.status_code == 404:
         public_status = 404
         prefix = "Task not found"
-    elif response.status_code in {400, 413, 415, 422}:
+    elif response.status_code in {400, 403, 413, 415, 422}:
         public_status = response.status_code
         prefix = "Generation request was rejected"
     elif response.status_code == 503:
@@ -122,6 +124,8 @@ def required_actions(job: dict[str, Any]) -> tuple[str, ...]:
 
 
 def output_gifs(job: dict[str, Any], base_url: str, key: str) -> dict[str, str | None]:
+    if not content_released(job):
+        return {action: None for action in ("eating", "standing", "grooming") if action != "standing" or job_species(job) == "dog"}
     candidates: dict[str, list[dict[str, Any]]] = {
         action: [] for action in ALL_ACTIONS
     }
@@ -172,6 +176,9 @@ def public_job(job: dict[str, Any], request: Request, key: str) -> dict[str, Any
         "success": "completed",
         "error": "failed",
         "canceled": "cancelled",
+        "pending_review": "running",
+        "blocked": "failed",
+        "moderation_error": "failed",
     }
     normalized_status = status_aliases.get(raw_status, raw_status)
     if normalized_status not in {"queued", "running", "completed", "failed", "cancelled"}:
@@ -210,6 +217,7 @@ def public_job(job: dict[str, Any], request: Request, key: str) -> dict[str, Any
         "species": job_species(job),
         "error": str(error) if error else None,
         "gifs": gifs,
+        "content_moderation": job.get("content_moderation"),
     }
 
 

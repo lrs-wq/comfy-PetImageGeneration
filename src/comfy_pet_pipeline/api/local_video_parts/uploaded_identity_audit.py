@@ -37,6 +37,9 @@ def persist_uploaded_identity_views(
             "input_sha256": file_sha256(input_path),
             "source_sha256": file_sha256(source_path),
         }
+        moderation_filename = CONTENT_MODERATION.persist_animated_upload(job_dir, role, raw_views[role])
+        if moderation_filename:
+            records[role]["moderation_filename"] = moderation_filename
     return records
 
 

@@ -16,6 +16,8 @@ from uuid import uuid4
 
 import requests
 
+from .content_moderation import released, output_manifest_matches
+
 
 CAT_GIF_ACTIONS = ("eating", "grooming")
 DOG_GIF_ACTIONS = ("eating", "standing")
@@ -50,6 +52,9 @@ def _normalized_status(job: dict[str, Any]) -> str:
         "success": "completed",
         "error": "failed",
         "canceled": "cancelled",
+        "pending_review": "running",
+        "blocked": "failed",
+        "moderation_error": "failed",
     }
     status = aliases.get(raw_status, raw_status)
     if status not in {"queued", "running", *TERMINAL_STATUSES}:
@@ -142,7 +147,7 @@ def build_callback_payload(
         "progress": _normalized_progress(job, status, stage),
         "stage": stage,
     }
-    if status == "completed":
+    if status == "completed" and released(job):
         payload["gifs"] = _gif_urls(job, public_base_url.rstrip("/"), job_id)
     return payload
 
@@ -271,6 +276,7 @@ class JobCallbackReporter:
                 "signature": signature,
                 "created_at": utc_now(),
                 "payload": payload,
+                "content_moderation_required": job.get("content_moderation", {}).get("required") is True,
             }
             event_path = self._outbox_directory(job_id) / (
                 f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
@@ -360,6 +366,18 @@ class JobCallbackReporter:
         return event
 
     def _post_event(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        if event["payload"].get("status") == "completed":
+            status_path = self._job_directory(str(event["job_id"])) / "status.json"
+            if status_path.is_file() or event.get("content_moderation_required"):
+                try:
+                    current_job = json.loads(status_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    current_job = {"content_moderation": {"required": True}}
+                if (event.get("content_moderation_required") and current_job.get("content_moderation", {}).get("required") is not True) or not released(current_job) or not output_manifest_matches(current_job, status_path.parent):
+                    event["payload"] = {
+                        "key": event["job_id"], "status": "failed", "progress": 0,
+                        "stage": "content_moderation_delivery_blocked",
+                    }
         try:
             response = self.request_post(
                 self.callback_url,

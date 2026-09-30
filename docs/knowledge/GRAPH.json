@@ -3,6 +3,63 @@
   "project": "comfy-pet-pipeline",
   "nodes": [
     {
+      "id": "comfy.module.content_moderation",
+      "type": "module",
+      "name": "Content Review 适配与异步交付控制",
+      "status": "active",
+      "tags": [
+        "input-gate",
+        "async-output-audit",
+        "delivery-revocation",
+        "sha256",
+        "separate-upstream-project"
+      ],
+      "evidence": "src/comfy_pet_pipeline/api/content_moderation.py"
+    },
+    {
+      "id": "comfy.api.content_moderation",
+      "type": "api",
+      "name": "审核规则、记录、复核与私有媒体接口",
+      "status": "active",
+      "evidence": "src/comfy_pet_pipeline/api/content_moderation_routes.py"
+    },
+    {
+      "id": "comfy.ui.content_moderation",
+      "type": "interface",
+      "name": "历史页人工复核与无记录标记",
+      "status": "active",
+      "evidence": "web/platform/history.html"
+    },
+    {
+      "id": "comfy.decision.content_moderation_async_delivery",
+      "type": "decision",
+      "name": "结果审核不阻塞首次交付、拒绝后拦截",
+      "status": "accepted",
+      "evidence": "docs/knowledge/DECISIONS/0016-content-moderation-async-delivery.md"
+    },
+    {
+      "id": "comfy.verification.content_moderation_controls",
+      "type": "verification",
+      "name": "异步交付、拒绝、鉴权和恢复控制测试",
+      "tags": [
+        "simulated-provider",
+        "not-detector-accuracy"
+      ],
+      "evidence": "tests/integration/test_content_moderation.py"
+    },
+    {
+      "id": "comfy.verification.content_moderation_adapter",
+      "type": "verification",
+      "name": "真实审核适配器少量样例验证",
+      "tags": [
+        "real-provider",
+        "synthetic-fixtures",
+        "not-comprehensive-accuracy",
+        "not-human-review-proof"
+      ],
+      "evidence": "ops/scripts/verify-content-moderation.py"
+    },
+    {
       "id": "comfy.decision.eating_bowl_shadow_separation",
       "type": "decision",
       "name": "吃饭深色碗壁与碗下薄阴影分离",
@@ -690,6 +747,42 @@
     {"id": "comfy.decision.local_action_motion_recovery", "type": "decision", "name": "局部动作或向上接触形变失败恢复真实驱动并按动作区域选优", "status": "accepted", "tags": ["eating", "standing", "motion-recovery", "reject-upward-contact-warp", "completion-first"], "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"}
   ],
   "edges": [
+    {
+      "from": "comfy.service.local_video_api",
+      "relation": "uses",
+      "to": "comfy.module.content_moderation",
+      "evidence": "src/comfy_pet_pipeline/api/local_video.py"
+    },
+    {
+      "from": "comfy.api.content_moderation",
+      "relation": "controls",
+      "to": "comfy.module.content_moderation",
+      "evidence": "src/comfy_pet_pipeline/api/content_moderation_routes.py"
+    },
+    {
+      "from": "comfy.ui.content_moderation",
+      "relation": "uses",
+      "to": "comfy.api.content_moderation",
+      "evidence": "src/comfy_pet_pipeline/api/content_moderation_platform.py"
+    },
+    {
+      "from": "comfy.module.content_moderation",
+      "relation": "governed_by",
+      "to": "comfy.decision.content_moderation_async_delivery",
+      "evidence": "docs/knowledge/DECISIONS/0016-content-moderation-async-delivery.md"
+    },
+    {
+      "from": "comfy.verification.content_moderation_controls",
+      "relation": "verifies",
+      "to": "comfy.module.content_moderation",
+      "evidence": "tests/integration/test_content_moderation.py"
+    },
+    {
+      "from": "comfy.verification.content_moderation_adapter",
+      "relation": "verifies",
+      "to": "comfy.api.content_moderation",
+      "evidence": "ops/scripts/verify-content-moderation.py"
+    },
     {
       "from": "comfy.module.pipeline",
       "relation": "governed_by",

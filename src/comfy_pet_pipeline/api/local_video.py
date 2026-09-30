@@ -11,6 +11,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -104,6 +105,7 @@ from ..identity.uploaded_identity import (
 )
 from ..identity.species_classifier import classify_pet_species
 from .job_callback import JobCallbackReporter
+from .content_moderation import ModerationController, ModerationHold, released as content_released
 from .local_video_parts import (
     generation_quality as _local_video_generation_quality,
     geometry_guides as _local_video_geometry_guides,
@@ -130,7 +132,7 @@ logging.basicConfig(
 )
 
 API_PREFIX = "/api/local-video"
-API_VERSION = "2.26.71"
+API_VERSION = "2.27.0"
 DATA_ROOT = Path(
     os.environ.get("PET_PIPELINE_DATA_ROOT", "/data/comfy-pet-pipeline")
 ).resolve()
@@ -144,7 +146,7 @@ COMFY_URL = os.environ.get("COMFY_URL", "http://127.0.0.1:8188").rstrip("/")
 COMFY_INPUT = DATA_ROOT / "comfyui" / "input"
 COMFY_OUTPUT = DATA_ROOT / "comfyui" / "output"
 MODEL_ROOT = DATA_ROOT / "models" / "comfyui"
-OUTPUT_ROOT = DATA_ROOT / "outputs" / "local_video_api"
+OUTPUT_ROOT = Path(os.environ.get("LOCAL_VIDEO_OUTPUT_ROOT", str(DATA_ROOT / "outputs" / "local_video_api"))).resolve()
 VALIDATED_FIRST_FRAME_CACHE_ROOT = (
     DATA_ROOT / "cache" / "validated_qwen_first_frames"
 )
@@ -1706,7 +1708,8 @@ WORKER_THREAD: threading.Thread | None = None
 REMBG_SESSION_LOCK = threading.Lock()
 REMBG_SESSION: Any | None = None
 
-TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled"}
+TERMINAL_JOB_STATUSES = {"completed", "failed", "cancelled", "blocked"}
+CONTENT_MODERATION = ModerationController(sys.modules[__name__])
 
 
 class JobCancelled(RuntimeError):
@@ -3510,9 +3513,22 @@ def write_json_atomic(path: Path, value: Any) -> None:
     os.replace(temp, path)
 
 
-def public_job(job: dict[str, Any]) -> dict[str, Any]:
+def public_job(job: dict[str, Any], *, include_unreleased: bool = False) -> dict[str, Any]:
     result = json.loads(json.dumps(job))
     result.pop("active_prompt_id", None)
+    result.pop("_content_moderation_completion", None)
+    result.pop("_content_moderation_generation_done", None)
+    if not include_unreleased and not content_released(job):
+        result["outputs"] = []
+        result["subject_replacement_results"] = []
+    if "content_moderation" in result:
+        record = result["content_moderation"]
+        result["content_moderation"] = {
+            key: record.get(key)
+            for key in ("required", "policy_version", "state", "active_stage", "revision", "updated_at", "delivery_mode", "delivery_revoked")
+        }
+        result["content_moderation"]["input"] = {"action": record.get("input", {}).get("action")}
+        result["content_moderation"]["output"] = {"action": record.get("output", {}).get("action")}
     public_stage_override = str(
         result.pop("public_stage_override", None) or ""
     ).strip()
@@ -3551,6 +3567,8 @@ def report_job_callback(job: dict[str, Any], *, force: bool = False) -> bool:
 
 
 def update_job(job_id: str, **changes: Any) -> dict[str, Any]:
+    if changes.get("status") == "completed":
+        CONTENT_MODERATION.before_complete(job_id, changes)
     with JOBS_LOCK:
         job = JOBS[job_id]
         job.update(changes)
@@ -3558,6 +3576,8 @@ def update_job(job_id: str, **changes: Any) -> dict[str, Any]:
         snapshot = dict(job)
     write_json_atomic(status_path(job_id), snapshot)
     report_job_callback(snapshot)
+    if changes.get("status") == "completed":
+        CONTENT_MODERATION.enqueue_output(job_id)
     return snapshot
 
 
@@ -3662,7 +3682,7 @@ def get_job(job_id: str) -> dict[str, Any]:
                 job = None
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
-    return public_job(job)
+    return public_job(job, include_unreleased=True)
 
 
 def cancel_requested(job_id: str) -> bool:
@@ -7286,6 +7306,9 @@ def try_recover_subject_replacement_output(
 ) -> bool:
     """Best-effort terminal recovery for an accepted transparent GIF job."""
 
+    if isinstance(error, ModerationHold):
+        return False
+
     with JOBS_LOCK:
         failed_job = dict(JOBS.get(job_id) or {})
     if failed_job.get("generation_mode") != "subject_replacement":
@@ -7299,6 +7322,8 @@ def try_recover_subject_replacement_output(
         return False
     try:
         return recover_subject_replacement_job_with_fallback(job_id, error)
+    except ModerationHold:
+        raise
     except Exception:  # noqa: BLE001 - caller retains the original failure
         LOGGER.exception(
             "Job %s degraded output fallback also failed",
@@ -7328,8 +7353,17 @@ def worker_loop() -> None:
                 LOGGER.info("Skipped cancelled job %s", job_id)
                 continue
             LOGGER.info("Starting job %s", job_id)
-            run_job(job_id)
+            CONTENT_MODERATION.check_inputs(job_id)
+            if CONTENT_MODERATION.raw_job(job_id).get("_content_moderation_generation_done"):
+                completion = CONTENT_MODERATION.raw_job(job_id).get(
+                    "_content_moderation_completion", {"status": "completed", "stage": "completed"}
+                )
+                update_job(job_id, **completion)
+            else:
+                run_job(job_id)
             LOGGER.info("Completed job %s", job_id)
+        except ModerationHold:
+            LOGGER.info("Job %s paused by content moderation", job_id)
         except JobCancelled:
             LOGGER.info("Job %s was cancelled by the user", job_id)
             mark_job_cancelled(job_id)
@@ -7344,7 +7378,11 @@ def worker_loop() -> None:
             LOGGER.error("Job %s failed: %s\n%s", job_id, exc, traceback.format_exc())
             with JOBS_LOCK:
                 failed_job = dict(JOBS.get(job_id) or {})
-            output_recovered = try_recover_subject_replacement_output(job_id, exc)
+            try:
+                output_recovered = try_recover_subject_replacement_output(job_id, exc)
+            except ModerationHold:
+                LOGGER.info("Recovered job %s paused by content moderation", job_id)
+                continue
             if output_recovered:
                 LOGGER.warning(
                     "Job %s completed with degraded output fallback after: %s",
@@ -7427,6 +7465,10 @@ def restore_jobs() -> None:
     for job_id in interrupted:
         with JOBS_LOCK:
             interrupted_job = dict(JOBS.get(job_id) or {})
+        if interrupted_job.get("_content_moderation_generation_done"):
+            update_job(job_id, status="queued", stage="resuming_completed_generation", error=None)
+            retry_after_recovery.append(job_id)
+            continue
         strict_first_frame_interrupted = bool(
             interrupted_job.get("qwen_first_frame_validated_required") is True
             and interrupted_job.get("reference_generation_status") == "running"
@@ -7446,7 +7488,11 @@ def restore_jobs() -> None:
         restart_error = RuntimeError(
             "API service restarted while this accepted job was running."
         )
-        if try_recover_subject_replacement_output(job_id, restart_error):
+        try:
+            recovered = try_recover_subject_replacement_output(job_id, restart_error)
+        except ModerationHold:
+            continue
+        if recovered:
             LOGGER.warning(
                 "Recovered interrupted job %s with audited degraded GIF outputs",
                 job_id,
@@ -7486,7 +7532,11 @@ def restore_jobs() -> None:
         overflow_error = RuntimeError(
             "Queue capacity was exceeded while restoring this accepted job."
         )
-        if try_recover_subject_replacement_output(job_id, overflow_error):
+        try:
+            recovered = try_recover_subject_replacement_output(job_id, overflow_error)
+        except ModerationHold:
+            continue
+        if recovered:
             LOGGER.warning(
                 "Recovered overflowed restored job %s with degraded GIF outputs",
                 job_id,
@@ -7524,6 +7574,7 @@ def startup() -> None:
         )
     JOB_CALLBACK_REPORTER.start()
     restore_jobs()
+    CONTENT_MODERATION.start()
     STOP_EVENT.clear()
     WORKER_THREAD = threading.Thread(
         target=worker_loop, name="local-video-worker", daemon=True
@@ -7534,6 +7585,7 @@ def startup() -> None:
 @app.on_event("shutdown")
 def shutdown() -> None:
     STOP_EVENT.set()
+    CONTENT_MODERATION.stop()
     if WORKER_THREAD and WORKER_THREAD.is_alive():
         WORKER_THREAD.join(timeout=5)
     JOB_CALLBACK_REPORTER.stop(timeout=5)
@@ -7541,7 +7593,10 @@ def shutdown() -> None:
 
 @app.get(f"{API_PREFIX}/health")
 def health() -> dict[str, Any]:
-    return _local_video_health.health()
+    result = _local_video_health.health()
+    from .content_moderation import enabled, POLICY_VERSION
+    result["content_moderation"] = {"enabled": enabled(), "policy_version": POLICY_VERSION}
+    return result
 
 
 @app.get(f"{API_PREFIX}/subjects")
@@ -8146,6 +8201,7 @@ async def create_subject_replacement_api_job(
             "cancel_requested": False,
             "active_prompt_id": None,
         }
+        CONTENT_MODERATION.prepare(job)
         with JOBS_LOCK:
             JOBS[job_id] = job
         persist_job(job_id)
@@ -8588,6 +8644,8 @@ async def create_job(
             "cancel_requested": False,
             "active_prompt_id": None,
         }
+        CONTENT_MODERATION.prepare(job)
+        job["moderation_input_filename"] = CONTENT_MODERATION.persist_animated_upload(job_dir, "front", raw)
         with JOBS_LOCK:
             JOBS[job_id] = job
         persist_job(job_id)
@@ -8614,7 +8672,7 @@ def list_jobs(
 
 @app.get(f"{API_PREFIX}/jobs/{{job_id}}")
 def job_status(job_id: str, _: None = Depends(require_api_key)) -> dict[str, Any]:
-    return get_job(job_id)
+    return public_job(get_job(job_id))
 
 
 @app.post(f"{API_PREFIX}/jobs/{{job_id}}/cancel")
@@ -8627,7 +8685,7 @@ def cancel_job(job_id: str, _: None = Depends(require_api_key)) -> dict[str, Any
         if current_status in TERMINAL_JOB_STATUSES:
             return public_job(job)
         active_prompt_id = job.get("active_prompt_id")
-        if current_status == "queued":
+        if current_status in {"queued", "pending_review", "moderation_error"}:
             job.update(
                 status="cancelled",
                 stage="cancelled",
@@ -8657,6 +8715,9 @@ def download_file(
     if Path(filename).name != filename:
         raise HTTPException(status_code=400, detail="Invalid filename.")
     job = get_job(job_id)
+    raw_job = CONTENT_MODERATION.raw_job(job_id)
+    if not CONTENT_MODERATION.file_allowed(raw_job, filename):
+        raise HTTPException(status_code=403, detail="内容未获放行或文件已变化，禁止交付。")
     allowed = {item["filename"] for item in job.get("outputs", [])}
     if filename not in allowed:
         raise HTTPException(
@@ -8666,3 +8727,8 @@ def download_file(
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Output file is missing on disk.")
     return FileResponse(path, filename=filename)
+
+
+from .content_moderation_routes import register_moderation_routes
+
+register_moderation_routes(app, sys.modules[__name__])

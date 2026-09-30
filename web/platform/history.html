@@ -119,6 +119,12 @@
     }
     .notice { min-height: auto; display: none; color: var(--red); border-style: solid; border-color: #e7b5aa; background: #fff3f0; }
     .notice button { margin-top: 10px; }
+    .status.pending_review { color: #76520b; background: #fff3cf; }
+    .status.blocked, .status.moderation_error { color: var(--red); background: #fff0eb; }
+    .review-note { width: 100%; min-height: 80px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+    .review-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+    .review-message { margin: 8px 0; color: var(--muted); }
+    .audit-json { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
     .loading::before { content: "正在读取历史记录…"; }
     .pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 18px; }
     .pager span { min-width: 120px; color: var(--muted); text-align: center; }
@@ -206,6 +212,9 @@
       <label>任务状态
         <select id="state">
           <option value="all">全部状态</option>
+          <option value="pending_review">待人工复核</option>
+          <option value="blocked">已拦截</option>
+          <option value="moderation_error">审核异常</option>
           <option value="completed">已完成</option>
           <option value="failed">失败但已有媒体</option>
           <option value="cancelled">已取消但已有媒体</option>
@@ -249,6 +258,7 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+    const basePath = window.location.pathname.replace(/\/history\/?$/, '');
     const historyState = {
       cursor: null,
       cursorStack: [],
@@ -260,6 +270,9 @@
     };
 
     const statusLabels = {
+      pending_review: '待人工复核',
+      blocked: '已拦截',
+      moderation_error: '审核异常',
       completed: '已完成',
       failed: '生成失败',
       cancelled: '已取消',
@@ -268,6 +281,7 @@
       unknown: '状态未知'
     };
     const outputLabels = {
+      moderation_input: '上传原图（审核输入）',
       cartoon_reference: '卡通角色基准图',
       subject_reference: 'SCAIL 主体参考图（身份/外观）',
       subject_reference_mask: 'SCAIL 主体参考遮罩（身份/外观区域）',
@@ -771,6 +785,78 @@
       if (!isVideoMedia(output)) media.loading = 'eager';
     }
 
+    function moderationSection(item) {
+      const section = element('div', 'section');
+      section.appendChild(element('h3', '', '内容审核'));
+      const record = item.content_moderation;
+      if (!record?.required) {
+        section.appendChild(element('p', 'review-message', '未审核：该任务没有机器审核及人工复核记录，不能作为审核接入证明。'));
+        return section;
+      }
+      const stateNames = { input_pending: '等待输入审核', input_auditing: '正在审核输入', input_passed: '输入已通过', output_pending: '等待结果审核', output_auditing: '正在审核结果', pending_review: '待人工复核', released: '审核通过', blocked: '已拦截', moderation_error: '审核异常' };
+      const actionNames = { allow: '机器通过', review: '待复核', block: '机器拦截', error: '审核异常', manual_allow: '人工通过', manual_block: '人工驳回' };
+      appendDefinitionList(section, [
+        ['审核状态', stateNames[record.state] || record.state],
+        ['输入审核', actionNames[record.input?.action] || '未完成'],
+        ['结果审核', actionNames[record.output?.action] || '未完成'],
+        ['规则版本', record.policy_version],
+        ['结果人工复核', record.require_output_review ? '必需' : '机器要求复核时必需']
+      ]);
+      section.appendChild(element('p', 'review-message', record.delivery_revoked ? '已拦截后续下载。此前下载或已发出的回调无法追回。' : '结果审核异步进行，生成完成即可下载并回调，无需等待机器审核或人工复核。'));
+      appendDefinitionList(section, [['对外交付', record.delivery_revoked ? '后续交付已拦截' : '生成完成即交付'], ['实际生成状态', item.generation_status]]);
+      const links = element('div', 'review-actions');
+      const auditLink = element('a', 'button', '下载审核记录');
+      auditLink.href = `${basePath}/api/jobs/video/${encodeURIComponent(item.job_id)}/moderation`;
+      auditLink.download = `${item.job_id}-moderation.json`;
+      const rulesLink = element('a', 'button', '查看生效规则');
+      rulesLink.href = `${basePath}/api/moderation/rules`;
+      rulesLink.target = '_blank';
+      rulesLink.rel = 'noopener';
+      links.append(auditLink, rulesLink);
+      section.appendChild(links);
+      const canDecide = ['pending_review', 'released', 'input_passed'].includes(record.state) && !['cancelled', 'failed'].includes(item.status);
+      const canRetry = ['pending_review', 'blocked', 'moderation_error'].includes(item.status);
+      if (canDecide || canRetry) {
+        const note = element('textarea', 'review-note');
+        note.placeholder = '填写复核依据或驳回原因（必填）。操作账号由后台记录。';
+        note.maxLength = 2000;
+        note.setAttribute('aria-label', '复核说明');
+        if (canDecide) section.appendChild(note);
+        const actions = element('div', 'review-actions');
+        const message = element('p', 'review-message');
+        message.setAttribute('role', 'status');
+        async function submit(operation) {
+          if (operation !== 'retry' && !note.value.trim()) { message.textContent = '请先填写复核说明。'; note.focus(); return; }
+          Array.from(actions.children).forEach(button => button.disabled = true);
+          message.textContent = '正在保存审核操作…';
+          try {
+            const response = await fetch(`${basePath}/api/jobs/video/${encodeURIComponent(item.job_id)}/moderation/${operation === 'retry' ? 'retry' : 'review'}`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin', cache: 'no-store',
+              ...(operation === 'retry' ? {} : { body: JSON.stringify({ decision: operation, note: note.value.trim(), revision: record.revision }) })
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+            $('detail').close();
+            resetHistoryAndLoad();
+          } catch (error) { message.textContent = error.message || '保存失败，请刷新后重试。'; }
+          finally { Array.from(actions.children).forEach(button => button.disabled = false); }
+        }
+        function action(label, operation) {
+          const button = element('button', 'button', label);
+          button.type = 'button'; button.addEventListener('click', () => submit(operation)); actions.appendChild(button);
+        }
+        if (record.state === 'pending_review' && canDecide) action(record.active_stage === 'input' ? '审核通过并继续生成' : '审核通过', 'approve');
+        if (canDecide) action('驳回并拦截', 'reject');
+        if (canRetry) action('重新机器审核', 'retry');
+        section.append(actions, message);
+      }
+      const details = element('details');
+      details.appendChild(element('summary', '', '机器检测记录与人工操作记录'));
+      details.appendChild(element('pre', 'audit-json', JSON.stringify(record, null, 2)));
+      section.appendChild(details);
+      return section;
+    }
+
     function openDetail(item) {
       $('detailTitle').textContent = `${taskTitle(item)} · ${item.job_id}`;
       const body = $('detailBody');
@@ -837,6 +923,7 @@
         ['可用视频', `${videoItems.filter(output => output.available !== false).length}/${videoItems.length}`]
       ]);
       metadata.appendChild(summarySection);
+      metadata.appendChild(moderationSection(item));
 
       if (isSubjectReplacement(item)) {
         const assetRoleSection = element('div', 'section');

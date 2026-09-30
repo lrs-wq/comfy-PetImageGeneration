@@ -4,7 +4,13 @@
   "display_name": "Comfy Pet Pipeline",
   "description": "猫狗身份保持、动作生成和透明 GIF/视频生产服务。",
   "status": "active",
-  "domains": ["pet-generation", "image-to-video", "comfyui", "quality-gates"],
+  "domains": [
+    "pet-generation",
+    "image-to-video",
+    "comfyui",
+    "quality-gates",
+    "content-moderation"
+  ],
   "entrypoints": [
     {
       "path": "simple_pet_gif_api.py",
@@ -25,6 +31,10 @@
     {
       "path": "src/comfy_pet_pipeline/api/platform.py",
       "purpose": "宠物生成测试平台后端"
+    },
+    {
+      "path": "src/comfy_pet_pipeline/api/content_moderation.py",
+      "purpose": "Comfy 输入门禁、独立服务适配、异步结果审核与交付撤销"
     }
   ],
   "verification": [
@@ -34,8 +44,14 @@
   "verification_policy": {
     "required_after_every_repository_modification": true,
     "mandatory_live_smoke_matrix": {
-      "cat": ["eating", "grooming"],
-      "dog": ["eating", "standing"]
+      "cat": [
+        "eating",
+        "grooming"
+      ],
+      "dog": [
+        "eating",
+        "standing"
+      ]
     },
     "one_job_per_species": true,
     "one_execution_per_action": true,
@@ -49,7 +65,8 @@
     "docs/architecture/PET_TWO_ACTION_PIPELINE.md",
     "docs/operations/PROJECT_LAYOUT.md",
     "docs/operations/SERVER_DEPLOYMENT.md",
-    "docs/operations/REGRESSION_GALLERY.md"
+    "docs/operations/REGRESSION_GALLERY.md",
+    "docs/api/CONTENT_MODERATION.md"
   ],
   "watch_rules": [
     {
@@ -59,7 +76,11 @@
         "local_video_api.py",
         "docs/api/**"
       ],
-      "knowledge": ["api", "service", "interface"]
+      "knowledge": [
+        "api",
+        "service",
+        "interface"
+      ]
     },
     {
       "paths": [
@@ -69,15 +90,33 @@
         "src/comfy_pet_pipeline/media/**",
         "profiles/**"
       ],
-      "knowledge": ["pipeline", "identity", "quality", "asset"]
+      "knowledge": [
+        "pipeline",
+        "identity",
+        "quality",
+        "asset"
+      ]
     },
     {
-      "paths": ["ops/**", "docs/operations/**"],
-      "knowledge": ["deployment", "operations"]
+      "paths": [
+        "ops/**",
+        "docs/operations/**"
+      ],
+      "knowledge": [
+        "deployment",
+        "operations"
+      ]
     },
     {
-      "paths": ["pyproject.toml", "requirements.txt", "requirements/**"],
-      "knowledge": ["dependency", "verification"]
+      "paths": [
+        "pyproject.toml",
+        "requirements.txt",
+        "requirements/**"
+      ],
+      "knowledge": [
+        "dependency",
+        "verification"
+      ]
     },
     {
       "paths": [
@@ -88,7 +127,22 @@
         ".githooks/**",
         "AGENTS.md"
       ],
-      "knowledge": ["verification", "regression", "operations"]
+      "knowledge": [
+        "verification",
+        "regression",
+        "operations"
+      ]
+    },
+    {
+      "paths": [
+        "web/platform/**",
+        "tests/integration/test_content_moderation.py"
+      ],
+      "knowledge": [
+        "content-moderation",
+        "interface",
+        "verification"
+      ]
     }
   ],
   "excluded_content": [
