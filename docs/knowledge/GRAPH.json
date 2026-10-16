@@ -745,7 +745,19 @@
     },
     {"id": "comfy.recovery.eating_bowl_anchored_degraded_motion", "type": "business_rule", "name": "吃饭降级按食盆和低头口鼻定位接触周期", "status": "active", "tags": ["eating", "degraded", "bowl-and-muzzle", "no-fixed-72-percent-freeze", "contact-then-observed-pose", "static-bowl", "selected-generated-only"], "evidence": "src/comfy_pet_pipeline/media/action_motion.py"},
     {"id": "comfy.quality.standing_motion_identity", "type": "business_rule", "name": "站立连通尾部相对运动与头部身份三轮选优", "status": "active", "tags": ["standing", "tail-wag", "body-relative-motion", "reject-camera-shake", "reject-detached-wisps", "head-chroma-retention", "three-attempts", "best-effort"], "evidence": "src/comfy_pet_pipeline/media/action_motion.py"},
-    {"id": "comfy.decision.local_action_motion_recovery", "type": "decision", "name": "局部动作或向上接触形变失败恢复真实驱动并按动作区域选优", "status": "accepted", "tags": ["eating", "standing", "motion-recovery", "reject-upward-contact-warp", "completion-first"], "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"}
+    {"id": "comfy.decision.local_action_motion_recovery", "type": "decision", "name": "局部动作或向上接触形变失败恢复真实驱动并按动作区域选优", "status": "accepted", "tags": ["eating", "standing", "motion-recovery", "reject-upward-contact-warp", "completion-first"], "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"},
+    {
+      "id": "comfy.rule.noncommercial_distribution",
+      "type": "business_rule",
+      "name": "原创内容非商用许可与第三方授权边界",
+      "status": "active",
+      "tags": [
+        "licensing",
+        "distribution",
+        "noncommercial"
+      ],
+      "evidence": "COPYRIGHT.md"
+    }
   ],
   "edges": [
     {"from": "comfy.ui.generation_moderation_state", "relation": "uses", "to": "comfy.module.content_moderation", "evidence": "web/platform/index.html"},
@@ -1629,6 +1641,12 @@
     {"from": "comfy.recovery.eating_bowl_anchored_degraded_motion", "relation": "governed_by", "to": "comfy.decision.local_action_motion_recovery", "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"},
     {"from": "comfy.module.pipeline", "relation": "checked_by", "to": "comfy.quality.standing_motion_identity", "evidence": "src/comfy_pet_pipeline/api/local_video_parts/subject_replacement.py"},
     {"from": "comfy.quality.standing_motion_identity", "relation": "governed_by", "to": "comfy.decision.local_action_motion_recovery", "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"},
-    {"from": "comfy.recovery.eating_full_driver_motion", "relation": "governed_by", "to": "comfy.decision.local_action_motion_recovery", "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"}
+    {"from": "comfy.recovery.eating_full_driver_motion", "relation": "governed_by", "to": "comfy.decision.local_action_motion_recovery", "evidence": "docs/knowledge/DECISIONS/0013-local-action-motion-recovery.md"},
+    {
+      "from": "comfy.project",
+      "relation": "governed_by",
+      "to": "comfy.rule.noncommercial_distribution",
+      "evidence": "LICENSE"
+    }
   ]
 }

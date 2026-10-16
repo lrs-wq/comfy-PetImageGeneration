@@ -66,7 +66,9 @@
     "docs/operations/PROJECT_LAYOUT.md",
     "docs/operations/SERVER_DEPLOYMENT.md",
     "docs/operations/REGRESSION_GALLERY.md",
-    "docs/api/CONTENT_MODERATION.md"
+    "docs/api/CONTENT_MODERATION.md",
+    "LICENSE",
+    "COPYRIGHT.md"
   ],
   "watch_rules": [
     {
@@ -142,6 +144,16 @@
         "content-moderation",
         "interface",
         "verification"
+      ]
+    },
+    {
+      "paths": [
+        "LICENSE",
+        "COPYRIGHT.md"
+      ],
+      "knowledge": [
+        "licensing",
+        "distribution"
       ]
     }
   ],
