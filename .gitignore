@@ -141,3 +141,8 @@ UnityCatCharacter/Logs/
 UnityCatCharacter/Temp/
 UnityCatCharacter/UserSettings/
 UnityCatCharacter_Build3DTemp_*/
+
+# Selected README documentation assets only
+!/docs/showcase/workflow.svg
+!/docs/showcase/dog-eating.gif
+!/docs/showcase/dog-standing.gif

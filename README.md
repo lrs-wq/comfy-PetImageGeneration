@@ -1,15 +1,42 @@
 # Comfy Pet Pipeline
 
-## 许可证与商业使用 / License and commercial use
-
-**本仓库中维护者有权许可的原创内容采用 [PolyForm Noncommercial 1.0.0](LICENSE)，仅许可非商业用途；商业使用须另行取得书面授权。**
-第三方内容、必须保留上游许可的部分及旧版本已授予的权利不受此变更覆盖。详见 [版权与第三方声明](COPYRIGHT.md)。
-
-Original material the maintainer is entitled to license is available for noncommercial purposes under [PolyForm Noncommercial 1.0.0](LICENSE). Commercial use requires separate written permission. Third-party and previously granted rights are preserved; see [COPYRIGHT.md](COPYRIGHT.md).
-
 猫狗图片与双动作 GIF 生成服务。调用方上传一张必选正面图，以及最多两张可选侧面图；系统先强制二分类为猫或狗，再生成并归一化 canonical 全身参考。猫生成 `eating`、`grooming`，狗生成 `eating`、`standing`，其中狗的 `standing` 暂时同时映射到兼容字段 `grooming`。
 
-当前 API 版本：`2.26.65`。猫舔毛导出保持原始时间方向，优先完整正向视频，接缝不合适时选择通过头爪运动与边界检查的自然周期正向重复；无法找到安全周期时保留正向动作并记录接缝告警。GIF、APNG 和白底 MP4 共用周期方案，原始生成视频单独保留。上传图先建立共享身份 canonical；低饱和灰黑/暖棕混合被毛会阻断高饱和橘化、条纹严重放大以及源图不存在的红粉眼鼻特征。前两轮生成仍不合格时，最后一轮改用原宠物安全抠图作为 Qwen 输入，以 `denoise=0.70` 且禁用用户 LoRA 轻度重绘；所有生成候选仍不安全时，只把上传身份安全抠图作为 canonical 锚点，绝不把身份漂移的生成图传给动作链路。该例外不把上传图当成动作首帧或最终动画输出。其后的每个物种/动作组合都有稳定隔离键、独立配置快照、Qwen 首帧异常边界、SCAIL 动画异常边界、几何引导、seed、实验目录和输出路径。单个动作发生普通执行异常时，系统先清理该动作运行态并继续兄弟动作，全部可运行动作尝试完成后再统一失败关闭或进入既有生成候选降级恢复；用户取消仍立即终止整任务。每个动作固定完成 `5` 轮 Qwen 候选生成；历史首帧缓存只写审计、不参与读取或候选计数。动作五轮结束后先选择严格合格候选；如果所有候选都只有视觉门问题，则改选媒体完整且风险最低的生成候选，以 `best_effort` 继续 SCAIL。模型无输出、媒体不可读取、无法取得可用主体 alpha、摘要不一致或进程失败仍属于运行完整性错误并阻断。猫支持 `eating / grooming`，默认犬和中型犬支持 `eating / standing`，测试平台显式选择小型犬后支持 `eating / drinking / running / sleeping / toileting / standing`；API 路由和请求字段保持不变。
+## 效果预览
+
+| 金毛进食 · eating | 金毛站立 · standing |
+| :---: | :---: |
+| ![真实生成的金毛进食动画](docs/showcase/dog-eating.gif) | ![真实生成的金毛站立动画](docs/showcase/dog-standing.gif) |
+
+以上为 **v2.26.69 历史生成样例**，来自本地项目留存的真实输出，已缩小为适合 README 的循环预览。它们展示成品形式，不代表当前版本重新运行的验收结果。[查看素材来源与演示说明](docs/showcase/README.md)。
+
+## 工作流程
+
+![从宠物照片到身份参考、动作生成和动画交付的流程](docs/showcase/workflow.svg)
+
+## 项目演示
+
+通过下方“主要入口”中的测试界面，在已部署环境完成以下流程：
+
+| 步骤 | 操作 | 可以观察的结果 |
+| --- | --- | --- |
+| 1 | 上传宠物正面图，可补充两张侧面图 | 输入视图与猫 / 狗物种 |
+| 2 | 提交任务并等待生成 | 任务进度与各动作阶段 |
+| 3 | 查看生成动画 | 猫：进食、舔毛；狗：进食、站立 |
+| 4 | 下载可用产物 | GIF、APNG 或 MP4，具体以任务输出为准 |
+
+开发接入可直接阅读 [上传与查询 API](docs/api/SIMPLE_PET_GIF_API.md)。测试平台依赖已部署的模型和服务；狗 `standing` 仍兼容映射到 `grooming` 字段。
+
+---
+
+<details>
+<summary>当前版本与兼容规则</summary>
+
+当前本地视频 API 版本：`2.27.0`；简化 GIF API 版本：`1.2.3`。猫舔毛导出保持原始时间方向，优先完整正向视频，接缝不合适时选择通过头爪运动与边界检查的自然周期正向重复；无法找到安全周期时保留正向动作并记录接缝告警。GIF、APNG 和白底 MP4 共用周期方案，原始生成视频单独保留。上传图先建立共享身份 canonical；低饱和灰黑/暖棕混合被毛会阻断高饱和橘化、条纹严重放大以及源图不存在的红粉眼鼻特征。前两轮生成仍不合格时，最后一轮改用原宠物安全抠图作为 Qwen 输入，以 `denoise=0.70` 且禁用用户 LoRA 轻度重绘；所有生成候选仍不安全时，只把上传身份安全抠图作为 canonical 锚点，绝不把身份漂移的生成图传给动作链路。该例外不把上传图当成动作首帧或最终动画输出。其后的每个物种/动作组合都有稳定隔离键、独立配置快照、Qwen 首帧异常边界、SCAIL 动画异常边界、几何引导、seed、实验目录和输出路径。单个动作发生普通执行异常时，系统先清理该动作运行态并继续兄弟动作，全部可运行动作尝试完成后再统一失败关闭或进入既有生成候选降级恢复；用户取消仍立即终止整任务。每个动作固定完成 `5` 轮 Qwen 候选生成；历史首帧缓存只写审计、不参与读取或候选计数。动作五轮结束后先选择严格合格候选；如果所有候选都只有视觉门问题，则改选媒体完整且风险最低的生成候选，以 `best_effort` 继续 SCAIL。模型无输出、媒体不可读取、无法取得可用主体 alpha、摘要不一致或进程失败仍属于运行完整性错误并阻断。猫支持 `eating / grooming`，默认犬和中型犬支持 `eating / standing`，测试平台显式选择小型犬后支持 `eating / drinking / running / sleeping / toileting / standing`；API 路由和请求字段保持不变。
+
+</details>
+
+内容审核接入、人工复核与结果异步审核的现行约定见 [内容审核与交付说明](docs/api/CONTENT_MODERATION.md)。
 
 ## 主要入口
 
@@ -55,3 +82,10 @@ bash ops/scripts/verify-change.sh
 敏感配置只存放于 `/etc/comfy-pet-pipeline/`，仓库仅提交 `ops/env/*.example`。运行模型、任务产物、Profile 资产和验证归档位于 `/data/comfy-pet-pipeline/`。ComfyUI 运行代码位于 `/opt/comfyui/current`，仓库根目录的 `ComfyUI` 仅作为兼容软链接。
 
 服务模板位于 `ops/systemd/`，部署说明见 [服务器部署文档](docs/operations/SERVER_DEPLOYMENT.md)。历史版本说明已归档到 `docs/history/README_RELEASE_HISTORY.md`。
+
+## 许可证与商业使用 / License and commercial use
+
+**本仓库中维护者有权许可的原创内容采用 [PolyForm Noncommercial 1.0.0](LICENSE)，仅许可非商业用途；商业使用须另行取得书面授权。**
+第三方内容、必须保留上游许可的部分及旧版本已授予的权利不受此变更覆盖。详见 [版权与第三方声明](COPYRIGHT.md)。
+
+Original material the maintainer is entitled to license is available for noncommercial purposes under [PolyForm Noncommercial 1.0.0](LICENSE). Commercial use requires separate written permission. Third-party and previously granted rights are preserved; see [COPYRIGHT.md](COPYRIGHT.md).
